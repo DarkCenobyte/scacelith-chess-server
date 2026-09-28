@@ -154,6 +154,10 @@ key('ANALYSIS_DEPTH_FAST', { section: 'anticheat', type: 'int', default: 10, min
 key('ANALYSIS_DEPTH_DEEP', { section: 'anticheat', type: 'int', default: 18, min: 6, max: 40, desc: 'Deep analysis depth (a strong engine\'s choice).' });
 key('ANALYSIS_MIN_PLIES', { section: 'anticheat', type: 'int', default: 30, min: 10, desc: 'Shorter games are not analysed.' });
 key('REPORTS_PER_DAY', { section: 'anticheat', type: 'int', default: 5, min: 1, desc: 'Reports one player may file per day.' });
+key('ANALYSIS_HASH_MB', { section: 'anticheat', type: 'int', default: 32, min: 1, max: 4096, desc: 'Transposition table of each analysis engine, in MB.' });
+key('ANALYSIS_POSITION_TIMEOUT_MS', { section: 'anticheat', type: 'int', default: 120000, min: 1000,
+    desc: 'Longest search of one position; an engine that exceeds it is restarted and the game is marked failed.' });
+key('ANALYSIS_POLL_MS', { section: 'anticheat', type: 'int', default: 5000, min: 100, desc: 'Interval at which an idle analysis engine looks for new games to analyse.' });
 
 // ---- Observability -------------------------------------------------------------------------------------
 key('METRICS_PORT', { section: 'observability', type: 'port', default: 9464, desc: 'Prometheus metrics and health endpoint (plain HTTP; 0 disables it).' });
