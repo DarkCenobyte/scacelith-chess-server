@@ -460,6 +460,7 @@ function think() {
 }
 
 function turn(c) {
+    if (c.pendingPly === c.game.ply) return;
     c.turnAt = now();
     c.gen++;
     if (stopping) return;
@@ -475,7 +476,11 @@ function doMove(c, gen) {
     if (gen !== c.gen || c.state !== S_READY || stopping) return;
     const g = c.game;
     if (!g || g.over || g.pos.side !== c.color) return;
+    // Already sent for this ply (both players of a game share its position: the opponent's
+    // socket may have delivered the next MoveMade first, and this turn is seen twice).
+    if (c.pendingPly === g.ply || g.resigned) return;
     if ((cfg.maxPlies > 0 && g.ply >= cfg.maxPlies) || g.ply >= 1190) {
+        g.resigned = true;
         send(c, clientFrame(encode.Resign({ seq: ++c.seq, game: g.id }), c.mask));
         cnt.resigns++;
         return;
@@ -526,7 +531,7 @@ function onSnapshot(c, m) {
     cnt.snapshots++;
     let g = games.get(m.game);
     if (!g) {
-        g = { id: m.game, pos: Position.start(), ply: 0, over: false };
+        g = { id: m.game, pos: Position.start(), ply: 0, over: false, resigned: false };
         games.set(m.game, g);
     }
     if (m.you === 0 && c.game !== g) cnt.gamesStarted++;     // White's first snapshot of this game
@@ -535,9 +540,10 @@ function onSnapshot(c, m) {
         for (const r of m.moves) g.pos.play(r.move);
         g.ply = m.moves.length;
     }
+    if (c.game !== g) c.pendingPly = -1;
+    else if (c.pendingPly >= g.ply) c.pendingPly = -1;      // resynchronised: that intent is gone
     c.game = g;
     c.color = m.you;
-    c.pendingPly = -1;
     c.acceptTries = 0;
     if (c.queuedAt) { hist.start.add((now() - c.queuedAt) * 1000); c.queuedAt = 0; }
     const pair = c.pair;
