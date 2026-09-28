@@ -25,6 +25,8 @@
 //   * `bus` is accepted and unused: endpoints already know how to reach remote connections.
 //   * recover() returns the count, or a Promise of it when journal.recover() is asynchronous.
 //   * shutdown() is async (it awaits the pending commits and journal.flush()).
+//   * When finishBatch throws for one record (err.gameId set), the batch is committed one game at a
+//     time so that only the bad game stays pending (and in the journal).
 //   * extra methods: onRtt(gameId, userId, rttMs), forfeitUser(userId) (the active game of a
 //     sanctioned user on this shard ends Forfeit), activeGameOf(userId), room(gameId),
 //     runTimers(now), pollCommits(now).
@@ -596,6 +598,9 @@ export class GameHost {
         }
         let res;
         try { res = this.store.games.finishBatch(records); } catch (err) {
+            // The store rolls back the whole batch on one bad record (invalid_record, foreign_key):
+            // commit the games one by one so that only the bad one stays pending.
+            if (batch.length > 1 && err && err.gameId !== undefined) return this._commitEach(batch, records, t);
             this._commitFailed(err, batch.length, t);
             return false;
         }
@@ -643,6 +648,19 @@ export class GameHost {
         }
         this.backoffMs = 0;
         this.nextCommitAt = this.pending.size ? t : Infinity;
+    }
+
+    _commitEach(batch, records, t) {
+        let failed = null;
+        for (let i = 0; i < batch.length; i++) {
+            const t0 = performance.now();
+            let res;
+            try { res = this.store.games.finishBatch([records[i]]); } catch (err) { failed = err; continue; }
+            if (res && typeof res.then === 'function') { failed = new Error('asynchronous store in _commitEach'); continue; }
+            this._commitDone([batch[i]], res, t0, t);
+        }
+        if (failed) { this._commitFailed(failed, this.pending.size, t); return false; }
+        return true;
     }
 
     _commitFailed(err, n, t) {

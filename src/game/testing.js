@@ -104,12 +104,19 @@ export class FakeStore {
         this.batches = [];
         this.failures = 0;           // number of next calls that throw
         this.async = false;          // return a Promise instead of the result
+        this.badIds = new Set();     // a batch holding one of these ids throws (like invalid_record)
         const self = this;
         this.games = {
             finishBatch(records) {
                 if (self.failures > 0) {
                     self.failures--;
                     const err = new Error('database is locked');
+                    if (self.async) return Promise.reject(err);
+                    throw err;
+                }
+                const bad = records.find((r) => self.badIds.has(r.id));
+                if (bad) {
+                    const err = Object.assign(new Error('invalid finished game record'), { code: 'invalid_record', gameId: bad.id });
                     if (self.async) return Promise.reject(err);
                     throw err;
                 }

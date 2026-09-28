@@ -431,3 +431,19 @@ test('GameRoom.fromJournal works from the host journal records', () => {
     const copy = GameRoom.fromJournal(journal.games.get(id), { config: CFG, createChessGame: () => new FakeChessGame() });
     assert.deepEqual(copy.snapshot(W, clock.t), host.room(id).snapshot(W, clock.t));
 });
+
+test('one bad record does not block the batch: the others are committed one by one', () => {
+    const { host, clock, store, journal } = mkHost();
+    const ids = [newGame(host, 1, 2), newGame(host, 3, 4), newGame(host, 5, 6)];
+    for (const id of ids) {
+        play(host, id, clock); play(host, id, clock);
+        host.onClientMessage(id, host.room(id).black.userId, { type: MSG.Resign, seq: 2, game: id }, null);
+    }
+    store.badIds.add(ids[1]);
+    clock.t += 100;
+    assert.equal(host.pollCommits(clock.t), false);
+    assert.deepEqual(store.committedIds.sort(), [ids[0], ids[2]].sort());
+    assert.ok(journal.done.has(ids[0]) && journal.done.has(ids[2]));
+    assert.equal(journal.done.has(ids[1]), false, 'the bad game stays in the journal');
+    assert.equal(host.stats().pendingCommits, 1);
+});
