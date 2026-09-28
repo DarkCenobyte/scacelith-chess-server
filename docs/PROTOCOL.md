@@ -881,11 +881,13 @@ per run of fixed-size fields, exact-size allocation, ASCII fast paths for string
 `node tools/gen-protocol.js --bench` (Node 22.22, one core of the development container; encode +
 decode of one message, operations per second, higher is better):
 
-| Message | interpreted (placeholder) | generated | speed-up |
-|---|---:|---:|---:|
-| `Move` (C2S, 26 bytes) | 1.30 M/s | 8.52 M/s | 6.6x |
-| `MoveMade` (S2C, 44 bytes) | 0.90 M/s | 6.71 M/s | 7.5x |
-| `GameSnapshot` with 80 moves (S2C, 940 bytes) | 20.5 k/s | 205 k/s | 10.0x |
+| Message | interpreted (placeholder) | generated | speed-up | generated encode only | generated decode only |
+|---|---:|---:|---:|---:|---:|
+| `Move` (C2S, 26 bytes) | 1.38 M/s | 8.91 M/s | 6.5x | 16.22 M/s | 28.21 M/s |
+| `MoveMade` (S2C, 43 bytes) | 0.97 M/s | 6.75 M/s | 6.9x | 10.39 M/s | 20.36 M/s |
+| `GameSnapshot` with 80 moves (S2C, 895 bytes) | 25.0 k/s | 326.5 k/s | 13.1x | 653.9 k/s | 711.2 k/s |
+
+Runs vary by about 10 %; a second run gave 6.5x, 6.0x and 16.0x.
 
 Decoding errors carry no stack trace (it would cost more than the decoding itself); encoding errors
 keep theirs (they are server bugs).

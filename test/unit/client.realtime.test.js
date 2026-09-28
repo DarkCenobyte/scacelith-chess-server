@@ -497,6 +497,8 @@ describe('ScacelithClient', () => {
         // Upgrade refused.
         const refused = await startWsServer({ handshake: () => ({ status: 429 }) });
         await assert.rejects(new ScacelithClient().connect({ port: refused.port, insecure: true, token: TOKEN }), (e) => e.status === 429);
+        // A Hello that cannot be encoded fails before connecting.
+        await assert.rejects(new ScacelithClient().connect({ port: fake.port, insecure: true, token: '' }), /invalid Hello \(token bad length\)/);
         for (const f of [fake, fake2, fake3, refused]) await f.close();
     });
 

@@ -112,6 +112,16 @@ export class ScacelithClient {
      */
     async connect(o = {}) {
         if (this.state === 'connecting' || this.state === 'hello' || this.state === 'ready') throw new Error('client: already connected');
+        // Encoded first: an invalid token or client name fails here, before any connection.
+        let hello;
+        try {
+            hello = encode.Hello({
+                seq: 1, proto: o.proto ?? PROTOCOL_VERSION, schema: o.schema ?? SCHEMA_HASH,
+                client: o.clientName ?? this.opts.clientName ?? 'scacelith-node-sdk', token: o.token ?? '',
+            });
+        } catch (e) {
+            throw new ScacelithError(`client: invalid Hello (${e.reason || e.message})`);
+        }
         this.state = 'connecting';
         this.seq = 0;
         this.closeCode = 0;
@@ -145,10 +155,8 @@ export class ScacelithClient {
             throw new ScacelithError(`client: ${e.message}`, { status: e.status });
         }
         this.state = 'hello';
-        this._send(encode.Hello({
-            seq: ++this.seq, proto: o.proto ?? PROTOCOL_VERSION, schema: o.schema ?? SCHEMA_HASH,
-            client: o.clientName ?? this.opts.clientName ?? 'scacelith-node-sdk', token: o.token ?? '',
-        }));
+        this.seq = 1;
+        this._send(hello);
         return welcome;
     }
 
