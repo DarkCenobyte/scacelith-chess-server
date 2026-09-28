@@ -23,10 +23,16 @@
 //     and windows only shrink from the head (oldest) to the tail (newest): the first player that
 //     is not excluded decides for the whole list. A search therefore costs O(number of non-empty
 //     rating points inside the window) with a tiny constant, and a successful search in a dense
-//     queue stops at the first bucket. A tick is O(n) per queue.
+//     queue stops at the first bucket. Players left unpaired are more than MATCH_WINDOW_START
+//     apart from each other (else they would have been paired), so a failing search meets at most
+//     about 2 * (MATCH_WINDOW_MAX + bonus) / MATCH_WINDOW_START of them. A tick is O(n) per queue
+//     (tools/bench-matchmaker.js: about 75 ms for 100k players joining at once, 50k pairs).
+//   * Joins are appended: a joinedAt older than the last MAX_REORDER queued players is raised to
+//     theirs (a late IPC message loses a few ms of waiting, the insertion stays O(1)).
 //   * Repeat limit: a count per pair of users plus a time-ordered log that expires them; pair keys
 //     are numbers (no allocation) while user ids are below 2^26.
-//   * Colour balances: a Map userId -> balance (zero balances are dropped).
+//   * Colour balances: a Map userId -> balance (zero balances are dropped; beyond BALANCE_CAP
+//     users the least recently updated are forgotten, i.e. reset to 0).
 //
 // Deviations and clarifications of the contract:
 //   * join() refuses a user already queued with ErrorCode.QueueNotAllowed (leave first), and a
@@ -37,6 +43,9 @@
 //   * join({ recentOpponents }) is an optional iterable of user ids the player must not be paired
 //     with (for instance from store.games.countBetween after a restart); it applies in both
 //     directions and in the queue it was given for.
+//   * Exclusions (recentOpponents, repeat limit) are skipped at most SCAN_CAP times per bucket list
+//     and search, which bounds a search even against a pathological exclusion list; a partner
+//     hidden behind more than that is found by its own search or at a later tick.
 //   * statusOf() returns null when the user is not queued.
 //   * A pairing's white/black are plain copies of the queue entries plus `waitMs`.
 
@@ -49,6 +58,8 @@ const { ErrorCode, QueueState } = enums;
 const MAX_RATING = 65535;          // PlayerInfo.rating is a u16
 const INITIAL_CAPACITY = 4096;     // rating points covered before the first growth
 const SCAN_CAP = 64;               // excluded entries skipped per list and bucket before giving up on it
+const MAX_REORDER = 64;            // queued players a late-arriving join may be placed before
+const BALANCE_CAP = 500000;        // colour balances kept in memory (least recently updated evicted)
 const PAIR_KEY_SHIFT = 67108864;   // 2^26: numeric pair keys stay below 2^52
 
 const mPairs = metrics.counter('scacelith_mm_pairs_total', 'Pairs made by the matchmaker', ['rated']);
@@ -129,9 +140,14 @@ class Queue {
 
     insert(e) {
         if (e.rating >= this.cap) this.grow(e.rating);
-        // Queue FIFO, ordered by joinedAt (appending is the normal case).
+        // Queue FIFO, ordered by joinedAt (appending is the normal case). A joinedAt older than
+        // MAX_REORDER queued players is moved up to theirs, so an insertion stays O(1).
         let p = this.tail;
-        while (p !== null && before(e, p)) p = p.prev;
+        let steps = 0;
+        while (p !== null && before(e, p)) {
+            if (++steps > MAX_REORDER) { e.joinedAt = p.joinedAt; break; }
+            p = p.prev;
+        }
         e.prev = p;
         e.next = p === null ? this.head : p.next;
         if (e.next !== null) e.next.prev = e; else this.tail = e;
@@ -415,7 +431,14 @@ export class Matchmaker {
     }
 
     _setBalance(userId, v) {
-        if (v === 0) this.balances.delete(userId); else this.balances.set(userId, v);
+        const b = this.balances;
+        b.delete(userId);                // re-inserted last: the Map stays in update order
+        if (v === 0) return;
+        b.set(userId, v);
+        if (b.size > BALANCE_CAP) {
+            let drop = b.size - Math.floor(BALANCE_CAP * 0.9);
+            for (const k of b.keys()) { if (drop-- <= 0) break; b.delete(k); }
+        }
     }
 
     /**

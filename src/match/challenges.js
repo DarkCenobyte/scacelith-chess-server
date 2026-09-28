@@ -42,7 +42,7 @@
 import crypto from 'node:crypto';
 import { enums } from '../protocol/schema.js';
 import { metrics } from '../metrics.js';
-import { categoryOf, parseCategory, CUSTOM_CATEGORY } from './elo.js';
+import { categoryOf, CUSTOM_CATEGORY } from './elo.js';
 
 const { ErrorCode, ChallengeState, ColorPref } = enums;
 
@@ -101,7 +101,7 @@ export function rematchSpec(previousGame, cfg) {
     return {
         white: { ...g.black }, black: { ...g.white },
         baseMs: g.baseMs, incMs: g.incMs, category,
-        rated: !!g.rated && category !== CUSTOM_CATEGORY && (!cfg || parseCategory(category, cfg) !== null),
+        rated: !!g.rated && category !== CUSTOM_CATEGORY,
         rematchOf: g.gameId ?? g.id ?? 0, challengeId: 0,
     };
 }
