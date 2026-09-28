@@ -1,0 +1,54 @@
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import { Presence } from '../../src/cluster/presence.js';
+
+describe('presence', () => {
+    it('claims, replaces (kick) and releases only the live connection', () => {
+        const p = new Presence();
+        assert.deepEqual(p.claim({ userId: 1, username: 'Alice', shard: 0, connId: 10 }), { previous: null });
+        assert.equal(p.userIdByName('alice'), 1);
+        const r = p.claim({ userId: 1, username: 'Alice', shard: 2, connId: 20 });
+        assert.deepEqual(r.previous, { shard: 0, connId: 10 });
+        assert.equal(p.release(1, 10, 0), false);                  // the replaced connection closing
+        assert.equal(p.get(1).connId, 20);
+        assert.equal(p.release(1, 20, 2), true);
+        assert.equal(p.get(1), undefined);
+        assert.equal(p.userIdByName('Alice'), 0);
+        assert.deepEqual(p.claim({ userId: 3, shard: 1, connId: 5 }), { previous: null });
+        assert.deepEqual(p.claim({ userId: 3, shard: 1, connId: 5 }), { previous: null });   // same connection again
+    });
+
+    it('limits connections per IPv4 address and per IPv6 /64', () => {
+        const p = new Presence({ maxPerIp: 2, maxConnections: 100 });
+        assert.equal(p.ipAcquire('192.0.2.1', 0).ok, true);
+        assert.equal(p.ipAcquire('::ffff:192.0.2.1', 1).ok, true);          // same client through a dual-stack listener
+        assert.deepEqual(p.ipAcquire('192.0.2.1', 0), { ok: false, reason: 'per_ip' });
+        assert.equal(p.ipAcquire('192.0.2.2', 0).ok, true);
+        assert.equal(p.ipAcquire('2001:db8:0:1::1', 0).ok, true);
+        assert.equal(p.ipAcquire('2001:db8:0:1:ffff::2', 0).ok, true);
+        assert.deepEqual(p.ipAcquire('2001:db8:0:1:abcd:1:2:3', 1), { ok: false, reason: 'per_ip' });
+        assert.equal(p.ipAcquire('2001:db8:0:2::1', 1).ok, true);           // another /64
+        assert.equal(p.ipRelease('2001:db8:0:1::1', 0), true);
+        assert.equal(p.ipAcquire('2001:db8:0:1::99', 0).ok, true);
+        assert.equal(p.ipRelease('203.0.113.1', 0), false);                 // never acquired
+    });
+
+    it('enforces the global limit and forgets a dead shard', () => {
+        const p = new Presence({ maxPerIp: 10, maxConnections: 3 });
+        p.ipAcquire('10.0.0.1', 0);
+        p.ipAcquire('10.0.0.2', 1);
+        p.ipAcquire('10.0.0.3', 1);
+        assert.deepEqual(p.ipAcquire('10.0.0.4', 0), { ok: false, reason: 'global' });
+        p.claim({ userId: 1, username: 'a', shard: 1, connId: 1 });
+        p.claim({ userId: 2, username: 'b', shard: 0, connId: 1 });
+        assert.equal(p.shardConnections(1), 2);
+        assert.deepEqual(p.dropShard(1), [1]);
+        assert.equal(p.connections, 1);
+        assert.equal(p.shardConnections(1), 0);
+        assert.equal(p.ipCount('10.0.0.2'), 0);
+        assert.equal(p.get(1), undefined);
+        assert.equal(p.get(2).shard, 0);
+        assert.equal(p.ipAcquire('10.0.0.4', 0).ok, true);
+        assert.equal(p.ipRelease('10.0.0.2', 1), false);                    // released with its shard already
+    });
+});

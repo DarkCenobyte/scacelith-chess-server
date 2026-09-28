@@ -36,6 +36,14 @@ key('WORKERS', { section: 'server', type: 'string', default: 'auto',
 key('SHARD_BASE', { section: 'server', type: 'int', default: 0, min: 0, max: 56,
     desc: 'First shard number of this instance (multi-instance deployments give each instance its own range).' });
 key('INSTANCE_ID', { section: 'server', type: 'string', default: '', desc: 'Free label of this instance in logs and metrics (default: host name).' });
+key('WS_ALLOWED_ORIGINS', { section: 'server', type: 'list', default: '',
+    desc: 'Origin header values allowed to open the game WebSocket (e.g. https://play.example.org). The game client sends no Origin; browsers always send one, so they are refused unless listed here.' });
+key('SHUTDOWN_GRACE_MS', { section: 'server', type: 'int', default: 3000, min: 0, max: 120000,
+    desc: 'On SIGTERM/SIGINT players are warned (ServerShutdown notice) this long before their connections close. Games in progress survive the restart (journal).' });
+key('LISTEN_REUSE_PORT', { section: 'server', type: 'bool', default: false,
+    desc: 'Linux: every worker binds its own listening socket (SO_REUSEPORT) and the kernel spreads new connections, instead of the primary accepting them and handing them out round-robin. Ignored on other systems.' });
+key('SHARD_OVERLOAD_LAG_MS', { section: 'server', type: 'int', default: 50, min: 5, max: 5000,
+    desc: 'Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker.' });
 
 // ---- TLS -----------------------------------------------------------------------------------------
 key('TLS_MODE', { section: 'tls', type: 'enum', values: ['native', 'proxy', 'off'], default: 'native',
@@ -56,6 +64,10 @@ key('JOURNAL_FLUSH_MS', { section: 'storage', type: 'int', default: 50, min: 5, 
 key('JOURNAL_FSYNC', { section: 'storage', type: 'bool', default: true, desc: 'fsync the journal at every flush (survives power loss, not only process crashes).' });
 key('DB_COMMIT_MS', { section: 'storage', type: 'int', default: 50, min: 1, max: 2000,
     desc: 'Finished games are committed to the database in batches, at most this long after they end.' });
+key('DB_CACHE_MB', { section: 'storage', type: 'int', default: 64, min: 2, max: 4096,
+    desc: 'SQLite page cache of each server process (the primary and every worker), in megabytes.' });
+key('DB_MMAP_MB', { section: 'storage', type: 'int', default: 256, min: 0, max: 65536,
+    desc: 'Part of the database file read through memory mapping, in megabytes (0 disables it).' });
 
 // ---- Secrets ---------------------------------------------------------------------------------------
 key('SERVER_SECRET', { section: 'secrets', type: 'secret', required: true, minBytes: 32,
@@ -83,12 +95,12 @@ key('SMTP_PORT', { section: 'mail', type: 'port', default: 587, desc: 'SMTP port
 key('SMTP_SECURITY', { section: 'mail', type: 'enum', values: ['starttls', 'tls', 'none'], default: 'starttls',
     desc: 'starttls (required, not opportunistic), tls (implicit, port 465) or none (local relay only).' });
 key('SMTP_USER', { section: 'mail', type: 'string', default: '', desc: 'SMTP user name (empty = no authentication).' });
-key('SMTP_PASSWORD', { section: 'mail', type: 'secret', default: '', desc: 'SMTP password.' });
+key('SMTP_PASSWORD', { section: 'mail', type: 'secretText', default: '', desc: 'SMTP password.' });
 
 // ---- Google single sign-on ---------------------------------------------------------------------------
 key('SSO_GOOGLE_ENABLED', { section: 'sso', type: 'bool', default: false, desc: 'Offers "Sign in with Google" (OpenID Connect, authorization code + PKCE through the system browser).' });
 key('GOOGLE_CLIENT_ID', { section: 'sso', type: 'string', default: '', desc: 'OAuth client ID of a "Web application" client in Google Cloud Console.' });
-key('GOOGLE_CLIENT_SECRET', { section: 'sso', type: 'secret', default: '', desc: 'OAuth client secret. Never commit it.' });
+key('GOOGLE_CLIENT_SECRET', { section: 'sso', type: 'secretText', default: '', desc: 'OAuth client secret. Never commit it.' });
 key('GOOGLE_REDIRECT_URI', { section: 'sso', type: 'string', default: '',
     desc: 'Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST:PUBLIC_API_PORT/auth/sso/google/callback).' });
 
@@ -154,6 +166,10 @@ key('ANALYSIS_DEPTH_FAST', { section: 'anticheat', type: 'int', default: 10, min
 key('ANALYSIS_DEPTH_DEEP', { section: 'anticheat', type: 'int', default: 18, min: 6, max: 40, desc: 'Deep analysis depth (a strong engine\'s choice).' });
 key('ANALYSIS_MIN_PLIES', { section: 'anticheat', type: 'int', default: 30, min: 10, desc: 'Shorter games are not analysed.' });
 key('REPORTS_PER_DAY', { section: 'anticheat', type: 'int', default: 5, min: 1, desc: 'Reports one player may file per day.' });
+key('ANALYSIS_HASH_MB', { section: 'anticheat', type: 'int', default: 32, min: 1, max: 4096, desc: 'Transposition table of each analysis engine, in MB.' });
+key('ANALYSIS_POSITION_TIMEOUT_MS', { section: 'anticheat', type: 'int', default: 120000, min: 1000,
+    desc: 'Longest search of one position; an engine that exceeds it is restarted and the game is marked failed.' });
+key('ANALYSIS_POLL_MS', { section: 'anticheat', type: 'int', default: 5000, min: 100, desc: 'Interval at which an idle analysis engine looks for new games to analyse.' });
 
 // ---- Observability -------------------------------------------------------------------------------------
 key('METRICS_PORT', { section: 'observability', type: 'port', default: 9464, desc: 'Prometheus metrics and health endpoint (plain HTTP; 0 disables it).' });
@@ -220,7 +236,8 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     for (const k of KEYS) {
         let raw = get(k.name);
         const fileRef = get(k.name + '_FILE');
-        if ((k.type === 'secret' || k.secretFile) && fileRef && raw === undefined) {
+        const secret = k.type === 'secret' || k.type === 'secretText';
+        if ((secret || k.secretFile) && fileRef && raw === undefined) {
             try { raw = fs.readFileSync(path.resolve(cwd, fileRef), 'utf8').trim(); } catch (e) {
                 errors.push(`${k.name}_FILE: cannot read ${fileRef} (${e.code || e.message})`);
                 continue;
@@ -232,8 +249,8 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
             if (k.required) { errors.push(`${k.name} is required (${k.desc.split('.')[0]}).`); continue; }
             v = k.default;
             if (k.type === 'list') v = String(v ?? '');
-            if (k.type === 'secret') v = null;
-            if (k.type === 'secret' || v === undefined) { cfg[toCamel(k.name)] = v ?? null; continue; }
+            if (secret) v = null;
+            if (secret || v === undefined) { cfg[toCamel(k.name)] = v ?? null; continue; }
             raw = String(v);
         }
         switch (k.type) {
@@ -263,6 +280,9 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
                 break;
             case 'list':
                 v = String(raw).split(',').map((s) => s.trim()).filter(Boolean);
+                break;
+            case 'secretText':      // a password or client secret used as written (not decoded)
+                v = String(raw);
                 break;
             case 'secret':
                 v = decodeSecret(String(raw));
@@ -315,7 +335,7 @@ export function describe(cfg) {
     const out = {};
     for (const [k, v] of Object.entries(cfg)) {
         const spec = KEYS.find((s) => toCamel(s.name) === k);
-        if (spec && spec.type === 'secret') out[k] = v ? '<set>' : '<unset>';
+        if (spec && (spec.type === 'secret' || spec.type === 'secretText')) out[k] = v ? '<set>' : '<unset>';
         else out[k] = v;
     }
     return out;
