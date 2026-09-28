@@ -36,6 +36,20 @@
 //     'game.recovered' { gameId, whiteId, blackId, shard } (not in the DESIGN 5.7 catalog: the
 //     primary needs it to give the players their active game back after a full restart).
 //   * the endpoint's `rttMs` (when a number) feeds room.onRtt before each message.
+//
+// Payloads this module produces or expects:
+//   createGame(spec): { white, black: { userId, name, rating, provisional }, baseMs, incMs (ms),
+//     rated, category? (derived from config.categories when absent; 'custom' is never rated),
+//     rematchOf?, id? (pre-allocated id of this shard) }
+//   primary 'game.ended': { gameId, whiteId, blackId, status, reason, rated (false for aborted
+//     results), category, rematchOffer (colour of a pending rematch offer, 2 = none) }
+//   primary 'game.rematch': { gameId, white, black (colours already swapped), category, baseMs,
+//     incMs, rated }; a reply { error } or ok:false sends Error{RematchUnavailable} to both.
+//   primary 'conduct.record': { userId, kind: 'abandon' | 'abort' | 'noshow' }
+//   anticheat.recordAnomaly: { userId, gameId, kind, detail (short text), posMatched }; its
+//     `certain` decides the sanction (the 6.5 table is the fallback when it answers nothing).
+// Complexity: a message costs O(1) besides the rules; a timer (re)schedule is O(1); one 10 ms
+// interval visits one wheel slot per call.
 
 import { performance } from 'node:perf_hooks';
 import { encode, enums, MSG, CloseCode } from '../protocol/index.js';
@@ -141,7 +155,13 @@ export class GameHost {
 
         this._fire = (entry, t) => {
             if (entry.removed) return;
-            this._process(entry, entry.room.tick(t), null, -1, 0);
+            try {
+                this._process(entry, entry.room.tick(t), null, -1, 0);
+            } catch (err) {
+                // A bug must not leave the game without a timer: log and try again in a second.
+                this.log.error('game tick failed', { err, gameId: entry.room.id });
+                this.wheel.schedule(entry, t + 1000);
+            }
         };
         this.interval = null;
         if (autoStart) {
@@ -231,21 +251,28 @@ export class GameHost {
             return;
         }
         if (endpoint && !entry.ep[color]) this._bind(entry, color, endpoint, false);
-        if (endpoint && typeof endpoint.rttMs === 'number' && endpoint.rttMs > 0) room.onRtt(color, endpoint.rttMs);
+        else if (endpoint && typeof endpoint.rttMs === 'number' && endpoint.rttMs > 0) room.onRtt(color, endpoint.rttMs);
         const t = this.now();
         let out;
-        switch (msg.type) {
-            case MSG.Move: out = room.onMove(color, msg, t); break;
-            case MSG.Resign: out = room.onResign(color, t, seq); break;
-            case MSG.DrawOffer: out = room.onDrawOffer(color, t, seq); break;
-            case MSG.DrawAnswer: out = room.onDrawAnswer(color, !!msg.accept, t, seq); break;
-            case MSG.DrawClaim: out = room.onDrawClaim(color, t, seq); break;
-            case MSG.Abort: out = room.onAbort(color, t, seq); break;
-            case MSG.Resync: out = room.onResync(color, t); break;
-            case MSG.Rematch: out = room.onRematch(color, !!msg.accept, t, seq); break;
-            default:
-                this._reject(endpoint, EC.NotInGame, seq, gameId);
-                return;
+        try {
+            switch (msg.type) {
+                case MSG.Move: out = room.onMove(color, msg, t); break;
+                case MSG.Resign: out = room.onResign(color, t, seq); break;
+                case MSG.DrawOffer: out = room.onDrawOffer(color, t, seq); break;
+                case MSG.DrawAnswer: out = room.onDrawAnswer(color, !!msg.accept, t, seq); break;
+                case MSG.DrawClaim: out = room.onDrawClaim(color, t, seq); break;
+                case MSG.Abort: out = room.onAbort(color, t, seq); break;
+                case MSG.Resync: out = room.onResync(color, t); break;
+                case MSG.Rematch: out = room.onRematch(color, !!msg.accept, t, seq); break;
+                default:
+                    this._reject(endpoint, EC.NotInGame, seq, gameId);
+                    return;
+            }
+        } catch (err) {
+            this.log.error('game message failed', { err, gameId, type: msg.type });
+            this._reject(endpoint, EC.Internal, seq, gameId);
+            this._reschedule(entry);
+            return;
         }
         this._process(entry, out, endpoint, color, seq);
         if (msg.type === MSG.Move) {
@@ -301,7 +328,7 @@ export class GameHost {
 
     /** Starts a commit when one is due at `t` (the interval calls it every 10 ms). */
     pollCommits(t = this.now()) {
-        if (this.pending.size && !this.commitInFlight && t >= this.nextCommitAt) return this._commit();
+        if (this.pending.size && !this.commitInFlight && t >= this.nextCommitAt) return this._commit(t);
         return null;
     }
 
@@ -382,7 +409,7 @@ export class GameHost {
         this.closed = true;
         for (let i = 0; i < 5 && (this.pending.size || this.commitInFlight); i++) {
             if (this.commitInFlight) { await this.commitInFlight; continue; }
-            const r = this._commit();
+            const r = this._commit(this.now());
             const ok = r && typeof r.then === 'function' ? await r : r;
             if (!ok) break;                             // the journal keeps them for the next start
         }
@@ -554,7 +581,7 @@ export class GameHost {
 
     // One store.games.finishBatch call for the pending games. Returns true / false, or a Promise
     // of it when the store is asynchronous.
-    _commit() {
+    _commit(t = this.now()) {
         const batch = [];
         for (const entry of this.pending.values()) {
             batch.push(entry);
@@ -564,25 +591,25 @@ export class GameHost {
         const records = batch.map((e) => e.room.record());
         const t0 = performance.now();
         if (!this.store || !this.store.games || typeof this.store.games.finishBatch !== 'function') {
-            this._commitDone(batch, null, t0);
+            this._commitDone(batch, null, t0, t);
             return true;
         }
         let res;
         try { res = this.store.games.finishBatch(records); } catch (err) {
-            this._commitFailed(err, batch.length);
+            this._commitFailed(err, batch.length, t);
             return false;
         }
         if (res && typeof res.then === 'function') {
             this.commitInFlight = res.then(
-                (r) => { this.commitInFlight = null; this._commitDone(batch, r, t0); return true; },
-                (err) => { this.commitInFlight = null; this._commitFailed(err, batch.length); return false; });
+                (r) => { this.commitInFlight = null; this._commitDone(batch, r, t0, this.now()); return true; },
+                (err) => { this.commitInFlight = null; this._commitFailed(err, batch.length, this.now()); return false; });
             return this.commitInFlight;
         }
-        this._commitDone(batch, res, t0);
+        this._commitDone(batch, res, t0, t);
         return true;
     }
 
-    _commitDone(batch, results, t0) {
+    _commitDone(batch, results, t0, t) {
         this.m.commitMs.observe(performance.now() - t0);
         this.m.batch.observe(batch.length);
         const byId = new Map();
@@ -615,13 +642,13 @@ export class GameHost {
             this._reschedule(entry);
         }
         this.backoffMs = 0;
-        this.nextCommitAt = this.pending.size ? this.now() : Infinity;
+        this.nextCommitAt = this.pending.size ? t : Infinity;
     }
 
-    _commitFailed(err, n) {
+    _commitFailed(err, n, t) {
         this.m.commitErrors.inc();
         this.backoffMs = this.backoffMs ? Math.min(this.backoffMs * 2, MAX_BACKOFF_MS) : Math.max(100, this.commitMs);
-        this.nextCommitAt = this.now() + this.backoffMs;
+        this.nextCommitAt = t + this.backoffMs;
         this.log.error('commit of finished games failed; retrying', { err, games: n, retryInMs: this.backoffMs });
     }
 }
