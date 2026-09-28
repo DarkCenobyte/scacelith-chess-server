@@ -5,16 +5,21 @@
   "license": "GPL-3.0-or-later",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.13" },
-  "bin": { "scacelith-server": "bin/scacelith-server.js", "scacelith-admin": "bin/admin.js" },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "bin": {
+    "scacelith-server": "bin/scacelith-server.js",
+    "scacelith-admin": "bin/admin.js"
+  },
   "scripts": {
     "start": "node bin/scacelith-server.js",
     "migrate": "node bin/scacelith-server.js migrate",
     "gen:protocol": "node tools/gen-protocol.js",
     "gen:env": "node tools/gen-env-example.js",
-    "test": "node --test --test-concurrency=1 test/",
-    "test:unit": "node --test test/unit/",
-    "test:integration": "node --test --test-concurrency=1 test/integration/",
+    "test": "node --test --test-concurrency=1 \"test/unit/*.test.js\" \"test/integration/*.test.js\"",
+    "test:unit": "node --test \"test/unit/*.test.js\"",
+    "test:integration": "node --test --test-concurrency=1 \"test/integration/*.test.js\"",
     "bench": "node bench/loadgen.js"
   },
   "dependencies": {}

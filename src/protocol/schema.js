@@ -87,7 +87,8 @@ export const enums = {
         QueueNotAllowed: 200, ChallengeNotFound: 201, UserUnavailable: 202, ChallengeLimit: 203,
         CannotChallengeSelf: 204, CodeInvalid: 205, RatedRequiresOfficialTc: 206,
         MatchmakingCooldown: 207, InvalidTimeControl: 208, RematchUnavailable: 209,
-        ProtocolViolation: 300, Flood: 301, CheatDetected: 302, SlowConsumer: 303,
+        // Enums travel as u8: keep every value below 256.
+        ProtocolViolation: 240, Flood: 241, CheatDetected: 242, SlowConsumer: 243,
     },
 };
 
