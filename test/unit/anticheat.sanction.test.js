@@ -120,7 +120,8 @@ test('startAnalysisProcess restarts a crashing worker with backoff and stops cle
     fs.writeFileSync(crash, 'process.exit(3);\n');
     const h = startAnalysisProcess(testConfig({ ANALYSIS_ENGINE_PATH: '/bin/true' }), { log: quiet, script: crash, minBackoffMs: 20, maxBackoffMs: 80 });
     assert.equal(h.enabled, true);
-    await new Promise((r) => setTimeout(r, 900));
+    // Each restart forks a Node process: poll instead of a fixed delay (slow on a loaded machine).
+    for (const end = Date.now() + 10000; h.restarts < 3 && Date.now() < end;) await new Promise((r) => setTimeout(r, 50));
     assert.ok(h.restarts >= 3, `restarted ${h.restarts} times`);
     await h.stop(500);
     const n = h.restarts;

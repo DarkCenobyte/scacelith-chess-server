@@ -50,8 +50,9 @@ test('timing: unknown user and wrong password take similar time', async (t) => {
         return Number(process.hrtime.bigint() - t0) / 1e6;
     };
     const known = [], unknown = [];
-    for (let i = 0; i < 7; i++) { known.push(await time('alice')); unknown.push(await time(`ghost${i}`)); }
-    const med = (a) => a.sort((x, y) => x - y)[3];
+    // Interleaved samples and medians, so that load from other processes affects both sides alike.
+    for (let i = 0; i < 15; i++) { known.push(await time('alice')); unknown.push(await time(`ghost${i}`)); }
+    const med = (a) => a.sort((x, y) => x - y)[7];
     const ratio = med(known) / med(unknown);
     assert.ok(ratio > 0.6 && ratio < 1.67, `median known ${med(known).toFixed(1)} ms, unknown ${med(unknown).toFixed(1)} ms`);
 });

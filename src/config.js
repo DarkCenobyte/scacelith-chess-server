@@ -24,9 +24,10 @@ key('SERVER_PUBLIC_HOST', { section: 'server', type: 'string', default: 'localho
 key('SERVER_MOTD', { section: 'server', type: 'string', default: '', max: 200,
     desc: 'Short message of the day shown in the online menu.' });
 key('BIND_ADDRESS', { section: 'server', type: 'string', default: '0.0.0.0', desc: 'Address the API and WebSocket listeners bind to.' });
-key('API_PORT', { section: 'server', type: 'port', default: 8443, desc: 'HTTPS API port.' });
-key('WS_PORT', { section: 'server', type: 'port', default: 8444,
-    desc: 'WSS (game WebSocket) port. May equal API_PORT: the API server then also accepts the WebSocket upgrade.' });
+key('API_PORT', { section: 'server', type: 'port', default: 44664,
+    desc: 'HTTPS API port (TCP). 44664 is the port of the official server; any free port works for a community server.' });
+key('WS_PORT', { section: 'server', type: 'port',
+    desc: 'WSS (game WebSocket) port. Empty (the default) = the same port as API_PORT: one TLS listener serves the API under /api/v1 and the WebSocket upgrade on /ws. Set another port to split them.' });
 key('PUBLIC_API_PORT', { section: 'server', type: 'port', default: 0,
     desc: 'API port as seen by clients when a proxy/NAT maps ports (0 = API_PORT).' });
 key('PUBLIC_WS_PORT', { section: 'server', type: 'port', default: 0,
@@ -299,6 +300,7 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     cfg.dbPath = cfg.dbPath || path.join(cfg.dataDir, 'scacelith.db');
     cfg.journalDir = cfg.journalDir || path.join(cfg.dataDir, 'journal');
     cfg.runDir = path.join(cfg.dataDir, 'run');
+    if (cfg.wsPort === null || cfg.wsPort === undefined) cfg.wsPort = cfg.apiPort;
     cfg.publicApiPort = cfg.publicApiPort || cfg.apiPort;
     cfg.publicWsPort = cfg.publicWsPort || cfg.wsPort;
     cfg.instanceId = cfg.instanceId || os.hostname();

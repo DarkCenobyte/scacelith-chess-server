@@ -33,8 +33,8 @@ Sections:
 | `SERVER_PUBLIC_HOST` | text | `localhost` | Public DNS name of the server, used in e-mail links and the Google SSO redirect URI. |
 | `SERVER_MOTD` | text (at most 200 characters) | (empty) | Short message of the day shown in the online menu. |
 | `BIND_ADDRESS` | text | `0.0.0.0` | Address the API and WebSocket listeners bind to. |
-| `API_PORT` | port (0-65535) | `8443` | HTTPS API port. |
-| `WS_PORT` | port (0-65535) | `8444` | WSS (game WebSocket) port. May equal API_PORT: the API server then also accepts the WebSocket upgrade. |
+| `API_PORT` | port (0-65535) | `44664` | HTTPS API port (TCP). 44664 is the port of the official server; any free port works for a community server. |
+| `WS_PORT` | port (0-65535) | (empty) | WSS (game WebSocket) port. Empty (the default) = the same port as API_PORT: one TLS listener serves the API under /api/v1 and the WebSocket upgrade on /ws. Set another port to split them. |
 | `PUBLIC_API_PORT` | port (0-65535) | `0` | API port as seen by clients when a proxy/NAT maps ports (0 = API_PORT). |
 | `PUBLIC_WS_PORT` | port (0-65535) | `0` | WSS port as seen by clients (0 = WS_PORT). |
 | `WORKERS` | text | `auto` | Worker processes (shards) handling connections and games: a number, or "auto" (one per CPU core, at most 16). |
