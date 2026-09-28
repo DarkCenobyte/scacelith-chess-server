@@ -66,6 +66,8 @@ Sections:
 | `JOURNAL_FLUSH_MS` | integer (5-1000) | `50` | Longest time a game event waits in memory before being written to the journal (group commit). |
 | `JOURNAL_FSYNC` | boolean (true/false, 1/0, yes/no, on/off) | `true` | fsync the journal at every flush (survives power loss, not only process crashes). |
 | `DB_COMMIT_MS` | integer (1-2000) | `50` | Finished games are committed to the database in batches, at most this long after they end. |
+| `DB_CACHE_MB` | integer (2-4096) | `64` | SQLite page cache of each server process (the primary and every worker), in megabytes. |
+| `DB_MMAP_MB` | integer (0-65536) | `256` | Part of the database file read through memory mapping, in megabytes (0 disables it). |
 
 ## Secrets
 
@@ -97,7 +99,7 @@ Sections:
 | `SMTP_PORT` | port (0-65535) | `587` | SMTP port (587 STARTTLS, 465 implicit TLS). |
 | `SMTP_SECURITY` | one of starttls, tls, none | `starttls` | starttls (required, not opportunistic), tls (implicit, port 465) or none (local relay only). |
 | `SMTP_USER` | text | (empty) | SMTP user name (empty = no authentication). |
-| `SMTP_PASSWORD`<br>`SMTP_PASSWORD_FILE` | secret | (unset) | SMTP password. |
+| `SMTP_PASSWORD` | secretText | (empty) | SMTP password. |
 
 ## Google single sign-on
 
@@ -105,7 +107,7 @@ Sections:
 | --- | --- | --- | --- |
 | `SSO_GOOGLE_ENABLED` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Offers "Sign in with Google" (OpenID Connect, authorization code + PKCE through the system browser). |
 | `GOOGLE_CLIENT_ID` | text | (empty) | OAuth client ID of a "Web application" client in Google Cloud Console. |
-| `GOOGLE_CLIENT_SECRET`<br>`GOOGLE_CLIENT_SECRET_FILE` | secret | (unset) | OAuth client secret. Never commit it. |
+| `GOOGLE_CLIENT_SECRET` | secretText | (empty) | OAuth client secret. Never commit it. |
 | `GOOGLE_REDIRECT_URI` | text | (empty) | Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST:PUBLIC_API_PORT/auth/sso/google/callback). |
 
 ## Abuse protection and limits
