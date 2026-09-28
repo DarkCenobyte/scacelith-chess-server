@@ -176,6 +176,9 @@ Sections:
 | `ANALYSIS_DEPTH_DEEP` | integer (6-40) | `18` | Deep analysis depth (a strong engine's choice). |
 | `ANALYSIS_MIN_PLIES` | integer (&gt;= 10) | `30` | Shorter games are not analysed. |
 | `REPORTS_PER_DAY` | integer (&gt;= 1) | `5` | Reports one player may file per day. |
+| `ANALYSIS_HASH_MB` | integer (1-4096) | `32` | Transposition table of each analysis engine, in MB. |
+| `ANALYSIS_POSITION_TIMEOUT_MS` | integer (&gt;= 1000) | `120000` | Longest search of one position; an engine that exceeds it is restarted and the game is marked failed. |
+| `ANALYSIS_POLL_MS` | integer (&gt;= 100) | `5000` | Interval at which an idle analysis engine looks for new games to analyse. |
 
 ## Observability
 
