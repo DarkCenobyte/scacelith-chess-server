@@ -81,7 +81,7 @@ function gauges() {
         if (c.game && !c.game.over && c.color === 0) whitePlaying++;
         if (c.pendingPly >= 0) pending++;
     }
-    return { open, ready, connecting, whitePlaying, pendingMoves: pending, localGames: games.size };
+    return { open, ready, connecting, whitePlaying, pendingMoves: pending, localGames: games.size, lastWelcomeAt };
 }
 
 function report(final = false) {
@@ -242,6 +242,7 @@ function onError(e) { const c = this._c; if (!c.err) c.err = e.code || e.message
 function onClose() { closed(this._c); }
 
 let inflight = 0;
+let lastWelcomeAt = 0;
 
 function closed(c) {
     const prev = c.state;
@@ -374,6 +375,7 @@ function onWelcome(c, m) {
     c.username = m.username;
     hist.hello.add((now() - c.tHello) * 1000);
     cnt.connOk++;
+    lastWelcomeAt = Date.now();
     if (cfg.pingIntervalMs > 0) schedule(now() + Math.random() * cfg.pingIntervalMs, c, K_PING, 0);
     pumpRamp();
 }
@@ -751,6 +753,10 @@ process.on('message', (msg) => {
             return;
         case 'games':
             startGames();
+            return;
+        case 'halt':                 // stop opening connections (memory guard)
+            rampNext = clients.length;
+            if (rampTimer) { clearInterval(rampTimer); rampTimer = null; }
             return;
         case 'stop':
             stopping = true;

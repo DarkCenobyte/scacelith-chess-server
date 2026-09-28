@@ -78,6 +78,8 @@ Output
   --label TEXT           free text stored in the report
   --json                 also print the JSON report on stdout
   --max-run-s S          safety limit of the whole run                      [900]
+  --wait-idle-s S        wait up to S s for the other processes of the machine to go quiet [0]
+  --min-free-mb N        stop opening connections below this available memory [1500]
 `;
 }
 
@@ -140,6 +142,8 @@ function options(raw) {
         label: raw.label || '',
         json: !!raw.json,
         maxRunS: num(raw.maxRunS, 900),
+        waitIdleS: num(raw.waitIdleS, 0),
+        minFreeMb: num(raw.minFreeMb, 1500),
     };
     if (!['challenge', 'queue'].includes(o.via)) throw new Error('--via challenge|queue');
     const m = /^(\d+(?:\.\d+)?)\+(\d+)$/.exec(o.tc);
@@ -394,6 +398,21 @@ async function main() {
         };
         const deadAll = () => procList.every((pr) => pr.exited);
 
+        // ---- quiet machine ----------------------------------------------------------------------------
+        if (o.waitIdleS > 0) {
+            const until = Date.now() + o.waitIdleS * 1000;
+            for (;;) {
+                const a = cpu.sample(pidMap());
+                await sleep(2000);
+                const d = cpu.delta(a, cpu.sample(pidMap()));
+                const ours = Object.values(d.procs).reduce((x, v) => x + v.cores, 0);
+                const other = d.machine ? d.machine.coresBusy - ours : 0;
+                if (other < 0.3) break;
+                if (Date.now() > until) { report.notes.push(`machine not idle after ${o.waitIdleS} s (other processes ${other.toFixed(2)} cores): started anyway`); break; }
+                say(`waiting for a quiet machine (other processes use ${other.toFixed(2)} cores)...`);
+            }
+        }
+
         // ---- baseline ---------------------------------------------------------------------------------
         await sleep(1500);
         pids = pidMap();
@@ -405,18 +424,27 @@ async function main() {
         let m0 = await startPhase('ramp');
         bcast({ cmd: 'connect' });
         let lastProgress = Date.now(), lastDone = 0;
-        let firstOkAt = 0, lastOkAt = 0;
+        let halted = false;
         for (;;) {
             await sleep(250);
             const done = (phase.c.connOk || 0) + (phase.c.connFail || 0);
-            if ((phase.c.connOk || 0) > 0 && !firstOkAt) firstOkAt = Date.now();
-            if (done !== lastDone) { lastDone = done; lastProgress = Date.now(); if (phase.c.connOk) lastOkAt = Date.now(); }
+            if (done !== lastDone) { lastDone = done; lastProgress = Date.now(); }
             if (done >= o.clients) break;
+            if (halted && done >= (phase.c.connStarted || 0)) break;
+            if (!halted && memAvailableMB() < o.minFreeMb) {
+                halted = true;
+                bcast({ cmd: 'halt' });
+                const note = `ramp halted at about ${done} connections: available memory below ${o.minFreeMb} MB`;
+                report.notes.push(note);
+                say(note);
+                await sleep(1200);
+            }
             if (Date.now() - lastProgress > 45000) { report.notes.push(`ramp stalled at ${done}/${o.clients}`); break; }
             if (deadAll()) throw new Error('every load process exited');
         }
         await sleep(1200);                              // last stats reports
         let m1 = await mark();
+        const lastOkAt = maxG('lastWelcomeAt');
         const rampSeconds = ((lastOkAt || m1.at) - m0.at) / 1000;
         const ramp = phaseResult('ramp', phase, m0, m1, {
             connectionsOk: phase.c.connOk || 0, connectionsFailed: phase.c.connFail || 0,
@@ -520,6 +548,15 @@ async function main() {
     } finally {
         await doCleanup();
     }
+}
+
+/** MemAvailable of the machine in MB (os.freemem() elsewhere). */
+function memAvailableMB() {
+    try {
+        const m = /MemAvailable:\s+(\d+) kB/.exec(fs.readFileSync('/proc/meminfo', 'latin1'));
+        if (m) return Number(m[1]) / 1024;
+    } catch { /* not Linux */ }
+    return os.freemem() / 2 ** 20;
 }
 
 function pickInfo(info) {
