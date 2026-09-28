@@ -26,10 +26,13 @@ export function gauss(r) {
     return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }
 
-/** Engine-assisted per-game values (a relay of engine moves with random delays). */
+/**
+ * Engine-assisted per-game values (a relay of engine moves with random delays), as measured with
+ * Stockfish 16 in test/unit/anticheat.engine.test.js (assisted depth 12, analysis 6/10).
+ */
 export const ENGINE_PROFILE = Object.freeze({
-    accuracy: { mean: 96, sd: 2.5 }, acpl: { mean: 14, sd: 6 }, t1Deep: { mean: 0.82, sd: 0.07 }, t1Fast: { mean: 0.7, sd: 0.08 },
-    t1Complex: { mean: 0.8, sd: 0.12 }, timeCorr: { mean: 0.0, sd: 0.2 }, timeCv: { mean: 0.4, sd: 0.1 },
+    accuracy: { mean: 98, sd: 1.5 }, acpl: { mean: 7, sd: 4 }, t1Deep: { mean: 0.7, sd: 0.1 }, t1Fast: { mean: 0.5, sd: 0.1 },
+    t1Complex: { mean: 0.6, sd: 0.15 }, timeCorr: { mean: 0.0, sd: 0.2 }, timeCv: { mean: 0.26, sd: 0.08 },
 });
 
 const LIMITS = { accuracy: [0, 100], acpl: [0, 1000], t1Deep: [0, 1], t1Fast: [0, 1], t1Complex: [0, 1], timeCorr: [-1, 1], timeCv: [0, 5] };

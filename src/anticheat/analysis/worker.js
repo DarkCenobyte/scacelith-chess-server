@@ -104,7 +104,22 @@ export function createAnalysisWorker({ config, store, log = null, engineFactory 
     async function loop(i) {
         const engine = factory(i);
         engines.push(engine);
+        let backoff = 5000;
         while (!stopping) {
+            // Never claim a job without a working engine: a wrong ANALYSIS_ENGINE_PATH must not
+            // mark the whole queue failed.
+            if (typeof engine.start === 'function') {
+                try {
+                    await engine.start();
+                    backoff = 5000;
+                } catch (e) {
+                    if (stopping) break;
+                    log?.error('analysis engine unavailable', { err: e, retryInMs: backoff });
+                    await sleep(backoff);
+                    backoff = Math.min(300000, backoff * 2);
+                    continue;
+                }
+            }
             let job = null;
             try { job = claim(); } catch (e) { log?.error('analysis queue unavailable', { err: e }); }
             if (!job) { await sleep(pollMs); continue; }

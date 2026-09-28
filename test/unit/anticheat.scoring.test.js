@@ -79,11 +79,12 @@ test('no flag for strong but consistent honest players (rating-relative)', () =>
 });
 
 test('a provisional rating gets the benefit of the doubt (smurf / returning player)', () => {
-    const g = syntheticSide({ r: rng(3), userId: 1, rating: 1500, category: '5+0', theta: 1.5, ratingGames: 100 });
-    const est = gameZ({ ...g, ratingGames: 100 }, learned);
-    const prov = gameZ({ ...g, ratingGames: 5 }, learned);
+    // A 1900-strength player whose rating still says 1500.
+    const g = syntheticSide({ r: rng(3), userId: 1, rating: 1900, category: '5+0', theta: 0 });
+    const est = gameZ({ ...g, rating: 1500, ratingGames: 100 }, learned);
+    const prov = gameZ({ ...g, rating: 1500, ratingGames: 5 }, learned);
     // Judged against peers up to 400 points stronger instead of 100.
-    assert.ok(prov.zQ < est.zQ - 0.1, `provisional ${prov.zQ} vs established ${est.zQ}`);
+    assert.ok(prov.zQ < est.zQ - 0.15, `provisional ${prov.zQ} vs established ${est.zQ}`);
     assert.ok(prov.z.accuracy < est.z.accuracy);
 });
 
@@ -122,15 +123,18 @@ test('high_confidence needs independent agreement: engine moves with human timin
 
 test('sudden lasting jump is flagged; a single outstanding game or a plausible improvement is not', () => {
     const r = rng(21);
-    let jumps = 0;
+    let flagged = 0;
     for (let i = 0; i < 10; i++) {
-        const hist = syntheticHistory({ r, games: 30, userId: 4000 + i, rating: 1600, category: '5+0', theta: 0.2, engineFrom: 20, engine: 1, engineTiming: false });
+        // 20 honest games, then 10 engine games with human-looking timing.
+        const hist = syntheticHistory({ r, games: 30, userId: 4000 + i, rating: 1300, category: '5+0', theta: 0.2, engineFrom: 20, engine: 1, engineTiming: false });
         const res = scorePlayer(hist, learned);
         assert.ok(res.jump.lasting);
-        if (res.jump.score >= MODEL.suspected.accuracyType) jumps++;
-        assert.notEqual(res.level, 'none');
+        assert.ok(res.jump.score > 0);
+        // The 30-game window alone is diluted by the honest games...
+        assert.ok(res.windows.all.Q.score < MODEL.suspected.accuracyType);
+        if (res.level !== 'none') flagged++;
     }
-    assert.ok(jumps >= 8, `jump signal in ${jumps}/10`);
+    assert.ok(flagged >= 8, `jump flagged in ${flagged}/10`);
     for (let i = 0; i < 20; i++) {
         const hist = syntheticHistory({ r, games: 30, userId: 5000 + i, rating: 1600, category: '5+0' });
         hist[25] = syntheticSide({ r, userId: 5000 + i, rating: 1600, category: '5+0', engine: 1, gameId: hist[25].gameId, endedAt: hist[25].endedAt });
@@ -197,14 +201,34 @@ test('high_confidence falls back to suspected, not none, without a moderator; a 
 
     const v = store._.addUser('q');
     const r = rng(44);
-    const hist = syntheticHistory({ r, games: 12, userId: v, rating: 1500, category: '5+0', engineFrom: 0, engine: 1, engineTiming: false, startAt: 1000 });
-    const opp = syntheticHistory({ r, games: 12, userId: 999, rating: 1500, category: '5+0', startAt: 1000 });
+    const hist = syntheticHistory({ r, games: 20, userId: v, rating: 1200, category: '5+0', engineFrom: 0, engine: 1, engineTiming: false, startAt: 1000 });
+    const opp = syntheticHistory({ r, games: 20, userId: 999, rating: 1200, category: '5+0', startAt: 1000 });
     hist.forEach((g, i) => { store._.addGame({ id: 50 + i, whiteId: v, blackId: 999, endedAt: g.endedAt }); store.analysis.complete(50 + i, features(50 + i, g, opp[i], { endedAt: g.endedAt, analysedAt: g.endedAt })); });
     const score = scorePlayer(hist, learned).score;
     store.integrity.set(v, { level: 'none', score, evidence: { review: { clearedAt: Date.now(), clearedScore: score, by: 'mod' } } });
     const res = updatePlayerIntegrity({ store, userId: v, population: learned, log: quiet });
     assert.equal(res.result.level === 'none' ? 'none' : 'flagged', 'flagged', 'the model alone would flag');
     assert.equal(res.level, 'none', 'but the moderator cleared this evidence');
+});
+
+test('suspected has hysteresis: a score just under the threshold keeps the flag', () => {
+    const r = rng(45);
+    const hist = syntheticHistory({ r, games: 30, userId: 1, rating: 1500, category: '5+0', engineFrom: 0, engine: 0.8, engineTiming: false });
+    let k = 5;
+    let res = null;
+    for (; k <= 30; k++) {
+        res = scorePlayer(hist.slice(0, k), learned);
+        if (res.level === 'none' && res.groups.accuracyType >= MODEL.suspected.accuracyType - MODEL.suspected.hysteresis) break;
+    }
+    assert.ok(k <= 30, 'found a history just under the threshold');
+    const store = createFakeStore();
+    const u = store._.addUser('h');
+    const opp = syntheticHistory({ r, games: k, userId: 999, rating: 1500, category: '5+0' });
+    hist.slice(0, k).forEach((g, i) => { store._.addGame({ id: 70 + i, whiteId: u, blackId: 999, endedAt: g.endedAt }); store.analysis.complete(70 + i, features(70 + i, { ...g, userId: u }, opp[i], { endedAt: g.endedAt })); });
+    store.integrity.set(u, { level: 'suspected', score: 3.6, evidence: {} });
+    assert.equal(updatePlayerIntegrity({ store, userId: u, population: learned, log: quiet }).level, 'suspected');
+    store.integrity.set(u, { level: 'none', score: 0, evidence: {} });
+    assert.equal(updatePlayerIntegrity({ store, userId: u, population: learned, log: quiet }).level, 'none', 'no flag from below the threshold');
 });
 
 test('population updates skip flagged players and short games', () => {

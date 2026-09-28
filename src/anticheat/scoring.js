@@ -51,7 +51,9 @@ export const MODEL = Object.freeze({
     shrinkComplex: 50,              // k for E (n = complex positions)
     tau: Object.freeze({ Q: 0.4, E: 0.45, T: 0.5 }),
     zClamp: 6,                      // a single game cannot weigh more than 6 sd
-    suspected: Object.freeze({ minGames: 5, accuracyType: 3.5 }),
+    // jumpWithRecent: a jump J and the recent-window quality (population-relative) both at
+    // least this high also make a player suspected (two views of the same recent games).
+    suspected: Object.freeze({ minGames: 5, accuracyType: 3.5, jumpWithRecent: 2.5, hysteresis: 0.5 }),
     high: Object.freeze({ minGames: 10, minMoves: 300, accuracyType: 3.0, timing: 1.5, combined: 3.5 }),
     // J tests "the recent games beat the player's own history by MORE than honestImprovement
     // per-game sd" (a plausible honest improvement is not evidence), and needs the jump to last
@@ -292,6 +294,8 @@ export function scorePlayer(games, pop) {
     let level = 'none';
     const S = MODEL.suspected, H = MODEL.high;
     if (all.games >= S.minGames && accuracyType >= S.accuracyType) level = 'suspected';
+    const recentA = Math.max(recent.Q.score, recent.E.score);
+    if (all.games >= S.minGames && jump.score >= S.jumpWithRecent && recentA >= S.jumpWithRecent) level = 'suspected';
     let highWindow = null;
     for (const [name, w] of [['all', all], ['recent', recent]]) {
         if (w.games < H.minGames || w.moves < H.minMoves) continue;
@@ -401,6 +405,9 @@ export function updatePlayerIntegrity({ store, userId, population, now = Date.no
     if (prev.level === 'confirmed') level = 'confirmed';
     else {
         if (prev.level === 'high_confidence' && levelRank(level) < levelRank('suspected')) level = 'suspected';
+        // Hysteresis: a suspected player stays suspected until the evidence clearly recedes
+        // (no flapping of the moderators' queue around the threshold).
+        if (prev.level === 'suspected' && level === 'none' && result.groups.accuracyType >= MODEL.suspected.accuracyType - MODEL.suspected.hysteresis) level = 'suspected';
         if (review?.clearedAt && prev.level === 'none' && level === 'suspected') {
             const since = games.filter((g) => (g.analysedAt || g.endedAt || 0) > review.clearedAt).length;
             if (!(result.score >= (review.clearedScore || 0) + 1.0 && since >= 5)) level = 'none';
