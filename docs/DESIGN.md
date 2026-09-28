@@ -199,7 +199,7 @@ arrays (use typed-array mailbox, 0x88 or 10x12).
 ```js
 new GameRoom({ id, category /* '3+2' | 'custom' */, baseMs, incMs, rated,
                white: { userId, name, rating, provisional }, black: {...},
-               createdAt, config, rematchOf? })
+               createdAt, config, rematchOf?, createChessGame /* () => new ChessGame(), injected by the host */ })
 room.onMove(color, { seq, ply, move, posHash, thinkMs, drawOffer }, now)  -> Outcome
 room.onResign(color, now) / onDrawOffer(color, now) / onDrawAnswer(color, accept, now)
 room.onDrawClaim(color, now) / onAbort(color, now) / onRematch(color, accept, now)
@@ -259,7 +259,8 @@ Official categories come from `cfg.categories`; `categoryOf(baseMs, incMs)` retu
 
 ### 5.5 Store (`src/store/index.js`)
 
-`openStore(config, { readonly = false }) -> Store`. Synchronous (`node:sqlite`). WAL,
+`openStore(config, { readonly = false, applyGame }) -> Store` (`applyGame` is
+`match/elo.js`'s, passed in by the bootstrap so the store does not import the match module). Synchronous (`node:sqlite`). WAL,
 `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`. Prepared statements cached. All
 times are epoch ms integers. `migrate(store)` applies `migrations/NNN_*.sql` in order inside
 transactions, recorded in `schema_migrations`.
@@ -571,6 +572,12 @@ weighted by the reporter's credibility, never the level itself.
   frame header before buffering, no compression, no fragmentation beyond the size limit,
   Hello timeout, per-connection token bucket, per-IP and global connection limits, slow
   consumers closed, heartbeat timeout, `Origin` refused by default.
+* **Proof of work format**: an endpoint that wants one answers HTTP 428
+  `{ "error": "pow_required", "pow": { "challenge": "<opaque ASCII>", "bits": 18, "expiresAt": ms } }`.
+  The client finds a nonce, a decimal ASCII string, such that
+  `SHA-256(challenge + ":" + nonce)` starts with `bits` zero bits (most significant bit of the
+  first byte first), and repeats the same request with `"pow": { "challenge", "nonce" }` added
+  to the JSON body. Challenges expire after 2 minutes and are single use.
 * **Logs**: no password, token, TOTP secret, recovery code, cookie or e-mail body; IPs truncated
   by default; security events retained `RETENTION_SECURITY_DAYS`, stored IPs erased after
   `RETENTION_IP_DAYS`.
