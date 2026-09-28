@@ -183,5 +183,5 @@ export function createSso(svc) {
         return login.sessionAnswer(user, { clientLabel, ip, method: PROVIDER });
     }
 
-    return { enabled, start, callback, poll, complete, normalizeEmail };
+    return { enabled, start, callback, poll, complete };
 }
