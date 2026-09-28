@@ -59,7 +59,7 @@ const newCounters = () => ({
     movesSent: 0, movesOk: 0, movesRejected: 0, resigns: 0, plies: 0, strayMoves: 0, resyncs: 0,
     gamesStarted: 0, gamesEnded: 0, snapshots: 0, challenges: 0, challengeRetries: 0, accepts: 0, queueJoins: 0,
     pingsSent: 0, pongs: 0, serverPings: 0, errors: 0, notices: 0, ratingUpdates: 0, writesBlocked: 0, decodeErrors: 0,
-    gameEvents: 0, unexpected: 0,
+    gameEvents: 0, unexpected: 0, tlsResumed: 0,
 });
 let cnt = newCounters();
 let maps = { fail: {}, rejected: {}, errors: {}, closes: {}, ends: {}, notices: {} };
@@ -231,6 +231,7 @@ function onSecure() {
     const c = this._c;
     if (c.state !== S_CONNECTING) return;
     c.state = S_UPGRADING;
+    if (cfg.tlsResume && this.isSessionReused()) cnt.tlsResumed++;
     this.write(upgradeReq);
 }
 function onData(chunk) {
