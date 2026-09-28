@@ -53,7 +53,7 @@ API, and `SHARD_BASE` gives each instance its shard range (section 9).
 | Path | Owner (agent) | Content |
 |---|---|---|
 | `src/config.js`, `src/log.js`, `src/metrics.js`, `src/util/ids.js`, `src/protocol/schema.js`, `docs/DESIGN.md` | orchestrator | shared foundations (agents may append keys to their own section of config.js) |
-| `tools/gen-protocol.js`, `src/protocol/codec.gen.js`, `src/protocol/index.js`, `../src/net/protocol_gen.*`, `docs/PROTOCOL.md`, `src/client/*` (Node SDK) | protocol | codegen, codecs, golden vectors, Node client SDK used by tests and bench |
+| `tools/gen-protocol.js`, `src/protocol/codec.gen.js` (a working run-time placeholder exists), `src/protocol/index.js`, `test/fixtures/protocol-vectors.json`, `docs/PROTOCOL.md`, `src/client/*` (Node SDK) | protocol | JS codegen, golden vectors, protocol reference, Node client SDK used by tests and bench |
 | `src/chess/*` | chess | rules (move generation, legality, SAN/UCI/FEN, repetition, draws), perft |
 | `src/game/*` | game | GameRoom (authoritative game), clocks, lag compensation, disconnection policy, GameHost (rooms of a shard, timer wheel, journal hooks, persistence queue) |
 | `src/match/*` | match | Elo (per category), matchmaker, challenges/private codes/rematch, conduct cooldowns |
@@ -64,7 +64,7 @@ API, and `SHARD_BASE` gives each instance its shard range (section 9).
 | `test/unit/<module>.*.test.js` | each owner | unit tests of the module |
 | `test/integration/*` | tests | multiplayer scenarios against a real server |
 | `bench/*` | bench | load generator and benchmark report |
-| `../src/net/*` (C++, except generated) , `../tests/net_tests.cpp` | client-net | transports (WinHTTP / OpenSSL), HTTPS API client, WSS client, credential store, OnlineClient |
+| `tools/gen-protocol-cpp.js`, `../src/net/*` (C++, incl. generated `protocol_gen.*`), `../tests/net_tests.cpp`, `../CMakeLists.txt` (net part) | client-net | C++ codegen, transports (WinHTTP / OpenSSL), HTTPS API client, WSS client, credential store, OnlineClient |
 | `../src/game/online_*`, `../src/ui/ui_screens_online*`, changes in `game_scene.*`, `ui_*`, `settings.*`, `assets/i18n/en.lang` | client-ui | menus, options, online game mode in the 3D scene, scoresheet header, ping |
 
 ## 3. Main flows
@@ -152,7 +152,10 @@ bool peekType(const uint8_t* p, size_t n, MsgType& t);
 ```
 Struct names are the message names, with `C_`/`S_` prefixes for Ping/Pong. `SCHEMA_HASH` is the
 first 4 bytes (big-endian u32) of SHA-256 of the canonical JSON of `{version, enums, structs,
-messages}` (object keys sorted, `doc` fields excluded).
+messages}` (object keys sorted, `doc` fields excluded): `computeSchemaHash()` in
+`src/protocol/schema-hash.js`, used by both generators. Golden vectors
+(`test/fixtures/protocol-vectors.json`: message object + hex encoding) are checked by the JS
+tests and by `tests/net_tests.cpp`.
 
 ### 5.2 Chess rules (`src/chess/index.js`)
 
