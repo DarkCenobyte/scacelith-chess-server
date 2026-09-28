@@ -36,6 +36,14 @@ key('WORKERS', { section: 'server', type: 'string', default: 'auto',
 key('SHARD_BASE', { section: 'server', type: 'int', default: 0, min: 0, max: 56,
     desc: 'First shard number of this instance (multi-instance deployments give each instance its own range).' });
 key('INSTANCE_ID', { section: 'server', type: 'string', default: '', desc: 'Free label of this instance in logs and metrics (default: host name).' });
+key('WS_ALLOWED_ORIGINS', { section: 'server', type: 'list', default: '',
+    desc: 'Origin header values allowed to open the game WebSocket (e.g. https://play.example.org). The game client sends no Origin; browsers always send one, so they are refused unless listed here.' });
+key('SHUTDOWN_GRACE_MS', { section: 'server', type: 'int', default: 3000, min: 0, max: 120000,
+    desc: 'On SIGTERM/SIGINT players are warned (ServerShutdown notice) this long before their connections close. Games in progress survive the restart (journal).' });
+key('LISTEN_REUSE_PORT', { section: 'server', type: 'bool', default: false,
+    desc: 'Linux: every worker binds its own listening socket (SO_REUSEPORT) and the kernel spreads new connections, instead of the primary accepting them and handing them out round-robin. Ignored on other systems.' });
+key('SHARD_OVERLOAD_LAG_MS', { section: 'server', type: 'int', default: 50, min: 5, max: 5000,
+    desc: 'Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker.' });
 
 // ---- TLS -----------------------------------------------------------------------------------------
 key('TLS_MODE', { section: 'tls', type: 'enum', values: ['native', 'proxy', 'off'], default: 'native',
