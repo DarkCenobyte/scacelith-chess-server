@@ -23,11 +23,10 @@ import { startPrimary } from './primary.js';
 
 const WORKER_MAIN = fileURLToPath(new URL('./worker-main.js', import.meta.url));
 
-function makeConduct(config, store) {
+function makeConduct(config, store, log) {
     const now = Date.now;
-    if (typeof conductModule.Conduct === 'function') return new conductModule.Conduct({ config, store, now });
-    if (typeof conductModule.createConduct === 'function') return conductModule.createConduct({ config, store, now });
-    if (typeof conductModule.default === 'function') return new conductModule.default({ config, store, now }); // eslint-disable-line new-cap
+    if (typeof conductModule.Conduct === 'function') return new conductModule.Conduct({ config, store, now, log });
+    if (typeof conductModule.createConduct === 'function') return conductModule.createConduct({ config, store, now, log });
     return null;
 }
 
@@ -61,7 +60,7 @@ export async function main() {
 
     const matchmaker = new Matchmaker({ config, now: Date.now });
     const challenges = new Challenges({ config, now: Date.now });
-    const conduct = makeConduct(config, store);
+    const conduct = makeConduct(config, store, logger.child('conduct'));
     if (!conduct) log.warn('match/conduct.js exports no Conduct: conduct cooldowns disabled');
 
     cluster.setupPrimary({ exec: WORKER_MAIN, args: [], serialization: 'advanced' });
@@ -74,6 +73,7 @@ export async function main() {
             return b ? { until: b.endsAt ?? b.until ?? now + 86400000 } : null;
         },
         ratingOf: (userId, category) => store.ratings.get(userId, category),
+        acceptsChallenges: (userId) => store.users.byId(userId)?.acceptChallenges !== false,
     });
     log.info('primary ready', { serverId, workers: config.workers, shardBase: config.shardBase, metricsPort: primary.metricsPort });
 

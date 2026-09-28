@@ -36,14 +36,12 @@ export async function main() {
     const bus = createBus({ config, shard, serverId, log: log.child('bus') });
     const host = new GameHost({
         shard, config, store, journal, anticheat, bus, primary, log: logger.child('game'),
-        createChessGame: (fen) => new ChessGame(fen),
+        createChessGame: () => new ChessGame(),
     });
+    // Replays the journal; the host announces each restored game to the primary
+    // ('game.recovered'), which gives it back to the players as their activeGame.
     const recovered = await host.recover();
     log.info('journal replayed', { games: recovered });
-    // Let the primary know the recovered games (presence.claim returns them as activeGame).
-    if (typeof host.activeGames === 'function') {
-        for (const g of host.activeGames()) primary.notify('game.active', { gameId: g.gameId ?? g.id, whiteId: g.whiteId, blackId: g.blackId });
-    }
     const apiHandler = createApiHandler({ config, store, auth, primary, anticheat, log: logger.child('http') });
 
     const s = await startShard({

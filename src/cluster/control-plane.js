@@ -8,6 +8,7 @@
 //   matchmaker / challenges / conduct   DESIGN 5.4 objects (conduct optional)
 //   activeBan(userId, now) -> { until } | until | null              (store.sanctions.activeBan)
 //   ratingOf(userId, category) -> { rating, games } | null           (store.ratings.get)
+//   acceptsChallenges(userId) -> bool                                 (store.users.byId().acceptChallenges)
 //
 // Game placement: a paired game is hosted by the shard of the player who waited longer (its
 // frames then never cross the bus for that player); when that shard reports overload
@@ -23,9 +24,14 @@
 //   shard -> primary  'shard.load' { conns, games, lagP99, overloaded }   (every 2 s)
 //                     'shard.ready' { shard }   (after host.recover() and listen: re-attaches the
 //                     live connections of players whose game that shard hosts)
-//                     'game.active' { gameId, whiteId, blackId }   (a recovered game: lets
-//                     presence.claim return it as activeGame after a full restart)
+//                     'game.recovered' { gameId, whiteId, blackId, shard }   (sent by the GameHost
+//                     for each game replayed from the journal: presence.claim returns it as
+//                     activeGame after a full restart; 'game.active' is an alias)
 //   primary -> shard  'shard.down' { shard }   (a shard died: forget its remote endpoints)
+//                     'game.forfeit' { userId, gameId }   (sanction.applied: the host shard of the
+//                     user's running game ends it Forfeit with host.forfeitUser)
+//   game.rematch: white/black are already swapped by the room (the new game's colours); the
+//   players' ratings are read again (the finished game changed them).
 //   presence.release of the live connection also leaves the queue and withdraws the user's
 //   pending challenges (so the router does not need a separate mm.leave that could race with a
 //   newer connection's QueueJoin).
@@ -63,13 +69,14 @@ export class ControlPlane {
      * @param {object} o.shards
      * @param {Function} [o.activeBan]
      * @param {Function} [o.ratingOf]
+     * @param {Function} [o.acceptsChallenges]
      * @param {object} [o.log]
      * @param {() => number} [o.now]
      * @param {() => number} [o.random]
      * @param {object} [o.registry]
      */
     constructor({ config, presence, matchmaker, challenges, conduct = null, limiter, once, shards, activeBan = null, ratingOf = null,
-        log = null, now = Date.now, random = Math.random, registry = defaultRegistry }) {
+        acceptsChallenges = null, log = null, now = Date.now, random = Math.random, registry = defaultRegistry }) {
         this.config = config;
         this.presence = presence;
         this.mm = matchmaker;
@@ -80,6 +87,7 @@ export class ControlPlane {
         this.shards = shards;
         this.activeBan = activeBan;
         this.ratingOf = ratingOf;
+        this.acceptsChallenges = acceptsChallenges;
         this.log = log;
         this.now = now;
         this.random = random;
@@ -90,10 +98,6 @@ export class ControlPlane {
         this.starting = new Set();
         /** @type {Map<number, {category:string, rated:boolean}>} users searching */
         this.queued = new Map();
-        /** @type {Map<number, object>} challenge id -> record */
-        this.chIndex = new Map();
-        /** @type {Map<number, Set<number>>} userId -> challenge ids (made or received) */
-        this.chByUser = new Map();
         /** @type {Map<number, number>} userId -> ban end (sanction.applied) */
         this.bans = new Map();
         /** @type {Map<number, object>} shard -> last load report */
@@ -105,7 +109,7 @@ export class ControlPlane {
         r.gaugeFn('scacelith_presence_online', 'Authenticated players online', () => this.presence.size);
         r.gaugeFn('scacelith_presence_connections', 'WebSocket connections counted by the primary', () => this.presence.connections);
         r.gaugeFn('scacelith_mm_searching', 'Players in the matchmaking queues', () => this.queued.size);
-        r.gaugeFn('scacelith_challenges_open', 'Open challenges and private codes', () => this.chIndex.size);
+        r.gaugeFn('scacelith_challenges_open', 'Open challenges and private codes', () => this.ch.size ?? 0);
         r.gaugeFn('scacelith_ratelimit_keys', 'Keys held by the global rate limiter', () => this.limiter.size);
         this._created = r.counter('scacelith_games_created_total', 'Games created by the primary', ['source']);
         this._createFailed = r.counter('scacelith_games_create_failed_total', 'game.create failures');
@@ -127,6 +131,7 @@ export class ControlPlane {
             'game.ended': (p) => this.gameEnded(p),
             'game.rematch': (p) => this.gameRematch(p),
             'game.active': (p) => this.gameActive(p),
+            'game.recovered': (p) => this.gameActive(p),
             'conduct.record': (p) => this.conductRecord(p),
             'ratelimit.take': (p) => this.limiter.take(p),
             'once.consume': (p) => this.once.consume(p),
@@ -401,130 +406,105 @@ export class ControlPlane {
     }
 
     // ---- challenges -----------------------------------------------------------------------------
+    // The Challenges module (DESIGN 5.4) owns the challenge objects: { id, kind, from (player),
+    // target, targetUserId, code, baseSec, incSec, baseMs, incMs, category, rated, color,
+    // receiverColor, expiresAt, state }; accept/joinCode return the game spec with the colours.
 
-    _statusFrame(rec, state) {
-        return encode.ChallengeStatus({ id: rec.id >>> 0, state, target: rec.target || '', code: rec.code || '', baseSec: rec.baseSec, incSec: rec.incSec, rated: !!rec.rated });
-    }
-
-    _index(rec) {
-        this.chIndex.set(rec.id, rec);
-        for (const u of [rec.from.userId, rec.to?.userId]) {
-            if (!u) continue;
-            let s = this.chByUser.get(u);
-            if (!s) { s = new Set(); this.chByUser.set(u, s); }
-            s.add(rec.id);
-        }
-    }
-
-    _forget(id) {
-        const rec = this.chIndex.get(id);
-        if (!rec) return null;
-        this.chIndex.delete(id);
-        for (const u of [rec.from.userId, rec.to?.userId]) {
-            const s = u && this.chByUser.get(u);
-            if (s) { s.delete(id); if (!s.size) this.chByUser.delete(u); }
-        }
-        return rec;
-    }
-
-    // A record from the challenges module's object, when this plane has none (defensive).
-    _recFrom(c) {
-        return {
-            id: c.id, code: c.code || '', from: c.from, to: c.to || null, target: c.target || c.to?.username || '',
-            baseSec: c.baseSec, incSec: c.incSec, rated: !!c.rated, color: c.color ?? CP.Random, expiresAt: c.expiresAt || 0,
-        };
+    _statusFrame(c, state) {
+        return encode.ChallengeStatus({ id: c.id >>> 0, state, target: c.target || '', code: c.code || '', baseSec: c.baseSec, incSec: c.incSec, rated: !!c.rated });
     }
 
     challengeCreate({ from, target = '', baseSec, incSec, rated, color }) {
         const now = this.now();
-        let to = null;
+        let targetUser = null;
         if (target) {
             const tid = this.presence.userIdByName(target);
-            if (tid === from.userId) return { error: E.CannotChallengeSelf };
-            if (!tid) return { error: E.UserUnavailable };
-            const tp = this.presence.get(tid);
-            to = { userId: tid, username: tp.username, shard: tp.shard, connId: tp.connId };
+            if (tid) {
+                let accepts = true;
+                if (this.acceptsChallenges) {
+                    try { accepts = this.acceptsChallenges(tid) !== false; } catch (e) { this.log?.error?.('preference read failed', { err: e }); }
+                }
+                targetUser = { userId: tid, username: this.presence.get(tid).username, online: true, acceptChallenges: accepts };
+            }
         }
         let r;
-        try { r = this.ch.create({ from, target, to, baseSec, incSec, rated, color }); } catch (e) {
+        try { r = this.ch.create({ from, target, targetUser, baseSec, incSec, rated, color }, now); } catch (e) {
             this.log?.error?.('challenge.create failed', { err: e });
             return { error: E.Internal };
         }
         if (!r || r.error || !r.challenge) return { error: r && r.error ? toErrorCode(r.error) : E.Internal };
         const c = r.challenge;
-        const rec = {
-            id: c.id, code: c.code || '', from, to, target: to ? to.username : '', baseSec, incSec, rated: !!rated,
-            color: color ?? CP.Random, expiresAt: c.expiresAt || now + (to ? this.config.challengeTtlMs : this.config.privateGameTtlMs),
-        };
-        this._index(rec);
-        this._sendUser(from.userId, [this._statusFrame(rec, CS.Pending)]);
-        if (to) {
-            const yourColor = rec.color === CP.White ? CP.Black : rec.color === CP.Black ? CP.White : CP.Random;
-            this._sendUser(to.userId, [encode.ChallengeReceived({
-                id: rec.id >>> 0, from: this._info(from), baseSec, incSec, rated: !!rated, yourColor, expiresMs: u32(rec.expiresAt - now),
+        this._sendUser(from.userId, [this._statusFrame(c, CS.Pending)]);
+        if (c.targetUserId) {
+            this._sendUser(c.targetUserId, [encode.ChallengeReceived({
+                id: c.id >>> 0, from: this._info(c.from), baseSec: c.baseSec, incSec: c.incSec, rated: !!c.rated,
+                yourColor: c.receiverColor ?? CP.Random, expiresMs: u32(c.expiresAt - now),
             })]);
         }
-        return { ok: true, id: rec.id, code: rec.code };
+        return { ok: true, id: c.id, code: c.code || '' };
     }
 
     async challengeAccept({ id, by }) {
-        const known = this.chIndex.get(id);
-        if (this._busy(by.userId) || (known && this._busy(known.from.userId))) return { error: E.AlreadyInGame };
+        const pending = this.ch.get?.(id);
+        if (this._busy(by.userId) || (pending && this._busy(pending.from.userId))) return { error: E.AlreadyInGame };
         let r;
-        try { r = this.ch.accept(id, by); } catch (e) { this.log?.error?.('challenge.accept failed', { err: e }); return { error: E.Internal }; }
-        if (!r || r.error) return { error: r && r.error ? toErrorCode(r.error) : E.ChallengeNotFound };
-        const rec = this._forget(id) || (r.challenge ? this._recFrom(r.challenge) : null);
-        if (!rec) return { error: E.ChallengeNotFound };
-        return this._startChallengeGame(rec, by);
+        try { r = this.ch.accept(id, by, this.now()); } catch (e) { this.log?.error?.('challenge.accept failed', { err: e }); return { error: E.Internal }; }
+        if (!r || r.error || !r.challenge) return { error: r && r.error ? toErrorCode(r.error) : E.ChallengeNotFound };
+        return this._startChallengeGame(r.challenge, r.game, by);
     }
 
     async challengeJoinCode({ code, by }) {
+        if (this._busy(by.userId)) return { error: E.AlreadyInGame };
         let r;
-        try { r = this.ch.joinCode(code, by); } catch (e) { this.log?.error?.('challenge.joinCode failed', { err: e }); return { error: E.Internal }; }
+        try { r = this.ch.joinCode(code, by, this.now()); } catch (e) { this.log?.error?.('challenge.joinCode failed', { err: e }); return { error: E.Internal }; }
         if (!r || r.error || !r.challenge) return { error: r && r.error ? toErrorCode(r.error) : E.CodeInvalid };
-        const rec = this._forget(r.challenge.id) || this._recFrom(r.challenge);
-        if (this._busy(by.userId) || this._busy(rec.from.userId)) return { error: E.AlreadyInGame };
-        return this._startChallengeGame(rec, by);
+        return this._startChallengeGame(r.challenge, r.game, by);
     }
 
-    async _startChallengeGame(rec, by) {
+    async _startChallengeGame(c, game, by) {
         const now = this.now();
-        const category = this.categoryOf(rec.baseSec * 1000, rec.incSec * 1000);
-        const creator = this._player(rec.from, category);
-        const accepter = this._player(by, category);
-        let creatorWhite;
-        if (rec.color === CP.White) creatorWhite = true;
-        else if (rec.color === CP.Black) creatorWhite = false;
-        else creatorWhite = this.random() < 0.5;
+        if (this._busy(c.from.userId)) {
+            this._sendUser(c.from.userId, [this._statusFrame(c, CS.Unavailable)]);
+            return { error: E.UserUnavailable };
+        }
+        let white = game?.white, black = game?.black;
+        if (!white || !black) {
+            const creatorWhite = c.color === CP.White ? true : c.color === CP.Black ? false : this.random() < 0.5;
+            white = creatorWhite ? c.from : by;
+            black = creatorWhite ? by : c.from;
+        }
+        const category = game?.category || c.category || this.categoryOf(c.baseSec * 1000, c.incSec * 1000);
         const spec = {
-            category, baseMs: rec.baseSec * 1000, incMs: rec.incSec * 1000, rated: !!rec.rated && category !== 'custom',
-            white: this._info(creatorWhite ? creator : accepter), black: this._info(creatorWhite ? accepter : creator), createdAt: now,
+            category, baseMs: game?.baseMs ?? c.baseSec * 1000, incMs: game?.incMs ?? c.incSec * 1000,
+            rated: !!(game ? game.rated : c.rated) && category !== 'custom',
+            white: this._info(this._player({ ...white, rating: undefined }, category)),
+            black: this._info(this._player({ ...black, rating: undefined }, category)),
+            createdAt: now,
         };
-        const preferred = this.presence.get(rec.from.userId)?.shard;
+        const preferred = this.presence.get(c.from.userId)?.shard;
         const r = await this.createGame(spec, preferred, 'challenge');
         if (!r.ok) {
-            this._sendUser(rec.from.userId, [this._statusFrame(rec, CS.Unavailable)]);
+            this._sendUser(c.from.userId, [this._statusFrame(c, CS.Unavailable)]);
             return { error: r.error };
         }
-        this._sendUser(rec.from.userId, [this._statusFrame(rec, CS.Accepted)]);
-        return { ok: true, id: rec.id, gameId: r.gameId };
+        this._sendUser(c.from.userId, [this._statusFrame(c, CS.Accepted)]);
+        return { ok: true, id: c.id, gameId: r.gameId };
     }
 
     challengeDecline({ id, userId }) {
         let r;
-        try { r = this.ch.decline(id, userId); } catch (e) { this.log?.error?.('challenge.decline failed', { err: e }); return { error: E.Internal }; }
-        if (r === false || (r && r.error)) return { error: r && r.error ? toErrorCode(r.error) : E.ChallengeNotFound };
-        const rec = this._forget(id);
-        if (rec) this._sendUser(rec.from.userId, [this._statusFrame(rec, CS.Declined)]);
+        try { r = this.ch.decline(id, userId, this.now()); } catch (e) { this.log?.error?.('challenge.decline failed', { err: e }); return { error: E.Internal }; }
+        if (!r || r.error) return { error: r && r.error ? toErrorCode(r.error) : E.ChallengeNotFound };
+        if (r.challenge) this._sendUser(r.challenge.from.userId, [this._statusFrame(r.challenge, CS.Declined)]);
         return { ok: true };
     }
 
     challengeCancel({ id, userId }) {
         let r;
-        try { r = this.ch.cancel(id, userId); } catch (e) { this.log?.error?.('challenge.cancel failed', { err: e }); return { error: E.Internal }; }
-        if (r === false || (r && r.error)) return { error: r && r.error ? toErrorCode(r.error) : E.ChallengeNotFound };
-        const rec = this._forget(id);
-        if (rec && rec.to) this._sendUser(rec.to.userId, [this._statusFrame(rec, CS.Cancelled)]);
+        try { r = this.ch.cancel(id, userId, this.now()); } catch (e) { this.log?.error?.('challenge.cancel failed', { err: e }); return { error: E.Internal }; }
+        if (!r || r.error) return { error: r && r.error ? toErrorCode(r.error) : E.ChallengeNotFound };
+        const c = r.challenge;
+        if (c && c.targetUserId) this._sendUser(c.targetUserId, [this._statusFrame(c, CS.Cancelled)]);
         return { ok: true };
     }
 
@@ -533,34 +513,22 @@ export class ControlPlane {
         let list;
         try { list = this.ch.expire(this.now()) || []; } catch (e) { this.log?.error?.('challenge expiry failed', { err: e }); return; }
         for (const c of list) {
-            const id = typeof c === 'number' ? c : c.id;
-            const rec = this._forget(id) || (typeof c === 'object' ? this._recFrom(c) : null);
-            if (!rec) continue;
-            const f = this._statusFrame(rec, CS.Expired);
-            this._sendUser(rec.from.userId, [f]);
-            if (rec.to) this._sendUser(rec.to.userId, [f]);
+            const f = this._statusFrame(c, CS.Expired);
+            this._sendUser(c.from.userId, [f]);
+            if (c.targetUserId) this._sendUser(c.targetUserId, [f]);
         }
     }
 
+    // The user went offline: outgoing challenges are cancelled (their targets are told), incoming
+    // ones become Unavailable (their creators are told).
     _dropChallengesOf(userId) {
-        const ids = this.chByUser.get(userId);
-        if (!ids) return;
-        for (const id of [...ids]) {
-            const rec = this.chIndex.get(id);
-            if (!rec) continue;
-            try {
-                if (rec.from.userId === userId) {
-                    this.ch.cancel(id, userId);
-                    this._forget(id);
-                    if (rec.to) this._sendUser(rec.to.userId, [this._statusFrame(rec, CS.Cancelled)]);
-                } else {
-                    this.ch.decline(id, userId);
-                    this._forget(id);
-                    this._sendUser(rec.from.userId, [this._statusFrame(rec, CS.Unavailable)]);
-                }
-            } catch (e) {
-                this.log?.error?.('challenge cleanup failed', { err: e });
-                this._forget(id);
+        let list;
+        try { list = this.ch.dropUser?.(userId) || []; } catch (e) { this.log?.error?.('challenge cleanup failed', { err: e }); return; }
+        for (const c of list) {
+            if (c.from.userId === userId) {
+                if (c.targetUserId) this._sendUser(c.targetUserId, [this._statusFrame(c, CS.Cancelled)]);
+            } else {
+                this._sendUser(c.from.userId, [this._statusFrame(c, CS.Unavailable)]);
             }
         }
     }
@@ -579,14 +547,14 @@ export class ControlPlane {
     }
 
     /**
-     * Both players asked for a rematch of gameId: new game, colours swapped (payload white/black
-     * are the finished game's players: user ids or {userId, name|username, rating?}).
+     * Both players asked for a rematch of gameId. white/black are the new game's players, colours
+     * already swapped by the room ({ userId, name|username, rating?, provisional? } or user ids).
      */
     async gameRematch({ gameId, white, black, category, baseMs, incMs, rated }) {
         const now = this.now();
         const norm = (x) => (typeof x === 'number' ? { userId: x } : { ...x, username: x.username ?? x.name });
-        const oldW = norm(white), oldB = norm(black);
-        for (const p of [oldW, oldB]) {
+        const nw = norm(white), nb = norm(black);
+        for (const p of [nw, nb]) {
             if (this._banUntil(p.userId, now) > now) return { error: E.RematchUnavailable };
             if (!this.presence.get(p.userId)) return { error: E.RematchUnavailable };
             const g = this.activeGames.get(p.userId);
@@ -597,12 +565,13 @@ export class ControlPlane {
                 if (until > now) return { error: E.RematchUnavailable };
             }
         }
-        for (const p of [oldW, oldB]) if (this.activeGames.get(p.userId) === gameId) this.activeGames.delete(p.userId);
+        for (const p of [nw, nb]) if (this.activeGames.get(p.userId) === gameId) this.activeGames.delete(p.userId);
         const cat = category || this.categoryOf(baseMs, incMs);
-        const nw = this._player({ ...oldB, rating: undefined }, cat), nb = this._player({ ...oldW, rating: undefined }, cat);
         const spec = {
             category: cat, baseMs, incMs, rated: !!rated && cat !== 'custom',
-            white: this._info(nw), black: this._info(nb), createdAt: now, rematchOf: gameId,
+            white: this._info(this._player({ ...nw, rating: undefined }, cat)),
+            black: this._info(this._player({ ...nb, rating: undefined }, cat)),
+            createdAt: now, rematchOf: gameId,
         };
         const r = await this.createGame(spec, shardOfGameId(gameId), 'rematch');
         return r.ok ? { ok: true, gameId: r.gameId } : { error: r.error === E.AlreadyInGame ? E.RematchUnavailable : r.error };
@@ -628,6 +597,8 @@ export class ControlPlane {
         this.bans.set(userId, end);
         this.log?.security?.('sanction applied', { userId, until: end, reason });
         this._kick(userId, 'banned', E.Banned, CloseCode.Banned, [errorFrame(E.Banned, true), encode.Notice({ code: N.Banned, arg: end })]);
+        const gameId = this.activeGames.get(userId);
+        if (gameId) this.shards.notify(shardOfGameId(gameId), 'game.forfeit', { userId, gameId });
         this._userGone(userId);
         return { ok: true };
     }
@@ -673,7 +644,7 @@ export class ControlPlane {
     stats() {
         return {
             online: this.presence.size, connections: this.presence.connections, searching: this.queued.size,
-            challenges: this.chIndex.size, playing: this.activeGames.size, shardsReady: this.readyShards.size,
+            challenges: this.ch.size ?? 0, playing: this.activeGames.size, shardsReady: this.readyShards.size,
         };
     }
 }

@@ -26,12 +26,16 @@
 // a FIFO checked every tick (connections are queued in arrival order, so the head is the oldest).
 //
 // Deviations from DESIGN 5.3/5.7, documented for the integrators:
-//   - RTT: endpoints expose `rttMs` (local: live value; remote: last value relayed by the bus),
-//     and `host.onRtt(gameId, userId, rttMs)` is called when the host defines it.
-//   - forged_type with AUTO_SANCTION_CERTAIN_CHEATS: the router calls
-//     `host.forfeit(gameId, userId, kind)` for the connection's games when the host defines it
-//     (the GameHost contract has no such entry; otherwise the game ends by abandonment after the
-//     kick).
+//   - Endpoints given to the GameHost: { send(buf), close(code, reason), connId, shard, userId,
+//     rttMs } (local: the socket; remote: relayed over the bus, close included). RTT: `rttMs` is
+//     the live EMA (local) or the last value relayed (remote), and host.onRtt(gameId, userId,
+//     rttMs) is called on every measurement.
+//   - forged_type with AUTO_SANCTION_CERTAIN_CHEATS: host.forfeitUser(userId) on the host shard of
+//     the connection's games (local call or bus Forfeit), then Error{CheatDetected} + 4302.
+//   - QueueJoin closes the rematch window of the connection's last game: a Rematch{accept:false}
+//     is given to its host without a reply endpoint (no error goes back when no window is open).
+//   - primary -> shard 'game.forfeit' { userId } -> host.forfeitUser(userId) (bans decided on the
+//     primary).
 //   - Extra IPC: shard -> primary 'shard.load' { shard, conns, games, lagP99, overloaded }
 //     every 2 s (host placement), primary -> shard 'shard.down' { shard } (forget the remote
 //     endpoints of a dead shard: its players are disconnected from their games).
@@ -89,6 +93,7 @@ class LocalEndpoint {
     get userId() { return this.conn.userId; }
     get rttMs() { return this.conn.rttMs; }
     send(buf) { return this.conn.sendFrame(buf); }
+    close(code, reason) { this.conn.close(code, reason || ''); }
 }
 
 /** The endpoint through which a GameHost reaches a connection of another shard (bus). */
@@ -98,6 +103,11 @@ class RemoteEndpoint {
         this.rttMs = 0; this.local = false; this.games = new Set();
     }
     send(buf) { return this.bus.send(this.shard, BusKind.ToConn, this.connId, this.userId, 0, buf); }
+    close(code) {
+        const b = Buffer.allocUnsafe(2);
+        b.writeUInt16LE(code & 0xffff, 0);
+        this.bus.control(this.shard, BusOp.Close, this.connId, this.userId, 0, b);
+    }
 }
 
 /** Router state of one connection (fixed shape). */
@@ -238,6 +248,7 @@ export class Router {
         ipc.on('conn.kick', ({ connId, closeCode, frames }) => this.kick(connId, closeCode, frames));
         ipc.on('auth.invalidate', (p) => this.invalidateSessions(p));
         ipc.on('shard.down', ({ shard }) => this.forgetShard(shard));
+        ipc.on('game.forfeit', ({ userId }) => ({ ok: this._forfeitLocal(userId) }));
     }
 
     /**
@@ -343,6 +354,7 @@ export class Router {
             case MSG.QueueJoin: {
                 if (!this.categories.has(msg.category)) { conn.sendFrame(errorFrame(msg.seq, E.InvalidCategory)); return; }
                 const { rating, provisional } = this._rating(conn.userId, msg.category);
+                this._closeRematch(conn, c);
                 this._call(conn, msg.seq, 'mm.join', {
                     userId: conn.userId, username: conn.username, category: msg.category, rated: msg.rated,
                     rating, provisional, shard: this.shard, connId: conn.id,
@@ -496,18 +508,38 @@ export class Router {
             }
         }
         if (c.games) {
+            const done = new Set();
             for (const g of c.games) {
                 const hs = shardOfGameId(g);
-                if (hs === this.shard) {
-                    if (typeof this.host.forfeit === 'function') {
-                        try { this.host.forfeit(g, conn.userId, 'forged_type'); } catch (e) { this.log?.error?.('host.forfeit failed', { err: e }); }
-                    }
-                } else if (this.bus) {
-                    this.bus.control(hs, BusOp.Forfeit, conn.id, conn.userId, g);
-                }
+                if (done.has(hs)) continue;
+                done.add(hs);
+                if (hs === this.shard) this._forfeitLocal(conn.userId);
+                else if (this.bus && this.isShard(hs)) this.bus.control(hs, BusOp.Forfeit, conn.id, conn.userId, g);
             }
         }
         this._fatal(conn, 0, E.CheatDetected, CloseCode.CheatDetected);
+    }
+
+    _forfeitLocal(userId) {
+        if (typeof this.host.forfeitUser !== 'function') return false;
+        try { return !!this.host.forfeitUser(userId); } catch (e) { this.log?.error?.('host.forfeitUser failed', { err: e }); return false; }
+    }
+
+    // Joining a queue ends the rematch window of the last game (DESIGN 6.3).
+    _closeRematch(conn, c) {
+        const g = this._currentGame(c);
+        if (!g) return;
+        const hs = shardOfGameId(g);
+        if (hs === this.shard) this._declineRematchLocal(g, conn.userId);
+        else if (this.bus && this.isShard(hs)) this.bus.control(hs, BusOp.RematchDecline, conn.id, conn.userId, g);
+    }
+
+    _declineRematchLocal(gameId, userId) {
+        try {
+            this.host.onClientMessage(gameId, userId, { type: MSG.Rematch, seq: 0, game: gameId, accept: false }, null);
+        } catch (e) {
+            this.log?.error?.('rematch decline failed', { gameId, err: e });
+        }
     }
 
     _currentGame(c) {
@@ -735,10 +767,17 @@ export class Router {
                 return;
             }
             case BusOp.Forfeit:
-                if (typeof this.host.forfeit === 'function') {
-                    try { this.host.forfeit(gameId, userId, 'forged_type'); } catch (e) { this.log?.error?.('host.forfeit failed', { err: e }); }
-                }
+                this._forfeitLocal(userId);
                 return;
+            case BusOp.RematchDecline:
+                this._declineRematchLocal(gameId, userId);
+                return;
+            case BusOp.Close: {
+                // Sent by a host shard (certain cheat): close our connection.
+                const conn = this.conns.get(connId);
+                if (conn && conn.userId === userId && payload.length >= 3) conn.close(payload.readUInt16LE(1), '');
+                return;
+            }
             default:
         }
     }

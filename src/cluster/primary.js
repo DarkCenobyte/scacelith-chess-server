@@ -23,7 +23,7 @@ import { ShardSupervisor } from './supervisor.js';
  * @param {object} [o.registry]
  */
 export async function startPrimary({ config, log, fork, matchmaker, challenges, conduct = null, activeBan = null, ratingOf = null,
-    shards, registry = defaultRegistry }) {
+    acceptsChallenges = null, shards, registry = defaultRegistry }) {
     const shardNumbers = shards || Array.from({ length: config.workers }, (_, i) => config.shardBase + i);
     const proc = startProcessMetrics({ registry });
     const presence = new Presence({ maxConnections: config.maxConnections, maxPerIp: config.maxConnectionsPerIp });
@@ -42,7 +42,7 @@ export async function startPrimary({ config, log, fork, matchmaker, challenges, 
     };
     cp = new ControlPlane({
         config, presence, matchmaker, challenges, conduct, limiter: new SlidingWindowLimiter(), once: new OnceStore(),
-        shards: directory, activeBan, ratingOf, log: log.child('control'), registry,
+        shards: directory, activeBan, ratingOf, acceptsChallenges, log: log.child('control'), registry,
     });
     registry.gaugeFn('scacelith_shards_ready', 'Shards ready', () => cp.readyShards.size);
     registry.gaugeFn('scacelith_shard_restarts', 'Shard restarts since the start', () => supervisor.restarts);

@@ -159,6 +159,7 @@ export class WsConnection {
         this._restNeed = 0;
         this._frag = null;          // fragments of a message in progress
         this._fragLen = 0;
+        this._fragCount = 0;
         this._closeSent = false;
         this._closeRecv = false;
         this._failed = false;
@@ -349,10 +350,11 @@ export class WsConnection {
                 if (fin) { this._deliver(payload); return !this._closed && !this._failed; }
                 this._frag = [Buffer.from(payload)];
                 this._fragLen = payload.length;
+                this._fragCount = 1;
                 return true;
             case OP_CONT: {
                 if (this._frag === null) return this._fail(CloseCode.ProtocolError, 'unexpected continuation frame');
-                if (this._frag.length >= MAX_FRAGMENTS) return this._fail(CloseCode.TooBig, 'too many fragments');
+                if (++this._fragCount > MAX_FRAGMENTS) return this._fail(CloseCode.TooBig, 'too many fragments');
                 if (payload.length) { this._frag.push(Buffer.from(payload)); this._fragLen += payload.length; }
                 if (!fin) return true;
                 const msg = this._frag.length === 1 ? this._frag[0] : Buffer.concat(this._frag, this._fragLen);

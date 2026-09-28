@@ -10,7 +10,7 @@
 //   u64 gameId     id53 (0 when not applicable)
 //   ... payload    ToHost: the client's raw C2S frame; ToConn: an encoded S2C frame;
 //                  Control: u8 op + op data (Hello: u8 shard, 32-byte token; Rtt: u16 ms;
-//                  Attach / Detach / Forfeit: none)
+//                  Close: u16 close code; Attach / Detach / Forfeit / RematchDecline: none)
 //
 // Links are one-way: each shard connects to a peer when it first has something to send to it,
 // and receives on the connections its peers opened. The first frame on a link is Control/Hello
@@ -37,7 +37,7 @@ import tls from 'node:tls';
 import { metrics as defaultRegistry } from '../metrics.js';
 
 export const BusKind = Object.freeze({ ToHost: 1, ToConn: 2, Control: 3 });
-export const BusOp = Object.freeze({ Hello: 1, Attach: 2, Detach: 3, Rtt: 4, Forfeit: 5 });
+export const BusOp = Object.freeze({ Hello: 1, Attach: 2, Detach: 3, Rtt: 4, Forfeit: 5, Close: 6, RematchDecline: 7 });
 export const BUS_HEADER_BYTES = 21;
 const TOKEN_BYTES = 32;
 
