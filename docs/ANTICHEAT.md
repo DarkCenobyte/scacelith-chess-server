@@ -147,9 +147,11 @@ the score falls 0.5 below its threshold (no flapping), `high_confidence` never f
 evidence (high confidence, or a score 1.0 above the cleared one with at least 5 new games).
 
 The stored evidence (`evidence.statistics`) holds the rule that triggered, the group scores
-per window, the jump details, human-readable reasons with the raw numbers (the player's
-weighted accuracy, ACPL, T1, timing against what peers of the same rating show) and a per-game
-table; `evidence.peak` keeps the highest score ever seen.
+per window, the jump details and human-readable reasons with the raw numbers (the player's
+weighted accuracy, ACPL, T1, timing against what peers of the same rating show);
+`evidence.peak` keeps the highest score ever seen. Players with no level and a score under 2
+only get a compact summary (scores, games, moves). The per-game numbers stay in the analysis
+rows, where `integrity show` reads them.
 
 ### Calibration and validation
 

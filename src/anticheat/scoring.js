@@ -387,6 +387,9 @@ function explain(items, all, recent, jump, pop) {
 
 // ---- integration with the store ------------------------------------------------------------------
 
+// Below this score and without a level, only a compact summary is stored.
+const NOTABLE_SCORE = 2;
+
 /**
  * Reads a player's analysed games (store.analysis.forUser) as sideOf() records.
  * @param {object} store
@@ -432,12 +435,15 @@ export function updatePlayerIntegrity({ store, userId, population, now = Date.no
             if (!(result.score >= (review.clearedScore || 0) + 1.0 && since >= 5)) level = 'none';
         }
     }
-    ev.statistics = {
-        model: MODEL.version, computedAt: now, level: result.level, score: result.score, groups: result.groups,
-        windows: result.windows, jump: result.jump, reasons: result.reasons, perGame: result.perGame,
-        highWindow: result.highWindow, trigger: result.trigger,
-    };
-    if (!ev.peak || result.score > (ev.peak.score || 0)) ev.peak = { at: now, score: result.score, level: result.level, groups: result.groups, reasons: result.reasons };
+    // Every analysed player gets a row, so keep it small: the per-game numbers stay in the
+    // analysis rows (bin/admin.js integrity show reads them there); the full explanation is only
+    // kept when there is something to explain.
+    const notable = level !== 'none' || result.score >= NOTABLE_SCORE;
+    ev.statistics = notable
+        ? { model: MODEL.version, computedAt: now, level: result.level, score: result.score, trigger: result.trigger, groups: result.groups,
+            windows: result.windows, jump: result.jump, reasons: result.reasons, highWindow: result.highWindow, games: result.games, moves: result.moves }
+        : { model: MODEL.version, computedAt: now, level: result.level, score: result.score, groups: result.groups, games: result.games, moves: result.moves };
+    if (notable && (!ev.peak || result.score > (ev.peak.score || 0))) ev.peak = { at: now, score: result.score, level: result.level, trigger: result.trigger, groups: result.groups, reasons: result.reasons };
     writeIntegrity(store, userId, { level, score: Math.max(result.score, 0), evidence: ev, updatedAt: now });
     if (level !== prev.level) log?.security?.('integrity.level', { userId, from: prev.level, to: level, score: result.score, groups: result.groups });
     return { level, previous: prev.level, score: result.score, result };

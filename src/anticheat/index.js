@@ -141,10 +141,12 @@ export function createAnticheat({ config, store, primary = null, log = null, now
         if (d !== null && d !== undefined && typeof d !== 'object') d = { info: String(d) };
         if (posMatched !== undefined) d = { ...(d || {}), posMatched: !!posMatched };
         if (!c.known) d = { ...(d || {}), reportedKind: String(kind).slice(0, 40) };
-        if (c.severity === 'info') lg.debug('anomaly', { userId, gameId, kind: label, severity: c.severity });
-        else lg.security('anomaly', { userId, gameId, kind: label, severity: c.severity, detail: d });
-
         const row = { userId, gameId: gameId || 0, kind: label, severity: c.severity, detail: d, at };
+        const key = `${userId}|${row.gameId}|${label}`;
+        // Repeats within a batching period are counted, not logged again (no log flooding).
+        if (c.severity === 'info') lg.debug('anomaly', { userId, gameId, kind: label, severity: c.severity });
+        else if (c.certain || !pending.has(key)) lg.security('anomaly', { userId, gameId, kind: label, severity: c.severity, detail: d });
+
         if (c.certain) {
             try { insertRows([row]); } catch (e) {
                 anomalyDropped.inc();
@@ -152,7 +154,6 @@ export function createAnticheat({ config, store, primary = null, log = null, now
             }
             return { severity: c.severity, certain: true };
         }
-        const key = `${userId}|${row.gameId}|${label}`;
         const prev = pending.get(key);
         if (prev) { prev.count++; prev.lastAt = at; }
         else if (pending.size >= MAX_PENDING && c.severity === 'info') anomalyDropped.inc();

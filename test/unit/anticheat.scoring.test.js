@@ -183,7 +183,10 @@ test('updatePlayerIntegrity: stores level, score and evidence with numbers; neve
     const rec = store.integrity.get(cheat);
     assert.equal(rec.level, 'high_confidence');
     assert.ok(rec.score >= 3);
-    assert.equal(rec.evidence.statistics.perGame.length, 25);
+    assert.equal(rec.evidence.statistics.games, 25);
+    assert.ok(rec.evidence.statistics.trigger.includes('agree'));
+    assert.equal(rec.evidence.peak.level, 'high_confidence');
+    assert.equal(store.integrity.get(honest).evidence.statistics.reasons, undefined, 'compact evidence for unremarkable players');
     assert.ok(rec.evidence.statistics.reasons.join(' ').match(/accuracy \d+\.\d vs \d+\.\d expected/));
     assert.equal(store.integrity.get(honest).level, 'none');
 
