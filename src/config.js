@@ -56,6 +56,10 @@ key('JOURNAL_FLUSH_MS', { section: 'storage', type: 'int', default: 50, min: 5, 
 key('JOURNAL_FSYNC', { section: 'storage', type: 'bool', default: true, desc: 'fsync the journal at every flush (survives power loss, not only process crashes).' });
 key('DB_COMMIT_MS', { section: 'storage', type: 'int', default: 50, min: 1, max: 2000,
     desc: 'Finished games are committed to the database in batches, at most this long after they end.' });
+key('DB_CACHE_MB', { section: 'storage', type: 'int', default: 64, min: 2, max: 4096,
+    desc: 'SQLite page cache of each server process (the primary and every worker), in megabytes.' });
+key('DB_MMAP_MB', { section: 'storage', type: 'int', default: 256, min: 0, max: 65536,
+    desc: 'Part of the database file read through memory mapping, in megabytes (0 disables it).' });
 
 // ---- Secrets ---------------------------------------------------------------------------------------
 key('SERVER_SECRET', { section: 'secrets', type: 'secret', required: true, minBytes: 32,
