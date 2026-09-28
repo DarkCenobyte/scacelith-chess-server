@@ -55,11 +55,11 @@ function getJson(url, ca) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function startServer({ workers = 1, env = {}, keep = !!process.env.KEEP_TEST_SERVER, dataDir } = {}) {
+export async function startServer({ workers = 1, env = {}, keep = !!process.env.KEEP_TEST_SERVER, dataDir, sharedPort = false } = {}) {
     const dir = dataDir || fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-it-'));
     const tls = makeCertificate(dir);
     const apiPort = await freePort();
-    const wsPort = await freePort();
+    const wsPort = sharedPort ? apiPort : await freePort();   // sharedPort: API and WSS on one port (the default layout)
     const metricsPort = await freePort();
     const fullEnv = {
         PATH: process.env.PATH,
