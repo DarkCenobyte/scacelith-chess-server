@@ -8,9 +8,9 @@
 // other message goes through the codec.
 
 import * as schema from '../../src/protocol/schema.js';
-import { MSG, encode, decode, SCHEMA_HASH, PROTOCOL_VERSION, WS_SUBPROTOCOL } from '../../src/protocol/index.js';
+import { MSG, encode, decode, enums, SCHEMA_HASH, PROTOCOL_VERSION, WS_SUBPROTOCOL } from '../../src/protocol/index.js';
 
-export { MSG, encode, decode, SCHEMA_HASH, PROTOCOL_VERSION, WS_SUBPROTOCOL };
+export { MSG, encode, decode, enums, SCHEMA_HASH, PROTOCOL_VERSION, WS_SUBPROTOCOL };
 
 const FIXED = { u8: 1, bool: 1, u16: 2, u32: 4, i32: 4, f64: 8, id53: 8 };
 
