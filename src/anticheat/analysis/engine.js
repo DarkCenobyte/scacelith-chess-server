@@ -105,16 +105,18 @@ export class UciEngine {
      * @param {number} [o.threads=1]
      * @param {number} [o.hashMb=16]
      * @param {number} [o.timeoutMs=60000]  longest search before the engine is restarted
+     * @param {number} [o.handshakeTimeoutMs=10000]  uci / isready answers
      * @param {boolean} [o.lowPriority=true]
      * @param {object} [o.log]
      */
-    constructor({ path, args = [], threads = 1, hashMb = 16, timeoutMs = 60000, lowPriority = true, log = null }) {
+    constructor({ path, args = [], threads = 1, hashMb = 16, timeoutMs = 60000, handshakeTimeoutMs = 10000, lowPriority = true, log = null }) {
         if (!path) throw new EngineError('spawn', 'engine path is empty');
         this.path = path;
         this.args = args;
         this.threads = threads;
         this.hashMb = hashMb;
         this.timeoutMs = timeoutMs;
+        this.handshakeTimeoutMs = handshakeTimeoutMs;
         this.lowPriority = lowPriority;
         this.log = log;
         this.proc = null;
@@ -176,7 +178,7 @@ export class UciEngine {
         const id = await this._command('uci', (line, st) => {
             if (line.startsWith('id name ')) st.name = line.slice(8).trim();
             return line === 'uciok' ? st.name || '' : undefined;
-        }, 10000);
+        }, this.handshakeTimeoutMs);
         this.name = id || 'unknown engine';
         this._setOption('Threads', this.threads);
         this._setOption('Hash', this.hashMb);
@@ -251,7 +253,7 @@ export class UciEngine {
     }
 
     /** Waits for `readyok`. */
-    async ready(timeoutMs = 10000) {
+    async ready(timeoutMs = this.handshakeTimeoutMs) {
         await this._command('isready', (line) => (line === 'readyok' ? true : undefined), timeoutMs);
     }
 

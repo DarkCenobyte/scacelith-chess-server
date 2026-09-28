@@ -53,7 +53,10 @@ export const MODEL = Object.freeze({
     zClamp: 6,                      // a single game cannot weigh more than 6 sd
     suspected: Object.freeze({ minGames: 5, accuracyType: 3.5 }),
     high: Object.freeze({ minGames: 10, minMoves: 300, accuracyType: 3.0, timing: 1.5, combined: 3.5 }),
-    jump: Object.freeze({ minRecent: 5, minEarlier: 8, minEffect: 0.75, minRecentLevel: 0.5, lastingFraction: 0.7, sdFloor: 0.6 }),
+    // J tests "the recent games beat the player's own history by MORE than honestImprovement
+    // per-game sd" (a plausible honest improvement is not evidence), and needs the jump to last
+    // (lastingFraction of the recent games above the old level) and to land above peers.
+    jump: Object.freeze({ minRecent: 5, minEarlier: 8, honestImprovement: 0.75, minRecentLevel: 1.0, lastingFraction: 0.7, sdFloor: 0.6 }),
     ratingBand: Object.freeze({ established: 100, provisional: 400 }),
     provisionalGames: 30,
     population: Object.freeze({ minMoves: 10, winsorZ: 4, skipLevels: Object.freeze(['high_confidence', 'confirmed']) }),
@@ -251,7 +254,7 @@ function jumpScore(chrono) {
     const all = [...r.map((x) => x - mr), ...e.map((x) => x - me)];
     const pooledSd = Math.max(J.sdFloor, Math.sqrt(all.reduce((a, x) => a + x * x, 0) / Math.max(1, all.length - 2)));
     const se = pooledSd * Math.sqrt(1 / r.length + 1 / e.length);
-    const t = (mr - me) / se;
+    const t = (mr - me - J.honestImprovement) / se;
     const above = r.filter((x) => x > me + 0.5 * pooledSd).length / r.length;
     res.effect = mr - me;
     res.recentMean = mr;
@@ -260,7 +263,7 @@ function jumpScore(chrono) {
     res.fractionAbove = above;
     res.t = t;
     // Only a jump UP to a level above peers counts (coming back from a bad streak is not suspicious).
-    if (res.lasting && res.effect >= J.minEffect && mr >= J.minRecentLevel) res.score = t;
+    if (res.lasting && mr >= J.minRecentLevel && t > 0) res.score = t;
     return res;
 }
 
