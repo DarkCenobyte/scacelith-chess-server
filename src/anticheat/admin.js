@@ -256,7 +256,7 @@ function integrityShow(ctx) {
     let t = `Integrity of ${u.username} (#${u.id}): ${integ.level}, score ${integ.score.toFixed(2)}, review priority ${priority}\n`;
     t += `  updated ${iso(integ.updatedAt)}${integ.reviewedBy ? `, last reviewed by ${integ.reviewedBy}` : ''}\n`;
     if (st) {
-        t += `\nStatistical evidence (model v${st.model}, ${iso(st.computedAt)}): automatic level ${st.level}\n`;
+        t += `\nStatistical evidence (model v${st.model}, ${iso(st.computedAt)}): automatic level ${st.level}${st.trigger ? ` (${st.trigger})` : ''}\n`;
         t += `  groups: Q ${st.groups?.Q} (quality), E ${st.groups?.E} (engine choice), J ${st.groups?.J} (jump), T ${st.groups?.T} (timing)\n`;
         for (const r of st.reasons || []) t += `  - ${r}\n`;
         if (ev.peak && ev.peak.score > st.score) t += `  peak score ${ev.peak.score} on ${iso(ev.peak.at)} (level ${ev.peak.level})\n`;

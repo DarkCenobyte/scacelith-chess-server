@@ -23,12 +23,20 @@
 //    (how far the player's estimated long-run level is from peers of the same rating, in units of
 //    how much honest players differ from each other). Windows: last 30 analysed games and last 10.
 // 4. Levels:
-//      suspected        >= 5 games and an accuracy-type score >= 3.5 (one strong signal);
+//      suspected        >= 5 games and an accuracy-type score >= 3.5 (one strong signal), or a
+//                       jump J >= 2.5 together with a recent-window Q or E >= 2.5 (the same recent
+//                       games are both far above peers and far above the player's own past);
 //      high_confidence  >= 10 games, >= 300 scored moves, accuracy-type >= 3.0 AND timing >= 1.5
 //                       AND their combination (A+T)/sqrt(2) >= 3.5: two independent kinds of
 //                       evidence must agree (Q, E and J are not independent of each other);
 //      confirmed        never set here (moderators, certain protocol cheats).
 //    Timing alone never flags anyone: lag, premoves and personal style move it too much.
+//    updatePlayerIntegrity adds memory: suspected stays until the score drops 0.5 below the
+//    threshold, high_confidence never falls below suspected without a moderator, and a player a
+//    moderator cleared is only flagged again on new evidence.
+// Calibration (synthetic populations, src/anticheat/testing/synthetic.js): no honest player
+// flagged out of 3000 x 4 sample sizes; full engine users flagged after a median of 10-19 games
+// once the server has its own statistics (fewer on a fresh server, whose priors are inflated).
 
 import { priorFor, timeClass, timeClassOfCategory, PRIOR_GAMES, PRIOR_METRICS } from './priors.js';
 import { welfordAdd, clamp, mean } from './analysis/stats.js';
@@ -291,17 +299,28 @@ export function scorePlayer(games, pop) {
     const groups = { Q: best('Q'), E: best('E'), J: jump.score, T: best('T') };
     const accuracyType = Math.max(groups.Q, groups.E, groups.J);
 
-    let level = 'none';
+    let level = 'none', trigger = null;
     const S = MODEL.suspected, H = MODEL.high;
-    if (all.games >= S.minGames && accuracyType >= S.accuracyType) level = 'suspected';
+    if (all.games >= S.minGames && accuracyType >= S.accuracyType) {
+        level = 'suspected';
+        trigger = `one accuracy-type signal >= ${S.accuracyType} over >= ${S.minGames} games`;
+    }
     const recentA = Math.max(recent.Q.score, recent.E.score);
-    if (all.games >= S.minGames && jump.score >= S.jumpWithRecent && recentA >= S.jumpWithRecent) level = 'suspected';
+    if (level === 'none' && all.games >= S.minGames && jump.score >= S.jumpWithRecent && recentA >= S.jumpWithRecent) {
+        level = 'suspected';
+        trigger = `sudden lasting jump (J >= ${S.jumpWithRecent}) with recent games far above peers (>= ${S.jumpWithRecent})`;
+    }
     let highWindow = null;
     for (const [name, w] of [['all', all], ['recent', recent]]) {
         if (w.games < H.minGames || w.moves < H.minMoves) continue;
         const a = Math.max(w.Q.score, w.E.score, jump.score);
         const t = w.T.score;
-        if (a >= H.accuracyType && t >= H.timing && (a + t) / Math.SQRT2 >= H.combined) { level = 'high_confidence'; highWindow = name; break; }
+        if (a >= H.accuracyType && t >= H.timing && (a + t) / Math.SQRT2 >= H.combined) {
+            level = 'high_confidence';
+            highWindow = name;
+            trigger = `accuracy-type ${a.toFixed(2)} and timing ${t.toFixed(2)} agree over the ${name === 'all' ? `last ${w.games}` : 'recent'} games (${w.moves} moves)`;
+            break;
+        }
     }
     const score = Math.max(accuracyType, (accuracyType + Math.max(0, groups.T)) / Math.SQRT2);
 
@@ -311,7 +330,7 @@ export function scorePlayer(games, pop) {
         timeCorr: g.timeCorr, timeCv: g.timeCv, zQ: r2(gz.zQ), zE: r2(gz.zE), zT: r2(gz.zT),
     }));
     return {
-        level, score: r2(score) ?? 0, highWindow,
+        level, score: r2(score) ?? 0, highWindow, trigger,
         groups: { Q: r2(groups.Q), E: r2(groups.E), J: r2(groups.J), T: r2(groups.T), accuracyType: r2(accuracyType) },
         windows: { all: summariseWindow(all), recent: summariseWindow(recent) },
         jump: { score: r2(jump.score), effect: r2(jump.effect), recentMean: r2(jump.recentMean), earlierMean: r2(jump.earlierMean), lasting: jump.lasting, fractionAbove: r2(jump.fractionAbove), recentGames: jump.recentGames, earlierGames: jump.earlierGames },
@@ -416,7 +435,7 @@ export function updatePlayerIntegrity({ store, userId, population, now = Date.no
     ev.statistics = {
         model: MODEL.version, computedAt: now, level: result.level, score: result.score, groups: result.groups,
         windows: result.windows, jump: result.jump, reasons: result.reasons, perGame: result.perGame,
-        highWindow: result.highWindow,
+        highWindow: result.highWindow, trigger: result.trigger,
     };
     if (!ev.peak || result.score > (ev.peak.score || 0)) ev.peak = { at: now, score: result.score, level: result.level, groups: result.groups, reasons: result.reasons };
     writeIntegrity(store, userId, { level, score: Math.max(result.score, 0), evidence: ev, updatedAt: now });
