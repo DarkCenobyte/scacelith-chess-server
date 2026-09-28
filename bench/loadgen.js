@@ -358,13 +358,18 @@ async function main() {
                     lgLagP99Ms: +maxG('lagP99').toFixed(1),
                     machineBusy: d.machine ? d.machine.busyRatio : null,
                     otherCores: d.machine && d.procs.primary ? +Math.max(0, d.machine.coresBusy - srvCores - lgCores).toFixed(2) : null,
+                    memAvailableMB: Math.round(memAvailableMB()),
                 };
                 lastConnOk = connOk;
                 report.timeline.push(row);
+                if (row.memAvailableMB < o.minFreeMb / 2) {
+                    say(`available memory ${row.memAvailableMB} MB: aborting the run to protect the machine`);
+                    doCleanup().then(() => process.exit(4));
+                }
                 say(`${elapsed()}s ${phaseName.padEnd(7)} conns ${String(row.ready).padStart(6)} (+${row.connPerSec}/s, ${total.c.connFail || 0} failed) `
                     + `games ${String(row.games).padStart(5)} moves/s ${String(row.movesPerSec).padStart(6)} rtt p50/p99 ${fmt(row.moveRttP50Ms, 1)}/${fmt(row.moveRttP99Ms, 1)} ms `
                     + `| server ${fmt(row.srvCores, 2)} cores lag ${fmt(row.srvLagP99Ms, 0)} ms rss ${fmt(row.srvRssMB)} MB `
-                    + `| loadgen ${fmt(row.lgCores, 2)} cores lag ${fmt(row.lgLagP99Ms, 0)} ms | cpu busy ${row.machineBusy !== null ? Math.round(row.machineBusy * 100) : '-'}%`
+                    + `| loadgen ${fmt(row.lgCores, 2)} cores lag ${fmt(row.lgLagP99Ms, 0)} ms | cpu busy ${row.machineBusy !== null ? Math.round(row.machineBusy * 100) : '-'}% | free ${row.memAvailableMB} MB`
                     + `${row.otherCores > 0.2 ? ` (other processes ${row.otherCores} cores)` : ''}`);
                 win = newAgg();
             } finally {
