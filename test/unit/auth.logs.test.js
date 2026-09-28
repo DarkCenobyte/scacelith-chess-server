@@ -19,7 +19,7 @@ test('no credential, token, code or e-mail address appears in the logs', async (
         redirectUri: 'https://chess.example.org:8443/auth/sso/google/callback', now: () => s.now() });
     s = await startTestServer({
         env: { POW_REGISTER_BITS: '4', POW_LOGIN_BITS: '4', POW_LOGIN_TRIGGER_PER_MIN: '3', SSO_GOOGLE_ENABLED: '1',
-            GOOGLE_CLIENT_ID: 'cid.apps.googleusercontent.com', GOOGLE_CLIENT_SECRET: Buffer.from('GOCSPX-log-test').toString('base64') },
+            GOOGLE_CLIENT_ID: 'cid.apps.googleusercontent.com', GOOGLE_CLIENT_SECRET: 'GOCSPX-log-test' },
         oidcEndpoints: idp.endpoints,
     });
     t.after(async () => { await s.close(); await idp.close(); });

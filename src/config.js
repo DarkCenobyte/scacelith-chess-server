@@ -87,12 +87,12 @@ key('SMTP_PORT', { section: 'mail', type: 'port', default: 587, desc: 'SMTP port
 key('SMTP_SECURITY', { section: 'mail', type: 'enum', values: ['starttls', 'tls', 'none'], default: 'starttls',
     desc: 'starttls (required, not opportunistic), tls (implicit, port 465) or none (local relay only).' });
 key('SMTP_USER', { section: 'mail', type: 'string', default: '', desc: 'SMTP user name (empty = no authentication).' });
-key('SMTP_PASSWORD', { section: 'mail', type: 'secret', default: '', desc: 'SMTP password.' });
+key('SMTP_PASSWORD', { section: 'mail', type: 'secretText', default: '', desc: 'SMTP password.' });
 
 // ---- Google single sign-on ---------------------------------------------------------------------------
 key('SSO_GOOGLE_ENABLED', { section: 'sso', type: 'bool', default: false, desc: 'Offers "Sign in with Google" (OpenID Connect, authorization code + PKCE through the system browser).' });
 key('GOOGLE_CLIENT_ID', { section: 'sso', type: 'string', default: '', desc: 'OAuth client ID of a "Web application" client in Google Cloud Console.' });
-key('GOOGLE_CLIENT_SECRET', { section: 'sso', type: 'secret', default: '', desc: 'OAuth client secret. Never commit it.' });
+key('GOOGLE_CLIENT_SECRET', { section: 'sso', type: 'secretText', default: '', desc: 'OAuth client secret. Never commit it.' });
 key('GOOGLE_REDIRECT_URI', { section: 'sso', type: 'string', default: '',
     desc: 'Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST:PUBLIC_API_PORT/auth/sso/google/callback).' });
 
@@ -162,7 +162,7 @@ key('REPORTS_PER_DAY', { section: 'anticheat', type: 'int', default: 5, min: 1, 
 // ---- Observability -------------------------------------------------------------------------------------
 key('METRICS_PORT', { section: 'observability', type: 'port', default: 9464, desc: 'Prometheus metrics and health endpoint (plain HTTP; 0 disables it).' });
 key('METRICS_BIND', { section: 'observability', type: 'string', default: '127.0.0.1', desc: 'Keep it private: 127.0.0.1 or an internal address.' });
-key('METRICS_TOKEN', { section: 'observability', type: 'secret', default: '', desc: 'Optional bearer token required to read the metrics.' });
+key('METRICS_TOKEN', { section: 'observability', type: 'secretText', default: '', desc: 'Optional bearer token required to read the metrics.' });
 key('LOG_LEVEL', { section: 'observability', type: 'enum', values: ['debug', 'info', 'warn', 'error'], default: 'info', desc: 'Log verbosity.' });
 key('LOG_FORMAT', { section: 'observability', type: 'enum', values: ['json', 'pretty'], default: 'json', desc: 'JSON lines (for log collectors) or readable text.' });
 key('LOG_IP', { section: 'observability', type: 'enum', values: ['truncated', 'full', 'hashed'], default: 'truncated',
@@ -224,7 +224,8 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     for (const k of KEYS) {
         let raw = get(k.name);
         const fileRef = get(k.name + '_FILE');
-        if ((k.type === 'secret' || k.secretFile) && fileRef && raw === undefined) {
+        const secret = k.type === 'secret' || k.type === 'secretText';
+        if ((secret || k.secretFile) && fileRef && raw === undefined) {
             try { raw = fs.readFileSync(path.resolve(cwd, fileRef), 'utf8').trim(); } catch (e) {
                 errors.push(`${k.name}_FILE: cannot read ${fileRef} (${e.code || e.message})`);
                 continue;
@@ -236,8 +237,8 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
             if (k.required) { errors.push(`${k.name} is required (${k.desc.split('.')[0]}).`); continue; }
             v = k.default;
             if (k.type === 'list') v = String(v ?? '');
-            if (k.type === 'secret') v = null;
-            if (k.type === 'secret' || v === undefined) { cfg[toCamel(k.name)] = v ?? null; continue; }
+            if (secret) v = null;
+            if (secret || v === undefined) { cfg[toCamel(k.name)] = v ?? null; continue; }
             raw = String(v);
         }
         switch (k.type) {
@@ -267,6 +268,9 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
                 break;
             case 'list':
                 v = String(raw).split(',').map((s) => s.trim()).filter(Boolean);
+                break;
+            case 'secretText':      // a password or client secret used as written (not decoded)
+                v = String(raw);
                 break;
             case 'secret':
                 v = decodeSecret(String(raw));
@@ -319,7 +323,7 @@ export function describe(cfg) {
     const out = {};
     for (const [k, v] of Object.entries(cfg)) {
         const spec = KEYS.find((s) => toCamel(s.name) === k);
-        if (spec && spec.type === 'secret') out[k] = v ? '<set>' : '<unset>';
+        if (spec && (spec.type === 'secret' || spec.type === 'secretText')) out[k] = v ? '<set>' : '<unset>';
         else out[k] = v;
     }
     return out;

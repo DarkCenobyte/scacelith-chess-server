@@ -13,7 +13,7 @@ async function setup(env = {}) {
     const cfgEnv = {
         SSO_GOOGLE_ENABLED: '1', GOOGLE_CLIENT_ID: CLIENT_ID,
         // config.js decodes secrets as base64; see the report about SSO/SMTP secrets.
-        GOOGLE_CLIENT_SECRET: Buffer.from(CLIENT_SECRET).toString('base64'), ...env,
+        GOOGLE_CLIENT_SECRET: CLIENT_SECRET, ...env,
     };
     // The provider signs with the server's (fake) clock, read once the server exists.
     let s = null;
