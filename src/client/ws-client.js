@@ -418,6 +418,7 @@ export class WsClient {
      * @param {string} [reason] at most 123 bytes
      */
     close(code = 1000, reason = '') {
+        if (!isValidCloseCode(code)) throw new RangeError(`websocket: close code ${code}`);
         const done = new Promise((resolve) => {
             if (this.readyState === CLOSED) { resolve(); return; }
             this.once('close', () => resolve());
@@ -425,7 +426,6 @@ export class WsClient {
         if (this.readyState === CONNECTING) {
             this._abortHandshake(handshakeError('closed by the client'));
         } else if (this.readyState === OPEN) {
-            if (!isValidCloseCode(code)) throw new RangeError(`websocket: close code ${code}`);
             this._closeSent = true;
             this.readyState = CLOSING;
             this.socket.write(buildFrame(8, closePayload(code, reason)));

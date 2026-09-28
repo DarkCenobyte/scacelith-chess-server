@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { WsClient, buildFrame, isValidCloseCode, OPEN, CLOSED } from '../../src/client/ws-client.js';
 import { ScacelithClient, ScacelithError } from '../../src/client/client.js';
 import * as P from '../../src/protocol/index.js';
@@ -99,7 +100,7 @@ class Peer {
 
 // handshake(req) may return { status, headers, body, skip } to answer something else than a
 // normal 101 (or skip: never answer).
-async function startWsServer({ tlsOptions = null, handshake = null } = {}) {
+async function startWsServer({ tlsOptions = null, handshake = null, onPeer = null } = {}) {
     const peers = [];
     const waiters = [];
     const onSocket = (socket) => {
@@ -128,6 +129,7 @@ async function startWsServer({ tlsOptions = null, handshake = null } = {}) {
             if (status !== 101) { socket.end(); return; }
             const rest = head.subarray(end + 4);
             peers.push(peer);
+            if (onPeer) onPeer(peer);
             for (const w of waiters.splice(0)) w(peer);
             if (rest.length) peer.feed(rest);
         };
@@ -386,13 +388,14 @@ describe('WsClient', () => {
 
 // ---- TLS -----------------------------------------------------------------------------------------
 
-function haveOpenssl() { try { return !!crypto && fs.existsSync('/usr/bin/openssl') || fs.existsSync('/usr/local/bin/openssl'); } catch { return false; } }
+function haveOpenssl() {
+    try { execFileSync('openssl', ['version'], { stdio: 'ignore' }); return true; } catch { return false; }
+}
 
 describe('WsClient over TLS', { skip: !haveOpenssl() && 'openssl not found' }, () => {
     let dir, cert, key;
     after(() => { if (dir) fs.rmSync(dir, { recursive: true, force: true }); });
     test('connects with the CA, refuses an unknown certificate', async () => {
-        const { execFileSync } = await import('node:child_process');
         dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-ws-tls-'));
         execFileSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes', '-days', '2',
             '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
@@ -420,12 +423,12 @@ const TOKEN = 'sct_' + 'k'.repeat(43);
 
 // A scripted fake server: decodes client frames, checks seq, answers with the codec.
 async function fakeServer(script = {}) {
-    const srv = await startWsServer();
     const sessions = [];
-    const waitSession = async () => {
-        const peer = await srv.nextPeer();
+    const sessionWaiters = [];
+    const attach = (peer) => {
         const s = { peer, received: [], lastSeq: 0, badSeq: 0, send: (name, f) => peer.send(P.encode[name](f)) };
         sessions.push(s);
+        for (const w of sessionWaiters.splice(0)) w(s);
         peer.onFrame = (f) => {
             if (f.op !== 2) return;
             const m = P.decode(f.payload, P.DECODE_C2S);
@@ -440,7 +443,11 @@ async function fakeServer(script = {}) {
                 s.send('S_Pong', { nonce: m.nonce, serverTime: Date.now() + (script.clockAhead ?? 0) });
             } else if (script.onMessage) script.onMessage(s, m);
         };
-        return s;
+    };
+    const srv = await startWsServer({ onPeer: attach });
+    const waitSession = () => {
+        const n = sessions.length;
+        return new Promise((resolve) => sessionWaiters.push(() => resolve(sessions[n])));
     };
     return { srv, sessions, waitSession, port: srv.port, close: () => srv.close() };
 }
