@@ -90,7 +90,6 @@ export class Ipc {
                 this.pending.delete(id);
                 reject(new IpcTimeoutError(type, ms));
             }, ms);
-            timer.unref?.();
             this.pending.set(id, { resolve, reject, timer });
             this._post({ $ipc: REQ, i: id, t: type, p: payload });
         });

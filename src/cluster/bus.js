@@ -312,6 +312,7 @@ export class Bus {
             try { this.onLinkUp?.(link.peer, reconnected); } catch (e) { this.log?.error?.('bus onLinkUp failed', { err: e }); }
         });
         socket.on('data', () => { /* peers never answer on our outgoing link */ });
+        socket.on('end', () => { if (link.socket === socket) link.connected = false; });   // peer going away: queue from now on
         socket.on('error', (e) => { this.log?.debug?.('bus link error', { peer: link.peer, code: e.code }); });
         socket.on('close', () => {
             if (link.socket !== socket) return;
