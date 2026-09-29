@@ -14,13 +14,18 @@
 //
 // Password hashing: `svc.hasher` runs every hash and verification (the dummy one of unknown
 // accounts included) through this service's hash limiter, one per worker process
-// (PASSWORD_HASH_CONCURRENCY at once, PASSWORD_HASH_QUEUE_MAX waiting, PASSWORD_HASH_QUEUE_TIMEOUT_MS,
-// security/password.js). A refused hash fails the request with 503 server_busy and a random
-// Retry-After of 5 to 15 s before the account changed: no failed login is counted and a reset
-// link stays valid (a proof of work already given is spent, as for any answer).
+// (PASSWORD_HASH_CONCURRENCY at once, PASSWORD_HASH_QUEUE_MAX waiting, security/password.js).
+// Each request gets one budget (svc.hashBudget): all its hashes together wait at most
+// PASSWORD_HASH_QUEUE_TIMEOUT_MS, and one client source (an IPv4 address or an IPv6 /48) may have
+// at most HASH_WAITERS_PER_SOURCE hashes waiting. A refused hash fails the request before the
+// account changed, with 503 server_busy (queue full or wait expired) or 429 rate_limited (too
+// many waiting from that source), each with a random Retry-After of 5 to 15 s: no failed login is
+// counted and a reset link stays valid (a proof of work already given is spent, as for any
+// answer). A new password hash is only written while the stored one is still the hash the
+// request checked (svc.setPasswordHashIf, svc.stillCurrent), so a reset always wins a race.
 
 import { createAccounts } from './accounts.js';
-import { AuthError, serverBusy } from './errors.js';
+import { AuthError, hashRateLimited, serverBusy } from './errors.js';
 import { createLogin } from './login.js';
 import { createMfa } from './mfa.js';
 import { createOidcClient, GOOGLE_OIDC } from './oidc.js';
@@ -30,12 +35,15 @@ import { createMailer, secretText } from '../mail/index.js';
 import { deriveAuthKeys } from '../security/keys.js';
 import { createHashLimiter, createPasswordHasher, limitHasher } from '../security/password.js';
 import { createPow } from '../security/pow.js';
-import { createLocalControl } from '../security/ratelimit.js';
+import { createLocalControl, prefixKey } from '../security/ratelimit.js';
 import { createSecurityEvents } from '../security/events.js';
 import { createSecretBox } from '../security/totp.js';
 import { metrics } from '../metrics.js';
 
 const powTotal = metrics.counter('scacelith_auth_pow_total', 'Proof-of-work answers', ['endpoint', 'result']);
+
+/** Password hashes one client source (an IPv4 address or an IPv6 /48) may have waiting in a worker's queue. */
+export const HASH_WAITERS_PER_SOURCE = 2;
 
 /**
  * The public base URL of the server's pages (e-mail links).
@@ -81,9 +89,14 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
 
     const hashLimiter = createHashLimiter({
         concurrency: config.passwordHashConcurrency, queueMax: config.passwordHashQueueMax, queueTimeoutMs: config.passwordHashQueueTimeoutMs,
+        perSourceMax: HASH_WAITERS_PER_SOURCE,
     });
     let busyWarnAt = 0;
     function hashBusy(err) {
+        // An optional hash that found no free slot (the login's rehash): the caller skips it.
+        if (err.reason === 'no_wait') return err;
+        // One client with too many hashes waiting: the answer of a rate limit, not a server problem.
+        if (err.reason === 'source_limit') return hashRateLimited();
         const t = now();
         if (t - busyWarnAt > 60000) {
             busyWarnAt = t;
@@ -98,6 +111,59 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
         box: createSecretBox(keys.mfa),
         events: events || createSecurityEvents({ store, log, now }),
         mailer: mailer || createMailer({ config, log }),
+    };
+
+    /**
+     * The hash budget of one request: every hash and verification it makes shares one
+     * PASSWORD_HASH_QUEUE_TIMEOUT_MS of waiting, and they count for the client's source (an IPv4
+     * address or an IPv6 /48) in the per-source limit of the queue.
+     * @param {string|null} ip
+     */
+    svc.hashBudget = (ip) => {
+        const deadline = performance.now() + config.passwordHashQueueTimeoutMs;
+        const source = ip ? prefixKey(ip) : null;
+        return {
+            /** Options of the next hash: what is left of the budget (at least 1 ms, so that a spent budget ends as an ordinary timeout). */
+            next: () => ({ maxWaitMs: Math.max(1, Math.ceil(deadline - performance.now())), source }),
+            /** Options of an optional hash, run only when a slot is free at once. */
+            noWait: () => ({ maxWaitMs: 0, source }),
+        };
+    };
+
+    // Runs fn in one store transaction when the store has them (the SQLite store: atomic across the
+    // processes that share the database; the in-memory test store runs it as it is).
+    const atomically = (fn) => (typeof store.transaction === 'function' ? store.transaction(fn) : fn());
+
+    /**
+     * Stores `passwordHash` for `userId` only while the stored hash is still `expected` (compare and
+     * set): a hash computed from a password checked against `expected` never overwrites a password
+     * reset or change that landed while it was computed.
+     * @returns {boolean} true when written
+     */
+    svc.setPasswordHashIf = (userId, expected, passwordHash) => atomically(() => {
+        const u = store.users.byId(userId);
+        if (!u || u.status !== 'active' || u.passwordHash !== expected) return false;
+        store.users.update(userId, { passwordHash });
+        return true;
+    });
+
+    /**
+     * After `password` matched the hash `checked` of `userId`: the account row when the password
+     * still matches what is stored now, else null. A check waits in the hash queue and runs for
+     * half a second, and a password reset or change (or another login's rehash) may land meanwhile;
+     * only then is the password checked again, against the new hash (`hashOpts`: the request's
+     * budget). So a login or an account change never succeeds with a password that a reset has
+     * already replaced.
+     * @returns {Promise<object|null>}
+     */
+    svc.stillCurrent = async (userId, checked, password, hashOpts) => {
+        const u = store.users.byId(userId);
+        if (!u || u.status !== 'active' || !u.passwordHash) return null;
+        if (u.passwordHash === checked) return u;
+        const { ok } = await svc.hasher.verify(u.passwordHash, password, hashOpts);
+        if (!ok) return null;
+        const again = store.users.byId(userId);
+        return again && again.status === 'active' && again.passwordHash === u.passwordHash ? again : null;
     };
     svc.pow = createPow({ key: keys.pow, ipKeyHash: keys.ipHash, now, once });
     svc.links = {

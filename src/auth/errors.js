@@ -38,6 +38,16 @@ export function serverBusy(retryAfterSec = BUSY_RETRY_AFTER_SEC.min + Math.floor
     return new AuthError(503, 'server_busy', 'The server is busy; try again in a few seconds.', { retryAfter: retryAfterSec });
 }
 
+/**
+ * 429 rate_limited, the same answer as the HTTP rate limits: this client (an IPv4 address or an
+ * IPv6 /48) already has as many password hashes waiting in the worker's queue as it may
+ * (security/password.js). The delay is random, as for serverBusy().
+ * @param {number} [retryAfterSec]
+ */
+export function hashRateLimited(retryAfterSec = BUSY_RETRY_AFTER_SEC.min + Math.floor(Math.random() * (BUSY_RETRY_AFTER_SEC.max - BUSY_RETRY_AFTER_SEC.min + 1))) {
+    return new AuthError(429, 'rate_limited', 'Too many requests; try again later.', { retryAfter: retryAfterSec });
+}
+
 /** The single answer of every failed password login (unknown account, wrong password, no password). */
 export function invalidCredentials() {
     return new AuthError(401, 'invalid_credentials', 'Wrong user name, e-mail or password.');

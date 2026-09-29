@@ -10,14 +10,15 @@
 // docs/CONFIG.md.
 
 import crypto from 'node:crypto';
-import { ConfigError, describe, loadConfig } from '../src/config.js';
+import { ConfigError, configWarnings, describe, loadConfig } from '../src/config.js';
 
 const USAGE = `Usage: scacelith-server [command]
 
 Commands:
   start          Start the server (default).
   migrate        Apply the database migrations, then exit.
-  check-config   Validate the configuration and print it without secrets.
+  check-config   Validate the configuration and print it without secrets
+                 (warnings about risky settings go to stderr).
   gen-secret     Print a new random value for SERVER_SECRET.
   help           Show this help.
 `;
@@ -60,6 +61,7 @@ async function run(cmd) {
         case 'check-config': {
             const config = configOrExit();
             process.stdout.write(JSON.stringify(describe(config), null, 2) + '\n');
+            for (const w of configWarnings(config)) process.stderr.write(`warning: ${w}\n`);
             return;
         }
         case 'gen-secret':

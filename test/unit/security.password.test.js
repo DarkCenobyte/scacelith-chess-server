@@ -86,6 +86,22 @@ test('unknown accounts cost the same work (dummy hash)', async () => {
     assert.equal(await h.verifyDummy('x'), false);
 });
 
+test('an argon2id hash on a runtime without argon2 fails after the dummy work, not at once', async () => {
+    const h = createPasswordHasher({ scrypt: { logN: 13 }, argon2: false });
+    await h.warmUp();
+    const stored = await createPasswordHasher({ argon2: fakeArgon2(), argon2Params: { memory: 1024, passes: 1, parallelism: 1 } }).hash('whatever it is');
+    assert.match(stored, /^\$argon2id\$/);
+    const time = async (f) => { const t = process.hrtime.bigint(); await f(); return Number(process.hrtime.bigint() - t) / 1e6; };
+    const argon = [], dummy = [];
+    for (let i = 0; i < 5; i++) {
+        argon.push(await time(async () => assert.deepEqual(await h.verify(stored, 'whatever it is'), { ok: false, needsRehash: false })));
+        dummy.push(await time(() => h.verifyDummy('whatever it is')));
+    }
+    const med = (a) => a.sort((x, y) => x - y)[2];
+    const ratio = med(argon) / med(dummy);
+    assert.ok(ratio > 0.5 && ratio < 2, `median ${med(argon).toFixed(1)} ms against ${med(dummy).toFixed(1)} ms for the dummy`);
+});
+
 test('policy: length, bytes, username, e-mail, common passwords', () => {
     const opts = { minLength: 10, username: 'Magnus_C', email: 'grandpatzer@example.com' };
     assert.equal(checkPasswordPolicy('short', opts).reason, 'too_short');

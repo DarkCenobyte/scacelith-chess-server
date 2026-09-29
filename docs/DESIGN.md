@@ -489,9 +489,10 @@ router.post(path, handler, { auth, body: schemaObject, rate })   // JSON only, H
 Path parameters use `:name`. JSON errors are `{ "error": "<snake_case_code>", "message": "...",
 "retryAfter"?: s }` (with a `Retry-After` header when `retryAfter` is set). An endpoint that
 hashes or checks a password may answer 503 `server_busy` when the worker's password hash queue
-is full (section 8). Every response carries `Cache-Control: no-store`, `X-Content-Type-Options:
-nosniff`, `Referrer-Policy: no-referrer`, `Strict-Transport-Security` (native TLS), and HTML
-pages a strict `Content-Security-Policy`. Route modules export `register(router, deps)`.
+is full, or 429 `rate_limited` when the client already has 2 hashes waiting there (section 8).
+Every response carries `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: no-referrer`, `Strict-Transport-Security` (native TLS), and HTML pages a
+strict `Content-Security-Policy`. Route modules export `register(router, deps)`.
 
 Endpoints (prefix `/api/v1`):
 
@@ -707,22 +708,43 @@ feeds `scacelith_retention_purged_total{kind}`, `scacelith_retention_ip_erased_t
   (`scrypt$17$8$1$<salt>$<hash>`); argon2id is used instead when `crypto.argon2` exists (Node
   >= 24.7) and hashes are upgraded at the next login. Length >= PASSWORD_MIN_LENGTH, <= 256
   bytes, not containing the username, not in the embedded list of common passwords. Unknown
-  login -> the same work on a dummy hash (constant-time behaviour).
+  login -> the same work on a dummy hash (constant-time behaviour); a stored argon2id hash on a
+  runtime without argon2 costs the same dummy work. The dummy uses the preferred algorithm, while
+  stored hashes keep theirs until the next password login, so every failed login check (known
+  account or not) is also padded to the slowest check of the last 10 to 20 minutes of the worker
+  (at most 2 s), with a timer that runs after the hash slot is released and uses no hash
+  capacity: the time of a failure does not tell which e-mail addresses are registered.
 * **Password hash cap**: one hash costs about 0.5-0.6 s of CPU and 64-128 MiB in the libuv thread
   pool, which the journal's fdatasync and the DNS lookups (SMTP, Google sign-in) share. Every
   hash and verification of a worker process (registration, login and its rehash, password change
   and reset, the re-authentication of account changes, the dummy verification of unknown
   accounts) goes through one bounded FIFO queue (`createHashLimiter` in
   `src/security/password.js`): `PASSWORD_HASH_CONCURRENCY` (1) run at once,
-  `PASSWORD_HASH_QUEUE_MAX` (32) wait, for at most `PASSWORD_HASH_QUEUE_TIMEOUT_MS` (10 s, under
-  the game's 15 s HTTP timeout). A request beyond the queue, or whose wait expired, is answered
-  HTTP 503 `{ "error": "server_busy", "retryAfter": s }` with a `Retry-After` header (a random
-  5-15 s, so that the refused clients do not come back together) before anything changed: no
-  failed login is counted and a reset link stays valid. With one hash per worker, each game event
-  loop keeps at least half a core during a login burst on a 2-core machine, and the thread pool
-  (`UV_THREADPOOL_SIZE`, 4 by default; keep it at 4 or more) keeps free threads for the file
-  system and DNS. Metrics: `scacelith_password_hash_in_flight`, `scacelith_password_hash_queued`
-  (per shard), `scacelith_password_hash_wait_ms`, `scacelith_password_hash_rejected_total{reason}`.
+  `PASSWORD_HASH_QUEUE_MAX` (32) wait. Each request has one wait budget of
+  `PASSWORD_HASH_QUEUE_TIMEOUT_MS` (10 s, at most 13 s so that the answer comes before the game's
+  15 s HTTP timeout) for all its hashes together: a password change checks the current password
+  and hashes the new one within it. A request beyond the queue, or whose budget ran out, is
+  answered HTTP 503 `{ "error": "server_busy", "retryAfter": s }` with a `Retry-After` header (a
+  random 5-15 s, so that the refused clients do not come back together) before anything changed:
+  no failed login is counted and a reset link stays valid. One client source (an IPv4 address or
+  an IPv6 /48) may have at most 2 hashes waiting; its next request is answered 429
+  `rate_limited` the same way, so that one network cannot fill the queue while staying under the
+  per-address limits. With one hash per worker, each game event loop keeps at least half a core
+  during a login burst on a 2-core machine, and the thread pool (`UV_THREADPOOL_SIZE`, 4 by
+  default; keep it at 4 or more, the primary warns at start when `PASSWORD_HASH_CONCURRENCY` is
+  not below it) keeps free threads for the file system and DNS. Metrics:
+  `scacelith_password_hash_in_flight`, `scacelith_password_hash_queued` (per shard),
+  `scacelith_password_hash_wait_ms`, `scacelith_password_hash_rejected_total{reason}` (reasons
+  `queue_full`, `timeout`, `source_limit`).
+* **Password changes under concurrency**: the login upgrades an outdated hash only when a hash
+  slot is free at once (it never waits a second time; the next login retries), and every new
+  hash computed from a checked password (the rehash, a password change) is written with a
+  compare-and-set on the hash that was checked (`svc.setPasswordHashIf` in `src/auth/index.js`,
+  one store transaction). After a check, the login and the re-authentication read the account
+  again: when the stored hash changed while the check waited or ran, the password is checked
+  once more against the new hash. So a password reset always wins against a login, a rehash or
+  a password change that was in flight, and no session is opened with a password the reset has
+  replaced.
 * **Tokens**: 32 random bytes, only their SHA-256 is stored; e-mail verification (24 h),
   password reset (1 h, revokes all sessions), MFA login challenge (5 min), SSO attempt (10 min),
   all single-use.
@@ -734,7 +756,8 @@ feeds `scacelith_retention_purged_total{kind}`, `scacelith_retention_ip_erased_t
 * **Enumeration**: register / forgot / resend answer the same whatever the e-mail; login errors
   are the same for an unknown account and a wrong password; usernames are public anyway (the
   "taken" answer is rate limited).
-* **Brute force and stuffing**: per-IP token buckets (API, auth), per-account failure counter
+* **Brute force and stuffing**: per-IP token buckets (API, auth; IPv6 per /64, and the password
+  endpoints also per /48 as a whole with `AUTH_RATE_PER_PREFIX`), per-account failure counter
   with exponential delay, global failure-rate detector that turns on the login proof-of-work
   (`POW_LOGIN_TRIGGER_PER_MIN`, 30 failed logins per minute: each costs a password hash, so a
   small server's hash throughput could never reach a much higher trigger),

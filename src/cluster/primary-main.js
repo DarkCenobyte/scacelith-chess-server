@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as anticheatModule from '../anticheat/index.js';
 import { configureLogging, logger } from '../log.js';
-import { loadConfig, describe } from '../config.js';
+import { loadConfig, describe, configWarnings } from '../config.js';
 import * as conductModule from '../match/conduct.js';
 import { Challenges } from '../match/challenges.js';
 import { applyGame } from '../match/elo.js';
@@ -51,6 +51,7 @@ export async function main() {
     configureLogging({ level: config.logLevel, format: config.logFormat, ipMode: config.logIp, secret: config.serverSecret, base: { inst: config.instanceId, proc: 'primary' } });
     const log = logger.child('primary');
     log.info('starting', { config: describe(config) });
+    for (const warning of configWarnings(config)) log.warn('configuration works against the design', { warning });
 
     fs.mkdirSync(config.dataDir, { recursive: true, mode: 0o750 });
     fs.mkdirSync(config.runDir, { recursive: true, mode: 0o700 });

@@ -19,7 +19,10 @@
 //   POST /auth/password/reset { token, newPassword } -> 200 { status: 'password_reset' } | 400 invalid_token | weak_password
 // Every endpoint that hashes or checks a password (register, login, password reset) may also
 // answer 503 server_busy{retryAfter} (with a Retry-After header) when the password hash queue of
-// the worker is full or the wait expired (security/password.js); nothing was changed then.
+// the worker is full or the wait expired, or 429 rate_limited{retryAfter} when the client (an IPv4
+// address or an IPv6 /48) already has 2 hashes waiting there (security/password.js); nothing was
+// changed then. The auth limit (AUTH_RATE_PER_IP per address or IPv6 /64) also applies to each
+// IPv6 /48 as a whole (AUTH_RATE_PER_PREFIX).
 
 import * as verifyPages from '../pages/verify-email.js';
 import * as resetPages from '../pages/reset-password.js';
@@ -37,7 +40,7 @@ const LINK_TOKEN = { type: 'string', min: 1, max: 128 };
  * @param {{ config: object, auth: object }} deps
  */
 export function register(router, { config, auth }) {
-    const authRate = { key: 'auth', limit: config.authRatePerIp, windowMs: 600000, shared: true };
+    const authRate = { key: 'auth', limit: config.authRatePerIp, prefixLimit: config.authRatePerPrefix, windowMs: 600000, shared: true };
     const pageRate = { key: 'page', limit: 60, windowMs: 60000 };
     const sessionRate = { key: 'sessions', limit: 60, windowMs: 60000, by: 'user' };
 
@@ -99,8 +102,8 @@ export function register(router, { config, auth }) {
             if (err && err.code === 'weak_password') return form(err.message);
             if (err && err.code === 'invalid_token') return { status: 400, html: resetPages.resetInvalid({ serverName }) };
             // The link is still valid: show the form again so that the user can simply resend it.
-            if (err && err.code === 'server_busy') {
-                return { ...form(err.message), status: 503, headers: { 'Retry-After': String(err.extra.retryAfter) } };
+            if (err && (err.code === 'server_busy' || err.code === 'rate_limited')) {
+                return { ...form(err.message), status: err.status, headers: { 'Retry-After': String(err.extra.retryAfter) } };
             }
             throw err;
         }

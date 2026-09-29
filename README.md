@@ -239,11 +239,28 @@ Every login, registration, password change or reset and every account change tha
 password computes a password hash: about 0.5-0.6 s of CPU and 64-128 MiB of memory (scrypt, or
 Argon2id on Node 24.7+) in Node's libuv thread pool. Each worker process runs at most
 `PASSWORD_HASH_CONCURRENCY` (1) of them at once; up to `PASSWORD_HASH_QUEUE_MAX` (32) more wait
-their turn, each for at most `PASSWORD_HASH_QUEUE_TIMEOUT_MS` (10 s). A request that finds the
-queue full, or that waited too long, is answered HTTP 503 `server_busy` with a `Retry-After` of 5
-to 15 seconds, and nothing changes on the server: the player simply tries again a little later.
-With one hash per worker, a login burst on a 2-core VPS still leaves each shard at least half a
-core for its games, and the extra memory stays at about 128 MiB per worker.
+their turn. All the hashes of one request wait at most `PASSWORD_HASH_QUEUE_TIMEOUT_MS` (10 s)
+together: a password change, which checks the current password and then hashes the new one,
+does not wait twice. A request that finds the queue full, or whose wait ran out, is answered
+HTTP 503 `server_busy` with a `Retry-After` of 5 to 15 seconds, and nothing changes on the
+server: the player simply tries again a little later. With one hash per worker, a login burst on
+a 2-core VPS still leaves each shard at least half a core for its games, and the extra memory
+stays at about 128 MiB per worker.
+
+One client cannot take the whole queue: an IPv4 address, or an IPv6 /48, may have at most 2
+hashes waiting in a worker, and its next request is answered 429 `rate_limited` (the game shows
+its usual "Too many attempts" message with the delay). The per-address limit of the password
+endpoints (`AUTH_RATE_PER_IP`, 20 per 10 minutes for an IPv4 address or an IPv6 /64) is also
+applied to each IPv6 /48 as a whole (`AUTH_RATE_PER_PREFIX`, 5 times as much by default), because
+a single customer often gets a /56 (256 /64 networks) or a /48 (65536).
+
+When a stored hash is outdated (for example scrypt after an upgrade to Node 24.7, where new
+hashes use Argon2id), the login upgrades it with the password it just checked, but only when a
+hash slot is free at once; otherwise the next login does it. That new hash, like the one of a
+password change, is only written when the stored hash did not change meanwhile, and a login whose
+password was replaced while it was being checked fails: a password reset always wins. A failed login is held until it took as long as the slowest password check of the
+last 10 to 20 minutes (at most 2 s, after the hash slot is freed), so that its time does not
+reveal whether the e-mail address or user name has an account, whatever algorithm its hash uses.
 
 - Raise `PASSWORD_HASH_CONCURRENCY` only when the machine has idle cores: each hash in flight
   keeps a whole core busy for half a second.
@@ -252,15 +269,18 @@ core for its games, and the extra memory stays at about 128 MiB per worker.
   fsync the game journal and resolve host names for SMTP and Google sign-in, which would
   otherwise wait behind the hashes. Set it in the process environment (for example the systemd
   `EnvironmentFile`), not in the server's `.env` file: the server reads its own settings from it,
-  but the thread pool only sees the real environment.
-- Keep `PASSWORD_HASH_QUEUE_TIMEOUT_MS` below the game's 15 s HTTP timeout, minus a second or two
-  for the hash itself, so that a refused player gets the "busy" answer rather than a timeout.
+  but the thread pool only sees the real environment. The server logs a warning at start (and
+  `check-config` prints it) when `PASSWORD_HASH_CONCURRENCY` is not below the pool size.
+- `PASSWORD_HASH_QUEUE_TIMEOUT_MS` is at most 13000: the game gives up after 15 s, and the hash
+  itself takes a second or two, so that a refused player gets the "busy" answer rather than a
+  timeout.
 - `POW_LOGIN_TRIGGER_PER_MIN` (30) turns the login proof of work on during a credential-stuffing
   wave. Each failed login costs a hash, so a much higher trigger could never be reached on a
   small machine.
 - On the metrics endpoint, `scacelith_password_hash_queued`, `scacelith_password_hash_wait_ms`
-  and `scacelith_password_hash_rejected_total` show the queue. Regular refusals outside an attack
-  mean the machine needs more cores, not a higher cap.
+  and `scacelith_password_hash_rejected_total` show the queue. Regular refusals with the reasons
+  `queue_full` or `timeout` outside an attack mean the machine needs more cores, not a higher
+  cap; the reason `source_limit` counts the clients held back to their 2 waiting hashes.
 
 ## Secrets
 

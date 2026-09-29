@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    FailureCounter, LruMap, SlidingWindowCounter, TokenBucketLimiter, createLocalControl, ipKey, normalizeIp,
+    FailureCounter, LruMap, SlidingWindowCounter, TokenBucketLimiter, createLocalControl, ipKey, normalizeIp, prefixKey,
 } from '../../src/security/ratelimit.js';
 import { createClock } from './helpers/auth-fakes.js';
 
@@ -87,4 +87,13 @@ test('client address keys: IPv4, IPv4-mapped, IPv6 /64', () => {
     assert.equal(ipKey('2001:db8:aa:bb::9'), '2001:db8:aa:bb::/64');
     assert.equal(normalizeIp('::ffff:10.1.2.3'), '10.1.2.3');
     assert.equal(normalizeIp('::1'), '::1');
+});
+
+test('client source keys: IPv4 address, IPv6 /48', () => {
+    assert.equal(prefixKey('198.51.100.4'), '198.51.100.4');
+    assert.equal(prefixKey('::ffff:198.51.100.4'), '198.51.100.4');
+    assert.equal(prefixKey('2001:db8:aa:bb:1:2:3:4'), '2001:db8:aa::/48');
+    assert.equal(prefixKey('2001:db8:aa:ffff::9'), '2001:db8:aa::/48', 'every /64 of the /48 has the same key');
+    assert.equal(prefixKey('2001:DB8:0AA::1'), '2001:db8:aa::/48');
+    assert.notEqual(prefixKey('2001:db8:ab::1'), prefixKey('2001:db8:aa::1'));
 });

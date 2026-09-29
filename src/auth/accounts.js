@@ -75,7 +75,7 @@ export function createAccounts(svc) {
 
         const sameAnswer = { status: 202, body: { status: 'verification_sent' } };
         const existing = store.users.byEmail(em);
-        const passwordHash = await hasher.hash(password);     // also for an existing address: same work
+        const passwordHash = await hasher.hash(password, svc.hashBudget(ip).next());     // also for an existing address: same work
         if (existing) {
             await notifyExistingAddress(existing, ip);
             if (!config.requireEmailVerification) throw new AuthError(409, 'email_taken', 'An account already uses this e-mail address.');
@@ -160,7 +160,7 @@ export function createAccounts(svc) {
         if (!user || user.status !== 'active') throw invalidResetToken();
         const policy = checkPasswordPolicy(newPassword, { minLength: config.passwordMinLength, username: user.username, email: user.email });
         if (policy) throw weak(policy);
-        const passwordHash = await hasher.hash(newPassword);
+        const passwordHash = await hasher.hash(newPassword, svc.hashBudget(ip).next());
         if (!store.tokens.consume('password_reset', sha256Hex(token), now())) throw invalidResetToken();
         store.users.update(user.id, { passwordHash, emailVerified: true });
         sessions.revokeAll(user.id);
@@ -172,42 +172,58 @@ export function createAccounts(svc) {
     /**
      * Re-authentication for account changes: the password and, when MFA is on and
      * `secondFactor` is not 'none', a TOTP code ('totp') or a code or recovery code ('any').
-     * @returns {Promise<object>} the user row
+     * `budget` is the request's hash budget (auth/index.js hashBudget), for a request that hashes
+     * again afterwards.
+     * @returns {Promise<object>} the user row; with secondFactor 'none', its passwordHash is the
+     *   hash the password matched
      */
-    async function reauth(userId, { password, code, recoveryCode }, { secondFactor = 'any', ip = null } = {}) {
+    async function reauth(userId, { password, code, recoveryCode }, { secondFactor = 'any', ip = null, budget = svc.hashBudget(ip) } = {}) {
         const key = 'r' + userId;
         const wait = reauthFailures.retryAfter(key);
         if (wait > 0) throw tooManyAttempts(wait);
         const user = activeUser(userId);
         if (!user.passwordHash) {
-            await hasher.verifyDummy(password || '');
+            await hasher.verifyDummy(password || '', budget.next());
             throw new AuthError(400, 'password_not_set', 'This account has no password yet; set one with "Forgot password" first.');
         }
-        const { ok } = await hasher.verify(user.passwordHash, password);
-        if (!ok) {
+        const { ok } = await hasher.verify(user.passwordHash, password, budget.next());
+        // The password may have been reset or changed while the check waited and ran.
+        const current = ok ? await svc.stillCurrent(userId, user.passwordHash, password, budget.next()) : null;
+        if (!current) {
             reauthFailures.fail(key);
             events.record('reauth_failed', { userId, ip, detail: { factor: 'password' } });
             throw new AuthError(403, 'invalid_password', 'Wrong password.');
         }
-        if (secondFactor !== 'none' && user.mfaEnabled) {
+        if (secondFactor !== 'none' && current.mfaEnabled) {
             if (!code && !recoveryCode) throw new AuthError(403, 'mfa_code_required', 'Enter a code of your authenticator app.');
-            const ok2 = await mfa.checkSecondFactor(user, { code, recoveryCode, allowRecovery: secondFactor === 'any', ip });
+            const ok2 = await mfa.checkSecondFactor(current, { code, recoveryCode, allowRecovery: secondFactor === 'any', ip });
             if (!ok2) {
                 reauthFailures.fail(key);
                 events.record('reauth_failed', { userId, ip, detail: { factor: 'mfa' } });
                 throw new AuthError(403, 'invalid_code', 'Wrong or already used code.');
             }
+            reauthFailures.reset(key);
+            return store.users.byId(userId) || current;
         }
         reauthFailures.reset(key);
-        return store.users.byId(userId) || user;
+        return current;
     }
 
     /** POST /account/password: revokes the other sessions. */
     async function changePassword(ctxUser, sessionId, { currentPassword, newPassword, ip }) {
-        const user = await reauth(ctxUser.userId, { password: currentPassword }, { secondFactor: 'none', ip });
+        // Both hashes of the request (the check of the current password, the hash of the new one)
+        // share one queue timeout, so that the answer comes before the game gives up.
+        const budget = svc.hashBudget(ip);
+        const user = await reauth(ctxUser.userId, { password: currentPassword }, { secondFactor: 'none', ip, budget });
         const policy = checkPasswordPolicy(newPassword, { minLength: config.passwordMinLength, username: user.username, email: user.email });
         if (policy) throw weak(policy);
-        store.users.update(user.id, { passwordHash: await hasher.hash(newPassword) });
+        const next = await hasher.hash(newPassword, budget.next());
+        // Written only over the hash the current password matched: a reset or another change that
+        // landed meanwhile wins (a login's rehash of the same password does not count as a change).
+        if (!svc.setPasswordHashIf(user.id, user.passwordHash, next)) {
+            const fresh = await svc.stillCurrent(user.id, user.passwordHash, currentPassword, budget.next());
+            if (!fresh || !svc.setPasswordHashIf(user.id, fresh.passwordHash, next)) throw new AuthError(403, 'invalid_password', 'Wrong password.');
+        }
         sessions.revokeAll(user.id, sessionId);
         events.record('password_changed', { userId: user.id, ip });
         svc.mail('passwordChanged', user.email, { username: user.username, when: new Date(now()), byReset: false });
