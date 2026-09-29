@@ -4,7 +4,7 @@
 // Record (little-endian):
 //   u32 length   bytes after this 8-byte header (17 + payload length)
 //   u32 crc32c   CRC-32C (Castagnoli) of those `length` bytes
-//   u8  kind     1 created, 2 move, 3 event, 4 ended, 5 committed
+//   u8  kind     1 created, 2 move, 3 event, 4 ended, 5 committed, 6 snapshot
 //   u64 gameId   id53
 //   f64 at       epoch ms
 //   ... payload  opaque (the game module's encoding)
@@ -17,11 +17,37 @@
 // each batch, so a segment exceeds it by at most one batch; records never span segments).
 //
 // Bookkeeping (memory only; open() recomputes it by scanning the segments): per segment, the set
-// of games it mentions and how many of them are not committed yet; per game, the segments that
-// mention it and the one holding its 'committed' record. A segment is deleted when every game it
-// mentions is committed (the 'committed' record durably written), and a segment holding a game's
-// 'committed' record outlives that game's older segments, so a later recovery can never see a
-// committed game's moves without its 'committed' record.
+// of games it mentions and how many of them still need it (pins); per game, the segments that
+// mention it, the first segment it needs (the one of its first record, or of its latest
+// snapshot) and the one holding its 'committed' record. A game not committed needs every segment
+// from its first one on. A segment is deleted when no game needs it any more (the records that
+// release it, 'committed' or 'snapshot', durably written), and a segment holding a game's
+// 'committed' record outlives every other segment that mentions that game, so a later recovery
+// can never see a committed game's records without its 'committed' record.
+//
+// Compaction (JOURNAL_COMPACT_SEGMENTS) keeps a shard's journal at about compactSegments + 1
+// segments whatever the length of its games; without it, a game of several hours would keep
+// every segment written since its start. A 'snapshot' record holds the whole state of one game
+// (the game module's encoding) and supersedes every earlier record of that game. When the
+// journal starts segment N, the games not committed whose first needed segment is
+// N - compactSegments or older are queued; the host takes a few of them at a time
+// (compactionCandidates(max): at most compactPerFlush snapshots per batch) and appends their
+// snapshot. Once the batch holding a snapshot is written (and fsynced), its segment becomes the
+// game's first needed one, and the older segments go by the rule above. Crash safety: until then
+// every older segment is still on disk (a torn snapshot is ignored like any torn record, and the
+// game replays from its older records); after it, recovery starts the game from its latest
+// snapshot and drops the records before it, wherever they are (a crash in the middle of the
+// deletions leaves some of them behind).
+//
+// Durability of the deletions (fsync on, i.e. against a power loss and not only a process
+// crash): a batch is fdatasynced before the bookkeeping that releases segments runs, so the
+// 'committed' or 'snapshot' record that releases a segment is durable before that segment is
+// unlinked. open() fdatasyncs every segment it read, then the directory, before it deletes
+// anything: a record found at start-up may have been written by a process that died before its
+// fdatasync and live only in the page cache. A segment holding a 'committed' record is unlinked
+// only once the unlinks before it are durable (a directory fsync in between), so an older segment
+// of a committed game can never survive a power loss without that record. That extra directory
+// fsync is rare (about once per rotation).
 //
 // Recovery reads the segments in order and stops reading a segment at the first record whose
 // length is impossible, which is truncated (torn write) or whose CRC does not match; the records
@@ -36,12 +62,16 @@ import { logger } from '../log.js';
 import { metrics } from '../metrics.js';
 
 /** Record kinds. */
-export const JournalKind = Object.freeze({ Created: 1, Move: 2, Event: 3, Ended: 4, Committed: 5 });
+export const JournalKind = Object.freeze({ Created: 1, Move: 2, Event: 3, Ended: 4, Committed: 5, Snapshot: 6 });
 
 /** Default segment size before rotation. */
 export const SEGMENT_BYTES = 16 * 1024 * 1024;
 /** Largest payload of one record. */
 export const MAX_PAYLOAD = 1024 * 1024;
+/** Default JOURNAL_COMPACT_SEGMENTS: a game is snapshotted once the journal is this many segments past the first one it needs. */
+export const COMPACT_SEGMENTS = 4;
+/** Default number of snapshots one flushed batch holds at most (the pace of the compaction). */
+export const COMPACT_PER_FLUSH = 8;
 
 const HEADER = 8;
 const FIXED = 17;                  // kind + gameId + at
@@ -49,6 +79,7 @@ const TWO32 = 4294967296;
 const INITIAL_BUFFER = 64 * 1024;
 const MAX_SPARE = 4 * 1024 * 1024;
 const EMPTY = Buffer.alloc(0);
+const NO_GAMES = Object.freeze([]);
 const SEGMENT_RE = /^segment-(\d+)\.log$/;
 
 const mFlushMs = metrics.histogram('scacelith_journal_flush_ms', 'Journal write (+ fsync) duration per flush',
@@ -56,7 +87,10 @@ const mFlushMs = metrics.histogram('scacelith_journal_flush_ms', 'Journal write 
 const mBytes = metrics.counter('scacelith_journal_bytes_total', 'Bytes written to the game journal');
 const mRecords = metrics.counter('scacelith_journal_records_total', 'Records appended to the game journal');
 const mErrors = metrics.counter('scacelith_journal_errors_total', 'Failed journal writes');
-const mSegmentsDeleted = metrics.counter('scacelith_journal_segments_deleted_total', 'Journal segments deleted once all their games were committed');
+const mSegmentsDeleted = metrics.counter('scacelith_journal_segments_deleted_total', 'Journal segments deleted once no game needed them');
+const mSnapshots = metrics.counter('scacelith_journal_snapshots_total', 'Game snapshots written to the journal (compaction of long games)');
+const mSegments = metrics.gauge('scacelith_journal_segments', 'Journal segments on disk', [], { perShard: true });
+const mDiskBytes = metrics.gauge('scacelith_journal_disk_bytes', 'Size of the journal segments on disk', [], { perShard: true });
 
 // ---- CRC-32C (Castagnoli, reflected polynomial 0x82F63B78), slicing-by-8 --------------------------
 
@@ -137,13 +171,16 @@ async function fsyncDir(dir) {
 }
 
 class Journal {
-    constructor({ dir, shard = 0, flushMs = 50, fsync = true, segmentBytes = SEGMENT_BYTES, log = logger.child('journal') }) {
+    constructor({ dir, shard = 0, flushMs = 50, fsync = true, segmentBytes = SEGMENT_BYTES,
+        compactSegments = COMPACT_SEGMENTS, compactPerFlush = COMPACT_PER_FLUSH, log = logger.child('journal') }) {
         if (!dir) throw new TypeError('openJournal: dir is required');
         this.dir = path.join(dir, `shard-${shard}`);
         this.shard = shard;
         this.flushMs = Math.max(0, flushMs);
         this.fsync = !!fsync;
         this.segmentBytes = segmentBytes;
+        this.compactSegments = Number.isFinite(compactSegments) ? Math.max(1, Math.floor(compactSegments)) : COMPACT_SEGMENTS;
+        this.compactPerFlush = Number.isFinite(compactPerFlush) ? Math.max(1, Math.floor(compactPerFlush)) : COMPACT_PER_FLUSH;
         this.log = log;
 
         this.buf = Buffer.allocUnsafe(INITIAL_BUFFER);
@@ -151,6 +188,9 @@ class Journal {
         this.spare = null;
         this.batchGames = new Set();
         this.batchCommits = [];
+        this.batchSnaps = [];           // games with a snapshot in the current buffer
+        this.snapsPending = new Set();  // games with a snapshot appended and not written yet
+        this.compactQueue = new Set();  // games to snapshot, in queue order
         this.waiters = [];              // flush() calls covering the current buffer
         this.inflight = null;           // waiters of the batch being written
         this.writing = false;
@@ -163,10 +203,14 @@ class Journal {
         this.seq = 0;                   // highest segment number used
         this.segSize = 0;
         this.forceRotate = false;
-        this.segs = new Map();          // seq -> { seq, file, games: Set, uncommitted, active }
-        this.games = new Map();         // gameId -> { segs: Set<seq>, committed, commitSeg }
+        this.segs = new Map();          // seq -> { seq, file, games: Set, pins, active, bytes }, ascending seq
+        this.games = new Map();         // gameId -> { segs: Set<seq>, first, committed, commitSeg }
+        this.diskBytes = 0;
+        this.snapshots = 0;
+        this.unlinks = 0;               // segments deleted so far
+        this.syncedUnlinks = 0;         // ... of which a directory fsync made the deletion durable
         this.recovered = new Map();
-        this.recoverInfo = { segments: 0, records: 0, games: 0, problems: [] };
+        this.recoverInfo = { segments: 0, records: 0, games: 0, snapshots: 0, problems: [] };
         this.onTimer = () => {
             this.timer = null;
             if (!this.writing && this.len > 0) this.startWrite();
@@ -182,16 +226,21 @@ class Journal {
         for (const seq of seqs) {
             this.seq = Math.max(this.seq, seq);
             const file = path.join(this.dir, segmentName(seq));
-            const buf = await fsp.readFile(file);
-            const seg = { seq, file, games: new Set(), uncommitted: 0, active: false };
+            const buf = await this.readSegment(file);
+            const seg = { seq, file, games: new Set(), pins: 0, active: false, bytes: buf.length };
             this.segs.set(seq, seg);
+            this.diskBytes += buf.length;
             const res = parseSegment(buf, (kind, gameId, at, payload) => {
                 this.recoverInfo.records++;
-                let list = perGame.get(gameId);
-                if (!list) { list = []; perGame.set(gameId, list); }
-                list.push({ kind, at, payload: Buffer.from(payload) });
+                const rec = { kind, at, payload: Buffer.from(payload) };
+                const list = kind === JournalKind.Snapshot ? null : perGame.get(gameId);
+                if (list) list.push(rec);
+                else perGame.set(gameId, [rec]);      // a snapshot supersedes the game's earlier records
                 this.track(gameId, seg);
-                if (kind === JournalKind.Committed) {
+                if (kind === JournalKind.Snapshot) {
+                    this.recoverInfo.snapshots++;
+                    this.markSnapshot(gameId, seq);
+                } else if (kind === JournalKind.Committed) {
                     committed.add(gameId);
                     this.markCommitted(gameId, seq);
                 }
@@ -205,8 +254,28 @@ class Journal {
         for (const [gameId, list] of perGame) if (!committed.has(gameId)) this.recovered.set(gameId, list);
         this.recoverInfo.segments = seqs.length;
         this.recoverInfo.games = this.recovered.size;
-        this.gc([...this.segs.keys()]);
+        // What was read is durable (readSegment), and so are the directory's entries (a previous
+        // process's deletions included) before anything is deleted on their strength.
+        if (this.fsync && seqs.length) await this.syncDir();
+        await this.gc([...this.segs.keys()]);
+        this.enqueueStale();
+        this.updateGauges();
         return this;
+    }
+
+    // Reads a whole segment at open(); with fsync on, makes it durable first (it may hold records a
+    // process wrote just before dying, which only the page cache has, and a 'snapshot' or
+    // 'committed' record read here lets older segments be deleted).
+    async readSegment(file) {
+        const fh = await fsp.open(file, 'r');
+        try {
+            if (this.fsync) {
+                try { await fh.datasync(); } catch { /* best effort (a read-only handle cannot be synced on Windows) */ }
+            }
+            return await fh.readFile();
+        } finally {
+            await fh.close();
+        }
     }
 
     /**
@@ -242,6 +311,10 @@ class Journal {
         this.len = need;
         this.batchGames.add(gameId);
         if (kind === JournalKind.Committed) this.batchCommits.push(gameId);
+        else if (kind === JournalKind.Snapshot) {
+            this.batchSnaps.push(gameId);
+            this.snapsPending.add(gameId);
+        }
         mRecords.inc();
         if (this.timer === null && !this.writing) this.timer = setTimeout(this.onTimer, this.flushMs);
     }
@@ -266,7 +339,34 @@ class Journal {
     }
 
     /**
-     * Games found at open() without a 'committed' record, with their records in order.
+     * Games whose snapshot the journal wants now (compaction, see the header of this file): at
+     * most `max`, and at most compactPerFlush snapshots per batch counting those already appended
+     * to it. O(1) when nothing is due. The caller appends a snapshot record (JournalKind.Snapshot)
+     * for each game it still hosts, from a state that includes every record it appended for that
+     * game; a game it skips is queued again at a later rotation.
+     * @param {number} [max=Infinity]
+     * @returns {readonly number[]} game ids
+     */
+    compactionCandidates(max = Infinity) {
+        if (this.compactQueue.size === 0 || this.closing || this.closed) return NO_GAMES;
+        const room = Math.min(max, this.compactPerFlush - this.batchSnaps.length);
+        if (!(room >= 1)) return NO_GAMES;
+        const limit = this.seq - this.compactSegments;
+        const out = [];
+        for (const gameId of this.compactQueue) {
+            this.compactQueue.delete(gameId);
+            const g = this.games.get(gameId);
+            if (g && !g.committed && g.first <= limit && !this.snapsPending.has(gameId)) {
+                out.push(gameId);
+                if (out.length >= room) break;
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Games found at open() without a 'committed' record, with their records in order; a game with
+     * a snapshot starts with its latest one (the earlier records are dropped).
      * @returns {Map<number, {kind:number, at:number, payload:Buffer}[]>}
      */
     recover() {
@@ -277,6 +377,7 @@ class Journal {
     stats() {
         return {
             segments: this.segs.size, seq: this.seq, segmentBytes: this.segSize, pendingBytes: this.len,
+            diskBytes: this.diskBytes, snapshots: this.snapshots, compactQueue: this.compactQueue.size,
             trackedGames: this.games.size, writing: this.writing, recovery: this.recoverInfo,
         };
     }
@@ -302,31 +403,50 @@ class Journal {
         const len = this.len;
         const games = this.batchGames;
         const commits = this.batchCommits;
+        const snaps = this.batchSnaps;
         const waiters = this.waiters;
         this.buf = this.spare || Buffer.allocUnsafe(INITIAL_BUFFER);
         this.spare = null;
         this.len = 0;
         this.batchGames = new Set();
         this.batchCommits = [];
+        this.batchSnaps = [];
         this.waiters = [];
         this.inflight = waiters;
         this.writing = true;
         const t0 = performance.now();
-        this.writeBatch(buf, len).then((seg) => {
-            mFlushMs.observe(performance.now() - t0);
-            mBytes.inc(len);
-            for (const g of games) this.track(g, seg);
-            const touched = new Set();
-            for (const g of commits) for (const s of this.markCommitted(g, seg.seq)) touched.add(s);
-            if (touched.size) this.gc([...touched]);
-            if (buf.length <= MAX_SPARE) this.spare = buf;
-            this.finishWrite(null);
-        }, (err) => {
+        this.writeBatch(buf, len).then((seg) => this.written(seg, buf, len, games, commits, snaps, t0), (err) => {
             mErrors.inc();
             this.forceRotate = true;        // later records must not follow a possibly torn write
+            for (const g of snaps) {        // not known to be durable: the games keep their segments
+                this.snapsPending.delete(g);
+                this.compactQueue.add(g);
+            }
             this.log.error('journal write failed', { err, bytes: len });
             this.finishWrite(err);
         });
+    }
+
+    // The batch is written (and fsynced): bookkeeping, deletions, then its flush() calls resolve.
+    // The next batch starts after the deletions, so they never run concurrently with a rotation's.
+    async written(seg, buf, len, games, commits, snaps, t0) {
+        mFlushMs.observe(performance.now() - t0);
+        mBytes.inc(len);
+        for (const g of games) this.track(g, seg);
+        const touched = new Set();
+        // The batch is durable: its snapshots release their games' older segments.
+        for (const g of snaps) {
+            this.snapsPending.delete(g);
+            for (const s of this.markSnapshot(g, seg.seq)) touched.add(s);
+        }
+        if (snaps.length) { this.snapshots += snaps.length; mSnapshots.inc(snaps.length); }
+        for (const g of commits) for (const s of this.markCommitted(g, seg.seq)) touched.add(s);
+        if (touched.size) {
+            try { await this.gc([...touched]); } catch (err) { this.log.error('journal segments not deleted', { err }); }
+        }
+        this.updateGauges();
+        if (buf.length <= MAX_SPARE) this.spare = buf;
+        this.finishWrite(null);
     }
 
     finishWrite(err) {
@@ -347,19 +467,24 @@ class Journal {
 
     async writeBatch(buf, len) {
         if (!this.fh || this.forceRotate || this.segSize >= this.segmentBytes) await this.rotate();
+        const seg = this.segs.get(this.seq);
         let off = 0;
         while (off < len) {
             const { bytesWritten } = await this.fh.write(buf, off, len - off, null);
             off += bytesWritten;
+            seg.bytes += bytesWritten;
+            this.diskBytes += bytesWritten;
         }
         this.segSize += len;
         if (this.fsync) await this.fh.datasync();
-        return this.segs.get(this.seq);
+        return seg;
     }
 
     async rotate() {
         this.forceRotate = false;
-        const prev = this.fh ? this.segs.get(this.seq) : null;
+        // The newest segment: the active one, or the one a failed rotation left without a handle
+        // (it must become deletable all the same).
+        const prev = this.segs.get(this.seq) || null;
         if (this.fh) {
             const fh = this.fh;
             this.fh = null;
@@ -368,42 +493,80 @@ class Journal {
         const seq = this.seq + 1;
         const file = path.join(this.dir, segmentName(seq));
         this.fh = await fsp.open(file, 'a');
-        if (this.fsync) await fsyncDir(this.dir);
+        if (this.fsync) await this.syncDir();
         this.seq = seq;
         this.segSize = 0;
-        this.segs.set(seq, { seq, file, games: new Set(), uncommitted: 0, active: true });
+        this.segs.set(seq, { seq, file, games: new Set(), pins: 0, active: true, bytes: 0 });
         if (prev) {
             prev.active = false;
-            this.gc([prev.seq]);
+            await this.gc([prev.seq]);
         }
+        this.enqueueStale();
+        this.updateGauges();
     }
 
     track(gameId, seg) {
         let g = this.games.get(gameId);
         if (!g) {
-            g = { segs: new Set(), committed: false, commitSeg: -1 };
+            g = { segs: new Set(), first: seg.seq, committed: false, commitSeg: -1 };
             this.games.set(gameId, g);
         }
         if (!g.segs.has(seg.seq)) {
             g.segs.add(seg.seq);
             seg.games.add(gameId);
-            if (!g.committed) seg.uncommitted++;
+            if (!g.committed && seg.seq >= g.first) seg.pins++;
         }
     }
 
-    // Returns the segments whose uncommitted count dropped.
+    // A snapshot of the game is durable in segment `seq`: the game no longer needs the segments
+    // before it. Returns the segments it released.
+    markSnapshot(gameId, seq) {
+        const g = this.games.get(gameId);
+        if (!g || g.committed || seq <= g.first) return NO_GAMES;
+        const released = [];
+        for (const s of g.segs) {
+            if (s >= g.first && s < seq) {
+                this.segs.get(s).pins--;
+                released.push(s);
+            }
+        }
+        g.first = seq;
+        return released;
+    }
+
+    // The game's 'committed' record is durable in segment `seq`. Returns the segments it mentions.
     markCommitted(gameId, seq) {
         const g = this.games.get(gameId);
-        if (!g) return [];
+        if (!g) return NO_GAMES;
         g.commitSeg = Math.max(g.commitSeg, seq);
-        if (g.committed) return [];
+        if (g.committed) return NO_GAMES;
         g.committed = true;
-        for (const s of g.segs) this.segs.get(s).uncommitted--;
+        for (const s of g.segs) if (s >= g.first) this.segs.get(s).pins--;
         return [...g.segs];
     }
 
+    // Queues for a snapshot the games not committed that still need a segment compactSegments or
+    // more behind the newest one (at open() and at every rotation; the segments are in ascending
+    // order, and only the old ones are visited).
+    enqueueStale() {
+        const limit = this.seq - this.compactSegments;
+        for (const seg of this.segs.values()) {
+            if (seg.seq > limit) break;
+            if (seg.pins === 0) continue;
+            for (const gameId of seg.games) {
+                const g = this.games.get(gameId);
+                if (g && !g.committed && g.first <= limit && !this.snapsPending.has(gameId)) this.compactQueue.add(gameId);
+            }
+        }
+    }
+
+    updateGauges() {
+        mSegments.set(this.segs.size);
+        mDiskBytes.set(this.diskBytes);
+    }
+
     deletable(seg) {
-        if (seg.active || seg.uncommitted > 0) return false;
+        if (seg.active || seg.pins > 0) return false;
         for (const gameId of seg.games) {
             const g = this.games.get(gameId);
             if (g && g.commitSeg === seg.seq && g.segs.size > 1) return false;
@@ -411,26 +574,66 @@ class Journal {
         return true;
     }
 
-    gc(candidates) {
-        const queue = [...candidates];
-        while (queue.length) {
-            const seg = this.segs.get(queue.pop());
-            if (!seg || !this.deletable(seg)) continue;
-            try {
-                fs.unlinkSync(seg.file);
-            } catch (e) {
-                if (e.code !== 'ENOENT') { this.log.warn('journal segment not deleted', { file: seg.file, err: e }); continue; }
-            }
-            mSegmentsDeleted.inc();
-            this.segs.delete(seg.seq);
-            for (const gameId of seg.games) {
-                const g = this.games.get(gameId);
-                if (!g) continue;
-                g.segs.delete(seg.seq);
-                if (g.segs.size === 0) this.games.delete(gameId);
-                else if (g.segs.size === 1 && g.segs.has(g.commitSeg)) queue.push(g.commitSeg);
-            }
+    // Whether the segment holds the 'committed' record of a game it mentions.
+    holdsCommit(seg) {
+        for (const gameId of seg.games) {
+            const g = this.games.get(gameId);
+            if (g && g.commitSeg === seg.seq) return true;
         }
+        return false;
+    }
+
+    // Deletes the candidate segments that no game needs any more, then the segments this makes
+    // deletable in turn (one holding a game's 'committed' record, once the game's other segments
+    // are gone). With fsync on, the segments holding a 'committed' record are deleted after the
+    // others, and only once every earlier deletion is durable (see the header of this file).
+    async gc(candidates) {
+        let queue = candidates;
+        while (queue.length) {
+            const next = [];
+            const held = new Set();
+            for (const s of queue) {
+                const seg = this.segs.get(s);
+                if (!seg || !this.deletable(seg)) continue;
+                if (this.fsync && this.holdsCommit(seg)) held.add(seg);
+                else this.remove(seg, next);
+            }
+            if (held.size) {
+                if (this.unlinks > this.syncedUnlinks) await this.syncDir();
+                // All of them deletable at the same moment: none waits for another's deletion.
+                const ready = [...held].filter((seg) => this.segs.get(seg.seq) === seg && this.deletable(seg));
+                for (const seg of ready) this.remove(seg, next);
+            }
+            queue = next;
+        }
+    }
+
+    // Unlinks one segment and forgets it; `next` receives the segments holding a 'committed'
+    // record that may be deletable now.
+    remove(seg, next) {
+        try {
+            fs.unlinkSync(seg.file);
+        } catch (e) {
+            if (e.code !== 'ENOENT') { this.log.warn('journal segment not deleted', { file: seg.file, err: e }); return; }
+        }
+        this.unlinks++;
+        mSegmentsDeleted.inc();
+        this.segs.delete(seg.seq);
+        this.diskBytes -= seg.bytes;
+        for (const gameId of seg.games) {
+            const g = this.games.get(gameId);
+            if (!g) continue;
+            g.segs.delete(seg.seq);
+            if (g.segs.size === 0) this.games.delete(gameId);
+            else if (g.segs.size === 1 && g.segs.has(g.commitSeg)) next.push(g.commitSeg);
+        }
+    }
+
+    // Directory fsync: the segments created and deleted so far are durable.
+    async syncDir() {
+        const n = this.unlinks;
+        await fsyncDir(this.dir);
+        if (n > this.syncedUnlinks) this.syncedUnlinks = n;
     }
 }
 
@@ -443,6 +646,8 @@ class Journal {
  * @param {number} [opts.flushMs=50]  JOURNAL_FLUSH_MS
  * @param {boolean} [opts.fsync=true]  JOURNAL_FSYNC
  * @param {number} [opts.segmentBytes]  rotation size (default 16 MB)
+ * @param {number} [opts.compactSegments=4]  JOURNAL_COMPACT_SEGMENTS
+ * @param {number} [opts.compactPerFlush=8]  snapshots per flushed batch at most
  * @param {object} [opts.log]
  * @returns {Promise<Journal>}
  */

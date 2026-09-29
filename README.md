@@ -225,6 +225,10 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
   applied migration was modified or is unknown to its version (a downgrade).
 - A crash loses at most the last journal flush (`JOURNAL_FLUSH_MS`, 50 ms) of moves in progress;
   finished games and rating changes are committed in database transactions.
+- The journal of each worker (`journal/shard-<n>/`) keeps about `JOURNAL_COMPACT_SEGMENTS + 1`
+  segments of 16 MB (80 MB by default), however long the games last: a game still running after
+  that many segments is rewritten as one snapshot record and its older segments are deleted. Plan
+  about 100 MB of disk per worker for it; `scacelith_journal_disk_bytes` shows the actual size.
 
 ## Moderation
 
