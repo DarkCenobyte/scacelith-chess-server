@@ -162,7 +162,8 @@ export async function startServer({ workers, reusePort = false, accounts = 0, en
     let exited = null;
     child.on('exit', (code, signal) => { exited = { code, signal }; });
 
-    const api = new ApiClient({ host: '127.0.0.1', port: apiPort, ca: tlsFiles.ca, timeoutMs: 2000 });
+    const plain = baseEnv.TLS_MODE === 'off';
+    const api = new ApiClient({ host: '127.0.0.1', port: apiPort, ca: tlsFiles.ca, insecure: plain, timeoutMs: 2000 });
     const deadline = Date.now() + 60000;
     let info = null;
     for (;;) {

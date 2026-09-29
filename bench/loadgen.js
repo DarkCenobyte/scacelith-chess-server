@@ -50,6 +50,7 @@ Load
   --hold-s S             connect: idle hold after the ramp                  [30]
   --ping-interval-ms N   client Ping (round trip) per connection, 0 = off   [10000]
   --tls-resume           resume TLS sessions (one ticket per process) instead of full handshakes
+  --plain                own server only: TLS_MODE=off + ALLOW_INSECURE_DEV (measures the cost of TLS)
 
 Games
   --via challenge|queue  direct challenges between paired accounts, or the matchmaking queue [challenge]
@@ -87,7 +88,7 @@ Output
 
 function parseArgs(argv) {
     const o = { serverEnv: [] };
-    const flags = new Set(['reuse-port', 'keep', 'json', 'tls-resume', 'help']);
+    const flags = new Set(['reuse-port', 'keep', 'json', 'tls-resume', 'plain', 'help']);
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         if (!a.startsWith('--')) throw new Error(`unexpected argument ${a}`);
@@ -120,6 +121,7 @@ function options(raw) {
         holdS: num(raw.holdS, 30),
         pingIntervalMs: num(raw.pingIntervalMs, 10000),
         tlsResume: !!raw.tlsResume,
+        plain: !!raw.plain,
         via: raw.via || 'challenge',
         tc: raw.tc || '3+2',
         rated: bool(raw.rated, true),
@@ -153,6 +155,7 @@ function options(raw) {
     if (!m) throw new Error('--tc M+I (e.g. 3+2)');
     o.tcSec = [Math.round(Number(m[1]) * 60), Number(m[2])];
     if (o.url && !o.tokens) throw new Error('--url needs --tokens (and usually --ca)');
+    if (o.url && o.plain) throw new Error('--plain only with the server started by the tool');
     o.clients = scenario === 'connect' ? o.conns : o.games * 2;
     if (o.jitter < 0 || o.jitter > 1) throw new Error('--jitter 0..1');
     return o;
@@ -205,12 +208,13 @@ async function main() {
             const workers = o.workers === 'auto' ? Math.max(cores, Math.ceil(o.clients / 15000)) : Number(o.workers);
             const env = {};
             if (o.scenario === 'burst') { env.WS_MSG_RATE = '1000'; env.WS_MSG_BURST = '2000'; }
+            if (o.plain) { env.TLS_MODE = 'off'; env.ALLOW_INSECURE_DEV = '1'; }
             for (const kv of o.serverEnv) { const i = kv.indexOf('='); env[kv.slice(0, i)] = kv.slice(i + 1); }
             say(`starting a server: ${workers} worker(s)${o.reusePort ? ', SO_REUSEPORT' : ''}, ${o.clients} bench accounts...`);
             srv = await startServer({ workers, reusePort: o.reusePort, accounts: o.clients, env, dataDir: o.dataDir, keep: o.keep, cpuProfDir: o.serverCpuProf, log: (s) => say(`  ${s}`) });
             cleanup.push(async () => { say('stopping the server...'); await srv.stop(); });
             target = { host: '127.0.0.1', port: srv.wsPort, path: '/ws', ca: srv.ca, servername: null, metrics: srv.metricsUrl, metricsToken: null, users: srv.users };
-            report.server = { mode: 'local', workers, reusePort: o.reusePort, dataDir: o.dataDir || '(temporary)', env: srv.env, info: pickInfo(srv.info), processes: srv.processes() };
+            report.server = { mode: 'local', workers, reusePort: o.reusePort, tls: !o.plain, dataDir: o.dataDir || '(temporary)', env: srv.env, info: pickInfo(srv.info), processes: srv.processes() };
         } else {
             const u = new URL(o.url);
             if (u.protocol !== 'wss:') throw new Error('--url must be wss://host:port/ws');
@@ -293,7 +297,7 @@ async function main() {
                 cfg: {
                     proc: pr.p, scenario: o.scenario, host: target.host, port: target.port, path: target.path,
                     hostHeader: `${target.servername || target.host}:${target.port}`, servername: target.servername, ca: target.ca,
-                    localAddress: ip, tlsResume: o.tlsResume,
+                    localAddress: ip, tlsResume: o.tlsResume, plain: o.plain,
                     rate: o.rate > 0 ? o.rate / procList.length : 0, inflight: o.inflight, connectTimeoutMs: o.connectTimeoutMs,
                     pingIntervalMs: o.pingIntervalMs, via: o.via, tc: o.tcSec, rated: o.rated,
                     moveIntervalMs: o.moveIntervalMs, jitter: o.jitter, maxPlies: o.maxPlies, betweenGamesMs: o.betweenGamesMs,
@@ -677,7 +681,7 @@ function printSummary(r) {
     L.push('');
     L.push(`==== ${r.params.scenario} summary ====`);
     L.push(`machine: ${r.machine.cores} x ${r.machine.cpuModel}, ${r.machine.memoryGB} GB, ${r.machine.node}, nofile ${r.machine.nofile ? `${r.machine.nofile.soft}/${r.machine.nofile.hard}` : '?'}`);
-    L.push(`server: ${r.server.mode}${r.server.workers ? `, ${r.server.workers} workers` : ''}${r.server.reusePort ? ', SO_REUSEPORT' : ''}; load: ${r.loadgen.procs} processes, ${r.loadgen.clients} clients${r.server.sameMachine ? ' (same machine)' : ''}`);
+    L.push(`server: ${r.server.mode}${r.server.workers ? `, ${r.server.workers} workers` : ''}${r.server.reusePort ? ', SO_REUSEPORT' : ''}${r.server.tls === false ? ', TLS off (--plain)' : ''}; load: ${r.loadgen.procs} processes, ${r.loadgen.clients} clients${r.server.sameMachine ? ' (same machine)' : ''}`);
     const ramp = r.phases.ramp;
     if (ramp) {
         L.push(`connections: ${ramp.connectionsOk} ok, ${ramp.connectionsFailed} failed, ${ramp.connectionsPerSec}/s over ${ramp.rampSeconds} s`);

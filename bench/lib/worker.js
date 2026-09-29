@@ -15,6 +15,7 @@
 // Commands from the coordinator (process.send): init, connect, games, stop, close, exit.
 
 import crypto from 'node:crypto';
+import net from 'node:net';
 import tls from 'node:tls';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { Position } from '../../src/chess/index.js';
@@ -212,14 +213,23 @@ function connect(c) {
     c.t0 = now();
     c.rbuf = null;
     cnt.connStarted++;
-    const o = { host: cfg.host, port: cfg.port, secureContext, servername: cfg.servername || undefined };
-    if (cfg.localAddress) o.localAddress = cfg.localAddress;
-    if (cfg.tlsResume && tlsSession) o.session = tlsSession;
-    const s = tls.connect(o);
+    let s;
+    if (cfg.plain) {
+        // --plain: TLS_MODE=off server (TLS cost left out of the measure).
+        const o = { host: cfg.host, port: cfg.port, noDelay: true };
+        if (cfg.localAddress) o.localAddress = cfg.localAddress;
+        s = net.connect(o);
+        s.on('connect', onSecure);
+    } else {
+        const o = { host: cfg.host, port: cfg.port, secureContext, servername: cfg.servername || undefined };
+        if (cfg.localAddress) o.localAddress = cfg.localAddress;
+        if (cfg.tlsResume && tlsSession) o.session = tlsSession;
+        s = tls.connect(o);
+        s.on('secureConnect', onSecure);
+    }
     s._c = c;
     c.sock = s;
     s.setNoDelay(true);
-    s.on('secureConnect', onSecure);
     s.on('data', onData);
     s.on('error', onError);
     s.on('close', onClose);
@@ -231,7 +241,7 @@ function onSecure() {
     const c = this._c;
     if (c.state !== S_CONNECTING) return;
     c.state = S_UPGRADING;
-    if (cfg.tlsResume && this.isSessionReused()) cnt.tlsResumed++;
+    if (cfg.tlsResume && !cfg.plain && this.isSessionReused()) cnt.tlsResumed++;
     this.write(upgradeReq);
 }
 function onData(chunk) {
