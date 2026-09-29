@@ -33,8 +33,10 @@ detail, posMatched })`. Severities (DESIGN 6.5):
 
 Storage: certain anomalies are written at once; the others are buffered and written in one
 `insertBatch` per second, repeats of the same kind in the same game coalesced into one row with
-`count` and `lastAt` (a flooding client cannot flood the database). The buffer is bounded (5000
-rows; info rows are dropped first) and losses are counted in
+`count` and `lastAt` (a flooding client cannot flood the database). When the buffer holds a
+suspicious anomaly, a shard also writes it right before it commits finished games, so that the
+analysis queue policy of the commit sees it. The buffer is bounded (5000 rows; info rows are
+dropped first) and losses are counted in
 `scacelith_anticheat_anomalies_dropped_total`. Metrics: `scacelith_anticheat_anomalies_total{kind,severity}`.
 Suspicious and certain anomalies are logged with `log.security('anomaly', ...)`.
 

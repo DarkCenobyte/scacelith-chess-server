@@ -15,13 +15,26 @@
 //   written (and fsynced) every record appended before it was chosen, their `ended` records
 //   included (journal.hasUnwritten(), then journal.flush()): a crash can then never find a game
 //   in the database whose journal says it is still running. When a journal write failed since
-//   the last commit or fails meanwhile (journal.failedWrites), the games waiting for their commit
-//   are journaled again as snapshots (the failed write may have held their `ended` records), and
-//   in the second case the commit is retried later. Right before finishBatch, the anti-cheat's buffered anomalies are
-//   written (anticheat.flush() when anticheat.pendingCount > 0), so that the analysis queue
-//   policy of the commit sees those of the game's last second. After the commit: RatingUpdate to
-//   both endpoints still attached, journal.committed(id), primary 'game.ended'. A finished room
-//   stays in memory until it is committed and its rematch window is closed.
+//   the last commit or fails meanwhile (journal.failedWrites), every game waiting for its commit
+//   is marked (the failed write may have held its `ended` record) and journaled again as a
+//   snapshot right before its own commit (_journalAgain: the batch's games only, which bounds the
+//   synchronous work), and in the second case the commit is retried later. At the
+//   JOURNAL_GATE_TRIES-th failed flush in a row (about 0.3 s after the first one with the default
+//   DB_COMMIT_MS), or at the first one during shutdown(), the journal is considered down: the
+//   batch is committed without waiting for it (error logged once per episode,
+//   scacelith_game_commit_unjournaled_total), its snapshots and `committed` records still
+//   appended, and each such commit starts one flush that ends the episode when it writes without
+//   a failure. The database is then the only durable copy of the result (finishBatch ignores a
+//   game id it already has, so a replay cannot apply it twice); what is left is the risk that
+//   waiting for the journal avoids: after a crash or a restart before the journal has written
+//   the game's snapshot or `committed` record, a game whose `ended` record was lost comes back
+//   running (and its new result is ignored by the database).
+//   Right before finishBatch, the anti-cheat's buffered anomalies are written when one of them is
+//   not info (anticheat.flush() when anticheat.pendingSignalCount > 0), so that the analysis
+//   queue policy of the commit sees those of the game's last second; that is a synchronous
+//   write on the main thread's SQLite connection (bounded by busy_timeout). After the commit:
+//   RatingUpdate to both endpoints still attached, journal.committed(id), primary 'game.ended'.
+//   A finished room stays in memory until it is committed and its rematch window is closed.
 // * recover() replays the journal at start-up: unfinished games are restored (both players
 //   disconnected with the recovery grace, RECOVERY_GRACE_MS or the normal grace when longer; the
 //   clock of the side to move restarts when that player is back, RECOVERY_CLOCK_HOLD_MS later at
@@ -37,7 +50,8 @@
 //     no interval; tests drive runTimers(now) / pollCommits(now)), `commitBatchMax` (500).
 //   * `bus` is accepted and unused: endpoints already know how to reach remote connections.
 //   * recover() returns the count, or a Promise of it when journal.recover() is asynchronous.
-//   * shutdown() is async (it awaits the pending commits and journal.flush()).
+//   * shutdown() is async (it awaits the pending commits and journal.flush(); a batch whose
+//     journal flush fails is committed without it, and a failed final flush is logged, not thrown).
 //   * When finishBatch throws for one record (err.gameId set), the batch is committed one game at a
 //     time so that only the bad game stays pending (and in the journal).
 //   * extra methods: onRtt(gameId, userId, rttMs), forfeitUser(userId) (the active game of a
@@ -56,8 +70,10 @@
 //     (room.journalSnapshot) of each game the journal asks for (journal.compactionCandidates():
 //     at most SNAPSHOTS_PER_TICK per call and 8 per flushed batch, about 0.3 ms each for the
 //     longest game) that is hosted here and not committed yet. It runs between two outcomes, so
-//     the snapshot includes every record already appended for the game. A journal without
-//     compactionCandidates (the in-memory test journal) is never compacted.
+//     the snapshot includes every record already appended for the game. The journal asks first
+//     for the games whose records a failed write lost, running or waiting for their commit: the
+//     snapshot supersedes the lost records, so a restart does not replay them from a gap. A
+//     journal without compactionCandidates (the in-memory test journal) is never compacted.
 //
 // Payloads this module produces or expects:
 //   createGame(spec): { white, black: { userId, name, rating, provisional }, baseMs, incMs (ms),
@@ -86,6 +102,8 @@ const { ErrorCode: EC, EndReason: ER, GameStatus: GS } = enums;
 const NONE = 2;
 const SLOT_MS = 10;
 const MAX_BACKOFF_MS = 10000;
+/** Journal flushes failed in a row before commits stop waiting for the journal (see _commit). */
+export const JOURNAL_GATE_TRIES = 3;
 /** Journal snapshots built per 10 ms interval at most (compaction stays off the move path). */
 const SNAPSHOTS_PER_TICK = 2;
 
@@ -99,6 +117,7 @@ class RoomEntry {
         this.committed = false;
         this.removed = false;
         this.queued = false;
+        this.rejournal = false;          // a failed journal write may have lost its `ended` record
         // Timer wheel links.
         this._twPrev = null; this._twNext = null; this._twSlot = -1; this._twDeadline = Infinity;
     }
@@ -124,7 +143,7 @@ export class GameHost {
      * @param {object} [opts.store] Store (store.games.finishBatch)
      * @param {object} [opts.journal] Journal (append, committed, recover, flush; hasUnwritten()
      *   and failedWrites when its writes are asynchronous)
-     * @param {object} [opts.anticheat] { recordAnomaly, sanctionCertain, flush?, pendingCount? }
+     * @param {object} [opts.anticheat] { recordAnomaly, sanctionCertain, flush?, pendingSignalCount? }
      * @param {object} [opts.bus] unused
      * @param {object} [opts.primary] { request(type, payload) -> Promise }
      * @param {object} [opts.log]
@@ -142,6 +161,9 @@ export class GameHost {
         this.store = store;
         this.journal = journal;
         this.journalFailures = journal && typeof journal.failedWrites === 'number' ? journal.failedWrites : 0;   // see _journalAgain
+        this.gateFailures = 0;           // journal flushes failed in a row before a commit (see _commit)
+        this.unjournaled = false;        // an episode of commits made without waiting for the journal
+        this.journalProbe = null;        // the flush that may end that episode
         this.anticheat = anticheat;
         this.bus = bus;
         this.primary = primary;
@@ -175,6 +197,8 @@ export class GameHost {
             batch: m.histogram('scacelith_game_commit_batch_size', 'Finished games per database commit', [1, 2, 5, 10, 25, 50, 100, 250, 500]),
             commitMs: m.histogram('scacelith_game_commit_latency_ms', 'Database commit latency of finished games', [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 5000]),
             commitErrors: m.counter('scacelith_game_commit_errors_total', 'Failed commits of finished games (retried)'),
+            unjournaled: m.counter('scacelith_game_commit_unjournaled_total',
+                'Finished games committed to the database without waiting for the journal, whose writes kept failing'),
         };
         this._rejectChildren = new Map();
         this._endedChildren = new Map();
@@ -455,17 +479,32 @@ export class GameHost {
         return count;
     }
 
-    /** Stops the timers, commits what is pending (a few attempts) and flushes the journal. */
+    /**
+     * Stops the timers, commits what is pending (a few attempts) and flushes the journal. Once
+     * closed, a batch whose journal flush fails is committed without waiting for the journal
+     * (_commit): the database is then the only durable copy of those results. A failed final
+     * flush is logged, not thrown, so the caller's stop goes on.
+     */
     async shutdown() {
         if (this.interval) { clearInterval(this.interval); this.interval = null; }
         this.closed = true;
         for (let i = 0; i < 5 && (this.pending.size || this.commitInFlight); i++) {
-            if (this.commitInFlight) { await this.commitInFlight; continue; }
-            const r = this._commit(this.now());
-            const ok = r && typeof r.then === 'function' ? await r : r;
-            if (!ok) break;                             // the journal keeps them for the next start
+            let ok;
+            try {
+                if (this.commitInFlight) { await this.commitInFlight; continue; }
+                const r = this._commit(this.now());
+                ok = r && typeof r.then === 'function' ? await r : r;
+            } catch (err) {
+                this.log.error('commit of finished games failed at shutdown', { err, games: this.pending.size });
+                ok = false;
+            }
+            if (!ok) break;                             // the database refused them: the journal keeps them for the next start
         }
-        if (this.journal && typeof this.journal.flush === 'function') await this.journal.flush();
+        if (this.journal && typeof this.journal.flush === 'function') {
+            try { await this.journal.flush(); } catch (err) {
+                this.log.error('journal flush failed at shutdown', { err, pendingCommits: this.pending.size });
+            }
+        }
     }
 
     // ---- internals -----------------------------------------------------------------------------
@@ -647,14 +686,20 @@ export class GameHost {
         if (!batch.length) return true;
         // The database must not have a game before its `ended` record is in the journal (and
         // fsynced): a crash in between would bring the committed game back as a live one. When a
-        // journal write failed since the last commit, it may have lost such records: the games
-        // waiting for their commit are journaled again (one snapshot each). When the journal
-        // still holds records not written yet (or being written), the batch, chosen now, is
-        // committed once they are; when a write fails meanwhile, the games are journaled again and
-        // the commit is retried after the backoff.
+        // journal write failed since the last commit, it may have lost such records: the batch's
+        // games are journaled again (one snapshot each; _journalAgain). When the journal still
+        // holds records not written yet (or being written), the batch, chosen now, is committed
+        // once they are; when a write fails meanwhile, the batch is journaled again and the commit
+        // is retried after the backoff. After JOURNAL_GATE_TRIES such failures in a row, or once
+        // shut down, the journal is considered down and the batch is committed without it
+        // (_commitUnjournaled); that lasts until a journal flush writes without a failure.
         const j = this.journal;
         if (j && typeof j.hasUnwritten === 'function') {
-            this._journalAgain(t, false);
+            if (this.gateFailures >= JOURNAL_GATE_TRIES) {
+                if (j.hasUnwritten() || j.failedWrites !== this.journalFailures) return this._commitUnjournaled(batch, t);
+                this._journalWorks();              // everything appended so far is written, without a failure
+            }
+            this._journalAgain(t, batch, false);
             if (j.hasUnwritten()) {
                 const failures = j.failedWrites;
                 let flushed;
@@ -665,11 +710,15 @@ export class GameHost {
                 ).then((err) => {
                     this.commitInFlight = null;
                     const now = this.now();
-                    if (!err) {
-                        try { return this._commitBatch(batch, now); } catch (e) { err = e; }
-                    } else {
-                        this._journalAgain(now, true);
-                    }
+                    try {
+                        if (!err) {
+                            this._journalWorks();
+                            return this._commitBatch(batch, now);
+                        }
+                        this.gateFailures++;
+                        if (this.closed || this.gateFailures >= JOURNAL_GATE_TRIES) return this._commitUnjournaled(batch, now, err);
+                        this._journalAgain(now, batch, true);
+                    } catch (e) { err = e; }
                     this._commitFailed(err, batch.length, now);
                     return false;
                 });
@@ -679,14 +728,20 @@ export class GameHost {
         return this._commitBatch(batch, t);
     }
 
-    // A snapshot record of each game waiting for its commit, whose `ended` record may have been
-    // lost with a failed journal write: when journal.failedWrites changed since the last call, or
-    // when `force`.
-    _journalAgain(t, force) {
+    // Journals again, as one snapshot record each, the games of `batch` whose `ended` record may
+    // have been lost with a failed journal write (all of them when `all`). A failure seen for the
+    // first time (journal.failedWrites changed since the last call) marks every game waiting for
+    // its commit: those not in this batch are journaled again before their own commit, so the
+    // synchronous work of one call is bounded by the batch.
+    _journalAgain(t, batch, all) {
         const f = this.journal.failedWrites;
-        if (!force && (typeof f !== 'number' || f === this.journalFailures)) return;
-        if (typeof f === 'number') this.journalFailures = f;
-        for (const entry of this.pending.values()) {
+        if (typeof f === 'number' && f !== this.journalFailures) {
+            this.journalFailures = f;
+            for (const entry of this.pending.values()) entry.rejournal = true;
+        }
+        for (const entry of batch) {
+            if (!entry.rejournal && !all) continue;
+            entry.rejournal = false;
             let rec;
             try { rec = entry.room.journalSnapshot(t); } catch (err) {
                 this.log.error('journal snapshot failed', { err, gameId: entry.room.id });
@@ -696,46 +751,91 @@ export class GameHost {
         }
     }
 
-    _commitBatch(batch, t) {
+    // The journal's writes keep failing (or the host is shutting down): the batch is committed
+    // without waiting for them, since the database is then the only durable copy of the results
+    // left. Its snapshots are still appended (with the `committed` records that follow, they
+    // reach the disk if the journal comes back), and one flush at a time tells when it does.
+    _commitUnjournaled(batch, t, err = null) {
+        this._journalAgain(t, batch, true);
+        if (!this.unjournaled) {
+            this.unjournaled = true;
+            this.log.error('journal writes keep failing: finished games are committed without waiting for the journal', {
+                err, failedWrites: this.journal.failedWrites, games: batch.length, pending: this.pending.size,
+            });
+        }
+        const r = this._commitBatch(batch, t, true);
+        this._probeJournal();
+        return r;
+    }
+
+    // One journal flush at a time while commits do not wait for the journal: the first one that
+    // writes without a failure ends that episode.
+    _probeJournal() {
+        const j = this.journal;
+        if (this.journalProbe || this.closed || typeof j.flush !== 'function') return;
+        const failures = j.failedWrites;
+        let p;
+        try { p = Promise.resolve(j.flush()); } catch (err) { p = Promise.reject(err); }
+        this.journalProbe = p.then(() => j.failedWrites === failures, () => false).then((ok) => {
+            this.journalProbe = null;
+            if (ok && this.gateFailures >= JOURNAL_GATE_TRIES) this._journalWorks();
+        });
+    }
+
+    // A journal flush wrote without a failure: commits wait for the journal again.
+    _journalWorks() {
+        this.gateFailures = 0;
+        if (this.unjournaled) {
+            this.unjournaled = false;
+            this.log.info('journal writes succeed again: finished games wait for the journal before their commit', {
+                failedWrites: this.journal.failedWrites,
+            });
+        }
+    }
+
+    _commitBatch(batch, t, unjournaled = false) {
         const records = batch.map((e) => e.room.record());
         const t0 = performance.now();
         if (!this.store || !this.store.games || typeof this.store.games.finishBatch !== 'function') {
-            this._commitDone(batch, null, t0, t);
+            this._commitDone(batch, null, t0, t, unjournaled);
             return true;
         }
-        // The anomalies still buffered by the anti-cheat (up to a second old) are written first:
-        // the commit's analysis queue policy looks for the game's suspicious anomalies.
+        // The anomalies still buffered by the anti-cheat (up to a second old) are written first
+        // when one of them is not info: the commit's analysis queue policy looks for the game's
+        // suspicious anomalies. This is a synchronous write on the main thread's connection
+        // (bounded by busy_timeout); info anomalies wait for the anti-cheat's own timer.
         const ac = this.anticheat;
-        if (ac && typeof ac.flush === 'function' && ac.pendingCount > 0) {
+        if (ac && typeof ac.flush === 'function' && ac.pendingSignalCount > 0) {
             try { ac.flush(); } catch (err) { this.log.warn('anticheat flush failed', { err }); }
         }
         let res;
         try { res = this.store.games.finishBatch(records); } catch (err) {
             // The store rolls back the whole batch on one bad record (invalid_record, foreign_key):
             // commit the games one by one so that only the bad one stays pending.
-            if (batch.length > 1 && err && err.gameId !== undefined) return this._commitEach(batch, records, t);
+            if (batch.length > 1 && err && err.gameId !== undefined) return this._commitEach(batch, records, t, unjournaled);
             this._commitFailed(err, batch.length, t);
             return false;
         }
         if (res && typeof res.then === 'function') {
             this.commitInFlight = res.then(
-                (r) => { this.commitInFlight = null; this._commitDone(batch, r, t0, this.now()); return true; },
+                (r) => { this.commitInFlight = null; this._commitDone(batch, r, t0, this.now(), unjournaled); return true; },
                 (err) => {
                     this.commitInFlight = null;
                     // Same fallback as the synchronous path: one bad record must not hold the others.
-                    if (batch.length > 1 && err && err.gameId !== undefined) return (this.commitInFlight = this._commitEachAsync(batch, records));
+                    if (batch.length > 1 && err && err.gameId !== undefined) return (this.commitInFlight = this._commitEachAsync(batch, records, unjournaled));
                     this._commitFailed(err, batch.length, this.now());
                     return false;
                 });
             return this.commitInFlight;
         }
-        this._commitDone(batch, res, t0, t);
+        this._commitDone(batch, res, t0, t, unjournaled);
         return true;
     }
 
-    _commitDone(batch, results, t0, t) {
+    _commitDone(batch, results, t0, t, unjournaled = false) {
         this.m.commitMs.observe(performance.now() - t0);
         this.m.batch.observe(batch.length);
+        if (unjournaled) this.m.unjournaled.inc(batch.length);
         const byId = new Map();
         if (Array.isArray(results)) for (const r of results) if (r) byId.set(r.gameId, r);
         for (const entry of batch) {
@@ -743,6 +843,7 @@ export class GameHost {
             this.pending.delete(room.id);
             entry.queued = false;
             entry.committed = true;
+            entry.rejournal = false;
             this.counts.committed++;
             const r = byId.get(room.id);
             if (r && r.ratings && r.ratings.white && r.ratings.black) {
@@ -769,26 +870,26 @@ export class GameHost {
         this.nextCommitAt = this.pending.size ? t : Infinity;
     }
 
-    _commitEach(batch, records, t) {
+    _commitEach(batch, records, t, unjournaled = false) {
         let failed = null;
         for (let i = 0; i < batch.length; i++) {
             const t0 = performance.now();
             let res;
             try { res = this.store.games.finishBatch([records[i]]); } catch (err) { failed = err; continue; }
             if (res && typeof res.then === 'function') { failed = new Error('asynchronous store in _commitEach'); continue; }
-            this._commitDone([batch[i]], res, t0, t);
+            this._commitDone([batch[i]], res, t0, t, unjournaled);
         }
         if (failed) { this._commitFailed(failed, this.pending.size, t); return false; }
         return true;
     }
 
-    async _commitEachAsync(batch, records) {
+    async _commitEachAsync(batch, records, unjournaled = false) {
         let failed = null;
         for (let i = 0; i < batch.length; i++) {
             const t0 = performance.now();
             let res;
             try { res = await this.store.games.finishBatch([records[i]]); } catch (err) { failed = err; continue; }
-            this._commitDone([batch[i]], res, t0, this.now());
+            this._commitDone([batch[i]], res, t0, this.now(), unjournaled);
         }
         this.commitInFlight = null;
         if (failed) { this._commitFailed(failed, this.pending.size, this.now()); return false; }

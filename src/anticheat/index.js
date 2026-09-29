@@ -5,6 +5,7 @@
 //   ac.recordAnomaly({ userId, gameId, kind, detail, posMatched }) -> { severity, certain }
 //   ac.sanctionCertain({ userId, gameId, kind }) -> { banUntil }
 //   ac.classify(kind, ctx) -> { severity, certain }
+//   ac.flush() -> rows written ; ac.pendingCount / ac.pendingSignalCount (buffered rows / of them not info)
 //   startAnalysisProcess(config) -> handle { enabled, pid, restarts, stop() }   (primary only)
 //
 // Deviations from / precisions on docs/DESIGN.md (the contracts left these open):
@@ -96,6 +97,7 @@ const MAX_EVIDENCE_ITEMS = 50;
 export function createAnticheat({ config, store, primary = null, log = null, now = Date.now, flushMs = 1000 }) {
     const lg = log || rootLogger.child('anticheat');
     const pending = new Map();      // userId|gameId|kind -> row (repeats coalesced)
+    let pendingSignal = 0;          // buffered rows that are not info (suspicious)
     let flushTimer = null;
     const sanctioned = new Map();   // userId|gameId -> ban end (idempotency within a game)
 
@@ -121,6 +123,7 @@ export function createAnticheat({ config, store, primary = null, log = null, now
             rows.push({ userId: r.userId, gameId: r.gameId, kind: r.kind, severity: r.severity, detail, at: r.at });
         }
         pending.clear();
+        pendingSignal = 0;
         try {
             insertRows(rows);
             return rows.length;
@@ -163,7 +166,10 @@ export function createAnticheat({ config, store, primary = null, log = null, now
         if (prev) { prev.count++; prev.lastAt = at; }
         else if (pending.size >= MAX_PENDING && c.severity === 'info') anomalyDropped.inc();
         else if (pending.size >= 2 * MAX_PENDING) anomalyDropped.inc();
-        else pending.set(key, { ...row, count: 1, lastAt: at });
+        else {
+            pending.set(key, { ...row, count: 1, lastAt: at });
+            if (c.severity !== 'info') pendingSignal++;
+        }
         scheduleFlush();
         return { severity: c.severity, certain: false };
     }
@@ -241,6 +247,8 @@ export function createAnticheat({ config, store, primary = null, log = null, now
         flush,
         close,
         get pendingCount() { return pending.size; },
+        /** Buffered rows that are not info: the host writes them before a commit (analysis queue policy). */
+        get pendingSignalCount() { return pendingSignal; },
         startAnalysisProcess: (cfg = config, opts = {}) => startAnalysisProcess(cfg, { log: lg, ...opts }),
     };
 }

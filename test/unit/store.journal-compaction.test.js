@@ -349,6 +349,109 @@ test('compaction candidates: a few per batch, never a committed game or one with
     fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('the games of a failed write are snapshotted first: whatever their age, not tracked yet included, never a committed one, a few per batch', async () => {
+    const dir = tmpDir();
+    const open = () => openJournal({ dir, log: quiet, flushMs: 1000, fsync: false, compactSegments: 4, compactPerFlush: 2 });
+    const j = await open();
+    j.append(Created, 1, 'c1', 1);
+    j.append(Created, 5, 'c5', 1);
+    j.append(Ended, 5, '', 2);
+    j.committed(5);
+    j.append(Created, 6, 'c6', 2);
+    await j.flush();                                   // 1: game 5 committed
+    // The failing batch: moves of games 1 and 6 (young: nothing to compact), the created records
+    // of games 2 and 3 (not tracked yet), game 4 committed in the same batch, a late record of
+    // the committed game 5.
+    j.append(Move, 1, 'm1', 3);
+    j.append(Move, 6, 'm6', 3);
+    j.append(Created, 2, 'c2', 3);
+    j.append(Created, 3, 'c3', 3);
+    j.append(Created, 4, 'c4', 3);
+    j.append(Ended, 4, '', 4);
+    j.committed(4);
+    j.append(Move, 5, 'late', 4);
+    j.writeBatch = async () => { delete j.writeBatch; throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }); };
+    await assert.rejects(j.flush(), /EIO/);
+    assert.equal(j.stats().healQueue, 4, 'games 1, 6, 2 and 3; not 4, whose committed record is appended again, nor the committed game 5');
+    // Game 6 ends and is committed meanwhile.
+    j.append(Ended, 6, '', 5);
+    j.committed(6);
+    await j.flush();                                   // 2 (a new segment after the failure)
+    assert.deepEqual([...j.compactionCandidates(1)], [1], 'at most `max` per call, first the lost records');
+    j.append(Snapshot, 1, 'snap1', 5);
+    assert.deepEqual([...j.compactionCandidates()], [2], 'at most compactPerFlush per batch; never a committed game; game 2 is not tracked');
+    j.append(Snapshot, 2, 'snap2', 5);
+    assert.deepEqual(j.compactionCandidates(), [], 'the batch already holds 2 snapshots');
+    await j.flush();                                   // 3
+    assert.deepEqual([...j.compactionCandidates()], [3]);
+    j.append(Snapshot, 3, 'snap3', 6);
+    await j.flush();
+    assert.deepEqual([j.stats().healQueue, j.compactionCandidates()], [0, []]);
+    await j.close();
+    // A restart replays each of them from its snapshot, and not the committed ones.
+    const c = await open();
+    const rec = c.recover();
+    assert.deepEqual([...rec.keys()].sort(byNum), [1, 2, 3]);
+    for (const g of [1, 2, 3]) assert.deepEqual(rec.get(g).map((r) => [r.kind, r.payload.toString()]), [[Snapshot, `snap${g}`]]);
+    await c.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('GameHost: a failed write lost records of running games; they are snapshotted first, and a restart restores them at their latest ply', async () => {
+    const dir = tmpDir();
+    const open = () => openJournal({ dir, log: quiet, flushMs: 1000, fsync: false });
+    let t = T0;
+    const mk = (journal, primary) => new GameHost({
+        shard: 0, config: CFG, store: new FakeStore(), journal, anticheat: new FakeAnticheat(), primary, log: silentLog,
+        createChessGame: () => new FakeChessGame(), now: () => t, metrics: new Registry(), autoStart: false,
+    });
+    const j = await open();
+    const host = mk(j, new FakePrimary());
+    const move = (id) => {
+        const room = host.room(id);
+        t += 1000;
+        host.onClientMessage(id, room.playerOf(room.ply & 1).userId, {
+            type: MSG.Move, seq: 1, game: id, ply: room.ply, move: fakeMove(room.ply), posHash: room.game.position.digest(), thinkMs: 0, drawOffer: false,
+        }, null);
+    };
+    const spec = (w) => ({ white: player(w), black: player(w + 1), rated: true, baseMs: 180000, incMs: 2000 });
+    const a = host.createGame(spec(1));
+    for (let i = 0; i < 4; i++) move(a);
+    await j.flush();
+    // The next write fails: it holds a move of game a and the created record of game b.
+    move(a);
+    const b = host.createGame(spec(3));
+    j.writeBatch = async () => { delete j.writeBatch; throw Object.assign(new Error('EIO: i/o error, write'), { code: 'EIO' }); };
+    await assert.rejects(j.flush(), /EIO/);
+    for (let i = 0; i < 6; i++) { move(a); move(b); }
+    await j.flush();
+    // The host's interval: the journal asks for both games first, although they are young.
+    assert.equal(host.compactJournal(t), 2);
+    await j.flush();
+    assert.equal(j.stats().healQueue, 0);
+    const live = [a, b].map((id) => {
+        const room = host.room(id);
+        return { ply: room.ply, digest: room.game.position.digest(), moves: Array.from(room.moves.subarray(0, room.ply)) };
+    });
+    assert.deepEqual(live.map((x) => x.ply), [11, 6]);
+    await host.shutdown();
+    await j.close();
+    // The next start restores both at their latest ply (not ServerAborted at ply 4, nor dropped).
+    const j2 = await open();
+    const primary = new FakePrimary();
+    const h2 = mk(j2, primary);
+    assert.equal(await h2.recover(), 2);
+    for (const [i, id] of [a, b].entries()) {
+        const room = h2.room(id);
+        assert.equal(room.isOver, false);
+        assert.deepEqual({ ply: room.ply, digest: room.game.position.digest(), moves: Array.from(room.moves.subarray(0, room.ply)) }, live[i]);
+    }
+    assert.deepEqual(primary.of('game.recovered').map((p) => p.gameId).sort(byNum), [a, b].sort(byNum));
+    await h2.shutdown();
+    await j2.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('a failed write holding committed records appends them again: the games\' segments are still deleted', async () => {
     const dir = tmpDir();
     const open = (d = dir) => openJournal({ dir: d, log: quiet, flushMs: 1000, fsync: false, segmentBytes: 1, compactSegments: 2 });

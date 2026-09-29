@@ -426,7 +426,7 @@ test('asynchronous store (writer thread): one bad record does not block the batc
     assert.equal(host.stats().pendingCommits, 1);
 });
 
-test('the anti-cheat\'s buffered anomalies are written before the finished game goes to the database (end-of-game signal)', () => {
+test('the anti-cheat\'s buffered anomalies are written before the finished game goes to the database when one is not info (end-of-game signal)', () => {
     const order = [];
     const acStore = { anomalies: { insertBatch(rows) { for (const r of rows) order.push(`anomaly ${r.kind} ${r.gameId}`); } } };
     const anticheat = createAnticheat({ config: CFG, store: acStore, log: silentLog, flushMs: 60000 });
@@ -435,6 +435,15 @@ test('the anti-cheat\'s buffered anomalies are written before the finished game 
     store.games.finishBatch = (records) => { for (const r of records) order.push(`commit ${r.id}`); return finishBatch(records); };
     const { host, clock } = mkHost({ store, anticheat });
     try {
+        // Only an info anomaly buffered: the commit does not write it (the analysis queue policy
+        // reads only the others); it waits for the anti-cheat's own timer.
+        const id0 = newGame(host, 5, 6);
+        anticheat.recordAnomaly({ userId: 5, gameId: id0, kind: 'stale_ply' });
+        assert.deepEqual([anticheat.pendingCount, anticheat.pendingSignalCount], [1, 0]);
+        host.onClientMessage(id0, 5, { type: MSG.Abort, seq: 2, game: id0 }, null);
+        host.pollCommits(clock.t + 50);
+        assert.deepEqual(order, [`commit ${id0}`]);
+        assert.equal(anticheat.pendingCount, 1);
         const id = newGame(host);
         play(host, id, clock); play(host, id, clock);
         // White's last move claims more thinking time than it had (suspicious: buffered up to a
@@ -443,16 +452,16 @@ test('the anti-cheat\'s buffered anomalies are written before the finished game 
         const room = host.room(id);
         host.onClientMessage(id, 1, moveMsg(room, { thinkMs: 5000 }), null);
         assert.equal(room.ply, 3);
-        assert.equal(anticheat.pendingCount, 1);
+        assert.deepEqual([anticheat.pendingCount, anticheat.pendingSignalCount], [2, 1]);
         host.onClientMessage(id, 1, { type: MSG.Resign, seq: 2, game: id }, null);
         host.pollCommits(clock.t + 50);
-        assert.deepEqual(order, [`anomaly clock_implausible ${id}`, `commit ${id}`]);
-        assert.equal(anticheat.pendingCount, 0);
+        assert.deepEqual(order.slice(1), [`anomaly stale_ply ${id0}`, `anomaly clock_implausible ${id}`, `commit ${id}`]);
+        assert.deepEqual([anticheat.pendingCount, anticheat.pendingSignalCount], [0, 0]);
         // Nothing buffered: no extra write before the next commit.
         const id2 = newGame(host, 3, 4);
         host.onClientMessage(id2, 3, { type: MSG.Abort, seq: 2, game: id2 }, null);
         host.pollCommits(clock.t + 200);
-        assert.deepEqual(order.slice(2), [`commit ${id2}`]);
+        assert.deepEqual(order.slice(4), [`commit ${id2}`]);
     } finally {
         anticheat.close();
     }

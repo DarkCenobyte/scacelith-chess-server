@@ -347,6 +347,13 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
   segments of 16 MB (80 MB by default), however long the games last: a game still running after
   that many segments is rewritten as one snapshot record and its older segments are deleted. Plan
   about 100 MB of disk per worker for it; `scacelith_journal_disk_bytes` shows the actual size.
+- When the journal cannot be written (a full disk, a failing volume),
+  `scacelith_journal_errors_total` grows and the workers log `journal write failed`. Finished
+  games still reach the database, rating changes included, after three failed journal flushes in
+  a row (about 0.3 s): `scacelith_game_commit_unjournaled_total` counts them, with one error
+  logged per episode. Free the space or fix the volume before a restart: a finished game whose
+  end the journal lost would come back as a game in progress (the database keeps its first
+  result).
 
 ## Moderation
 

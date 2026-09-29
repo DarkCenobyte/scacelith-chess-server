@@ -51,10 +51,12 @@ test('non-certain anomalies are batched, coalesced, and flushed on the timer', a
     ac.recordAnomaly({ userId: 8, gameId: 11, kind: 'desync', posMatched: false });
     assert.equal(store._.anomalies.length, 0, 'nothing written before the flush');
     assert.equal(ac.pendingCount, 3);
+    assert.equal(ac.pendingSignalCount, 1, 'bad_seq; stale_ply and desync are info');
     assert.equal(counterValue('bad_seq', 'suspicious') - before, 3);
     await new Promise((r) => setTimeout(r, 80));
     const batches = store.calls.filter((c) => c.name === 'anomalies.insertBatch');
     assert.equal(batches.length, 1, 'one insertBatch per period');
+    assert.deepEqual([ac.pendingCount, ac.pendingSignalCount], [0, 0]);
     assert.equal(store._.anomalies.length, 3);
     const seq = store._.anomalies.find((a) => a.kind === 'bad_seq');
     assert.equal(seq.detail.count, 3);
