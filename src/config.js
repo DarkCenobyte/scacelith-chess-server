@@ -186,6 +186,10 @@ key('ANALYSIS_HASH_MB', { section: 'anticheat', type: 'int', default: 32, min: 1
 key('ANALYSIS_POSITION_TIMEOUT_MS', { section: 'anticheat', type: 'int', default: 120000, min: 1000,
     desc: 'Longest search of one position; an engine that exceeds it is restarted and the game is marked failed.' });
 key('ANALYSIS_POLL_MS', { section: 'anticheat', type: 'int', default: 5000, min: 100, desc: 'Interval at which an idle analysis engine looks for new games to analyse.' });
+key('ANALYSIS_QUEUE_MAX', { section: 'anticheat', type: 'int', default: 5000, min: 0,
+    desc: 'Most ordinary games waiting for engine analysis: while this many wait, a newly finished ordinary game is not queued (the engines could not catch up anyway). Games with a report, a suspicion signal or a moderator request are always queued and analysed first. 0 analyses only those.' });
+key('ANALYSIS_SAMPLE_RATE', { section: 'anticheat', type: 'number', default: 1, min: 0, max: 1,
+    desc: 'Share of the ordinary rated games queued for analysis (0 to 1, drawn at random when the game ends). Lower it when the engine cannot keep up with the games played.' });
 
 // ---- Observability -------------------------------------------------------------------------------------
 key('METRICS_PORT', { section: 'observability', type: 'port', default: 9464, desc: 'Prometheus metrics and health endpoint (plain HTTP; 0 disables it).' });
@@ -197,6 +201,8 @@ key('LOG_IP', { section: 'observability', type: 'enum', values: ['truncated', 'f
     desc: 'How client addresses appear in the logs: truncated (IPv4 /24, IPv6 /48), full, or hashed (keyed HMAC, rotated daily).' });
 key('RETENTION_SECURITY_DAYS', { section: 'observability', type: 'int', default: 90, min: 1, desc: 'Security events (failed logins, anomalies without sanction) are deleted after this many days.' });
 key('RETENTION_IP_DAYS', { section: 'observability', type: 'int', default: 30, min: 1, desc: 'Stored IP addresses (sessions, security events) are erased after this many days.' });
+key('RETENTION_INTERVAL_MS', { section: 'observability', type: 'int', default: 3600000, min: 60000,
+    desc: 'Interval of the retention purge run by the primary (expired sessions and tokens, old security events, anomalies, conduct events and failed analysis jobs, IP erasure). The first run starts about a minute after the server starts.' });
 
 // ---------------------------------------------------------------------------------------------------------
 
@@ -281,6 +287,13 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
                 const min = k.type === 'port' ? 0 : k.min, max = k.type === 'port' ? 65535 : k.max;
                 if (min !== undefined && v < min) errors.push(`${k.name}: at least ${min}.`);
                 if (max !== undefined && v > max) errors.push(`${k.name}: at most ${max}.`);
+                break;
+            }
+            case 'number': {
+                if (!/^-?(\d+\.?\d*|\.\d+)$/.test(String(raw).trim())) { errors.push(`${k.name}: number expected, got "${raw}".`); continue; }
+                v = Number(raw);
+                if (k.min !== undefined && v < k.min) errors.push(`${k.name}: at least ${k.min}.`);
+                if (k.max !== undefined && v > k.max) errors.push(`${k.name}: at most ${k.max}.`);
                 break;
             }
             case 'bool': {

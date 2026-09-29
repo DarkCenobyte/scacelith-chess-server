@@ -17,8 +17,9 @@
 //     ratings } with the stored before/after and the player's current game count. Ratings are
 //     applied only to rated games that were played out (status WhiteWins / BlackWins / Draw, not
 //     Aborted) in an official category (not 'custom'); only those are queued for analysis (when
-//     they have >= ANALYSIS_MIN_PLIES plies). An invalid record throws StoreError
-//     'invalid_record' (with .gameId) and the whole batch is rolled back.
+//     they have >= ANALYSIS_MIN_PLIES plies), under the queue policy below. An invalid record
+//     throws StoreError 'invalid_record' (with .gameId) and the whole batch is rolled back. The
+//     entry of a game left out of the queue carries analysisSkipped: 'sample' | 'backlog'.
 //   - users.anonymize(id, now?) -> { tokenHashes } (the revoked sessions, for the auth caches):
 //     username becomes 'deleted#<id>' (also in the game records), e-mail, password, MFA,
 //     sessions, tokens, SSO links, recovery codes, integrity record and stored IPs are erased;
@@ -40,6 +41,16 @@
 //   - analysis: a job is claimed at most 3 times (ANALYSIS_MAX_ATTEMPTS); a running job older than
 //     10 minutes is re-queued (or failed at the cap) by the next claim; fail() re-queues until the
 //     cap and returns the new status; extra enqueue(gameId, now) (manual re-analysis) and stats().
+//   - analysis queue policy (DESIGN.md 6.5): every job has a priority (AnalysisPriority: ordinary,
+//     signal, report, manual) and next() takes the highest first, then the oldest. At the end of
+//     a game, a suspicion signal (either player's integrity level above 'none', an open
+//     cheating/other report of weight >= 0.5 against either player in the last 30 days, a
+//     non-info anomaly recorded in this game) queues it as 'signal'. An ordinary game is drawn
+//     with ANALYSIS_SAMPLE_RATE and queued only while fewer than ANALYSIS_QUEUE_MAX ordinary jobs
+//     wait; otherwise it is not inserted at all. analysis.request(gameId, reason, now) queues an
+//     eligible game for a report (or raises the priority of its waiting job, or re-queues a failed
+//     one); enqueue() is a moderator request (priority 'manual'). analysis.backlog() counts the
+//     waiting jobs { ordinary, priority }.
 //   - integrity.populationStats(category, ratingBucket) or (prefix) -> { metric: { n, mean, m2,
 //     variance, stdev, updatedAt } }; integrity.updatePopulation(updates, now) with updates
 //     [{ key | category+ratingBucket+metric, value | values | {n, mean, m2} }] (or (key, value,
@@ -48,7 +59,12 @@
 //   - security.forUser(userId, limit); security.purge(now, cfg) deletes events older than
 //     RETENTION_SECURITY_DAYS and erases their IPs after RETENTION_IP_DAYS.
 //   - retention.run(now, cfg) also deletes revoked sessions after a day, info/suspicious anomalies
-//     after RETENTION_SECURITY_DAYS (as the config key describes) and conduct events after 30 days.
+//     after RETENTION_SECURITY_DAYS (as the config key describes), conduct events after 30 days
+//     and failed analysis jobs after 30 days (done jobs are kept: their features are the players'
+//     analysed history, read by the scoring and by bin/admin.js without a time limit).
+//     retention.runAsync(now, cfg, { sliceMs, signal, pause }) runs the same statements but
+//     returns to the event loop whenever a slice of sliceMs is used up (the primary runs it), and
+//     stops early when the AbortSignal fires or the store is closed.
 //   - store.transaction(fn): runs fn in one BEGIN IMMEDIATE transaction (nested calls use
 //     savepoints), for callers that need several store calls to be atomic.
 //   - JSON columns (tokens.data, anomaly/security detail, evidence, features) round-trip any JSON
@@ -60,6 +76,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { logger } from '../log.js';
 import { metrics } from '../metrics.js';
@@ -94,6 +111,11 @@ const ANALYSIS_MAX_ATTEMPTS = 3;
 const ANALYSIS_STALE_MS = 10 * 60000;
 const CONDUCT_EVENT_TTL_MS = 30 * DAY;
 const REVOKED_SESSION_TTL_MS = DAY;
+const ANALYSIS_FAILED_TTL_MS = 30 * DAY;
+const REPORT_SIGNAL_MS = 30 * DAY;
+// A report flags the reported player's next games only from a credible reporter: the stored weight
+// reaches REPORT_RULES.lowCredibility of anticheat/reports.js (sock puppets never flag anyone).
+const REPORT_SIGNAL_MIN_WEIGHT = 0.5;
 const INTEGRITY_LEVELS = ['none', 'suspected', 'high_confidence', 'confirmed'];
 const { GameStatus } = enums;
 
@@ -101,6 +123,11 @@ const mBatchMs = metrics.histogram('scacelith_store_commit_batch_ms', 'Duration 
     [1, 2, 5, 10, 25, 50, 100, 250, 1000]);
 const mGames = metrics.counter('scacelith_store_games_committed_total', 'Finished games written to the database');
 const mBusy = metrics.counter('scacelith_store_busy_total', 'Store operations that gave up waiting for the database lock');
+const mAnalysisSkipped = metrics.counter('scacelith_anticheat_analysis_skipped_total',
+    'Finished rated games not queued for engine analysis (sample: ANALYSIS_SAMPLE_RATE, backlog: ANALYSIS_QUEUE_MAX reached)', ['reason']);
+
+/** Priority of an analysis job: the highest waiting priority is analysed first (DESIGN.md 6.5). */
+export const AnalysisPriority = Object.freeze({ ordinary: 0, signal: 1, report: 2, manual: 3 });
 
 /** Error thrown by the store; `code` is a stable snake_case identifier. */
 export class StoreError extends Error {
@@ -222,10 +249,11 @@ function resolveDbFile(config, override) {
  *   commit rated games
  * @param {object} [opts.log]  logger (default: logger.child('store'))
  * @param {string} [opts.path]  database file overriding config.dbPath
+ * @param {() => number} [opts.random]  uniform [0, 1) draw of ANALYSIS_SAMPLE_RATE (tests)
  * @returns {object} Store (DESIGN.md 5.5)
  */
 export function openStore(config, opts = {}) {
-    const { readonly = false, applyGame = null, log = logger.child('store') } = opts;
+    const { readonly = false, applyGame = null, log = logger.child('store'), random = Math.random } = opts;
     const file = resolveDbFile(config, opts.path);
     if (file !== ':memory:' && !readonly) fs.mkdirSync(path.dirname(file), { recursive: true });
     const db = new DatabaseSync(file, { readOnly: readonly });
@@ -244,13 +272,15 @@ export function openStore(config, opts = {}) {
         db.close();
         throw mapSqliteError(e);
     }
-    return createStore(db, config, { readonly, applyGame, log, file });
+    return createStore(db, config, { readonly, applyGame, log, file, random });
 }
 
-function createStore(db, config, { readonly, applyGame, log, file }) {
+function createStore(db, config, { readonly, applyGame, log, file, random }) {
     const provisionalGames = config.provisionalGames ?? 30;
     const initialRating = config.initialRating ?? 1500;
     const analysisMinPlies = config.analysisMinPlies ?? 30;
+    const analysisQueueMax = config.analysisQueueMax ?? 5000;
+    const analysisSampleRate = config.analysisSampleRate ?? 1;
 
     // Statement cache: SQL text -> prepared statement.
     const cache = new Map();
@@ -626,7 +656,36 @@ function createStore(db, config, { readonly, applyGame, log, file }) {
         };
     }
 
-    function commitGame(r, now) {
+    // Analysis queue policy of a finished game (header, DESIGN.md 6.5): a suspicion signal queues
+    // it ahead of the ordinary games; an ordinary game is drawn with ANALYSIS_SAMPLE_RATE and
+    // queued only while fewer than ANALYSIS_QUEUE_MAX ordinary jobs wait. `batch.ordinary` caches
+    // that count for the rest of the transaction (the write lock is held, nobody else changes it).
+    // Returns why the game was left out ('sample' | 'backlog'), or null when it was queued.
+    function queueAnalysis(r, now, batch) {
+        const flagged = st(`SELECT EXISTS (SELECT 1 FROM player_integrity WHERE user_id IN (?1, ?2) AND level <> 'none')
+            OR EXISTS (SELECT 1 FROM reports WHERE reported_id IN (?1, ?2) AND created_at >= ?3 AND status = 'open'
+                AND category <> 'abuse' AND weight >= ?6)
+            OR EXISTS (SELECT 1 FROM anomalies WHERE user_id IN (?1, ?2) AND at >= ?4 AND game_id = ?5 AND severity <> 'info')
+            AS flagged`).get(r.whiteId, r.blackId, now - REPORT_SIGNAL_MS, ms(r.startedAt ?? r.endedAt ?? now), r.id,
+            REPORT_SIGNAL_MIN_WEIGHT).flagged;
+        const insert = (priority) => st('INSERT OR IGNORE INTO analysis_jobs (game_id, queued_at, priority) VALUES (?, ?, ?)')
+            .run(r.id, now, priority);
+        if (flagged) {
+            insert(AnalysisPriority.signal);
+            return null;
+        }
+        if (analysisSampleRate < 1 && !(random() < analysisSampleRate)) return 'sample';
+        if (batch.ordinary === null) {
+            batch.ordinary = st(`SELECT count(*) AS n FROM (SELECT 1 FROM analysis_jobs WHERE status = 'queued' AND priority = ?
+                LIMIT ?)`).get(AnalysisPriority.ordinary, analysisQueueMax).n;
+        }
+        if (batch.ordinary >= analysisQueueMax) return 'backlog';
+        insert(AnalysisPriority.ordinary);
+        batch.ordinary++;
+        return null;
+    }
+
+    function commitGame(r, now, batch) {
         checkRecord(r);
         const existing = st('SELECT white_id, black_id, category, white_before, white_after, black_before, black_after FROM games WHERE id = ?')
             .get(r.id);
@@ -665,10 +724,8 @@ function createStore(db, config, { readonly, applyGame, log, file }) {
                 changes ? changes.black.before : null, changes ? changes.black.after : null,
                 r.rematchOf ? r.rematchOf : null, r.flags ?? 0,
                 moves, packArray(r.spentMs, Uint32Array), packArray(r.clockMs, Uint32Array));
-        if (rate && plies >= analysisMinPlies) {
-            st('INSERT OR IGNORE INTO analysis_jobs (game_id, queued_at) VALUES (?, ?)').run(r.id, now);
-        }
-        return { gameId: r.id, ratings: changes };
+        const skipped = rate && plies >= analysisMinPlies ? queueAnalysis(r, now, batch) : null;
+        return skipped ? { gameId: r.id, ratings: changes, analysisSkipped: skipped } : { gameId: r.id, ratings: changes };
     }
 
     const games = {
@@ -680,9 +737,11 @@ function createStore(db, config, { readonly, applyGame, log, file }) {
             if (!Array.isArray(records) || records.length === 0) return [];
             const t0 = performance.now();
             const now = Date.now();
-            const out = tx(() => records.map((r) => commitGame(r, now)));
+            const batch = { ordinary: null };
+            const out = tx(() => records.map((r) => commitGame(r, now, batch)));
             mBatchMs.observe(performance.now() - t0);
             mGames.inc(out.reduce((n, x) => n + (x.duplicate ? 0 : 1), 0));
+            for (const x of out) if (x.analysisSkipped) mAnalysisSkipped.labels(x.analysisSkipped).inc();
             return out;
         },
         byId(id) {
@@ -788,6 +847,10 @@ function createStore(db, config, { readonly, applyGame, log, file }) {
         },
     };
 
+    const SECURITY_DELETE_SQL = `DELETE FROM security_events WHERE id IN (SELECT id FROM security_events WHERE at < ? LIMIT ${CHUNK})`;
+    const SECURITY_IP_SQL = `UPDATE security_events SET ip = NULL WHERE id IN (SELECT id FROM security_events
+        WHERE ip IS NOT NULL AND at < ? LIMIT ${CHUNK})`;
+
     const security = {
         insertBatch(list) {
             if (!list || !list.length) return 0;
@@ -803,20 +866,21 @@ function createStore(db, config, { readonly, applyGame, log, file }) {
         },
         /** Deletes events older than RETENTION_SECURITY_DAYS, erases IPs older than RETENTION_IP_DAYS. */
         purge(now = Date.now(), cfg = config) {
-            const deleted = chunked(`DELETE FROM security_events WHERE id IN (SELECT id FROM security_events WHERE at < ? LIMIT ${CHUNK})`,
-                ms(now) - cfg.retentionSecurityDays * DAY);
-            const ipErased = chunked(`UPDATE security_events SET ip = NULL WHERE id IN (SELECT id FROM security_events
-                WHERE ip IS NOT NULL AND at < ? LIMIT ${CHUNK})`, ms(now) - cfg.retentionIpDays * DAY);
+            const deleted = chunked(SECURITY_DELETE_SQL, ms(now) - cfg.retentionSecurityDays * DAY);
+            const ipErased = chunked(SECURITY_IP_SQL, ms(now) - cfg.retentionIpDays * DAY);
             return { deleted, ipErased };
         },
     };
 
     // ---- analysis queue ----------------------------------------------------------------------------
 
-    const toJob = (r) => ({ gameId: r.game_id, attempts: r.attempts, queuedAt: r.queued_at, startedAt: r.started_at, worker: r.worker });
+    const toJob = (r) => ({
+        gameId: r.game_id, priority: r.priority, attempts: r.attempts, queuedAt: r.queued_at, startedAt: r.started_at, worker: r.worker,
+    });
+    const { WhiteWins, BlackWins, Draw } = GameStatus;
 
     const analysis = {
-        /** Claims up to `limit` queued jobs atomically (oldest first) for `workerId`. */
+        /** Claims up to `limit` queued jobs atomically (highest priority, then oldest first) for `workerId`. */
         next(limit = 1, workerId = null, now = Date.now()) {
             const t = ms(now);
             return tx(() => {
@@ -824,10 +888,11 @@ function createStore(db, config, { readonly, applyGame, log, file }) {
                     error = 'stale: worker vanished', finished_at = CASE WHEN attempts >= ?1 THEN ?2 ELSE NULL END
                     WHERE status = 'running' AND started_at < ?3`).run(ANALYSIS_MAX_ATTEMPTS, t, t - ANALYSIS_STALE_MS);
                 return st(`UPDATE analysis_jobs SET status = 'running', worker = ?1, started_at = ?2, attempts = attempts + 1
-                    WHERE game_id IN (SELECT game_id FROM analysis_jobs WHERE status = 'queued' ORDER BY queued_at, game_id LIMIT ?3)
-                    RETURNING game_id, attempts, queued_at, started_at, worker`)
+                    WHERE game_id IN (SELECT game_id FROM analysis_jobs WHERE status = 'queued'
+                        ORDER BY priority DESC, queued_at, game_id LIMIT ?3)
+                    RETURNING game_id, priority, attempts, queued_at, started_at, worker`)
                     .all(workerId === null || workerId === undefined ? null : String(workerId), t, limit)
-                    .map(toJob).sort((a, b) => a.queuedAt - b.queuedAt || a.gameId - b.gameId);
+                    .map(toJob).sort((a, b) => b.priority - a.priority || a.queuedAt - b.queuedAt || a.gameId - b.gameId);
             });
         },
         complete(gameId, features, now = Date.now()) {
@@ -846,10 +911,37 @@ function createStore(db, config, { readonly, applyGame, log, file }) {
                 return status;
             });
         },
+        /** Moderator request: (re-)analyses any stored game, before every other job (priority 'manual'). */
         enqueue(gameId, now = Date.now()) {
-            guard(() => st(`INSERT INTO analysis_jobs (game_id, queued_at) VALUES (?, ?) ON CONFLICT (game_id) DO UPDATE SET
+            guard(() => st(`INSERT INTO analysis_jobs (game_id, queued_at, priority) VALUES (?, ?, ?) ON CONFLICT (game_id) DO UPDATE SET
                 status = 'queued', attempts = 0, worker = NULL, started_at = NULL, finished_at = NULL, error = NULL,
-                queued_at = excluded.queued_at`).run(gameId, ms(now)));
+                queued_at = excluded.queued_at, priority = excluded.priority`).run(gameId, ms(now), AnalysisPriority.manual));
+        },
+        /**
+         * Makes sure a game the automatic policy analyses (rated, official category, played out,
+         * >= ANALYSIS_MIN_PLIES plies) gets analysed with at least the priority of `reason`
+         * ('signal' | 'report' | 'manual'): queued when it has no job (left out by the policy),
+         * its priority raised while it waits, a failed job queued again. A running or done job is
+         * left alone. Returns true when a job was queued or changed.
+         */
+        request(gameId, reason = 'report', now = Date.now()) {
+            // 'ordinary' is refused: it would bypass ANALYSIS_QUEUE_MAX.
+            const priority = Object.hasOwn(AnalysisPriority, reason) ? AnalysisPriority[reason] : 0;
+            if (priority <= AnalysisPriority.ordinary) throw new StoreError('invalid', `analysis.request: unknown or ordinary priority ${reason}`);
+            return Number(guard(() => st(`INSERT INTO analysis_jobs (game_id, queued_at, priority)
+                SELECT id, ?2, ?3 FROM games WHERE id = ?1 AND rated = 1 AND category <> 'custom' AND status IN (?5, ?6, ?7)
+                    AND ply_count >= ?4
+                ON CONFLICT (game_id) DO UPDATE SET priority = max(priority, excluded.priority), status = 'queued',
+                    attempts = CASE WHEN status = 'failed' THEN 0 ELSE attempts END,
+                    error = CASE WHEN status = 'failed' THEN NULL ELSE error END, finished_at = NULL
+                WHERE status = 'failed' OR (status = 'queued' AND priority < excluded.priority)`)
+                .run(gameId, ms(now), priority, analysisMinPlies, WhiteWins, BlackWins, Draw)).changes) === 1;
+        },
+        /** Jobs waiting: { ordinary, priority } (priority: every job above 'ordinary'). */
+        backlog() {
+            const r = st(`SELECT (SELECT count(*) FROM analysis_jobs WHERE status = 'queued' AND priority = ?1) AS ordinary,
+                (SELECT count(*) FROM analysis_jobs WHERE status = 'queued' AND priority > ?1) AS priority`).get(AnalysisPriority.ordinary);
+            return { ordinary: r.ordinary, priority: r.priority };
         },
         forUser(userId, limit = 50) {
             return st(`SELECT a.game_id, a.status, a.attempts, a.finished_at, a.error, a.features, g.category, g.white_id, g.ended_at,
@@ -1005,27 +1097,71 @@ function createStore(db, config, { readonly, applyGame, log, file }) {
 
     // ---- retention ------------------------------------------------------------------------------------
 
+    // The purge as a list of chunked statements (LIMIT CHUNK rows each, one short autocommit
+    // transaction per execution), each run again until it touches fewer than CHUNK rows; `count`
+    // names the total it adds to. Rows are deleted before the IPs of the remaining ones are erased;
+    // an IP column is set to NULL, its row stays as long as it is needed.
+    function retentionSteps(t, cfg) {
+        const ipBefore = t - cfg.retentionIpDays * DAY;
+        const securityBefore = t - cfg.retentionSecurityDays * DAY;
+        return [
+            { count: 'sessions', arg: t, sql: `DELETE FROM sessions WHERE id IN (SELECT id FROM sessions
+                WHERE min(expires_at, idle_expires_at) <= ? LIMIT ${CHUNK})` },
+            { count: 'sessions', arg: t - REVOKED_SESSION_TTL_MS, sql: `DELETE FROM sessions WHERE id IN (SELECT id FROM sessions
+                WHERE revoked_at IS NOT NULL AND revoked_at <= ? LIMIT ${CHUNK})` },
+            { count: 'tokens', arg: t, sql: `DELETE FROM tokens WHERE id IN (SELECT id FROM tokens WHERE expires_at <= ? LIMIT ${CHUNK})` },
+            { count: 'ipErased', arg: ipBefore, sql: `UPDATE sessions SET ip = NULL WHERE id IN (SELECT id FROM sessions
+                WHERE ip IS NOT NULL AND created_at < ? LIMIT ${CHUNK})` },
+            { count: 'securityEvents', arg: securityBefore, sql: SECURITY_DELETE_SQL },
+            { count: 'ipErased', arg: ipBefore, sql: SECURITY_IP_SQL },
+            { count: 'anomalies', arg: securityBefore, sql: `DELETE FROM anomalies WHERE id IN (SELECT id FROM anomalies
+                WHERE severity <> 'certain' AND at < ? LIMIT ${CHUNK})` },
+            { count: 'conductEvents', arg: t - CONDUCT_EVENT_TTL_MS, sql: `DELETE FROM conduct_events WHERE id IN (SELECT id
+                FROM conduct_events WHERE at < ? LIMIT ${CHUNK})` },
+            { count: 'analysisJobs', arg: t - ANALYSIS_FAILED_TTL_MS, sql: `DELETE FROM analysis_jobs WHERE game_id IN (SELECT game_id
+                FROM analysis_jobs WHERE status = 'failed' AND finished_at < ? LIMIT ${CHUNK})` },
+        ];
+    }
+    const retentionCounts = () => ({ sessions: 0, tokens: 0, securityEvents: 0, anomalies: 0, conductEvents: 0, analysisJobs: 0, ipErased: 0 });
+
     const retention = {
-        /** Periodic clean-up (chunked, short transactions). Returns what it removed. */
+        /** Periodic clean-up in one go (chunked, short transactions). Returns what it removed. */
         run(now = Date.now(), cfg = config) {
-            const t = ms(now);
-            const expiredSessions = chunked(`DELETE FROM sessions WHERE id IN (SELECT id FROM sessions
-                WHERE min(expires_at, idle_expires_at) <= ? LIMIT ${CHUNK})`, t);
-            const revokedSessions = chunked(`DELETE FROM sessions WHERE id IN (SELECT id FROM sessions
-                WHERE revoked_at IS NOT NULL AND revoked_at <= ? LIMIT ${CHUNK})`, t - REVOKED_SESSION_TTL_MS);
-            const tokensDeleted = chunked(`DELETE FROM tokens WHERE id IN (SELECT id FROM tokens WHERE expires_at <= ? LIMIT ${CHUNK})`, t);
-            const sessionIps = chunked(`UPDATE sessions SET ip = NULL WHERE id IN (SELECT id FROM sessions
-                WHERE ip IS NOT NULL AND created_at < ? LIMIT ${CHUNK})`, t - cfg.retentionIpDays * DAY);
-            const sec = security.purge(t, cfg);
-            const anomaliesDeleted = chunked(`DELETE FROM anomalies WHERE id IN (SELECT id FROM anomalies
-                WHERE severity <> 'certain' AND at < ? LIMIT ${CHUNK})`, t - cfg.retentionSecurityDays * DAY);
-            const conductDeleted = chunked(`DELETE FROM conduct_events WHERE id IN (SELECT id FROM conduct_events
-                WHERE at < ? LIMIT ${CHUNK})`, t - CONDUCT_EVENT_TTL_MS);
-            const counts = {
-                sessions: expiredSessions + revokedSessions, tokens: tokensDeleted, securityEvents: sec.deleted,
-                anomalies: anomaliesDeleted, conductEvents: conductDeleted, ipErased: sessionIps + sec.ipErased,
-            };
+            const counts = retentionCounts();
+            for (const step of retentionSteps(ms(now), cfg)) counts[step.count] += chunked(step.sql, step.arg);
             log.debug('retention done', counts);
+            return counts;
+        },
+        /**
+         * The same clean-up, returning to the event loop (await pause(), default setImmediate)
+         * whenever sliceMs of work has been done, so a large purge never stalls the process. Stops
+         * before the next statement once `signal` is aborted or the store closed (what was already
+         * deleted stays deleted). Resolves to the counts of run(); a failure rejects with the error,
+         * which carries the counts done so far as `err.counts`.
+         * @param {number} [now]
+         * @param {object} [cfg]
+         * @param {{ sliceMs?: number, signal?: AbortSignal, pause?: () => Promise<void> }} [opts]
+         */
+        async runAsync(now = Date.now(), cfg = config, { sliceMs = 10, signal = null, pause = nextTurn } = {}) {
+            const counts = retentionCounts();
+            let sliceStart = performance.now();
+            try {
+                for (const step of retentionSteps(ms(now), cfg)) {
+                    for (;;) {
+                        if (closed || signal?.aborted) return counts;
+                        const n = Number(guard(() => st(step.sql).run(step.arg)).changes);
+                        counts[step.count] += n;
+                        if (performance.now() - sliceStart >= sliceMs) {
+                            await pause();
+                            sliceStart = performance.now();
+                        }
+                        if (n < CHUNK) break;
+                    }
+                }
+            } catch (e) {
+                if (e && typeof e === 'object') e.counts = counts;
+                throw e;
+            }
             return counts;
         },
     };

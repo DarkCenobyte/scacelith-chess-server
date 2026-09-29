@@ -79,10 +79,24 @@ priority), claims rated games of at least `ANALYSIS_MIN_PLIES` from the queue, a
 Single thread, fixed depth and controlled hash make the analysis **reproducible** with the same
 engine build: a moderator can re-run it and get the same numbers.
 
+**Queue policy** (docs/DESIGN.md 6.5). The engine takes the highest priority first, then the
+oldest job: a moderator request, then a game a player reported (`cheating` or `other`), then a
+game with a suspicion signal at its end (either player's integrity level above `none`, an open
+`cheating` or `other` report of weight 0.5 or more against either player in the last 30 days, a
+`suspicious` or `certain` anomaly in that game), then the ordinary games. The first three are
+always queued. An ordinary game is queued with probability `ANALYSIS_SAMPLE_RATE` (default 1) and
+only while fewer than `ANALYSIS_QUEUE_MAX` (default 5000) ordinary games wait; otherwise it is
+not analysed (`scacelith_anticheat_analysis_skipped_total`). A report on such a game queues it
+afterwards. So a busy server never makes a suspicious game wait weeks behind ordinary ones, and
+the population statistics keep being fed by a steady sample of ordinary games. The policy
+changes no level and no sanction.
+
 Cost (Stockfish 16, one core of the test container): depth 10 MultiPV 3 about 60 ms per
 position, depth 14 about 0.4 s, depth 18 about 2 s. With the defaults (10/18) a 40- to 60-move
 game costs 2 to 4 minutes of one core; raise `ANALYSIS_WORKERS` or lower `ANALYSIS_DEPTH_DEEP`
-(14 is about 5 times cheaper) if the queue grows. A job whose engine times out
+(14 is about 5 times cheaper) if `scacelith_anticheat_analysis_queue_ordinary` stays at
+`ANALYSIS_QUEUE_MAX` (ordinary games are then being skipped), or lower `ANALYSIS_SAMPLE_RATE`
+to analyse a smaller, steadier share of them. A job whose engine times out
 (`ANALYSIS_POSITION_TIMEOUT_MS`) or crashes is marked failed and the engine restarted; an engine
 that cannot start makes the worker wait (5 s .. 5 min) without claiming jobs.
 
@@ -188,7 +202,10 @@ comment? }`:
 * `REPORTS_PER_DAY` per reporter (`429 report_limit`); comments up to 500 characters, control
   characters removed;
 * one report per (reporter, reported, game): a duplicate gets the same `202 { status: 'received' }`
-  as a new report, and nothing in the answer depends on the reported account.
+  as a new report, and nothing in the answer depends on the reported account;
+* a `cheating` or `other` report queues the engine analysis of the reported game ahead of the
+  ordinary games (section 3), even when the queue policy had left the game out; this only
+  produces evidence for moderators.
 
 Reporter credibility (0.02 .. 2): `base = 0.1 + 0.9 sqrt(age x games)` with age = min(1, days/30)
 and games = min(1, games played/50) (both needed: fresh account farms and idle old accounts
@@ -258,10 +275,11 @@ the running server); `--revoke-sessions` also logs them out (shards drop cached 
 
 | Data | Where | Retention |
 |---|---|---|
-| Anomalies (kind, severity, game, detail, time) | `store.anomalies` | security retention (`RETENTION_SECURITY_DAYS`) for non-sanctioned ones, per the store's policy |
+| Anomalies (kind, severity, game, detail, time) | `store.anomalies` | `info` and `suspicious` ones deleted after `RETENTION_SECURITY_DAYS` by the hourly retention purge; `certain` ones kept |
 | Sanctions (ban, reason, source, game, moderator, lift) | `store.sanctions` | kept |
 | Integrity level, score, evidence (statistics, peak, certain cheats, reviews) | `store.integrity` | kept while the account exists |
-| Per-game features of analysed games (numbers, compact per-move table; no positions beyond the game's own moves) | `store.analysis` | kept with the game |
+| Per-game features of analysed games (numbers, compact per-move table; no positions beyond the game's own moves) | `store.analysis` | kept with the game (the scoring and `integrity show` read a player's latest analysed games, however old) |
+| Failed analysis jobs (no features, an error message) | `store.analysis` | deleted 30 days after the failure by the retention purge |
 | Population statistics (n, mean, M2 per metric, category and rating bucket; no personal data) | `store.integrity` population | kept |
 | Reports (reporter, reported, game, category, comment, weight, outcome, moderator) | `store.reports` | kept; comments are only shown to moderators |
 | Moderator actions | `store.security` (`moderator_action`) | security retention |
@@ -279,4 +297,6 @@ header of `src/anticheat/index.js`):
   row with the `features` given to `complete()`;
 * `reports.forReported(userId)` rows carry `weight` and `at`; the optional
   `reports.forReporter(userId)` (rows with `outcome`) feeds the reporter's track record;
+* the optional `analysis.request(gameId, 'report', now)` queues a reported game (without it a
+  report does not touch the analysis queue);
 * free-form values are passed as objects and retried as JSON text if the store refuses them.

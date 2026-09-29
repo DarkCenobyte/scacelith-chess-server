@@ -9,7 +9,8 @@
 //   await writer.close();
 //
 // The store's commit metrics (scacelith_store_commit_batch_ms, scacelith_store_games_committed_total,
-// scacelith_store_busy_total) are counted in the shard's own registry from the thread's answers.
+// scacelith_store_busy_total, scacelith_anticheat_analysis_skipped_total) are counted in the
+// shard's own registry from the thread's answers.
 
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
@@ -53,6 +54,8 @@ export function startStoreWriter({ config, shard = 0, logging = true, log = null
         [1, 2, 5, 10, 25, 50, 100, 250, 1000]);
     const mGames = metrics.counter('scacelith_store_games_committed_total', 'Finished games written to the database');
     const mBusy = metrics.counter('scacelith_store_busy_total', 'Store operations that gave up waiting for the database lock');
+    const mSkipped = metrics.counter('scacelith_anticheat_analysis_skipped_total',
+        'Finished rated games not queued for engine analysis (sample: ANALYSIS_SAMPLE_RATE, backlog: ANALYSIS_QUEUE_MAX reached)', ['reason']);
     const waiting = new Map();
     let next = 1, w = null, closing = null;
 
@@ -81,6 +84,7 @@ export function startStoreWriter({ config, shard = 0, logging = true, log = null
             }
             mBatchMs.observe(ms);
             mGames.inc(Array.isArray(result) ? result.reduce((n, x) => n + (x && x.duplicate ? 0 : 1), 0) : 0);
+            if (Array.isArray(result)) for (const x of result) if (x && x.analysisSkipped) mSkipped.labels(x.analysisSkipped).inc();
             p.resolve(result);
         });
         t.on('error', fail);

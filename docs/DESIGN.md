@@ -38,9 +38,10 @@ JSDoc on exported functions. Code comments in English.
   encoded, no re-serialisation).
 * The **primary** is the control plane: nothing per move goes through it. It owns the global
   state that must be unique: presence (one live connection per account), queues, challenges,
-  private codes, conduct cooldowns, global rate limits and single-use tokens.
+  private codes, conduct cooldowns, global rate limits and single-use tokens. It also runs the
+  periodic retention purge of the database, in small slices (section 7).
 * The **analysis process** runs the engine analysis of finished rated games from a queue table
-  in the database; it never touches live games.
+  in the database (bounded and prioritized, section 6.5); it never touches live games.
 * SQLite (`node:sqlite`, WAL mode, `busy_timeout`) is opened by every shard and by the primary.
   Writes are small and batched; the WebSocket hot path never touches the database.
 
@@ -100,9 +101,9 @@ animates the other robot playing it. A's client treats its own `MoveMade` as the
 abandonment, abort...), the host sends `GameEnd` to both, journals it, and queues the game for
 the database. Every `DB_COMMIT_MS` the host commits the queued games in one transaction
 (`store.games.finishBatch`): game record + both ratings (read and written inside the
-transaction) + analysis job. The transaction runs on the shard's store writer thread
-(`src/store/writer.js`, its own SQLite connection), so the event loop never waits for the disk or
-another process's write lock. After the commit it sends `RatingUpdate` and tells the primary
+transaction) + analysis job (queue policy: section 6.5). The transaction runs on the shard's
+store writer thread (`src/store/writer.js`, its own SQLite connection), so the event loop never
+waits for the disk or another process's write lock. After the commit it sends `RatingUpdate` and tells the primary
 `game.ended`.
 
 **Reconnection.** A lost connection keeps the game running (the player's clock too). The
@@ -302,7 +303,8 @@ store.ratings.get(userId, category) -> { rating, games, wins, draws, losses, pea
 store.ratings.forUser(userId) -> [{ category, ... }] ; leaderboard(category, limit, minGames)
 store.games.finishBatch(records) -> [{ gameId, ratings: null | { white: RatingChange, black: RatingChange } }]
   // One transaction for the batch: inserts each game, applies match/elo.applyGame to rated games
-  // with the ratings read inside the transaction, queues rated games of >= ANALYSIS_MIN_PLIES for analysis.
+  // with the ratings read inside the transaction, queues rated games of >= ANALYSIS_MIN_PLIES for analysis
+  // (section 6.5: an ordinary game left out by the policy has analysisSkipped: 'sample' | 'backlog' in its entry).
   // record: { id, category, rated, baseMs, incMs, whiteId, blackId, whiteName, blackName, whiteRating, blackRating,
   //           startedAt, endedAt, status, reason, moves: Uint16Array, spentMs: Uint32Array, clockMs: Uint32Array,
   //           rematchOf, flags }
@@ -313,11 +315,15 @@ store.sanctions.activeBan(userId, now) -> sanction | null ; list(userId) ; lift(
 store.anomalies.insertBatch([{ userId, gameId, kind, severity /* 'info'|'suspicious'|'certain' */, detail, at }]) ; forUser(userId, limit)
 store.security.insertBatch([{ kind, userId, ip, detail, at }]) ; purge(now, cfg)
 store.analysis.next(limit, workerId, now) -> [job] ; complete(gameId, features) ; fail(gameId, error) ; forUser(userId, limit)
+  // next() takes the highest priority first, then the oldest; job: { gameId, priority, attempts, queuedAt, startedAt, worker }
+store.analysis.enqueue(gameId, now) ; request(gameId, 'report', now) -> bool ; backlog() -> { ordinary, priority }
+  // enqueue: moderator re-analysis (priority manual); request: a reported game (section 6.5)
 store.integrity.get(userId) -> { level /* 'none'|'suspected'|'high_confidence'|'confirmed' */, score, evidence, updatedAt, reviewedBy }
 store.integrity.set(userId, fields) ; listFlagged(minLevel, limit) ; populationStats(ratingBucket) / updatePopulation(...)
 store.reports.create({ reporterId, reportedId, gameId, category, comment, weight, at }) -> id
 store.reports.countByReporterSince(reporterId, since) ; exists(reporterId, reportedId, gameId) ; listOpen(limit) ; forReported(userId) ; resolve(id, outcome, by, now)
-store.retention.run(now, cfg) -> counts        // expired sessions/tokens, old security events, IP erasure
+store.retention.run(now, cfg) -> counts        // expired sessions/tokens, old security events, IP erasure (section 7)
+store.retention.runAsync(now, cfg, { sliceMs, signal }) -> Promise<counts>   // the same, returning to the event loop between slices
 store.close()
 ```
 
@@ -585,6 +591,30 @@ independent signals agree over >= 10 games and >= 300 non-trivial moves), `confi
 decision via `bin/admin.js`, or a certain protocol cheat). Reports raise the review priority,
 weighted by the reporter's credibility, never the level itself.
 
+**Analysis backlog.** One engine analyses about 1,000 to 12,000 games a day (depth 18, MultiPV 3,
+from ply 16 on), far fewer than a busy server finishes, so the queue is bounded and prioritized
+instead of growing without end. Every job has a priority and the engine takes the highest first,
+then the oldest:
+
+1. `manual`: a moderator asked for the (re-)analysis of a game (`store.analysis.enqueue`);
+2. `report`: a player reported the game (category `cheating` or `other`); the report queues it
+   even if the policy had left it out, and re-queues it if its analysis had failed;
+3. `signal`: a suspicion signal at the end of the game: the integrity level of either player is
+   above `none`, either player has an open `cheating` or `other` report from the last 30 days
+   by a credible reporter (stored weight at least 0.5, so sock puppets never flag anyone), or a
+   `suspicious` or `certain` anomaly was recorded in this game;
+4. `ordinary`: every other rated game of an official category with at least
+   `ANALYSIS_MIN_PLIES` plies.
+
+Games of the first three kinds are always queued. An ordinary game is queued with probability
+`ANALYSIS_SAMPLE_RATE` (default 1), and only while fewer than `ANALYSIS_QUEUE_MAX` (default 5000)
+ordinary jobs wait; otherwise it gets no job at all and is counted in
+`scacelith_anticheat_analysis_skipped_total{reason="sample"|"backlog"}`. An ordinary game
+therefore waits at most about `ANALYSIS_QUEUE_MAX` divided by the engine throughput, and a
+suspicious game never waits behind ordinary ones. `scacelith_anticheat_analysis_queue_ordinary`
+and `scacelith_anticheat_analysis_queue_priority` show the backlog. The policy only decides what
+is analysed and when: it changes no level and no sanction, and statistics never ban.
+
 ## 7. What lives where, and what survives a crash
 
 | Data | Where | Written | After a crash |
@@ -596,6 +626,29 @@ weighted by the reporter's credibility, never the level itself.
 | Sanctions, anomalies (certain), integrity levels, reports | SQLite | sanctions immediately; anomalies batched (1 s) | kept (a batch in flight may be lost for `info` anomalies) |
 | Presence, queues, challenges, private codes, rate-limit counters | primary memory | - | lost: clients reconnect and re-queue |
 | Security events (failed logins...) | SQLite | batched (1 s) | kept, purged after `RETENTION_SECURITY_DAYS` |
+
+**Retention purge.** Personal data is not kept longer than it is needed. The primary runs
+`store.retention.runAsync` every `RETENTION_INTERVAL_MS` (default one hour; the first run about a
+minute after the start):
+
+| Data | Deleted or erased |
+|---|---|
+| Sessions | as soon as they expire (absolute or idle limit); revoked ones a day after the revocation; the IP address of a live session `RETENTION_IP_DAYS` (30) after the login, the row stays |
+| Single-use tokens (some carry the e-mail address) | once expired (24 hours at most) |
+| Security events | after `RETENTION_SECURITY_DAYS` (90); their IP address after `RETENTION_IP_DAYS`, the row stays |
+| Anomalies | `info` and `suspicious` ones after `RETENTION_SECURITY_DAYS`; `certain` ones (the evidence of an automatic sanction) are kept |
+| Conduct events | after 30 days (the conduct rules look back 3 days at most) |
+| Analysis jobs | failed ones 30 days after the failure; done ones are kept (their features are each player's analysed history, read by the scoring and by `bin/admin.js integrity show` without a time limit); waiting and running jobs are never purged |
+
+Accounts (anonymized when deleted), games, ratings, sanctions, reports and integrity records are
+kept. The primary is the control plane, so the purge must not hold its event loop: every
+statement deletes at most 1000 rows in its own short transaction, and the run returns to the
+event loop whenever 10 ms of work have been done (measured on the development container: 350,000
+rows purged in 1.5 s, the event loop never held for more than about 30 ms). Runs never overlap.
+On shutdown the run in progress is aborted between two statements and awaited before the
+database is closed. Each run logs its counts at info level (numbers only, no personal data) and
+feeds `scacelith_retention_purged_total{kind}`, `scacelith_retention_ip_erased_total`,
+`scacelith_retention_runs_total{result}` and `scacelith_retention_run_seconds`.
 
 ## 8. Security model
 
@@ -655,7 +708,7 @@ weighted by the reporter's credibility, never the level itself.
   to the JSON body. Challenges expire after 2 minutes and are single use.
 * **Logs**: no password, token, TOTP secret, recovery code, cookie or e-mail body; IPs truncated
   by default; security events retained `RETENTION_SECURITY_DAYS`, stored IPs erased after
-  `RETENTION_IP_DAYS`.
+  `RETENTION_IP_DAYS` (by the hourly retention purge, section 7).
 
 ## 9. Scaling beyond one machine
 
