@@ -89,9 +89,10 @@ function createAccounts(env, count, scratch) {
  * @param {Record<string,string>} [o.env] extra environment (overrides)
  * @param {string} [o.dataDir] keep the data here (not deleted)
  * @param {boolean} [o.keep] do not delete the temporary directory
+ * @param {string} [o.cpuProfDir] write V8 CPU profiles of the server processes there
  * @param {(s: string) => void} [o.log]
  */
-export async function startServer({ workers, reusePort = false, accounts = 0, env = {}, dataDir = null, keep = false, log = () => {} }) {
+export async function startServer({ workers, reusePort = false, accounts = 0, env = {}, dataDir = null, keep = false, cpuProfDir = null, log = () => {} }) {
     const dir = dataDir ? path.resolve(dataDir) : fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-bench-'));
     fs.mkdirSync(dir, { recursive: true });
     const tlsFiles = makeCertificate(dir);
@@ -153,7 +154,10 @@ export async function startServer({ workers, reusePort = false, accounts = 0, en
     const logFile = path.join(dir, 'server.log');
     const logFd = fs.openSync(logFile, 'a');
     const { cmd, args } = withNofile([process.execPath, SERVER, 'start']);
-    const child = spawn(cmd, args, { cwd: ROOT, env: baseEnv, stdio: ['ignore', logFd, logFd] });
+    // --server-cpu-prof: every server process (primary, shards, analysis) writes a V8 CPU profile
+    // when it exits (graceful stop).
+    const runEnv = cpuProfDir ? { ...baseEnv, NODE_OPTIONS: `--cpu-prof --cpu-prof-dir=${path.resolve(cpuProfDir)}` } : baseEnv;
+    const child = spawn(cmd, args, { cwd: ROOT, env: runEnv, stdio: ['ignore', logFd, logFd] });
     fs.closeSync(logFd);
     let exited = null;
     child.on('exit', (code, signal) => { exited = { code, signal }; });

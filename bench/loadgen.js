@@ -69,6 +69,8 @@ Server (started by the tool unless --url)
   --server-env K=V       extra server setting (repeatable)
   --data-dir DIR         keep the server data here (not deleted)
   --keep                 keep the temporary data directory
+  --server-cpu-prof DIR  V8 CPU profile of every server process, written to DIR at the stop
+                         (analyse with node bench/profile-summary.js DIR/*.cpuprofile)
 Existing test server
   --url wss://host:port/ws   --ca FILE   --tokens FILE (username<TAB>token or token per line)
   --metrics URL          http://host:port/metrics        --metrics-token T
@@ -143,6 +145,7 @@ function options(raw) {
         json: !!raw.json,
         maxRunS: num(raw.maxRunS, 900),
         waitIdleS: num(raw.waitIdleS, 0),
+        serverCpuProf: raw.serverCpuProf || null,
         minFreeMb: num(raw.minFreeMb, 1500),
     };
     if (!['challenge', 'queue'].includes(o.via)) throw new Error('--via challenge|queue');
@@ -204,7 +207,7 @@ async function main() {
             if (o.scenario === 'burst') { env.WS_MSG_RATE = '1000'; env.WS_MSG_BURST = '2000'; }
             for (const kv of o.serverEnv) { const i = kv.indexOf('='); env[kv.slice(0, i)] = kv.slice(i + 1); }
             say(`starting a server: ${workers} worker(s)${o.reusePort ? ', SO_REUSEPORT' : ''}, ${o.clients} bench accounts...`);
-            srv = await startServer({ workers, reusePort: o.reusePort, accounts: o.clients, env, dataDir: o.dataDir, keep: o.keep, log: (s) => say(`  ${s}`) });
+            srv = await startServer({ workers, reusePort: o.reusePort, accounts: o.clients, env, dataDir: o.dataDir, keep: o.keep, cpuProfDir: o.serverCpuProf, log: (s) => say(`  ${s}`) });
             cleanup.push(async () => { say('stopping the server...'); await srv.stop(); });
             target = { host: '127.0.0.1', port: srv.wsPort, path: '/ws', ca: srv.ca, servername: null, metrics: srv.metricsUrl, metricsToken: null, users: srv.users };
             report.server = { mode: 'local', workers, reusePort: o.reusePort, dataDir: o.dataDir || '(temporary)', env: srv.env, info: pickInfo(srv.info), processes: srv.processes() };
