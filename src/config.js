@@ -43,6 +43,8 @@ key('SHUTDOWN_GRACE_MS', { section: 'server', type: 'int', default: 3000, min: 0
     desc: 'On SIGTERM/SIGINT players are warned (ServerShutdown notice) this long before their connections close. Games in progress survive the restart (journal).' });
 key('LISTEN_REUSE_PORT', { section: 'server', type: 'bool', default: false,
     desc: 'Linux: every worker binds its own listening socket (SO_REUSEPORT) and the kernel spreads new connections, instead of the primary accepting them and handing them out round-robin. Ignored on other systems.' });
+key('LISTEN_BACKLOG', { section: 'server', type: 'int', default: 2048, min: 128, max: 65535,
+    desc: 'Length of the kernel queue of new connections not yet accepted (listen backlog), which absorbs reconnection bursts. The kernel caps it at net.core.somaxconn (Linux), so raise that sysctl as well (README, kernel settings).' });
 key('SHARD_OVERLOAD_LAG_MS', { section: 'server', type: 'int', default: 250, min: 5, max: 5000,
     desc: 'Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker.' });
 
@@ -108,6 +110,8 @@ key('GOOGLE_REDIRECT_URI', { section: 'sso', type: 'string', default: '',
 // ---- Abuse protection --------------------------------------------------------------------------------
 key('MAX_CONNECTIONS', { section: 'limits', type: 'int', default: 200000, min: 1, desc: 'Simultaneous WebSocket connections, whole server.' });
 key('MAX_CONNECTIONS_PER_IP', { section: 'limits', type: 'int', default: 16, min: 1, desc: 'Simultaneous WebSocket connections from one IP address (IPv6: per /64).' });
+key('MAX_PENDING_HANDSHAKES', { section: 'limits', type: 'int', default: 128, min: 1, max: 100000,
+    desc: 'TLS handshakes in progress per worker (TLS_MODE=native). A new connection beyond it, or beyond MAX_CONNECTIONS_PER_IP handshakes from one address, is closed before any TLS work and the client retries later, so a reconnection storm is served in turn instead of every handshake slowing down together. While the server is full, a worker also lets at most half this number of new TLS connections per second through.' });
 key('WS_MAX_MESSAGE_BYTES', { section: 'limits', type: 'int', default: 512, min: 128, max: 65536, desc: 'Largest message a client may send.' });
 key('WS_MSG_RATE', { section: 'limits', type: 'int', default: 20, min: 1, desc: 'Messages per second a client may send (sustained).' });
 key('WS_MSG_BURST', { section: 'limits', type: 'int', default: 40, min: 1, desc: 'Message burst a client may send.' });
@@ -132,6 +136,8 @@ key('ALLOW_CUSTOM_TIME_CONTROLS', { section: 'games', type: 'bool', default: tru
 key('FIRST_MOVE_TIMEOUT_MS', { section: 'games', type: 'int', default: 30000, min: 5000, desc: 'A player who does not make their first move in time: the game is aborted (no rating change).' });
 key('RECONNECT_GRACE_MIN_MS', { section: 'games', type: 'int', default: 15000, min: 5000, desc: 'Shortest time a disconnected player has to come back.' });
 key('RECONNECT_GRACE_MAX_MS', { section: 'games', type: 'int', default: 60000, min: 5000, desc: 'Longest time a disconnected player has to come back (the grace is 10% of the base time within these bounds).' });
+key('RECOVERY_GRACE_MS', { section: 'games', type: 'int', default: 90000, min: 15000, max: 3600000,
+    desc: 'Time both players of a game restored from the journal after a restart or a crash have to come back (or the normal grace when it is longer): the server, not the players, broke the connection, and every client reconnects at once. The running clock still restarts at the recovery.' });
 key('LAG_COMP_MAX_MS', { section: 'games', type: 'int', default: 1000, min: 0, max: 5000, desc: 'Largest network lag given back on one move.' });
 key('LAG_QUOTA_INITIAL_MS', { section: 'games', type: 'int', default: 2000, min: 0, desc: 'Lag compensation budget of each player at the start of a game.' });
 key('LAG_QUOTA_GAIN_MS', { section: 'games', type: 'int', default: 100, min: 0, desc: 'Lag compensation budget regained at every move.' });

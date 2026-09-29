@@ -26,6 +26,10 @@
 //   * GameRoom.fromJournal(records, { config, createChessGame, strict }) needs the injected rules
 //     and configuration; room.recover(now) applies the restart semantics of DESIGN 6.4 separately
 //     so that a plain replay rebuilds an identical room.
+//   * Each player's current disconnection has its own grace (disconnectGrace): the normal one
+//     (graceFor) after a Disconnect, RECOVERY_GRACE_MS (recoveryGraceFor) for both after a
+//     recovery, until the player is back. The deadlines below use them; with equal graces they
+//     are the rules of DESIGN 6.4 unchanged.
 //   * The 'game_over' anomaly kind (info) is reported for a Move on a finished game (DESIGN 6.2
 //     step 2 says "info" without naming it).
 //   * A game reaching 1200 plies (the protocol's Move.ply limit) ends ServerAborted.
@@ -40,14 +44,16 @@
 //              u32 quotaAfter | u32 gseq (of its MoveMade) | f64 recvTime
 //   3 event    12 bytes: u8 kind | u8 color | u16 0 | u32 gseqAfter | u32 arg
 //              kinds (JournalEvent): 1 draw offer, 2 draw declined (color = decliner),
-//              3 disconnect (arg = grace), 4 reconnect, 5 desync, 6 recovered (server restart),
-//              7 checkpoint (60 bytes, written only by journalState(), see _checkpointRecord)
+//              3 disconnect (arg = grace), 4 reconnect, 5 desync, 6 recovered (server restart,
+//              arg = the recovery grace given to both players; 0 = RECOVERY_GRACE_MS),
+//              7 checkpoint (68 bytes, written only by journalState(), see _checkpointRecord;
+//              60-byte ones without the graces are read too)
 //   4 ended    24 bytes: u8 status | u8 reason | u8 culprit colour | u8 0 | u32 whiteMs |
 //              u32 blackMs | u32 gseq (of its GameEnd) | f64 endedAt
 // The round-trip averages are not journaled (they restart from the default after a restart).
 
 import { encode, enums } from '../protocol/index.js';
-import { GameClock, clockPolicy, graceFor } from './clock.js';
+import { GameClock, clockPolicy, graceFor, recoveryGraceFor } from './clock.js';
 
 const { GameStatus: GS, EndReason: ER, GameEventKind: EV, ErrorCode: EC } = enums;
 const WHITE = 0, BLACK = 1, NONE = 2;
@@ -74,7 +80,7 @@ export const RECOVERY_GSEQ_JUMP = 256;
 
 const MB_OFFER = 1, MB_DECLINED = 2;
 const RM_NONE = 0, RM_OPEN = 1, RM_AGREED = 2, RM_CLOSED = 3;
-const MOVE_REC_BYTES = 32, EVENT_REC_BYTES = 12, ENDED_REC_BYTES = 24, CHECKPOINT_BYTES = 60;
+const MOVE_REC_BYTES = 32, EVENT_REC_BYTES = 12, ENDED_REC_BYTES = 24, CHECKPOINT_BYTES = 68, CHECKPOINT_V1_BYTES = 60;
 
 /** Thrown when a journal cannot be replayed. */
 export class JournalError extends Error {
@@ -163,6 +169,7 @@ export class GameRoom {
         this.createChessGame = createChessGame;
         this.policy = clockPolicy(config);
         this.graceMs = graceFor(this.baseMs, config);
+        this.recoveryGraceMs = recoveryGraceFor(this.baseMs, config);
         this.drawOfferLimit = Number.isFinite(config.drawOffersPerGame) ? config.drawOffersPerGame : 3;
 
         this.game = createChessGame();
@@ -177,6 +184,7 @@ export class GameRoom {
         this.desyncs = [0, 0];
         this.connected = [true, true];
         this.disconnectedAt = [0, 0];
+        this.disconnectGrace = [this.graceMs, this.graceMs];   // grace of each player's current disconnection
         this._over = false;
         this.result = null;          // { status, reason, whiteMs, blackMs, endedAt }
         this.endGseq = 0;
@@ -494,9 +502,10 @@ export class GameRoom {
 
     /**
      * Server restart semantics (DESIGN 6.4) on a room rebuilt by fromJournal(): both players are
-     * marked disconnected with a fresh grace, and the running clock (or first-move timer)
-     * restarts at `now` from its journaled value. A finished game only loses its rematch window.
-     * The Outcome carries the journal record of the recovery (to append).
+     * marked disconnected with the recovery grace (recoveryGraceFor: RECOVERY_GRACE_MS, or the
+     * normal grace when longer), and the running clock (or first-move timer) restarts at `now`
+     * from its journaled value. A finished game only loses its rematch window. The Outcome
+     * carries the journal record of the recovery (to append; it records the grace).
      */
     recover(now) {
         now = Math.floor(now);
@@ -511,9 +520,9 @@ export class GameRoom {
             this.rematchBy = NONE;
             return out;
         }
-        this._applyEvent(JournalEvent.Recovered, NONE, 0, now);
+        this._applyEvent(JournalEvent.Recovered, NONE, this.recoveryGraceMs, now);
         this.gseq += RECOVERY_GSEQ_JUMP;
-        out.journal.push(this._eventRecord(JournalEvent.Recovered, NONE, 0, now));
+        out.journal.push(this._eventRecord(JournalEvent.Recovered, NONE, this.recoveryGraceMs, now));
         return out;
     }
 
@@ -702,6 +711,7 @@ export class GameRoom {
             case JournalEvent.Disconnect:
                 this.connected[color] = false;
                 this.disconnectedAt[color] = at;
+                this.disconnectGrace[color] = this.graceMs;
                 break;
             case JournalEvent.Reconnect:
                 this.connected[color] = true;
@@ -712,6 +722,7 @@ export class GameRoom {
             case JournalEvent.Recovered:
                 this.connected[WHITE] = this.connected[BLACK] = false;
                 this.disconnectedAt[WHITE] = this.disconnectedAt[BLACK] = at;
+                this.disconnectGrace[WHITE] = this.disconnectGrace[BLACK] = arg > 0 ? arg : this.recoveryGraceMs;
                 this.clock.restart(at);
                 this.flags |= RecordFlag.Recovered;
                 break;
@@ -761,27 +772,30 @@ export class GameRoom {
         return this.drawOffersUsed[color] < this.drawOfferLimit && plyNow >= this.drawDeclinedAt[color] + DRAW_REOFFER_PLIES;
     }
 
+    // End of the grace of `color`'s current disconnection.
+    _graceEnd(color) { return this.disconnectedAt[color] + this.disconnectGrace[color]; }
+
     // Grace expiry moment (Infinity when both are connected). Both gone within 5 s of each
-    // other: the longer grace; otherwise the first to leave is the one who abandons.
+    // other: the later grace end; otherwise the first grace to end (with equal graces, the
+    // first to leave) is the one of the player who abandons.
     _graceDeadline() {
         const w = !this.connected[WHITE], b = !this.connected[BLACK];
         if (!w && !b) return Infinity;
-        const g = this.graceMs;
         if (w && b) {
-            const dw = this.disconnectedAt[WHITE], db = this.disconnectedAt[BLACK];
-            if (Math.abs(dw - db) <= BOTH_DISCONNECT_WINDOW_MS) return Math.max(dw, db) + g;
-            return Math.min(dw, db) + g;
+            const ew = this._graceEnd(WHITE), eb = this._graceEnd(BLACK);
+            if (Math.abs(this.disconnectedAt[WHITE] - this.disconnectedAt[BLACK]) <= BOTH_DISCONNECT_WINDOW_MS) return Math.max(ew, eb);
+            return Math.min(ew, eb);
         }
-        return (w ? this.disconnectedAt[WHITE] : this.disconnectedAt[BLACK]) + g;
+        return this._graceEnd(w ? WHITE : BLACK);
     }
 
     _graceDeadlineOf(color) {
         if (this.connected[color]) return Infinity;
         const other = color ^ 1;
         if (!this.connected[other] && Math.abs(this.disconnectedAt[color] - this.disconnectedAt[other]) <= BOTH_DISCONNECT_WINDOW_MS) {
-            return Math.max(this.disconnectedAt[color], this.disconnectedAt[other]) + this.graceMs;
+            return Math.max(this._graceEnd(color), this._graceEnd(other));
         }
-        return this.disconnectedAt[color] + this.graceMs;
+        return this._graceEnd(color);
     }
 
     // Grace left of the player the viewer waits for (the opponent; for a spectator the first to expire).
@@ -825,7 +839,7 @@ export class GameRoom {
             this._end(GS.Aborted, ER.BothDisconnected, now, out, NONE, NONE);
             return;
         }
-        const absent = w && b ? (dw <= db ? WHITE : BLACK) : (w ? WHITE : BLACK);
+        const absent = w && b ? (this._graceEnd(WHITE) <= this._graceEnd(BLACK) ? WHITE : BLACK) : (w ? WHITE : BLACK);
         if (this.ply < 2) {
             this._end(GS.Aborted, ER.NoShow, now, out, absent, NONE);
             out.conduct.push({ userId: this.playerOf(absent).userId, kind: 'noshow' });
@@ -942,6 +956,8 @@ export class GameRoom {
         b.writeDoubleLE(this.clock.turnStart, 44);
         b.writeUInt32LE(this.clock.quota[WHITE] >>> 0, 52);
         b.writeUInt32LE(this.clock.quota[BLACK] >>> 0, 56);
+        b.writeUInt32LE(clampInt(this.disconnectGrace[WHITE], 0, 0xffffffff), 60);
+        b.writeUInt32LE(clampInt(this.disconnectGrace[BLACK], 0, 0xffffffff), 64);
         return { kind: JournalKind.Event, at: this.clock.turnStart, payload: b };
     }
 
@@ -971,7 +987,7 @@ export class GameRoom {
     }
 
     _replayCheckpoint(b) {
-        if (b.length < CHECKPOINT_BYTES) throw new JournalError('short checkpoint record');
+        if (b.length < CHECKPOINT_V1_BYTES) throw new JournalError('short checkpoint record');
         this.drawOffer = b[1] <= NONE ? b[1] : NONE;
         this.connected[WHITE] = (b[2] & 1) !== 0;
         this.connected[BLACK] = (b[2] & 2) !== 0;
@@ -988,6 +1004,9 @@ export class GameRoom {
         this.clock.turnStart = b.readDoubleLE(44);
         this.clock.quota[WHITE] = b.readUInt32LE(52);
         this.clock.quota[BLACK] = b.readUInt32LE(56);
+        const long = b.length >= CHECKPOINT_BYTES;
+        this.disconnectGrace[WHITE] = long ? b.readUInt32LE(60) : this.graceMs;
+        this.disconnectGrace[BLACK] = long ? b.readUInt32LE(64) : this.graceMs;
     }
 
     _replayEnded(b) {

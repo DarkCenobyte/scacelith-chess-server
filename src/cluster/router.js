@@ -40,7 +40,9 @@
 //     every 2 s (host placement), primary -> shard 'shard.down' { shard } (forget the remote
 //     endpoints of a dead shard: its players are disconnected from their games).
 //   - 'conn.ipAcquire' is called before the 101 response (refused upgrades never become
-//     connections: HTTP 429 per IP, 503 when the server is full).
+//     connections: HTTP 429 per IP, 503 when the server is full). Its answers also feed
+//     isFull(), the server-full signal with which the listeners shed new connections before the
+//     TLS handshake (net/listeners.js); that is only an estimate, this check stays the exact one.
 //   - ServerFull closes with 4006 (4000 + ErrorCode.ServerFull; CloseCode has no entry for it).
 //
 // Complexity per message: O(1) (one decode, one Map lookup, one token bucket update).
@@ -59,6 +61,8 @@ const N = enums.NoticeCode;
 export const CLOSE_SERVER_FULL = 4006;
 const DIR_C2S = Object.freeze({ dir: 'c2s' });
 const MAX_PENDING_HELLO = 8;
+/** How long a MAX_CONNECTIONS refusal keeps this worker in the server-full state (isFull). */
+export const FULL_HOLD_MS = 5000;
 const MAX_GAMES_PER_CONN = 8;
 const RTT_CAP_MS = 2000;
 const VALID_ERRORS = new Set(Object.values(E));
@@ -198,11 +202,17 @@ export class Router {
         this._anomalies = r.counter('scacelith_ws_anomalies_total', 'Protocol anomalies seen by the router', ['kind']);
         this._relayed = r.counter('scacelith_ws_relayed_total', 'Game messages relayed to another shard');
 
+        // Server-full signal for the admission before TLS (isFull): the last answers of the exact
+        // MAX_CONNECTIONS check, and this worker's share of MAX_CONNECTIONS with 20 % of slack.
+        this.localCap = Math.ceil((config.maxConnections || 200000) * 1.2 / Math.max(1, config.workers || 1));
+        this._fullAt = -Infinity;
+        this._admitAt = -Infinity;
         this.admission = {
             acquire: (ip) => this.primary.request('conn.ipAcquire', { ip, shard: this.shard }).then(
                 (res) => {
-                    if (res && res.ok) return true;
+                    if (res && res.ok) { this._admitAt = Date.now(); return true; }
                     const global = res && res.reason === 'global';
+                    if (global) this._fullAt = Date.now();
                     return { ok: false, status: global ? 503 : 429, error: global ? 'server_full' : 'too_many_connections' };
                 },
                 (e) => { this.log?.warn?.('ipAcquire failed', { err: e }); return { ok: false, status: 503, error: 'unavailable' }; }),
@@ -227,6 +237,20 @@ export class Router {
         clearInterval(this._timer);
         clearInterval(this._loadTimer);
         this._timer = this._loadTimer = null;
+    }
+
+    /**
+     * Whether the server is full as far as this worker knows, so that the listeners shed new
+     * connections before the TLS handshake (net/listeners.js TlsGate). True while the primary's
+     * last answer to 'conn.ipAcquire' was a MAX_CONNECTIONS refusal less than FULL_HOLD_MS ago
+     * (an admitted upgrade or the delay ends it: some connections still reach the exact check,
+     * so a freed slot is found), or while this worker holds 1.2 times its share of
+     * MAX_CONNECTIONS. O(1).
+     * @param {number} [now]
+     */
+    isFull(now = Date.now()) {
+        if (this.conns.size >= this.localCap) return true;
+        return this._fullAt > this._admitAt && now - this._fullAt < FULL_HOLD_MS;
     }
 
     /**

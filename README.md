@@ -140,6 +140,9 @@ location / {
 }
 ```
 
+The server then does no TLS work, so the handshake limit `MAX_PENDING_HANDSHAKES` (see
+[Kernel settings](#kernel-settings-linux)) does not apply: limit the handshakes on the proxy.
+
 `TLS_MODE=off` exists for local development only and is refused unless `ALLOW_INSECURE_DEV=1`.
 
 ### The official server
@@ -180,6 +183,38 @@ WantedBy=multi-user.target
 
 With `DATA_DIR=/var/lib/scacelith` in the environment file. `LimitNOFILE` must exceed
 `MAX_CONNECTIONS`. This unit is an example: adapt the paths to your installation.
+
+### Kernel settings (Linux)
+
+After a restart every client reconnects within a few seconds. New connections wait in a kernel
+queue until the server accepts them; `LISTEN_BACKLOG` (2048 by default) sets its length, but the
+kernel caps it at `net.core.somaxconn` (4096 since Linux 5.4, 128 on older kernels), and
+connections still in their TCP handshake wait in a second queue bounded by
+`net.ipv4.tcp_max_syn_backlog`. Raise both, and reserve the server's port:
+
+```sh
+# /etc/sysctl.d/90-scacelith.conf, applied with: sysctl --system
+net.core.somaxconn = 4096
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.ip_local_reserved_ports = 44664
+```
+
+The last line matters because 44664 lies inside Linux's default range of ephemeral ports
+(32768-60999). While the server is stopped, any outgoing connection of the machine (a DNS query, a
+download, the SMTP relay) may get 44664 as its local port, and the restart then fails with
+`EADDRINUSE`. Reserve `WS_PORT` as well when it differs from `API_PORT` (a comma-separated list).
+
+The server protects itself during such a reconnection storm. With native TLS, each worker performs
+at most `MAX_PENDING_HANDSHAKES` (128) TLS handshakes at a time, and at most
+`MAX_CONNECTIONS_PER_IP` of them for one address; a connection beyond that is closed at once,
+before any TLS work, and the game retries after a random delay. The CPU then completes the
+handshakes in turn instead of starting all of them together and finishing none before the
+clients give up. When the server is full (`MAX_CONNECTIONS`), a worker also lets only
+`MAX_PENDING_HANDSHAKES / 2` new TLS connections per second through: enough for the API and for the
+"server full" answer, while the other attempts cost no TLS work. On the default shared port the
+API shares that rate; setting `WS_PORT` to another port keeps the API outside it. Games that were
+running when the server stopped come back from the journal, and both players then have
+`RECOVERY_GRACE_MS` (90 s) to reconnect instead of the normal grace.
 
 ## Accounts, e-mail and Google sign-in
 

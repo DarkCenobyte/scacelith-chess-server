@@ -359,8 +359,12 @@ test('recovery after a crash: running games restored, ended-but-uncommitted game
     b.host.attach(running, 2, eb);
     const s = last(eb);
     assert.deepEqual([s.type, s.running, s.blackMs, s.blackConnected, s.whiteConnected], [MSG.GameSnapshot, B, blackMs - 2000, true, false]);
-    // White never comes back: abandonment after White's fresh grace.
+    // White never comes back: abandonment after the recovery grace (RECOVERY_GRACE_MS, 90 s),
+    // not the normal 18 s of a 3+2 game.
+    assert.equal(s.graceMs, 90000 - 2000);
     b.host.runTimers(b.clock.t - 2000 + 18000);
+    assert.equal(room.isOver, false);
+    b.host.runTimers(b.clock.t - 2000 + 90000);
     assert.deepEqual([room.result.status, room.result.reason], [GS.BlackWins, ER.Abandonment]);
 });
 

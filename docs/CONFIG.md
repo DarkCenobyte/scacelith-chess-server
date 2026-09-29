@@ -43,6 +43,7 @@ Sections:
 | `WS_ALLOWED_ORIGINS` | comma-separated list | (empty) | Origin header values allowed to open the game WebSocket (e.g. https://play.example.org). The game client sends no Origin; browsers always send one, so they are refused unless listed here. |
 | `SHUTDOWN_GRACE_MS` | integer (0-120000) | `3000` | On SIGTERM/SIGINT players are warned (ServerShutdown notice) this long before their connections close. Games in progress survive the restart (journal). |
 | `LISTEN_REUSE_PORT` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Linux: every worker binds its own listening socket (SO_REUSEPORT) and the kernel spreads new connections, instead of the primary accepting them and handing them out round-robin. Ignored on other systems. |
+| `LISTEN_BACKLOG` | integer (128-65535) | `2048` | Length of the kernel queue of new connections not yet accepted (listen backlog), which absorbs reconnection bursts. The kernel caps it at net.core.somaxconn (Linux), so raise that sysctl as well (README, kernel settings). |
 | `SHARD_OVERLOAD_LAG_MS` | integer (5-5000) | `250` | Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker. |
 
 ## TLS
@@ -116,6 +117,7 @@ Sections:
 | --- | --- | --- | --- |
 | `MAX_CONNECTIONS` | integer (&gt;= 1) | `200000` | Simultaneous WebSocket connections, whole server. |
 | `MAX_CONNECTIONS_PER_IP` | integer (&gt;= 1) | `16` | Simultaneous WebSocket connections from one IP address (IPv6: per /64). |
+| `MAX_PENDING_HANDSHAKES` | integer (1-100000) | `128` | TLS handshakes in progress per worker (TLS_MODE=native). A new connection beyond it, or beyond MAX_CONNECTIONS_PER_IP handshakes from one address, is closed before any TLS work and the client retries later, so a reconnection storm is served in turn instead of every handshake slowing down together. While the server is full, a worker also lets at most half this number of new TLS connections per second through. |
 | `WS_MAX_MESSAGE_BYTES` | integer (128-65536) | `512` | Largest message a client may send. |
 | `WS_MSG_RATE` | integer (&gt;= 1) | `20` | Messages per second a client may send (sustained). |
 | `WS_MSG_BURST` | integer (&gt;= 1) | `40` | Message burst a client may send. |
@@ -140,6 +142,7 @@ Sections:
 | `FIRST_MOVE_TIMEOUT_MS` | integer (&gt;= 5000) | `30000` | A player who does not make their first move in time: the game is aborted (no rating change). |
 | `RECONNECT_GRACE_MIN_MS` | integer (&gt;= 5000) | `15000` | Shortest time a disconnected player has to come back. |
 | `RECONNECT_GRACE_MAX_MS` | integer (&gt;= 5000) | `60000` | Longest time a disconnected player has to come back (the grace is 10% of the base time within these bounds). |
+| `RECOVERY_GRACE_MS` | integer (15000-3600000) | `90000` | Time both players of a game restored from the journal after a restart or a crash have to come back (or the normal grace when it is longer): the server, not the players, broke the connection, and every client reconnects at once. The running clock still restarts at the recovery. |
 | `LAG_COMP_MAX_MS` | integer (0-5000) | `1000` | Largest network lag given back on one move. |
 | `LAG_QUOTA_INITIAL_MS` | integer (&gt;= 0) | `2000` | Lag compensation budget of each player at the start of a game. |
 | `LAG_QUOTA_GAIN_MS` | integer (&gt;= 0) | `100` | Lag compensation budget regained at every move. |
