@@ -22,7 +22,8 @@
 //     they have >= ANALYSIS_MIN_PLIES plies), under the queue policy below. An invalid record
 //     throws StoreError 'invalid_record' (with .gameId) and the whole batch is rolled back. The
 //     entry of a game left out of the queue carries analysisSkipped: 'sample' | 'backlog' |
-//     'player'.
+//     'player'; the entry of a game that took over waiting jobs carries analysisDisplaced: [ids of
+//     the games whose job it removed].
 //   - users.anonymize(id, now?) -> { tokenHashes } (the revoked sessions, for the auth caches):
 //     username becomes 'deleted#<id>' (also in the game records), e-mail, password, MFA,
 //     sessions, tokens, SSO links, recovery codes, integrity record and stored IPs are erased;
@@ -50,8 +51,11 @@
 //     waits): ordinary games keep a quarter of the engine time however many prioritized games
 //     arrive. At the end of a game, a suspicion signal (either player's integrity level above
 //     'none', an open cheating/other report of weight >= 0.5 against either player in the last
-//     30 days, a non-info anomaly recorded in this game) queues it as 'signal', unless either
-//     player already has SIGNAL_JOBS_PER_PLAYER signal jobs waiting ('player'). An ordinary game
+//     30 days, a non-info anomaly recorded in this game) queues it as 'signal', under a cap of
+//     SIGNAL_JOBS_PER_PLAYER signal jobs waiting per player: past it, a game with a non-info
+//     anomaly of its own takes over the oldest waiting job, without such an anomaly, of each capped
+//     player, in the same transaction (the count stays at the cap), and any other flagged game is
+//     skipped ('player', also when every waiting job has an anomaly of its own). An ordinary game
 //     is drawn with ANALYSIS_SAMPLE_RATE and queued only while fewer than ANALYSIS_QUEUE_MAX
 //     ordinary jobs wait; otherwise it is not inserted at all. analysis.request(gameId, reason,
 //     now) queues an eligible game for a report (or raises the priority of its waiting job, or
@@ -138,7 +142,9 @@ const REPORT_SIGNAL_MIN_WEIGHT = 0.5;
 const ORDINARY_SHARE = 4;
 // Waiting 'signal' jobs per player: a flagged player's further games are not queued while this
 // many of their games wait (the scoring reads their 30 latest analysed games, so these renew most
-// of that window); one prolific flagged player cannot grow the signal tier without bound.
+// of that window); one prolific flagged player cannot grow the signal tier without bound. A game
+// with an anomaly of its own replaces a waiting one without (queueAnalysis), so games flagged only
+// through the player cannot keep one with evidence out.
 const SIGNAL_JOBS_PER_PLAYER = 20;
 // analysis.backlog() counts at most this many jobs per tier (one index range scan each).
 const BACKLOG_COUNT_MAX = 100000;
@@ -149,8 +155,17 @@ const mBatchMs = metrics.histogram('scacelith_store_commit_batch_ms', 'Duration 
     [1, 2, 5, 10, 25, 50, 100, 250, 1000]);
 const mGames = metrics.counter('scacelith_store_games_committed_total', 'Finished games written to the database');
 const mBusy = metrics.counter('scacelith_store_busy_total', 'Store operations that gave up waiting for the database lock');
+// The same help text is registered by store/writer.js (the shard counts its writer thread's answers).
 const mAnalysisSkipped = metrics.counter('scacelith_anticheat_analysis_skipped_total',
-    'Finished rated games not queued for engine analysis (sample: ANALYSIS_SAMPLE_RATE, backlog: ANALYSIS_QUEUE_MAX reached, player: 20 flagged games of a player already waiting)', ['reason']);
+    'Finished rated games not queued for engine analysis (sample: ANALYSIS_SAMPLE_RATE, backlog: ANALYSIS_QUEUE_MAX reached, player: 20 flagged games of a player already waiting, displaced: a waiting flagged game without an anomaly of its own gave its place to a game with one)', ['reason']);
+
+// Counts the games of finishBatch results left out of the analysis queue, or taken out of it.
+function countSkipped(counter, results) {
+    for (const x of results) {
+        if (x.analysisSkipped) counter.labels(x.analysisSkipped).inc();
+        if (x.analysisDisplaced) counter.labels('displaced').inc(x.analysisDisplaced.length);
+    }
+}
 
 /** Priority of an analysis job: the highest waiting priority is analysed first (DESIGN.md 6.5). */
 export const AnalysisPriority = Object.freeze({ ordinary: 0, signal: 1, report: 2, manual: 3 });
@@ -698,37 +713,67 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             .get(userId, SIGNAL_JOBS_PER_PLAYER).n >= SIGNAL_JOBS_PER_PLAYER;
     }
 
+    // The oldest waiting signal job of player `userId` whose game has no non-info anomaly of its
+    // own (of that game's players since its start, as at its end), or null when every such job has
+    // one: the job that a game with an anomaly of its own displaces when the player's cap is reached.
+    function displaceableSignalJob(userId) {
+        return st(`SELECT j.game_id AS gameId, j.white_id AS whiteId, j.black_id AS blackId FROM analysis_jobs j
+            JOIN games g ON g.id = j.game_id
+            WHERE j.game_id IN (SELECT game_id FROM analysis_jobs WHERE white_id = ?1 AND status = 'queued' AND priority = 1
+                UNION ALL SELECT game_id FROM analysis_jobs WHERE black_id = ?1 AND status = 'queued' AND priority = 1)
+            AND NOT EXISTS (SELECT 1 FROM anomalies a WHERE a.user_id IN (j.white_id, j.black_id) AND a.at >= g.started_at
+                AND a.game_id = j.game_id AND a.severity <> 'info')
+            ORDER BY j.queued_at, j.game_id LIMIT 1`).get(userId) ?? null;
+    }
+
     // Analysis queue policy of a finished game (header, DESIGN.md 6.5): a suspicion signal queues
-    // it ahead of the ordinary games (unless either player has SIGNAL_JOBS_PER_PLAYER signal jobs
-    // waiting already); an ordinary game is drawn with ANALYSIS_SAMPLE_RATE and queued only while
-    // fewer than ANALYSIS_QUEUE_MAX ordinary jobs wait. `batch.ordinary` caches that count for the
-    // rest of the transaction (the write lock is held, nobody else changes it). Returns why the
-    // game was left out ('sample' | 'backlog' | 'player'), or null when it was queued.
-    function queueAnalysis(r, now, batch) {
-        const flagged = st(`SELECT EXISTS (SELECT 1 FROM player_integrity WHERE user_id IN (?1, ?2) AND level <> 'none')
+    // it ahead of the ordinary games, under the cap of SIGNAL_JOBS_PER_PLAYER waiting signal jobs
+    // per player; an ordinary game is drawn with ANALYSIS_SAMPLE_RATE and queued only while fewer
+    // than ANALYSIS_QUEUE_MAX ordinary jobs wait. `batch.ordinary` caches that count for the rest
+    // of the transaction (the write lock is held, nobody else changes it). Sets
+    // entry.analysisSkipped to why the game was left out ('sample' | 'backlog' | 'player'), and
+    // entry.analysisDisplaced to the games whose waiting job it took over.
+    function queueAnalysis(r, now, batch, entry) {
+        const s = st(`SELECT EXISTS (SELECT 1 FROM anomalies WHERE user_id IN (?1, ?2) AND at >= ?4 AND game_id = ?5 AND severity <> 'info')
+            AS own, EXISTS (SELECT 1 FROM player_integrity WHERE user_id IN (?1, ?2) AND level <> 'none')
             OR EXISTS (SELECT 1 FROM reports WHERE reported_id IN (?1, ?2) AND created_at >= ?3 AND status = 'open'
-                AND category <> 'abuse' AND weight >= ?6)
-            OR EXISTS (SELECT 1 FROM anomalies WHERE user_id IN (?1, ?2) AND at >= ?4 AND game_id = ?5 AND severity <> 'info')
-            AS flagged`).get(r.whiteId, r.blackId, now - REPORT_SIGNAL_MS, ms(r.startedAt ?? r.endedAt ?? now), r.id,
-            REPORT_SIGNAL_MIN_WEIGHT).flagged;
+                AND category <> 'abuse' AND weight >= ?6) AS player`).get(r.whiteId, r.blackId, now - REPORT_SIGNAL_MS,
+            ms(r.startedAt ?? r.endedAt ?? now), r.id, REPORT_SIGNAL_MIN_WEIGHT);
         const insert = (priority) => st(`INSERT OR IGNORE INTO analysis_jobs (game_id, queued_at, priority, white_id, black_id)
             VALUES (?, ?, ?, ?, ?)`).run(r.id, now, priority, r.whiteId, r.blackId);
-        if (flagged) {
+        if (s.own || s.player) {
             // Never sampled out or capped by ANALYSIS_QUEUE_MAX, and never demoted to 'ordinary':
             // ordinary jobs are the random sample of the population statistics.
-            if (signalCapReached(r.whiteId) || signalCapReached(r.blackId)) return 'player';
+            const capped = [r.whiteId, r.blackId].filter(signalCapReached);
+            if (capped.length) {
+                // A game flagged only through its players is not queued past the cap. A game with
+                // an anomaly of its own takes over the oldest waiting job, without an anomaly of its
+                // own, of each capped player (the count stays at the cap): junk games can never
+                // push a game with evidence out. Skipped only when every job waiting has some.
+                if (!s.own) { entry.analysisSkipped = 'player'; return; }
+                // Both players capped: the job taken from the first may be one of the second's too.
+                // Nothing is removed before a job is found for each.
+                const out = [];
+                for (const p of capped) {
+                    if (out.some((v) => v.whiteId === p || v.blackId === p)) continue;
+                    const v = displaceableSignalJob(p);
+                    if (!v) { entry.analysisSkipped = 'player'; return; }
+                    out.push(v);
+                }
+                for (const v of out) st('DELETE FROM analysis_jobs WHERE game_id = ?').run(v.gameId);
+                entry.analysisDisplaced = out.map((v) => v.gameId);
+            }
             insert(AnalysisPriority.signal);
-            return null;
+            return;
         }
-        if (analysisSampleRate < 1 && !(random() < analysisSampleRate)) return 'sample';
+        if (analysisSampleRate < 1 && !(random() < analysisSampleRate)) { entry.analysisSkipped = 'sample'; return; }
         if (batch.ordinary === null) {
             batch.ordinary = st(`SELECT count(*) AS n FROM (SELECT 1 FROM analysis_jobs WHERE status = 'queued' AND priority = ?
                 LIMIT ?)`).get(AnalysisPriority.ordinary, analysisQueueMax).n;
         }
-        if (batch.ordinary >= analysisQueueMax) return 'backlog';
+        if (batch.ordinary >= analysisQueueMax) { entry.analysisSkipped = 'backlog'; return; }
         insert(AnalysisPriority.ordinary);
         batch.ordinary++;
-        return null;
     }
 
     function commitGame(r, now, batch) {
@@ -770,8 +815,9 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                 changes ? changes.black.before : null, changes ? changes.black.after : null,
                 r.rematchOf ? r.rematchOf : null, r.flags ?? 0,
                 moves, packArray(r.spentMs, Uint32Array), packArray(r.clockMs, Uint32Array));
-        const skipped = rate && plies >= analysisMinPlies ? queueAnalysis(r, now, batch) : null;
-        return skipped ? { gameId: r.id, ratings: changes, analysisSkipped: skipped } : { gameId: r.id, ratings: changes };
+        const entry = { gameId: r.id, ratings: changes };
+        if (rate && plies >= analysisMinPlies) queueAnalysis(r, now, batch, entry);
+        return entry;
     }
 
     const games = {
@@ -787,7 +833,7 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             const out = tx(() => records.map((r) => commitGame(r, now, batch)));
             mBatchMs.observe(performance.now() - t0);
             mGames.inc(out.reduce((n, x) => n + (x.duplicate ? 0 : 1), 0));
-            for (const x of out) if (x.analysisSkipped) mAnalysisSkipped.labels(x.analysisSkipped).inc();
+            countSkipped(mAnalysisSkipped, out);
             return out;
         },
         byId(id) {

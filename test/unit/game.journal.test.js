@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { GameRoom, JournalKind, JournalError, RecordFlag, RECOVERY_GSEQ_JUMP } from '../../src/game/room.js';
+import { GameRoom, JournalKind, JournalEvent, JournalError, RecordFlag, RECOVERY_GSEQ_JUMP } from '../../src/game/room.js';
 import { FakeChessGame, fakeMove } from '../../src/game/testing.js';
 import { decode, enums, MSG } from '../../src/protocol/index.js';
 import { testConfig } from '../../src/config.js';
@@ -246,6 +246,17 @@ test('journal payload formats', () => {
     j.run(j.room.onDisconnect(B, T0 + 1500));
     assert.equal(j.log[2].payload.length, 12);
     assert.equal(j.log[2].payload.readUInt32LE(8), 30000);
+    assert.equal(j.log[2].payload[2], 0);
+    // The recovered record: 16 bytes, byte 2 = 1 (each player's first reconnection restarts its
+    // first-move timer); a checkpoint's presence byte: 1 White connected, 2 Black connected, 4 clock
+    // held, 8 White and 16 Black not back since the recovery.
+    const rec = GameRoom.fromJournal(j.log, opts());
+    const recovered = rec.recover(T0 + 1800).journal[0].payload;
+    assert.deepEqual([recovered.length, recovered[0], recovered[1], recovered[2], recovered[3]], [16, JournalEvent.Recovered, 2, 1, 0]);
+    const presence = () => rec.journalState().find((r) => r.kind === JournalKind.Event).payload[2];
+    assert.equal(presence(), 4 | 8 | 16);
+    rec.onReconnect(W, T0 + 1900);
+    assert.equal(presence(), 1 | 4 | 16);
     j.run(j.room.onResign(W, T0 + 2000));
     const end = j.log[3];
     assert.equal(end.kind, JournalKind.Ended);

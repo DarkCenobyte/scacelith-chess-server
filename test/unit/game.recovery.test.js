@@ -3,7 +3,8 @@
 // disconnection gets the normal grace again. The clock of the side to move waits for that player,
 // RECOVERY_CLOCK_HOLD_MS at most, and the hold replays identically from the journal, from a
 // snapshot and after a second crash. A restored game aborted NoShow because its player never came
-// back records no conduct incident.
+// back records no conduct incident. Before the second ply, the first reconnection of the side to
+// move since the recovery restarts its first-move timer, even after the hold.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -308,6 +309,247 @@ test('a restored game at ply 1: no conduct incident when its player never came b
     // A game that was never restored keeps its conduct incident.
     const c = GameRoom.fromJournal(log, opts());
     assert.deepEqual(c.tick(T0 + 2000 + 30000).conduct, [{ userId: 4, kind: 'noshow' }]);
+});
+
+// ---- First-move timer of a game restored before its second ply -------------------------------------
+
+const FIRST = CFG.firstMoveTimeoutMs;
+
+// A 3+2 game at ply 1 (Black to move), and its journal.
+function atPly1(id = 626262) {
+    const room = new GameRoom({ id, category: '3+2', baseMs: 180000, incMs: 2000, rated: true, white: pl(3), black: pl(4), createdAt: T0, ...opts() });
+    const log = [room.createdRecord()];
+    recorder(log)(room.onMove(W, moveOf(room), T0 + 2000));
+    return log;
+}
+
+test('a restored game at ply 1: back after the hold, the side to move gets its whole first-move time from its first reconnection', () => {
+    assert.equal(FIRST, 30000);
+    const R = T0 + 12000;
+    const { room, out, log } = restart(atPly1(), R);
+    const run = recorder(log);
+    assert.equal(out.journal[0].payload[2], 1, 'the recovery record asks for the restart');
+    assert.deepEqual(room.awaySinceRecovery, [true, true]);
+    run(room.onReconnect(W, R + 1000));
+    assert.deepEqual(room.awaySinceRecovery, [false, true]);
+    // The hold ends without Black: its first-move timer runs from then on.
+    assert.equal(run(room.tick(R + HOLD)).clockStarted, B);
+    assert.equal(room.nextDeadline(), R + HOLD + FIRST);
+    // Black is back 2 s before that deadline, within its recovery grace.
+    const back = R + HOLD + FIRST - 2000;
+    const o = run(room.onReconnect(B, back));
+    assert.equal(o.clockStarted, B, 'the host sends White a snapshot with the new timer');
+    assert.deepEqual([room.clock.turnStart, room.nextDeadline()], [back, back + FIRST]);
+    assert.equal(room.snapshot(B, back).firstMoveMs, FIRST);
+    assert.equal(room.snapshot(W, back + 1000).firstMoveMs, FIRST - 1000);
+    assert.deepEqual(fp(GameRoom.fromJournal(log, opts()), back), fp(room, back), 'the journal replays to the same room');
+    assert.equal(run(room.tick(R + HOLD + FIRST)).ended, false, 'still running at the deadline it had before');
+    // Leaving and coming back again does not restart it a second time.
+    run(room.onDisconnect(B, back + 5000));
+    const again = run(room.onReconnect(B, back + 10000));
+    assert.equal(again.clockStarted, 2);
+    assert.deepEqual([room.clock.turnStart, room.nextDeadline()], [back, back + FIRST]);
+    assert.equal(room.snapshot(B, back + 10000).firstMoveMs, FIRST - 10000);
+    assert.deepEqual(fp(GameRoom.fromJournal(log, opts()), back + 10000), fp(room, back + 10000));
+    // Back with its whole first-move time and no move: a no-show.
+    assert.equal(run(room.tick(back + FIRST - 1)).ended, false);
+    const end = run(room.tick(back + FIRST));
+    assert.deepEqual([room.result.status, room.result.reason], [GS.Aborted, ER.NoShow]);
+    assert.deepEqual(end.conduct, [{ userId: 4, kind: 'noshow' }]);
+});
+
+test('a restored game at ply 0: the first reconnection restarts the timer of the side to move, also after the opponent\'s first move', () => {
+    const room0 = new GameRoom({ id: 636363, category: '3+2', baseMs: 180000, incMs: 2000, rated: true, white: pl(3), black: pl(4), createdAt: T0, ...opts() });
+    const R = T0 + 10000;
+    const { room, log } = restart([room0.createdRecord()], R);
+    const run = recorder(log);
+    run(room.tick(R + HOLD));
+    // White (to move) is back 25 s after the hold: 30 s from then.
+    const wBack = R + HOLD + 25000;
+    assert.equal(run(room.onReconnect(W, wBack)).clockStarted, W);
+    assert.equal(room.nextDeadline(), wBack + FIRST);
+    // White moves; Black, still away since the recovery, has its first-move time from that move...
+    const wMove = wBack + 1000;
+    assert.equal(run(room.onMove(W, moveOf(room), wMove)).moved, true);
+    assert.equal(room.nextDeadline(), wMove + FIRST);
+    // ...and the whole of it again from its first reconnection (before its recovery grace ends).
+    const bBack = wMove + 25000;
+    assert.ok(bBack < R + 90000);
+    assert.equal(run(room.onReconnect(B, bBack)).clockStarted, B);
+    assert.equal(room.nextDeadline(), bBack + FIRST);
+    assert.deepEqual(fp(GameRoom.fromJournal(log, opts()), bBack), fp(room, bBack));
+    assert.equal(run(room.onMove(B, moveOf(room), bBack + 29000)).moved, true);
+    assert.deepEqual(room.awaySinceRecovery, [false, false]);
+    // A player who is not to move gets no restart from its reconnection.
+    const other = restart([room0.createdRecord()], R).room;
+    other.tick(R + HOLD);
+    assert.equal(other.onReconnect(B, R + HOLD + 1000).clockStarted, 2);
+    assert.deepEqual([other.clock.turnStart, other.awaySinceRecovery], [R + HOLD, [true, false]]);
+    // A game restored at ply 2 or later sets nothing: its clock rules are the ones of the hold.
+    const late = restart(journaled().log, R + 20000).room;
+    assert.deepEqual(late.awaySinceRecovery, [false, false]);
+});
+
+test('the first-move restart survives journalState, a journal snapshot and a replay; a second recovery gives it again', () => {
+    const R = T0 + 12000;
+    const S = R + HOLD + 5000;
+    const live = () => {
+        const g = restart(atPly1(), R);
+        const run = recorder(g.log);
+        run(g.room.onReconnect(W, R + 1000));
+        run(g.room.tick(R + HOLD));
+        return { ...g, run };
+    };
+    const g = live();
+    const state = g.room.journalState();
+    const cp = state.find((r) => r.kind === JournalKind.Event && r.payload[0] === JournalEvent.Checkpoint);
+    assert.equal(cp.payload[2] & 0x18, 16, 'Black\'s away bit in the checkpoint presence byte');
+    for (const [label, records] of [['journalState', state], ['journalSnapshot', [g.room.journalSnapshot(S)]]]) {
+        const ref = live();
+        const copy = GameRoom.fromJournal(records, opts());
+        assert.deepEqual(copy.awaySinceRecovery, [false, true], label);
+        assert.deepEqual(fp(copy, S), fp(ref.room, S), label);
+        const a = ref.run(ref.room.onReconnect(B, S + 10000)), b = copy.onReconnect(B, S + 10000);
+        assert.deepEqual(b.journal.map((r) => [r.kind, r.at, r.payload]), a.journal.map((r) => [r.kind, r.at, r.payload]), label);
+        assert.deepEqual([b.clockStarted, copy.nextDeadline()], [B, S + 10000 + FIRST], label);
+        assert.deepEqual(fp(copy, S + 10000), fp(ref.room, S + 10000), label);
+    }
+    // Restored at ply 0, both still away at the snapshot: both bits, and White (to move) gets the restart.
+    const room0 = new GameRoom({ id: 646464, category: '3+2', baseMs: 180000, incMs: 2000, rated: true, white: pl(3), black: pl(4), createdAt: T0, ...opts() });
+    const zero = restart([room0.createdRecord()], R).room;
+    zero.tick(R + HOLD);
+    const zs = zero.journalSnapshot(S);
+    const zcp = GameRoom.fromJournal([zs], opts()).journalState().find((r) => r.kind === JournalKind.Event);
+    assert.equal(zcp.payload[2] & 0x18, 0x18);
+    const zc = GameRoom.fromJournal([zs], opts());
+    assert.deepEqual(zc.awaySinceRecovery, [true, true]);
+    assert.deepEqual([zc.onReconnect(W, S + 1000).clockStarted, zc.nextDeadline()], [W, S + 1000 + FIRST]);
+    // Black came back and left again before the snapshot: no restart after it either.
+    const h = live();
+    h.run(h.room.onReconnect(B, S));
+    h.run(h.room.onDisconnect(B, S + 2000));
+    const snap = h.room.journalSnapshot(S + 3000);
+    const copy = GameRoom.fromJournal([snap], opts());
+    assert.deepEqual(copy.awaySinceRecovery, [false, false]);
+    assert.deepEqual([copy.onReconnect(B, S + 4000).clockStarted, copy.nextDeadline()], [2, S + FIRST]);
+    // A second crash: the new recovery gives both players their first reconnection again.
+    const R2 = S + 20000;
+    const second = restart([snap], R2);
+    assert.deepEqual(second.room.awaySinceRecovery, [true, true]);
+    second.room.tick(R2 + HOLD);
+    assert.equal(second.room.onReconnect(B, R2 + HOLD + 10000).clockStarted, B);
+    assert.equal(second.room.nextDeadline(), R2 + HOLD + 10000 + FIRST);
+});
+
+test('journals of older builds replay without the first-move restart: no flag in the recovered record, no away bit in checkpoints', () => {
+    const R = T0 + 12000;
+    const back = R + HOLD + FIRST - 2000;
+    const { room, log } = restart(atPly1(), R);
+    const run = recorder(log);
+    run(room.onReconnect(W, R + 1000));
+    run(room.tick(R + HOLD));
+    run(room.onReconnect(B, back));
+    const isRecovered = (r) => r.kind === JournalKind.Event && r.payload[0] === JournalEvent.Recovered;
+    const isCheckpoint = (r) => r.kind === JournalKind.Event && r.payload[0] === JournalEvent.Checkpoint;
+    const edit = (records, fn) => records.map((r) => {
+        const p = Buffer.from(r.payload);
+        fn(r, p);
+        return { ...r, payload: p };
+    });
+    const noFlag = (r, p) => { if (isRecovered(r)) p[2] = 0; };
+    const noBits = (r, p) => { if (isCheckpoint(r)) p[2] &= 7; };
+    assert.equal(GameRoom.fromJournal(log, opts()).clock.turnStart, back, 'this build');
+    // An older build: the release checkpoint of the hold has no away bit, the recovery no flag.
+    for (const [label, old] of [['both', edit(log, (r, p) => { noFlag(r, p); noBits(r, p); })], ['checkpoint', edit(log, noBits)]]) {
+        const a = GameRoom.fromJournal(old, opts());
+        assert.deepEqual([a.clock.turnStart, a.nextDeadline(), a.awaySinceRecovery], [R + HOLD, R + HOLD + FIRST, [false, false]], label);
+    }
+    // No hold (RECOVERY_CLOCK_HOLD_MS=0, or a 12-byte record of an older build): no checkpoint in
+    // between, so the recovered record alone decides.
+    const none = testConfig({ RECOVERY_CLOCK_HOLD_MS: '0' });
+    const z = restart(atPly1(), R, none);
+    recorder(z.log)(z.room.onReconnect(B, R + 20000));
+    assert.equal(GameRoom.fromJournal(z.log, opts(none)).clock.turnStart, R + 20000);
+    const zOld = edit(z.log, noFlag);
+    assert.equal(GameRoom.fromJournal(zOld, opts(none)).clock.turnStart, R);
+    const short = zOld.map((r) => (isRecovered(r) ? { ...r, payload: r.payload.subarray(0, 12) } : r));
+    assert.equal(GameRoom.fromJournal(short, opts(none)).clock.turnStart, R);
+});
+
+test('GameHost with a real journal: a compaction snapshot and a crash keep the first-move restart; the opponent sees the new timer', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-first-'));
+    const copy = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-first-copy-'));
+    const JOPTS = { shard: 0, log: silentLog, flushMs: 1000, fsync: false, segmentBytes: 1, compactSegments: 1 };
+    const clock = { t: T0 };
+    try {
+        // 1. White plays its first move; then the process dies.
+        const j0 = await openJournal({ dir, ...JOPTS });
+        const h0 = hostOn(j0, clock);
+        const id = h0.createGame({ white: pl(1), black: pl(2), rated: true, baseMs: 180000, incMs: 2000 });
+        clock.t += 1500;
+        move(h0, id);
+        await j0.close();
+
+        // 2. Restart at R1: White comes back, Black does not; the hold ends; the game is compacted.
+        clock.t += 30000;
+        const R1 = clock.t;
+        const j1 = await openJournal({ dir, ...JOPTS });
+        const h1 = hostOn(j1, clock);
+        assert.equal(h1.recover(), 1);
+        const room = h1.room(id);
+        const ew = new FakeEndpoint(1);
+        clock.t = R1 + 2000;
+        h1.attach(id, 1, ew);
+        clock.t = R1 + HOLD;
+        h1.runTimers(clock.t + 10);
+        assert.equal(room.nextDeadline(), R1 + HOLD + FIRST);
+        await j1.flush();
+        clock.t = R1 + HOLD + 1000;
+        assert.equal(h1.compactJournal(clock.t), 1, 'the journal asked for a snapshot of the game');
+        await j1.flush();
+
+        // 3. A crash at S, after the hold: the copy replays to the same room, Black still away.
+        const S = R1 + HOLD + 3000;
+        clock.t = S;
+        fs.cpSync(path.join(dir, 'shard-0'), path.join(copy, 'shard-0'), { recursive: true });
+        const j2 = await openJournal({ dir: copy, ...JOPTS });
+        const records = j2.recover().get(id);
+        assert.equal(records[0].kind, JournalKind.Snapshot, 'the game starts from its snapshot');
+        const replay = GameRoom.fromJournal(records, opts());
+        assert.deepEqual(fp(replay, S), fp(room, S), 'the room as it was at the crash');
+        assert.deepEqual(replay.awaySinceRecovery, [false, true]);
+
+        // 4. On the live host, Black is back 26 s after the hold: White is sent the new timer.
+        ew.clear();
+        clock.t = R1 + HOLD + 26000;
+        const eb = new FakeEndpoint(2);
+        h1.attach(id, 2, eb);
+        assert.deepEqual(ew.msgs().map((x) => [x.type, x.kind, x.firstMoveMs]),
+            [[MSG.GameEvent, EV.PlayerReconnected, undefined], [MSG.GameSnapshot, undefined, FIRST]]);
+        assert.equal(eb.msgs().at(-1).firstMoveMs, FIRST);
+        assert.equal(room.nextDeadline(), clock.t + FIRST);
+
+        // 5. The second restart, from the copy at R2: Black's first reconnection after the new hold
+        //    gives it the whole first-move time again.
+        clock.t = S + 30000;
+        const R2 = clock.t;
+        const h2 = hostOn(j2, clock);
+        assert.equal(h2.recover(), 1);
+        const r2 = h2.room(id);
+        assert.deepEqual(r2.awaySinceRecovery, [true, true]);
+        clock.t = R2 + HOLD;
+        h2.runTimers(clock.t + 10);
+        clock.t = R2 + HOLD + 15000;
+        const eb2 = new FakeEndpoint(2);
+        h2.attach(id, 2, eb2);
+        assert.equal(eb2.msgs().at(-1).firstMoveMs, FIRST);
+        assert.equal(r2.nextDeadline(), clock.t + FIRST);
+        await j2.close();
+        await j1.close();
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(copy, { recursive: true, force: true });
+    }
 });
 
 test('the first move after a recovery: thinkMs counted from the previous move is not clock_implausible', () => {
