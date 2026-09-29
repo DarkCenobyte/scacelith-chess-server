@@ -29,7 +29,7 @@ Server CPU on the test vCPU. Divide by `s` for another host.
 | Move | 190-420 µs, higher at low move rates per shard (moves are then handled one by one); TLS is 23-34 % of it |
 | Game (start, end, commit, rating update) | about 3 ms |
 | Reconnection after a crash (TLS handshake, WebSocket upgrade, Hello; the client reuses its `GET /info` answer) | about 2.3-2.5 ms (inferred) |
-| Reconnection after a graceful restart (the client reads `GET /info` again on its own TLS connection) | about 4 ms (2.3 ms for the WebSocket, 1.5-2 ms for `/info`) |
+| Reconnection after a graceful restart (the client reads `GET /info` again on its own TLS connection) | about 4 ms (inferred: 2.3 ms for the WebSocket, 1.5-2 ms for `/info`) |
 | Password login or registration | 0.50-0.55 s with scrypt (Node 22), 0.35 s with Argon2id (Node 24.7 or later) |
 | Fixed cost per shard with traffic, per process at idle | about 0.05 core, about 0.013 core |
 
@@ -37,7 +37,7 @@ Where the CPU goes at the comfortable point with a 10 s ping (inferred from the 
 
 `CLIENT_PING_INTERVAL_MS` sets how often the client pings. The server announces it to the game at connection (in `Welcome`); it accepts 1,000 to 60,000 ms and defaults to 10,000. Lowering it makes the ping indicator more reactive at a CPU cost: at 2 s, capacity falls by a factor of 1.87 for mix M1.
 
-The server's own heartbeat is part of these costs. Each worker walks its connections in slices and pings a connection when its last ping is at least half of `HEARTBEAT_INTERVAL_MS` (10 s) old. Once a worker holds more than about 40 connections, a lap over them takes about one interval, so a loaded worker sends one ping per connection per interval, as in the measurements; a nearly idle worker pings up to twice as often. The game sends one probe Ping when nothing came from the server for 1.5 intervals (7.5 s at least) and drops the connection after 2 intervals (10 s at least).
+The server's own heartbeat is part of these costs. Each worker walks its connections in slices and pings a connection when its last ping is at least half of `HEARTBEAT_INTERVAL_MS` (10 s) old. Once a worker holds a few hundred connections, a lap over them takes about one interval (from 41 to about 200 connections it takes between half an interval and one), so a loaded worker sends one ping per connection per interval, as in the measurements; a nearly idle worker pings up to twice as often. The game sends one probe Ping when nothing came from the server for 1.5 intervals (7.5 s at least) and drops the connection after 2 intervals (10 s at least).
 
 ### Speed factor `s`
 
@@ -118,13 +118,13 @@ The server uses the SQLite bundled with Node (3.51 in Node 22.22) through `node:
 
 Migrations are numbered SQL files (001 to 003 today). `start` applies the missing ones in order before the workers accept players, and `node bin/scacelith-server.js migrate` does the same and exits. Each runs in its own transaction and is recorded with a SHA-256 checksum; the server refuses to start when an applied migration was modified or is unknown to its version (a downgrade).
 
-PostgreSQL is planned but not written. The store's interface hides the SQL, so a PostgreSQL store with translated migrations would be the way to several machines sharing accounts and ratings. A machine of this size does not need it: one SQLite writer commits a batch of 25 games in 4.9 ms, while a full VPS ends 7 to 14 games per second.
+PostgreSQL is planned but not written. The store's interface hides the SQL, so a PostgreSQL store with translated migrations would be the way to several machines sharing accounts and ratings. A machine of this size does not need it: one SQLite writer commits a batch of 25 games in 4.9 ms, while a full VPS ends about 12 to 23 games per second (inferred: 71,000 games a day per 1,000 connected players, at the comfortable load with the 10 s ping).
 
 ### What is stored
 
 Accounts (password hash, encrypted TOTP secret, HMAC'd recovery codes), sessions and single-use tokens (SHA-256 of the token only), one rating per official time control, finished games (moves, times and clocks as BLOBs), sanctions, conduct, anomalies, security events, the analysis queue and reports. Deleted accounts are anonymized, not removed.
 
-Games in progress live in memory and in a per-shard append-only journal, flushed every `JOURNAL_FLUSH_MS` (50 ms) with `fdatasync`. Finished games are committed in batches of up to 500 by a writer thread every `DB_COMMIT_MS` (50 ms), with the rating updates in the same transaction. Before a batch is committed, the shard flushes the journal if records are waiting, so the database never holds a finished game whose end the journal has not recorded; with `JOURNAL_FSYNC=true` that is one more `fdatasync` per commit batch, at most one every `DB_COMMIT_MS`. A crash loses at most the last 50 ms of moves.
+Games in progress live in memory and in a per-shard append-only journal, flushed every `JOURNAL_FLUSH_MS` (50 ms) with `fdatasync`. Finished games are committed in batches of up to 500 by a writer thread every `DB_COMMIT_MS` (50 ms), with the rating updates in the same transaction. Before a batch is committed, the shard flushes the journal if records are waiting, so the database never holds a finished game whose end the journal has not recorded; with `JOURNAL_FSYNC=true` that is one more `fdatasync` per commit batch. A batch starts `DB_COMMIT_MS` after the first game of an empty queue ended, or at once when games ended during the previous commit, so there is at most one batch per finished game. A crash loses at most the last 50 ms of moves.
 
 Journal compaction keeps the journal small however long the games last. Segments are 16 MB. Once a worker's journal has moved `JOURNAL_COMPACT_SEGMENTS` (4) segments past the oldest record a game still needs, that game is written again as one snapshot record and the older segments are deleted. A worker's journal then stays at about (4 + 1) × 16 MB = 80 MB; the README advises planning 100 MB per worker. Disabling custom time controls to protect the disk is no longer needed.
 
@@ -158,7 +158,7 @@ Average load is taken as 40 % of the peak (inferred), so 5,600 average players i
 
 ### Disk I/O
 
-An NVMe disk (about 20,000 writes of 4 KB per second) is not a limit: at most about 40 journal `fdatasync` per second per worker (inferred: one per 50 ms flush and one before each commit batch, at most one per 50 ms), plus 5 to 20 database commits per second.
+An NVMe disk (about 20,000 writes of 4 KB per second) is not a limit: at most about 30 journal `fdatasync` per second per worker (inferred: 20 from the 50 ms flushes, plus one before each commit batch, which needs at least one finished game: about 6 per second per worker at the comfortable load with the 10 s ping, about 12 at the memory limit), plus 5 to 20 database commits per second.
 
 ### Backups
 
@@ -167,6 +167,7 @@ An NVMe disk (about 20,000 writes of 4 KB per second) is not a limit: at most ab
 
 ```sh
 cd /opt/scacelith/dedicated-server
+sudo -u scacelith mkdir -p /var/lib/scacelith/backup
 sudo -u scacelith env SCACELITH_ENV_FILE=/etc/scacelith/scacelith.env \
   node bin/admin.js backup /var/lib/scacelith/backup/scacelith-$(date +%F).db --verify
 ```
@@ -180,7 +181,7 @@ sudo -u scacelith env SCACELITH_ENV_FILE=/etc/scacelith/scacelith.env \
 
 ### Password logins
 
-A password login, a registration, a password change or reset, and an account change that asks for the password each cost one hash; a token reconnection costs only a SHA-256 and a database read. Sessions last 30 days idle (`SESSION_IDLE_DAYS`), so password logins are rare in normal operation. At `s` = 0.65 a hash takes about 0.8 s of CPU and 128 MiB with scrypt, about 0.55 s and 64 MiB with Argon2id (inferred).
+A password login, a registration, a password reset and an account change that asks for the password each cost one hash, and a password change two (the check of the current password and the new hash); a token reconnection costs only a SHA-256 and a database read. Sessions last 30 days idle (`SESSION_IDLE_DAYS`), so password logins are rare in normal operation. At `s` = 0.65 a hash takes about 0.8 s of CPU and 128 MiB with scrypt, about 0.55 s and 64 MiB with Argon2id (inferred).
 
 | `s` = 0.65, scrypt | 2 vCores | 4 vCores |
 |---|---|---|
@@ -205,15 +206,15 @@ With `TLS_MODE=native`, each worker screens new TCP connections before any TLS w
 1. A new connection has 3 s to send the first record of its TLS ClientHello and holds no handshake slot meanwhile; a silent or malformed one is closed. At most 16 × `MAX_PENDING_HANDSHAKES` (2,048) connections per worker, and 4 × `MAX_PENDING_HANDSHAKES_PER_IP` (16) per address group, may wait at once.
 2. The connection then needs one of the worker's `MAX_PENDING_HANDSHAKES` (128) handshake slots and one of the `MAX_PENDING_HANDSHAKES_PER_IP` slots of its address group, an IPv4 address or an IPv6 /48. That key is empty by default, which means 4. A connection beyond either cap is closed with a reset, and the game retries after its backoff. A handshake that fails or passes its 10 s timeout gives its slot back and is closed.
 
-At about 3.7 ms of CPU per handshake on these vCores (inferred: 2.4 ms ÷ 0.65), 128 handshakes in flight are about half a second of work, so the handshakes a worker starts finish long before the game's 10 s deadline, and a reconnection storm is served in turn. `scacelith_tls_refused_total{reason}` counts the closed connections.
+At about 3.7 ms of CPU per new connection on these vCores (TLS handshake, upgrade and Hello, the handshake being about half of it; inferred: 2.4 ms ÷ 0.65), 128 handshakes in flight are about half a second of work, so the handshakes a worker starts finish long before the game's 10 s deadline, and a reconnection storm is served in turn. `scacelith_tls_refused_total{reason}` counts the closed connections.
 
-**Players who share one address.** A school, a company network or a mobile operator's carrier-grade NAT puts many players behind one IPv4 address. In normal play the per-group cap does not matter: a handshake holds its slot for one or two network round trips, so 4 slots per worker serve dozens of handshakes per second from one address (inferred). After a restart, when they all reconnect at once, players behind one address are served 4 at a time per worker and come back later than the others. Other limits matter more for such a group: `MAX_CONNECTIONS_PER_IP` (16 connections per IPv4 address), `AUTH_RATE_PER_IP` (20 password logins, registrations or resets per 10 minutes), and the 2 password hashes one address may have waiting in a worker (the next concurrent login gets 429, and the game retries after the `Retry-After`). For a club or a school that plays over one address, raise `MAX_CONNECTIONS_PER_IP` and `AUTH_RATE_PER_IP` above the size of the group, and `MAX_PENDING_HANDSHAKES_PER_IP` to about 16 (it must stay below `MAX_PENDING_HANDSHAKES`).
+**Players who share one address.** A school, a company network or a mobile operator's carrier-grade NAT puts many players behind one IPv4 address. In normal play the per-group cap does not matter: a handshake holds its slot for one or two network round trips, so 4 slots per worker serve dozens of handshakes per second from one address (inferred). After a restart, when they all reconnect at once, players behind one address are served 4 at a time per worker and come back later than the others. Other limits matter more for such a group: `MAX_CONNECTIONS_PER_IP` (16 connections per IPv4 address), `AUTH_RATE_PER_IP` (20 password logins, registrations or resets per 10 minutes), and the 2 password hashes one address may have waiting in a worker (the next concurrent login gets 429, and the game shows the player how long to wait before trying again). For a club or a school that plays over one address, raise `MAX_CONNECTIONS_PER_IP` and `AUTH_RATE_PER_IP` above the size of the group, and `MAX_PENDING_HANDSHAKES_PER_IP` to about 16 (it must stay below `MAX_PENDING_HANDSHAKES`).
 
 **Load tests from one machine.** Every client of a load machine shares its address, and the load generator does not retry a refused connection. On the test instance, set `MAX_PENDING_HANDSHAKES_PER_IP=127` (one below `MAX_PENDING_HANDSHAKES`) and `MAX_CONNECTIONS_PER_IP` above the clients per load address, as the tool does for a server it starts itself. See [Validating on the real machine](#validating-on-the-real-machine).
 
 ### When the server is full
 
-`MAX_CONNECTIONS` counts the signed-in players of the whole server. A newcomer beyond it is refused at Hello with `ServerFull`, and the game then waits 60 to 120 s before trying again, so 1,000 newcomers waiting for a place cost about 0.07 vCore (inferred: 1,000 ÷ 90 s × 6 ms for the two TLS handshakes of an attempt). A player whose game is in progress is still admitted, so a full server does not make a game end by abandonment. So that such a player can reach Hello, WebSocket upgrades may go max(16, 2 %) beyond `MAX_CONNECTIONS` (200 above 10,000, 400 above 20,000); beyond that reserve the upgrade gets HTTP 503. After such a refusal (for 5 s), or while it holds 1.2 times its share of `MAX_CONNECTIONS`, a worker sheds: its TLS gate lets only `MAX_PENDING_HANDSHAKES` / 2 (64) new TLS connections per second through and closes the others before any TLS work. That bounds the TLS work spent while shedding at about a quarter of each vCore (inferred: 64 per second × 3.7 ms), and the connections closed before TLS cost almost nothing. On the default shared port the API is let through at the same rate; setting `WS_PORT` to another port keeps the API outside that limit.
+`MAX_CONNECTIONS` counts the signed-in players of the whole server. A newcomer beyond it is refused at Hello with `ServerFull`, and the game then waits 60 to 120 s before trying again, so 1,000 newcomers waiting for a place cost about 0.07 vCore (inferred: 1,000 ÷ 90 s × 6 ms for an attempt, which reads `/info` and opens the WebSocket over two TLS connections: 4 ms ÷ 0.65). A player whose game is in progress is still admitted, so a full server does not make a game end by abandonment. So that such a player can reach Hello, WebSocket upgrades may go max(16, 2 %) beyond `MAX_CONNECTIONS` (200 above 10,000, 400 above 20,000); beyond that reserve the upgrade gets HTTP 503. After such a refusal (for 5 s), or while it holds 1.2 times its share of `MAX_CONNECTIONS`, a worker sheds: its TLS gate lets only `MAX_PENDING_HANDSHAKES` / 2 (64) new TLS connections per second through and closes the others before any TLS work. That bounds the TLS work spent while shedding at about a quarter of each vCore (inferred: 64 per second × 3.7 ms), and the connections closed before TLS cost almost nothing. On the default shared port the API is let through at the same rate; setting `WS_PORT` to another port keeps the API outside that limit.
 
 `MAX_CONNECTIONS` protects memory and file descriptors, not CPU: set it from the memory figure, and let the CPU figures tell you when to move to a larger machine.
 
@@ -230,15 +231,15 @@ Time until every client is back (inferred):
 | Load | Clients on 2 vCores / 4 vCores | After a crash | After a graceful restart |
 |---|---|---|---|
 | Comfortable, 2 s ping | 7,500 / 15,300 | about 35-40 s | about 60-65 s |
-| Above comfortable, 2 s ping | 10,000 / 20,000 | about 55-60 s | about 90-100 s |
+| Above comfortable, 2 s ping | 10,000 / 20,000 | about 50-57 s | about 85-95 s |
 | Comfortable, 10 s ping (default) | 14,000 / 28,400 | about 60 s | about 100 s |
 
-The crash times come from a simulation of the client's backoff reviewed during the capacity study (57-60 s at the comfortable load and 81-84 s for 10,000 clients on 2 vCores at `s` = 0.70, with 4 ms per reconnection), extrapolated to `s` = 0.65 and brought down to 2.3-2.5 ms per reconnection. The graceful-restart column is the crash column × 4 ms ÷ 2.4 ms. Players with a game in progress retry sooner and more often than the others, so most games are back before the last client; the table is the cautious case. For comparison, the older server gave restored bullet and blitz games only 15-18 s: about 37 % of the clients came back within it, so only about 14 % of the games in progress kept both players (0.37 × 0.37).
+The crash times come from a simulation of the client's backoff reviewed during the capacity study (57-60 s at the comfortable load and 81-84 s for 10,000 clients on 2 vCores at `s` = 0.70, with 4 ms per reconnection), extrapolated to `s` = 0.65 and brought down to 2.3-2.5 ms per reconnection. The graceful-restart column is the crash column × 4 ms ÷ 2.4 ms. Players with a game in progress retry more often than the others, and after a graceful restart sooner too, so most games are back before the last client; the table is the cautious case. For comparison, the older server gave restored bullet and blitz games only 15-18 s: about 37 % of the clients came back within it, so only about 14 % of the games in progress kept both players (0.37 × 0.37).
 
 Two settings decide whether the games survive:
 
 - `RECOVERY_GRACE_MS` (90 s): both players of a restored game have this long, from the moment the server restores it, to come back (the normal grace when that is longer). The default covers every crash in the table and a graceful restart at the comfortable load with a 2 s ping. It does not cover a graceful restart at the comfortable load with the default 10 s ping (about 100 s), nor above the comfortable load. Set 150000 on both VPS if you may restart near the comfortable load (inferred: 100 s plus half again as a margin).
-- `RECOVERY_CLOCK_HOLD_MS` (20 s): the clock (or first-move timer) of the side to move stays stopped until that player is back, for this long at most; after it, the clock runs and a late player loses the difference. At the comfortable load with a 10 s ping, reconnecting only the players with a game in progress takes at least about 16 s after a crash and 27 s after a graceful restart, on either VPS (inferred: 0.6 × 14,000 clients × 2.4 or 4 ms ÷ (2 vCores × 0.65 × 0.95)), plus up to 2 or 8 s before the first attempt. The default covers crashes; set 45000 on both VPS for graceful restarts near the comfortable load. The hold must stay below `RECOVERY_GRACE_MS`, and it is also the free thinking time a player could take by staying away on purpose, so do not raise it further.
+- `RECOVERY_CLOCK_HOLD_MS` (20 s): the clock (or first-move timer) of the side to move stays stopped until that player is back, for this long at most; after it, the clock runs and a late player loses the difference. At the comfortable load with a 10 s ping, reconnecting only the players with a game in progress takes at least about 16 s after a crash and 27 s after a graceful restart, on either VPS (inferred: 0.6 × 14,000 clients × 2.4 or 4 ms ÷ (2 vCores × 0.65 × 0.95)), plus up to 2 or 8 s before the first attempt. After a crash the players with a game in progress retry together with the others (all within 0.5-2 s), so the last of them may need up to about 27 s plus 2 s (inferred: 14,000 clients × 2.4 ms ÷ (2 vCores × 0.65 × 0.95)): the default is enough only well below the comfortable load. Set 45000 on both VPS if a crash or a graceful restart may happen near the comfortable load. The hold must stay below `RECOVERY_GRACE_MS`, and it is also the free thinking time a player could take by staying away on purpose, so do not raise it further.
 
 With half the comfortable load or less, the defaults are about enough for a graceful restart too (inferred: the times shrink roughly with the number of clients). Restart at quiet hours, keep `SHUTDOWN_GRACE_MS` so clients receive the notice, and enable `LISTEN_REUSE_PORT`. Keep `RECONNECT_GRACE_MIN_MS` at 15000 for ordinary disconnections: raising it just before a restart is not needed, and the configuration is only read at start.
 
@@ -258,7 +259,7 @@ With half the comfortable load or less, the defaults are about enough for a grac
 | `MAX_CONNECTIONS_PER_IP`, `MAX_PENDING_HANDSHAKES_PER_IP` | 16, empty (4) (defaults) | same | raise both when many players share one address (a school, a company); on a load-test instance too |
 | `PASSWORD_HASH_CONCURRENCY` | 1 (default) | 1 | the memory budget counts one 128 MiB hash per worker, and each hash takes a vCore for 0.8 s |
 | `POW_LOGIN_TRIGGER_PER_MIN` | 20 | 30 (default) | the default is about a fifth of a 2-vCore VPS in scrypt (inferred) |
-| `RECOVERY_GRACE_MS`, `RECOVERY_CLOCK_HOLD_MS` | 150000, 45000 | same | cover a graceful restart near the comfortable load (inferred); the defaults 90000 and 20000 cover crashes |
+| `RECOVERY_GRACE_MS`, `RECOVERY_CLOCK_HOLD_MS` | 150000, 45000 | same | cover a crash or a graceful restart near the comfortable load (inferred); the default 90000 covers crashes, 20000 only well below the comfortable load |
 | `HEARTBEAT_INTERVAL_MS`, `HEARTBEAT_TIMEOUT_MS` | 10000, 30000 (default) | same | the heartbeat round trip feeds lag compensation, and the game drops a connection after two silent intervals |
 | `JOURNAL_FLUSH_MS`, `JOURNAL_FSYNC`, `DB_COMMIT_MS` | 50, true, 50 (default) | same | NVMe has plenty of room |
 | `ANALYSIS_ENGINE_PATH` | empty | optional, `ANALYSIS_WORKERS=1` | one engine takes a whole vCore |
@@ -364,4 +365,4 @@ for i in 1 2 3 4 5; do node -e "const c=require('crypto');const t=process.cpuUsa
 4. **Restarts.** Near the comfortable load, a graceful restart takes about 100 s to bring every player back with the 10 s ping (inferred), and games survive only with the recovery settings above. This has not been tested with a real multi-machine reconnection wave.
 5. **Admission limits and journal compaction are tested, not measured under load.** The TLS gate, the password-hash cap, the upgrade reserve and compaction came after the load measurements, and only the retention purge has a measured cost. Run the load tests above again on the real machine.
 6. **Player mix.** Between a bullet-heavy mix and a slow one, capacity changes by more than a factor of two. Production metrics will tell which one your players resemble.
-7. **Small items.** One SQLite writer for 7 to 14 game ends per second is ample, the primary stays under 0.25 core, and one analysis engine follows only a small share of the games at full load.
+7. **Small items.** One SQLite writer for about 12 to 23 game ends per second is ample, the primary stays under 0.25 core, and one analysis engine follows only a small share of the games at full load.
