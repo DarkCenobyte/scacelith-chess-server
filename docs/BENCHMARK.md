@@ -69,12 +69,18 @@ coordinator samples `/metrics` and, for a local server on Linux, the CPU time of
 load process from `/proc`; the rest of the machine's CPU time is reported as "other processes".
 
 **Handshakes in flight.** With native TLS every worker performs at most `MAX_PENDING_HANDSHAKES`
-(128) handshakes at a time and closes the connections beyond that before any TLS work (counted in
-`scacelith_tls_refused_total{reason="handshakes"}` on the server and as failed connections by the
-tool, which does not retry). The runs below predate that limit. To measure the raw handshake rate
-again, keep `--inflight` times the load processes below `MAX_PENDING_HANDSHAKES` times `WORKERS`,
-or raise the key with `--server-env MAX_PENDING_HANDSHAKES=100000`; with the default, a ramp that
-opens connections faster than the server completes them measures the gate instead.
+(128) handshakes at a time, and at most `MAX_PENDING_HANDSHAKES_PER_IP` (4 by default) for one
+source address, and closes the connections beyond that before any TLS work (counted in
+`scacelith_tls_refused_total{reason="handshakes"|"per_ip"}` on the server and as failed
+connections by the tool, which does not retry). A connection takes its slot once its ClientHello
+has arrived; a TLS client sends it at once, so that wait costs the tool nothing. Since each load
+process is a single source address, the tool sets `MAX_PENDING_HANDSHAKES_PER_IP` to
+`MAX_PENDING_HANDSHAKES - 1` on the server it starts, so that only the per-worker cap applies (a
+remote server keeps its own setting). The runs below predate these limits. To measure the raw
+handshake rate again, keep `--inflight` times the load processes below `MAX_PENDING_HANDSHAKES`
+times `WORKERS`, or raise the key with `--server-env MAX_PENDING_HANDSHAKES=100000`; with the
+default, a ramp that opens connections faster than the server completes them measures the gate
+instead.
 
 **Open files.** The container used here has a hard `nofile` limit of 20,000 per process that
 cannot be raised without `CAP_SYS_RESOURCE`, so the tool uses at least `clients / 15000` server
@@ -351,6 +357,9 @@ resources to watch: the primary (presence, challenges, matchmaking) and the sing
   before a client's deadline. A higher value only helps when the clients are far away (each
   handshake then waits for round trips, not for the CPU). While the server is full it also sets
   the rate of new TLS connections let through (half of it per second and per worker).
+  `MAX_PENDING_HANDSHAKES_PER_IP` (4 per worker for one IPv4 address or IPv6 /48) only matters
+  when many players share one address: raise it for a school or a company network, keeping it
+  well below `MAX_PENDING_HANDSHAKES` (DESIGN.md 5.8).
 - **Several machines**: DESIGN.md section 9 (shard ranges with `SHARD_BASE`, a TCP bus between
   machines, the control plane as a service, a PostgreSQL store, a layer-4 load balancer in front).
 - **Profiling**: `--server-cpu-prof DIR` and `node bench/profile-summary.js DIR/*.cpuprofile`

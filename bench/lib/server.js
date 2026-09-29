@@ -123,6 +123,8 @@ export async function startServer({ workers, reusePort = false, accounts = 0, en
         HTTP_RATE_PER_IP: '1000000',
         MAX_CONNECTIONS: '1000000',
         MAX_CONNECTIONS_PER_IP: '1000000',
+        // Each load process is one source address: only the per-worker handshake cap applies.
+        MAX_PENDING_HANDSHAKES_PER_IP: String(Math.max(1, (parseInt(env.MAX_PENDING_HANDSHAKES, 10) || 128) - 1)),
         SHUTDOWN_GRACE_MS: '200',
         LOG_LEVEL: 'warn',
         LOG_FORMAT: 'json',

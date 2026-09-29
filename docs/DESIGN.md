@@ -453,28 +453,68 @@ ac.classify(kind, ctx) -> { severity, certain }
 Connection storms (`src/net/listeners.js`, `Router.isFull`). Every listener listens with
 `LISTEN_BACKLOG` (the kernel caps it at `net.core.somaxconn`; the primary's round-robin handle
 honours it too). With native TLS, a gate (`TlsGate`) runs in front of the TLS servers' own
-'connection' listener, which is where Node starts the TLS work on a new TCP socket:
+'connection' listener, which is where Node starts the TLS work on a new TCP socket. The gate
+closes the sockets it refuses with an RST, before any TLS work, and counts them in
+`scacelith_tls_refused_total{reason}`:
 
-* A socket holds a handshake slot from its accept until 'secureConnection', 'tlsClientError' or
-  its close (the handshake timeout, 10 s, bounds it). Beyond `MAX_PENDING_HANDSHAKES` slots per
-  worker, or `MAX_CONNECTIONS_PER_IP` for one address group (IPv4 address, IPv6 /64), a new
-  socket is closed with an RST before any TLS work and counted in
-  `scacelith_tls_refused_total{reason}`. A worker is one thread: starting 10,000 handshakes
-  together (1-3.5 ms of CPU each) makes all of them late, while a bounded number in flight lets
-  the CPU finish them in turn; the refused clients retry with their backoff. The per-address cap
-  keeps a few idle sockets from one host from holding every slot.
+* Waiting for the ClientHello. A new socket holds no handshake slot until its first TLS record
+  has arrived whole: a handshake record of at most 16 KB whose body starts a ClientHello (a client
+  may fragment the ClientHello over several records; only the first one is awaited). It has 3 s
+  for that, in as many TCP segments as it likes. The gate copies the bytes as they come and puts
+  them back into the raw socket before it hands the socket to Node's listener, which replays them
+  into the TLS engine. A socket that stays silent or is too slow (`hello_timeout`), that sends
+  anything else (`bad_hello`), or that ends first is closed. Waiting sockets cost no CPU and
+  little memory, and they are bounded as well: `16 * MAX_PENDING_HANDSHAKES` per worker
+  (`waiting`) and `4 * MAX_PENDING_HANDSHAKES_PER_IP` per address group (`waiting_per_ip`). The
+  gauge `scacelith_tls_hello_waiting` counts them.
+* Handshake slots. The socket then takes a slot, held until 'secureConnection', 'tlsClientError'
+  or its close. Beyond `MAX_PENDING_HANDSHAKES` slots per worker (`handshakes`), or
+  `MAX_PENDING_HANDSHAKES_PER_IP` for one address group (`per_ip`), it is closed. The per-group
+  cap is separate from `MAX_CONNECTIONS_PER_IP` and small: by default
+  `MAX_PENDING_HANDSHAKES / 32` with a floor of 2, so 4, and config.js refuses a value that is
+  not below `MAX_PENDING_HANDSHAKES`. An address group here is an IPv4 address or an IPv6 /48,
+  the usual allocation of one customer (presence.js counts WebSocket connections per /64). A
+  worker is one thread: starting 10,000 handshakes together (1-3.5 ms of CPU each) makes all of
+  them late, while a bounded number in flight lets the CPU finish them in turn; the refused
+  clients retry with their backoff. Players behind one public IPv4 address (NAT, CGNAT), or in
+  one IPv6 /48 (some mobile and residential networks give many customers addresses from the same
+  /48), share their group's slots; a handshake lasts about one round trip, so 4 per worker still
+  serve many of them, and `MAX_PENDING_HANDSHAKES_PER_IP` can be raised where that is not enough.
+* Handshake timeout (10 s). Node only reports it ('tlsClientError') and leaves the socket open, so
+  the gate destroys every socket whose handshake fails or times out. Without that, a client that
+  stopped after its ClientHello kept its socket and a file descriptor forever (on the https
+  server even after sending its FIN, in CLOSE_WAIT), and could still complete the handshake
+  later, outside the gate's accounting.
 * On the listener that carries the WebSocket upgrade, the gate also sheds load while the server is
   full. `Router.isFull()` is true while the primary's last answer to `conn.ipAcquire` was a
   `MAX_CONNECTIONS` refusal less than 5 s ago (an admitted upgrade ends it), or while the worker
-  holds `ceil(MAX_CONNECTIONS * 1.2 / WORKERS)` WebSocket connections. New connections then pass at
-  `MAX_PENDING_HANDSHAKES / 2` per second (token bucket, one second of burst) and the others are
-  closed before TLS. What passes reaches the API (`GET /info` works, so a client learns that the
-  server is full) or the upgrade, where `conn.ipAcquire` stays the exact check (HTTP 503) and
+  holds `ceil(MAX_CONNECTIONS * 1.2 / WORKERS)` WebSocket connections; its times come from the
+  monotonic clock (`performance.now()`), as do the gate's, so a step of the wall clock neither
+  prolongs nor shortens the state. New connections then pass at `MAX_PENDING_HANDSHAKES / 2` per
+  second (token bucket, one second of burst; `server_full`) and the others are closed before TLS.
+  What passes reaches the API or the upgrade, where `conn.ipAcquire` stays the exact check and
   refreshes the signal; a slot freed by a leaving player is found by the next upgrade that passes.
-  Only WebSocket connections are counted, never API requests.
+  The HTTP 503 of that check is the only way a client learns that the server is full: `GET /info`
+  has no such field, and a client closed before TLS sees a network error and retries with its
+  short backoff. Only WebSocket connections are counted, never API requests.
 * Compromise: before TLS the gate cannot tell an API request from an upgrade on the shared port
-  (both are inside the TLS stream), so while the server is full the API shares the rate above
-  with the upgrades. With `WS_PORT != API_PORT` the API listener is never shed.
+  (both are inside the TLS stream), so while the server is full new API connections are let
+  through at the rate above too, together with the upgrades: the API keeps working for players
+  already logged in, more slowly (connections already open are past the gate and not affected).
+  With `WS_PORT != API_PORT` the API listener is never shed, the better layout for a server that
+  expects to be full.
+* What the gate does not stop. Its caps keep a few hosts from blocking everyone; an attacker with
+  many address groups can still fill them, on every worker. With the defaults, replaying a
+  captured ClientHello and then staying silent holds a slot for the 10 s of the handshake timeout,
+  at the cost of one ServerHello for the server (the attacker does no cryptography): 32 address
+  groups opening about 13 such connections per second per worker keep every slot full, and every
+  new TLS connection to that worker is refused until the attack stops, the API included on the
+  shared port. The waiting room needs more (128 groups and about 700 silent connections per
+  second per worker). Players already connected are not affected. Raising
+  `MAX_PENDING_HANDSHAKES` raises the connection rate such an attack needs in proportion, and a
+  lower `MAX_PENDING_HANDSHAKES_PER_IP` raises the number of address groups it needs; stopping it
+  belongs in front of the server (a per-source connection rate limit in the firewall, or a
+  filtering provider).
 * `TLS_MODE=proxy` and `off` have no gate: the TLS work (and its limits) belongs to the proxy.
 
 ### 5.9 HTTP (`src/http/`)
