@@ -446,17 +446,25 @@ export class WsServer {
      *        connection admission (per-IP / global limits), called last, after every check passed
      * @param {(req: object, socket: object) => string} [o.clientIp] client address (proxy aware)
      * @param {(type: number) => string} [o.messageLabel] metric label of an outgoing message (by first byte)
+     * @param {Record<string, string>} [o.upgradeHeaders] extra headers of every 101 response (the
+     *        shards send Scacelith-Server-Id, so that a client checks whom it talks to before Hello)
      * @param {object} [o.log] logger
      * @param {object} [o.registry] metrics registry
      */
     constructor({
         maxMessageBytes = 512, subprotocol = WS_SUBPROTOCOL, allowOrigins = [], path = '/ws',
         sendBufferLimit = 262144, onConnection, admission = null, clientIp = null, messageLabel = null,
-        log = null, registry = defaultRegistry, handshakeTimeoutMs = 10000, maxHeaderBytes = 8192,
-        closeTimeoutMs = 2000, pingRate = 2, pingBurst = 5,
+        upgradeHeaders = null, log = null, registry = defaultRegistry, handshakeTimeoutMs = 10000,
+        maxHeaderBytes = 8192, closeTimeoutMs = 2000, pingRate = 2, pingBurst = 5,
     } = {}) {
         this.maxMessageBytes = maxMessageBytes;
         this.subprotocol = subprotocol;
+        this._upgradeExtra = '';
+        for (const [name, value] of Object.entries(upgradeHeaders || {})) {
+            const v = String(value);
+            if (!TOKEN_RE.test(name) || BAD_VALUE_RE.test(v)) throw new Error(`invalid upgrade header ${name}`);
+            this._upgradeExtra += `${name}: ${v}\r\n`;
+        }
         this.allowOrigins = new Set((allowOrigins || []).map((o) => String(o).trim().toLowerCase()).filter(Boolean));
         this.path = path;
         this.sendBufferLimit = sendBufferLimit;
@@ -619,7 +627,7 @@ export class WsServer {
         socket.setTimeout(0);
         socket.write(
             'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
-            `Sec-WebSocket-Accept: ${acceptKey(key)}\r\nSec-WebSocket-Protocol: ${this.subprotocol}\r\n\r\n`);
+            `Sec-WebSocket-Accept: ${acceptKey(key)}\r\nSec-WebSocket-Protocol: ${this.subprotocol}\r\n${this._upgradeExtra}\r\n`);
         const conn = new WsConnection(this, socket, ip, this.subprotocol);
         conn._admitted = admitted;
         this.connections.set(conn.id, conn);

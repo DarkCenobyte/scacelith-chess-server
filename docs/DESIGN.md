@@ -75,13 +75,17 @@ random bytes). The server stores `sha256(token)` only. With MFA: an intermediate
 (5 min, single use) and `POST /api/v1/auth/login/mfa`.
 
 **Realtime connection.** `wss://host:WS_PORT/ws` with `Sec-WebSocket-Protocol: scacelith.v1`,
-no `Origin` header (browsers are refused unless configured). Within `WS_HELLO_TIMEOUT_MS` the
+no `Origin` header (browsers are refused unless configured). The `101` answer carries
+`Scacelith-Server-Id` (the `/info` `serverId`), so that a client which skipped `/info` still
+checks that its saved session belongs to this server. Within `WS_HELLO_TIMEOUT_MS` the
 client sends `Hello{proto, schema, client, token}`. The shard validates the token (auth
 service, cached), checks bans and e-mail verification, then asks the primary
-`presence.claim`. The primary kicks an older connection of the same account
-(`Error{Replaced}` + close 4007) and returns the active game, if any. The shard answers
-`Welcome`, then (if a game is active) attaches the connection to the game, whose host sends a
-`GameSnapshot`.
+`presence.claim`. The primary refuses a new player beyond `MAX_CONNECTIONS` (`ServerFull`,
+close 4006), but not a player whose game is in progress: the upgrade lets `max(16, 2 %)`
+connections beyond `MAX_CONNECTIONS` through for them, since it cannot tell users apart. It kicks
+an older connection of the same account (`Error{Replaced}` + close 4007) and returns the active
+game, if any. The shard answers `Welcome`, then (if a game is active) attaches the connection to
+the game, whose host sends a `GameSnapshot`.
 
 **Matchmaking.** `QueueJoin{category, rated}` -> the shard checks the category and reads the
 player's rating (`store.ratings.get`), then `mm.join` to the primary. Each `MATCH_TICK_MS` the
@@ -114,19 +118,23 @@ reconnections so that a restart or a full server does not bring every player bac
 instant: full jitter (a random delay between 0.5 s and min(30 s, 2 s x 2^n)), 60 to 120 s after
 `ServerFull` (HTTP 503 at the upgrade or close 4006), a first attempt 5 to 35 s after a shutdown
 (`Notice{ServerShutdown}` or close 4008), and no `/api/v1/info` request for 10 minutes after
-losing a connection that had reached `Welcome` (PROTOCOL.md, lifecycle step 6). A player whose
-game is in progress is the exception: the grace is short (15 s by default, given again after a
-restart), so their attempts are never more than 8 s apart and the first one after a shutdown
-comes 1 to 8 s after it.
+losing a connection that had reached `Welcome`, except after a shutdown (PROTOCOL.md, lifecycle
+step 6). A player whose game is in progress is the exception: the grace is short (at least
+`RECONNECT_GRACE_MIN_MS`, 15 s by default, and `RECOVERY_GRACE_MS`, 90 s by default, for a game
+restored after a restart), so their attempts are 8 s apart at most unless the server gave a
+`Retry-After`, and the first one after a shutdown comes 1 to 8 s after it.
 
 **Client pings.** Besides answering the server's heartbeat (`HEARTBEAT_INTERVAL_MS`, which also
-measures the round trip used for lag compensation), the game client sends its own `Ping` for its
-ping indicator and its estimate of the server clock. The server chooses how often:
-`Welcome.clientPingMs` = `CLIENT_PING_INTERVAL_MS` (10 s by default, 1 s to 60 s). The client
-sends four quick pings after each `Welcome` and then follows that interval. Every ping costs a
-TLS record each way for every connected player, so a lower value makes the indicator more reactive
-at a measurable price on a small machine (docs/BENCHMARK.md). The router answers at most one
-client `Ping` per 950 ms per connection.
+measures the round trip used for lag compensation; the router's sweep pings each connection every
+half interval to one interval), the game client sends its own `Ping` for its ping indicator and
+its estimate of the server clock. The server chooses how often: `Welcome.clientPingMs` =
+`CLIENT_PING_INTERVAL_MS` (10 s by default, 1 s to 60 s). The client sends four quick pings after
+each `Welcome` and then follows that interval. Every ping costs a TLS record each way for every
+connected player, so a lower value makes the indicator more reactive at a measurable price on a
+small machine (docs/BENCHMARK.md). The router answers at most one client `Ping` per 950 ms per
+connection. The client's liveness check does not depend on that interval: when nothing came for
+1.5 heartbeats (7.5 s at least) it sends one `Ping` at once, and it calls the connection dead
+after two heartbeats (10 s at least) with nothing received.
 
 ## 4. Shared foundations (exist already)
 
@@ -402,7 +410,7 @@ Shard -> primary:
 |---|---|---|
 | `presence.claim` | `{ userId, username, shard, connId, ip }` | `{ ok, activeGame: id or 0, kicked: bool }` or `{ error }` (ServerFull, Banned) |
 | `presence.release` | `{ userId, connId }` | - |
-| `conn.ipAcquire` / `conn.ipRelease` | `{ ip }` | `{ ok }` (per-IP connection limit) |
+| `conn.ipAcquire` / `conn.ipRelease` | `{ ip }` | `{ ok }` or `{ ok: false, reason }` (`per_ip`: `MAX_CONNECTIONS_PER_IP`; `global`: `MAX_CONNECTIONS` plus `max(16, 2 %)`) |
 | `mm.join` | `{ userId, username, category, rated, rating, provisional, shard, connId }` | `{ ok }` / `{ error }` |
 | `mm.leave` | `{ userId }` | `{ ok }` |
 | `challenge.create` / `.accept` / `.decline` / `.cancel` / `.joinCode` | see 5.4 | `{ ok, id?, code? }` / `{ error }` |

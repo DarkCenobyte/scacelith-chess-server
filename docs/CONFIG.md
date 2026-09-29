@@ -116,7 +116,7 @@ Sections:
 
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
-| `MAX_CONNECTIONS` | integer (&gt;= 1) | `200000` | Simultaneous WebSocket connections, whole server. |
+| `MAX_CONNECTIONS` | integer (&gt;= 1) | `200000` | Simultaneous players, whole server. Newcomers beyond it are refused at Hello (ServerFull), but a player whose game is in progress is still admitted, so that a full server does not make them lose it by abandonment. WebSocket upgrades may go max(16, 2 %) beyond it, so that such a player can reach Hello. |
 | `MAX_CONNECTIONS_PER_IP` | integer (&gt;= 1) | `16` | Simultaneous WebSocket connections from one IP address (IPv6: per /64). |
 | `MAX_PENDING_HANDSHAKES` | integer (1-100000) | `128` | TLS handshakes in progress per worker (TLS_MODE=native). A new connection beyond it, or beyond MAX_CONNECTIONS_PER_IP handshakes from one address, is closed before any TLS work and the client retries later, so a reconnection storm is served in turn instead of every handshake slowing down together. While the server is full, a worker also lets at most half this number of new TLS connections per second through. |
 | `WS_MAX_MESSAGE_BYTES` | integer (128-65536) | `512` | Largest message a client may send. |
@@ -124,7 +124,7 @@ Sections:
 | `WS_MSG_BURST` | integer (&gt;= 1) | `40` | Message burst a client may send. |
 | `WS_SEND_BUFFER_LIMIT` | integer (&gt;= 4096) | `262144` | Bytes queued for a client that does not read; beyond it the connection is closed (the client reconnects and resynchronises). |
 | `WS_HELLO_TIMEOUT_MS` | integer (&gt;= 1000) | `10000` | Time a new connection has to authenticate. |
-| `HEARTBEAT_INTERVAL_MS` | integer (&gt;= 1000) | `10000` | Server ping interval (also measures each player's latency). |
+| `HEARTBEAT_INTERVAL_MS` | integer (&gt;= 1000) | `10000` | Server ping interval: each connection gets a ping every half interval to one interval (it also measures each player's latency). The game client considers the connection dead after twice this (10 s at least) with nothing received. |
 | `HEARTBEAT_TIMEOUT_MS` | integer (&gt;= 3000) | `30000` | A connection silent for this long is considered dead. |
 | `CLIENT_PING_INTERVAL_MS` | integer (1000-60000) | `10000` | Interval of the game client's own Ping, announced in Welcome (the client measures its round trip for the ping indicator and its estimate of the server clock with it). Lower is a more reactive ping indicator but costs more server CPU for every connected player: at 2000 these pings alone take a third or more of the server CPU of a player in a 3+2 game. After each connection the client sends a few quick pings anyway. |
 | `HTTP_BODY_LIMIT` | integer (&gt;= 1024) | `16384` | Largest API request body in bytes. |

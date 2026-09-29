@@ -21,9 +21,11 @@
 //          challenges when the release matches the live connection), host.detach (local or bus).
 //
 // Heartbeat: one sweeper interval per shard (TICK_MS) walks the connections in slices, so every
-// connection is visited once per HEARTBEAT_INTERVAL_MS without a timer per connection: S_Ping
-// with the server time, and close 1001 after HEARTBEAT_TIMEOUT_MS of silence. Hello deadlines are
-// a FIFO checked every tick (connections are queued in arrival order, so the head is the oldest).
+// connection is visited once per HEARTBEAT_INTERVAL_MS or more often, without a timer per
+// connection: S_Ping with the server time when the last one is half an interval old or more (so
+// pings are between half an interval and an interval plus a tick apart), and close 1001 after
+// HEARTBEAT_TIMEOUT_MS of silence. Hello deadlines are a FIFO checked every tick (connections are
+// queued in arrival order, so the head is the oldest).
 //
 // Deviations from DESIGN 5.3/5.7, documented for the integrators:
 //   - Endpoints given to the GameHost: { send(buf), close(code, reason), connId, shard, userId,
@@ -878,7 +880,10 @@ export class Router {
         }
         if (this._helloHead > 1024 && this._helloHead * 2 > q.length) { this._helloQ = q.slice(this._helloHead); this._helloHead = 0; }
 
-        // Heartbeat slice.
+        // Heartbeat slice. A lap over the connections takes ceil(n / slice) ticks, at most about one
+        // interval. When the iterator runs out mid-tick, the tick ends there and the next lap starts
+        // with the next tick at the first connection (restarting the lap here would visit a
+        // connection twice in one tick; consuming the first entry here would skip it forever).
         const n = this.conns.size;
         if (!n) { this._iter = null; return; }
         const slice = Math.max(1, Math.ceil(n * this.tickMs / cfg.heartbeatIntervalMs));
@@ -888,9 +893,9 @@ export class Router {
             let r = this._iter.next();
             if (r.done) {
                 this._iter = this.conns.values();
+                if (i > 0) break;
                 r = this._iter.next();
                 if (r.done) break;
-                if (i > 0) break;                // do not visit a connection twice in one tick
             }
             const conn = r.value;
             if (now - conn.lastRecvAt >= timeout) { conn.close(CloseCode.GoingAway, 'timeout'); continue; }
@@ -901,7 +906,11 @@ export class Router {
                 this._fatal(conn, 1, E.Internal, CloseCode.Internal);
                 continue;
             }
-            if (conn.state === 'ready' && now - c.pingAt >= interval - this.tickMs) {
+            // A lap lasts at most about one interval, so a ping on every visit at least half an
+            // interval after the last one keeps pings between interval / 2 and interval + tick
+            // apart. (Waiting for interval - tick would skip every other visit whenever a lap is
+            // shorter than that, and space the pings about two intervals apart.)
+            if (conn.state === 'ready' && now - c.pingAt >= interval / 2) {
                 c.pingAt = now;
                 c.pingNonce = (c.pingNonce + 1) >>> 0 || 1;
                 c.pingSentAt = performance.now();

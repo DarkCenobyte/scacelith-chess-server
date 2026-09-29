@@ -440,3 +440,69 @@ describe('router: primary and bus', () => {
         assert.deepEqual([l.shard, l.games, l.lagP99, l.overloaded], [0, 3, 300, true]);
     });
 });
+
+describe('router: heartbeat sweep', () => {
+    // A Router alone, driven tick by tick on a simulated clock, with fake ready connections that
+    // answer every S_Ping at once (unless `silent`).
+    function sweepRig({ n, heartbeatMs, tickMs = 250, silent = () => false }) {
+        const cfg = testConfig({ HEARTBEAT_INTERVAL_MS: String(heartbeatMs), HEARTBEAT_TIMEOUT_MS: String(heartbeatMs * 3) });
+        const primary = { request: async () => ({ ok: true }), notify() {} };
+        const router = new Router({
+            config: cfg, shard: 0, host: new FakeHost(), auth: { validateToken: async () => null }, primary, registry: new Registry(), tickMs,
+        });
+        const t0 = Date.now();
+        const conns = [];
+        for (let i = 1; i <= n; i++) {
+            const conn = {
+                id: i, state: 'ready', openedAt: t0, lastRecvAt: t0, pings: [], closedAt: 0, now: t0,
+                sendFrame(buf) {
+                    if (buf[0] !== MSG.S_Ping) return;
+                    this.pings.push(this.now);
+                    if (!silent(this)) this.lastRecvAt = this.now;
+                },
+                close() { this.closedAt = this.now; this.state = 'closed'; router._onClose(this); },
+            };
+            router._onConnection(conn);
+            conn.ctx.pingAt = t0;
+            conns.push(conn);
+        }
+        const run = (ms) => {
+            for (let t = t0 + tickMs; t <= t0 + ms; t += tickMs) {
+                for (const c of conns) c.now = t;
+                router.sweep(t);
+            }
+        };
+        return { conns, run, t0 };
+    }
+
+    it('pings and checks the first connection of a worker too', () => {
+        for (const [n, hb, ms] of [[11, 1000, 6000], [150, 10000, 45000], [1601, 10000, 45000]]) {
+            const { conns, run } = sweepRig({ n, heartbeatMs: hb });
+            run(ms);
+            for (const c of conns) assert.ok(c.pings.length >= Math.floor(ms / hb) - 1, `n=${n}: connection ${c.id} got ${c.pings.length} pings`);
+        }
+        // A silent first connection is closed after the heartbeat timeout, not kept forever.
+        const { conns, run, t0 } = sweepRig({ n: 11, heartbeatMs: 1000, silent: (c) => c.id === 1 });
+        run(6000);
+        assert.ok(conns[0].closedAt > 0 && conns[0].closedAt - t0 <= 3000 + 1000 + 250, `closed after ${conns[0].closedAt - t0} ms`);
+        assert.ok(conns.slice(1).every((c) => c.closedAt === 0));
+    });
+
+    it('spaces the pings of every connection between half an interval and an interval', () => {
+        const hb = 10000, tick = 250;
+        for (const n of [1, 2, 3, 5, 11, 40, 41, 150, 399, 1000, 1601, 4000]) {
+            const { conns, run, t0 } = sweepRig({ n, heartbeatMs: hb, tickMs: tick });
+            run(60000);
+            for (const c of conns) {
+                // The first one: at the first visit half an interval after the opening.
+                assert.ok(c.pings.length && c.pings[0] - t0 >= hb / 2 && c.pings[0] - t0 <= hb * 1.5 + tick,
+                    `n=${n}: connection ${c.id}, first ping after ${c.pings[0] - t0} ms`);
+                for (let i = 1; i < c.pings.length; i++) {
+                    const gap = c.pings[i] - c.pings[i - 1];
+                    assert.ok(gap >= hb / 2 && gap <= hb + tick, `n=${n}: connection ${c.id}, ${gap} ms before ping ${i + 1}`);
+                }
+                assert.ok(t0 + 60000 - c.pings.at(-1) <= hb + tick, `n=${n}: connection ${c.id} not pinged since ${c.pings.at(-1) - t0} ms`);
+            }
+        }
+    });
+});

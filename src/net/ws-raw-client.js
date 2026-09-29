@@ -187,6 +187,7 @@ export function connectWs({ host = '127.0.0.1', port, path = '/ws', protocols = 
             if (hdrs['sec-websocket-accept'] !== expected) { socket.destroy(); reject(new Error('bad Sec-WebSocket-Accept')); return; }
             const client = new RawWsClient(socket, buf.subarray(end + 4));
             client.protocol = hdrs['sec-websocket-protocol'];
+            client.headers = hdrs;
             resolve(client);
         };
         socket.on('data', onData);

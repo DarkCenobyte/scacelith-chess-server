@@ -5,9 +5,24 @@
 // released when the socket closes ('conn.ipRelease'); they are kept per shard as well, so that a
 // crashed shard's connections can be forgotten at once (dropShard).
 //
+// MAX_CONNECTIONS has two checks. At the upgrade the user is not known yet, so the count may go a
+// small reserve beyond it (max(16, 2 %)); the exact cap is applied at Hello, where
+// ControlPlane.presenceClaim refuses newcomers (ServerFull, close 4006) but still admits a player
+// whose game is in progress. A player who lost the connection during a game on a full server can
+// thus come back before the reconnection grace runs out instead of competing with newcomers for
+// the slots that free up.
+//
 // All operations are O(1).
 
 import { ipGroupKey } from '../net/ip.js';
+
+/**
+ * Upgrades admitted beyond MAX_CONNECTIONS, for the players with a game in progress (see above).
+ * @param {number} maxConnections
+ */
+export function upgradeReserve(maxConnections) {
+    return Math.max(16, Math.ceil(maxConnections * 0.02));
+}
 
 export class Presence {
     /**
@@ -15,6 +30,8 @@ export class Presence {
      */
     constructor({ maxConnections = 200000, maxPerIp = 16, now = Date.now } = {}) {
         this.maxConnections = maxConnections;
+        /** Connections counted at the upgrade: MAX_CONNECTIONS plus the reserve (see above). */
+        this.upgradeCap = maxConnections + upgradeReserve(maxConnections);
         this.maxPerIp = maxPerIp;
         this.now = now;
         /** @type {Map<number, {userId:number, username:string, shard:number, connId:number, ip:string, since:number}>} */
@@ -31,13 +48,14 @@ export class Presence {
     }
 
     /**
-     * Counts a new connection from `ip` on `shard`, unless a limit is reached.
+     * Counts a new connection from `ip` on `shard`, unless a limit is reached (whole server:
+     * upgradeCap, MAX_CONNECTIONS plus the reserve).
      * @param {string} ip
      * @param {number} shard
      * @returns {{ ok: boolean, reason?: 'per_ip'|'global' }}
      */
     ipAcquire(ip, shard) {
-        if (this.connections >= this.maxConnections) return { ok: false, reason: 'global' };
+        if (this.connections >= this.upgradeCap) return { ok: false, reason: 'global' };
         const key = ipGroupKey(ip);
         const n = this.ipCounts.get(key) || 0;
         if (n >= this.maxPerIp) return { ok: false, reason: 'per_ip' };

@@ -282,7 +282,11 @@ export class ControlPlane {
         const until = this._banUntil(userId, now);
         if (until > now) return { error: E.Banned, until };
         const existing = this.presence.get(userId);
-        if (!existing && this.presence.size >= this.config.maxConnections) return { error: E.ServerFull };
+        // The exact MAX_CONNECTIONS check (the upgrade allows a small reserve beyond it, presence.js).
+        // A player with a game in progress is admitted anyway: refusing them would lose the game by
+        // abandonment. Their number is bounded by the live games.
+        const full = this.presence.size >= this.config.maxConnections;
+        if (full && !existing && !this.activeGames.has(userId)) return { error: E.ServerFull };
         const { previous } = this.presence.claim({ userId, username, shard: shard ?? from, connId, ip });
         if (previous) {
             this._kicks.labels('replaced').inc();

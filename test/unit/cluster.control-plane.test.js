@@ -105,6 +105,37 @@ describe('control plane: presence', () => {
         assert.equal(cp.presenceClaim({ userId: 1, username: 'a', shard: 1, connId: 4 }, 1).ok, true);   // a reconnect is not a new user
     });
 
+    it('admits a player whose game is in progress on a full server; newcomers in the reserve get ServerFull', () => {
+        const max = 3;
+        const { cp, presence } = setup({ config: { ...cfg, maxConnections: max, maxConnectionsPerIp: 100 } });
+        const gameId = new GameIdAllocator(1).next();
+        // A full server: every slot taken by a player, and one of the players of gameId just lost
+        // the connection (the socket closed: its count and its presence are released).
+        for (let u = 1; u <= max; u++) {
+            assert.equal(presence.ipAcquire(`10.0.0.${u}`, 0).ok, true);
+            assert.equal(cp.presenceClaim({ userId: u, username: `u${u}`, shard: 0, connId: u }, 0).ok, true);
+        }
+        cp.gameActive({ gameId, whiteId: 3, blackId: 9 });
+        presence.ipRelease('10.0.0.3', 0);
+        cp.presenceRelease({ userId: 3, connId: 3 }, 0);
+        // A newcomer takes the freed slot first.
+        assert.equal(presence.ipAcquire('10.0.0.4', 0).ok, true);
+        assert.equal(cp.presenceClaim({ userId: 4, username: 'u4', shard: 0, connId: 4 }, 0).ok, true);
+        // The upgrade of the returning player passes on the reserve, and Hello admits them with their game.
+        assert.equal(presence.ipAcquire('10.0.0.3', 1).ok, true);
+        assert.deepEqual(cp.presenceClaim({ userId: 3, username: 'u3', shard: 1, connId: 30 }, 1), { ok: true, activeGame: gameId, kicked: false });
+        assert.equal(presence.size, max + 1);
+        // So does their opponent, never seen before on this server.
+        assert.equal(presence.ipAcquire('10.0.0.9', 1).ok, true);
+        assert.equal(cp.presenceClaim({ userId: 9, username: 'u9', shard: 1, connId: 90 }, 1).activeGame, gameId);
+        // Another newcomer passes the upgrade on the reserve too, but not Hello.
+        assert.equal(presence.ipAcquire('10.0.0.5', 0).ok, true);
+        assert.deepEqual(cp.presenceClaim({ userId: 5, username: 'u5', shard: 0, connId: 5 }, 0), { error: E.ServerFull });
+        // The reserve has an end: max(16, 2 %) upgrades beyond MAX_CONNECTIONS.
+        while (presence.connections < max + 16) assert.equal(presence.ipAcquire('10.0.2.1', 0).ok, true);
+        assert.deepEqual(presence.ipAcquire('10.0.0.3', 0), { ok: false, reason: 'global' });
+    });
+
     it('serves requests over a bound IPC channel with the caller shard', async () => {
         const { cp } = setup();
         const [a, b] = channelPair();

@@ -56,6 +56,8 @@ export async function startShard({ config, shard, serverId, primary, host, auth,
         sendBufferLimit: config.wsSendBufferLimit, onConnection: router.onConnection, admission: router.admission,
         clientIp, messageLabel: (t) => TYPE_NAMES[t] || `0x${t.toString(16)}`, log: log.child('ws'), registry,
         handshakeTimeoutMs: Math.min(10000, config.wsHelloTimeoutMs),
+        // The /info serverId again, so that a client that reuses an /info answer checks it before Hello.
+        upgradeHeaders: serverId ? { 'Scacelith-Server-Id': serverId } : null,
     });
     let ready = false, draining = false, stopping = null;
     const listeners = new Listeners({
