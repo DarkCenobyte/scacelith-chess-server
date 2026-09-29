@@ -129,6 +129,8 @@ describe('cluster end to end (primary + 2 shard processes)', { timeout: 60000 },
         a = await Client.open(ports[0], 1);
         b = await Client.open(ports[1], 2);
         assert.deepEqual([a.welcome.userId, b.welcome.userId, a.welcome.activeGame], [1, 2, 0]);
+        // Every shard names the server in its 101 response (the /info serverId).
+        assert.deepEqual([a.ws.headers['scacelith-server-id'], b.ws.headers['scacelith-server-id']], ['e2e', 'e2e']);
         const s1 = a.send('QueueJoin', { category: '5+0', rated: true });
         assert.equal((await a.until('Ack')).ref, s1);
         assert.equal((await a.until('QueueStatus')).state, QS.Searching);

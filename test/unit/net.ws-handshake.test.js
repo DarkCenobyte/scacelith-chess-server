@@ -39,6 +39,7 @@ for (const mode of ['raw', 'http']) {
         before(async () => {
             wss = new WsServer({
                 registry: new Registry(), allowOrigins: ['https://play.example.org'], handshakeTimeoutMs: 300,
+                upgradeHeaders: { 'Scacelith-Server-Id': 'srv-test' },
                 onConnection: (c) => { opened.push(c); c.onMessage = (cn, b) => cn.sendFrame(Buffer.from(b)); },
                 admission: {
                     acquire(ip) {
@@ -58,6 +59,7 @@ for (const mode of ['raw', 'http']) {
         it('accepts a valid upgrade and echoes the subprotocol', async () => {
             const c = await connectWs({ port, protocols: ['other', 'scacelith.v1'] });
             assert.equal(c.protocol, 'scacelith.v1');
+            assert.equal(c.headers['scacelith-server-id'], 'srv-test');     // upgradeHeaders
             c.send(Buffer.from([1, 2, 3]));
             assert.deepEqual([...await c.next()], [1, 2, 3]);
             c.close(1000);
@@ -167,6 +169,17 @@ for (const mode of ['raw', 'http']) {
         }
     });
 }
+
+describe('ws upgrade headers', () => {
+    it('refuses header names and values that would break the 101 response', () => {
+        const make = (h) => new WsServer({ registry: new Registry(), upgradeHeaders: h });
+        assert.throws(() => make({ 'Scacelith-Server-Id': 'a\r\nSet-Cookie: x=1' }), /invalid upgrade header/);
+        assert.throws(() => make({ 'Bad Name': 'x' }), /invalid upgrade header/);
+        assert.equal(make({ 'Scacelith-Server-Id': '0b6f3c1e-2a4d-4c55-9a1f-7d2c9e8b1a33' })._upgradeExtra,
+            'Scacelith-Server-Id: 0b6f3c1e-2a4d-4c55-9a1f-7d2c9e8b1a33\r\n');
+        assert.equal(make(null)._upgradeExtra, '');
+    });
+});
 
 describe('parseRequestHead', () => {
     it('parses a request and joins duplicate headers', () => {

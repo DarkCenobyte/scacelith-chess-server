@@ -940,20 +940,24 @@ the generator. The HTTPS account API is described in \`docs/DESIGN.md\` section 
     lifecycle: `1. **Connect.** \`wss://host:WS_PORT/ws\` (the port and path come from \`/api/v1/info\`), with
    \`Sec-WebSocket-Protocol: ${defaultSchema.WS_SUBPROTOCOL}\` and no \`Origin\` header (browsers are refused unless the
    server allows their origin). TLS certificate validation follows the server's trust settings
-   (OS store or a pinned certificate for self-signed community servers).
+   (OS store or a pinned certificate for self-signed community servers). The \`101\` answer carries
+   \`Scacelith-Server-Id\`, the \`serverId\` of \`/api/v1/info\`: a client whose saved session at that
+   origin belongs to another server id drops it instead of sending it in \`Hello\`.
 2. **Hello.** Within \`WS_HELLO_TIMEOUT_MS\` (default 10 s; close 4010 otherwise) the client sends
    \`Hello{seq: 1, proto, schema, client, token}\` where \`token\` is the session token obtained from
    *this* server's HTTPS login. Any other message before \`Hello\` is \`Error{HelloRequired, fatal}\`.
 3. **Welcome.** The server validates the token (\`Unauthorized\`, close 4003), bans (\`Banned\`, 4004),
-   e-mail verification (\`EmailUnverified\`), capacity (\`ServerFull\`), claims the account's presence
-   (an older connection of the same account receives \`Error{Replaced, fatal}\` + close 4007) and
-   answers \`Welcome{proto, serverTime, userId, username, serverName, heartbeatMs, clientPingMs,
-   maxMsgPerSec, activeGame}\`. \`serverTime\` gives the client a first estimate of the server clock
-   offset; \`clientPingMs\` is the interval of the client's own \`Ping\` (below).
+   e-mail verification (\`EmailUnverified\`), capacity (\`ServerFull\`, close 4006, for a new player
+   beyond \`MAX_CONNECTIONS\`; a player whose game is in progress is admitted), claims the account's
+   presence (an older connection of the same account receives \`Error{Replaced, fatal}\` + close
+   4007) and answers \`Welcome{proto, serverTime, userId, username, serverName, heartbeatMs,
+   clientPingMs, maxMsgPerSec, activeGame}\`. \`serverTime\` gives the client a first estimate of
+   the server clock offset; \`clientPingMs\` is the interval of the client's own \`Ping\` (below).
 4. **Game in progress.** When \`activeGame != 0\` the host of that game sends a \`GameSnapshot\` right
    after \`Welcome\`; the client rebuilds the board and the clocks from it.
-5. **Heartbeats.** The server sends \`Ping{nonce, serverTime}\` every \`heartbeatMs\`
-   (\`HEARTBEAT_INTERVAL_MS\`, default 10 s); the client answers \`Pong{seq, nonce}\` **at once** (the
+5. **Heartbeats.** The server sends \`Ping{nonce, serverTime}\` about every \`heartbeatMs\`
+   (\`HEARTBEAT_INTERVAL_MS\`, default 10 s: two pings are between half of it and all of it apart,
+   plus the server's sweep period of 250 ms); the client answers \`Pong{seq, nonce}\` **at once** (the
    server measures each player's round trip with it and uses it for lag compensation). A connection
    silent for \`HEARTBEAT_TIMEOUT_MS\` (default 30 s) is closed. The client measures its own round
    trip and clock offset with \`Ping{seq, nonce}\` (at most one per second), answered by
@@ -962,8 +966,9 @@ the generator. The HTTPS account API is described in \`docs/DESIGN.md\` section 
    are right quickly), then one every \`Welcome.clientPingMs\` (\`CLIENT_PING_INTERVAL_MS\`, default
    10 s, 1 s to 60 s; 0 means the client's default of 10 s). Each of these pings costs server CPU
    for every connected player, so the server chooses the interval. The client decides that the
-   connection is dead from the server's heartbeats only (nothing received for twice
-   \`heartbeatMs\`, 10 s at least), never from its own pings.
+   connection is dead when nothing at all was received for twice \`heartbeatMs\` (10 s at least).
+   After 1.5 times \`heartbeatMs\` (7.5 s at least) without anything, it sends one \`Ping\` of its own
+   at once: its \`Pong\` keeps a live connection when a heartbeat comes late.
 6. **Reconnection.** A lost connection does not stop a game: the player's clock keeps running and the
    opponent receives \`GameEvent{PlayerDisconnected, arg = grace ms}\`. The client reconnects with
    exponential backoff and full jitter (attempt n waits a uniform random time between 0.5 s and
@@ -971,19 +976,24 @@ the generator. The HTTPS account API is described in \`docs/DESIGN.md\` section 
    again at 1 on the new connection) and receives \`Welcome\` then \`GameSnapshot\`. A full server
    (HTTP 503 at the upgrade, \`Error{ServerFull}\` or close 4006) is retried after 60 s to 120 s.
    After a shutdown (\`Notice{ServerShutdown}\`, \`Error{ShuttingDown}\` or close 4008) the first
-   attempt waits 5 s to 35 s, which spreads the reconnection wave of a restart. A player whose
-   game is in progress only has the reconnection grace (at least \`RECONNECT_GRACE_MIN_MS\`, 15 s
-   by default, given again after a restart): their attempts are never more than 8 s apart, whatever
-   the cause, and their first attempt after a shutdown waits 1 s to 8 s. For 10 minutes after losing
-   a connection that had reached \`Welcome\`, the automatic attempts reuse the \`/api/v1/info\`
-   answer (\`wsPath\`) that connection was made with instead of asking for it again (one TLS
-   handshake instead of two); a connection the player asks for always reads it first. The client
-   never replays move intents from the old connection blindly: the snapshot says which moves the
-   server accepted. It does not reconnect after \`Replaced\`, \`Banned\`, \`Unauthorized\`,
-   \`UnsupportedProtocol\` or \`CheatDetected\`.
+   attempt waits 5 s to 35 s, which spreads the reconnection wave of a restart, and the first HTTP
+   503 that follows is the restart, retried like a failure (a later one is a full server again).
+   A player whose game is in progress only has the reconnection grace to come back: at least
+   \`RECONNECT_GRACE_MIN_MS\` (15 s by default), and \`RECOVERY_GRACE_MS\` (90 s by default) for a
+   game the server restored after a restart. Their attempts are 8 s apart at most, whatever the
+   cause, unless the server gave a \`Retry-After\`, and their first attempt after a shutdown waits
+   1 s to 8 s. For 10 minutes after losing a connection that had reached \`Welcome\` (not after a
+   shutdown), the automatic attempts reuse the \`/api/v1/info\` answer (\`wsPath\`) that
+   connection was made with instead of asking for it again (one TLS handshake instead of two). A
+   5xx at the upgrade keeps that answer (a reverse proxy answers 502 while the server restarts); a
+   4xx other than 429 makes the next attempt read it again. A connection the player asks for always
+   reads it first. The client never replays move intents from the old connection blindly: the
+   snapshot says which moves the server accepted. It does not reconnect after \`Replaced\`,
+   \`Banned\`, \`Unauthorized\`, \`UnsupportedProtocol\` or \`CheatDetected\`.
 7. **Closing.** The server closes with the codes below; a fatal \`Error\` precedes the close when there
    is one. \`Notice{ServerShutdown, arg = ms}\` announces a restart: the client reconnects afterwards
-   (games in progress are replayed from the server's journal, with a fresh grace period).`,
+   (games in progress are replayed from the server's journal, and their players then have
+   \`RECOVERY_GRACE_MS\`, 90 s by default, to come back).`,
 
     gameflow: `* **Intents, not commands.** Every C2S game message is a request; the server decides. A client never
   shows a move, a result or a clock value that the server did not confirm, except for the local
@@ -1068,7 +1078,9 @@ the generator. The HTTPS account API is described in \`docs/DESIGN.md\` section 
 * Client \`Ping\`: at most one per second (a faster one gets no \`Pong\`); the interval the server wants
   is \`Welcome.clientPingMs\`.
 * Per IP address: \`MAX_CONNECTIONS_PER_IP\` simultaneous connections (IPv6 per /64); whole server:
-  \`MAX_CONNECTIONS\` (\`Error{ServerFull}\` beyond).
+  \`MAX_CONNECTIONS\` players (\`Error{ServerFull}\` at \`Hello\` beyond it, except for a player whose
+  game is in progress). The upgrade itself is refused (HTTP 503) only \`max(16, 2 %)\` connections
+  beyond it, so that such a player can reach \`Hello\`.
 * A client that does not read its messages (more than \`WS_SEND_BUFFER_LIMIT\` bytes queued) is closed
   with 4303 (\`SlowConsumer\`); it reconnects and resynchronises from the snapshot.
 * Challenges, private games and queue joins have their own limits (\`ChallengeLimit\`,

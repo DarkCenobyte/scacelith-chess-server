@@ -110,7 +110,8 @@ key('GOOGLE_REDIRECT_URI', { section: 'sso', type: 'string', default: '',
     desc: 'Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST:PUBLIC_API_PORT/auth/sso/google/callback).' });
 
 // ---- Abuse protection --------------------------------------------------------------------------------
-key('MAX_CONNECTIONS', { section: 'limits', type: 'int', default: 200000, min: 1, desc: 'Simultaneous WebSocket connections, whole server.' });
+key('MAX_CONNECTIONS', { section: 'limits', type: 'int', default: 200000, min: 1,
+    desc: 'Simultaneous players, whole server. Newcomers beyond it are refused at Hello (ServerFull), but a player whose game is in progress is still admitted, so that a full server does not make them lose it by abandonment. WebSocket upgrades may go max(16, 2 %) beyond it, so that such a player can reach Hello.' });
 key('MAX_CONNECTIONS_PER_IP', { section: 'limits', type: 'int', default: 16, min: 1, desc: 'Simultaneous WebSocket connections from one IP address (IPv6: per /64).' });
 key('MAX_PENDING_HANDSHAKES', { section: 'limits', type: 'int', default: 128, min: 1, max: 100000,
     desc: 'TLS handshakes in progress per worker (TLS_MODE=native). A new connection beyond it, or beyond MAX_CONNECTIONS_PER_IP handshakes from one address, is closed before any TLS work and the client retries later, so a reconnection storm is served in turn instead of every handshake slowing down together. While the server is full, a worker also lets at most half this number of new TLS connections per second through.' });
@@ -120,7 +121,8 @@ key('WS_MSG_BURST', { section: 'limits', type: 'int', default: 40, min: 1, desc:
 key('WS_SEND_BUFFER_LIMIT', { section: 'limits', type: 'int', default: 262144, min: 4096,
     desc: 'Bytes queued for a client that does not read; beyond it the connection is closed (the client reconnects and resynchronises).' });
 key('WS_HELLO_TIMEOUT_MS', { section: 'limits', type: 'int', default: 10000, min: 1000, desc: 'Time a new connection has to authenticate.' });
-key('HEARTBEAT_INTERVAL_MS', { section: 'limits', type: 'int', default: 10000, min: 1000, desc: 'Server ping interval (also measures each player\'s latency).' });
+key('HEARTBEAT_INTERVAL_MS', { section: 'limits', type: 'int', default: 10000, min: 1000,
+    desc: 'Server ping interval: each connection gets a ping every half interval to one interval (it also measures each player\'s latency). The game client considers the connection dead after twice this (10 s at least) with nothing received.' });
 key('HEARTBEAT_TIMEOUT_MS', { section: 'limits', type: 'int', default: 30000, min: 3000, desc: 'A connection silent for this long is considered dead.' });
 key('CLIENT_PING_INTERVAL_MS', { section: 'limits', type: 'int', default: 10000, min: 1000, max: 60000,
     desc: 'Interval of the game client\'s own Ping, announced in Welcome (the client measures its round trip for the ping indicator and its estimate of the server clock with it). Lower is a more reactive ping indicator but costs more server CPU for every connected player: at 2000 these pings alone take a third or more of the server CPU of a player in a 3+2 game. After each connection the client sends a few quick pings anyway.' });
