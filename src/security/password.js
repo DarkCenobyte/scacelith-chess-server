@@ -10,12 +10,31 @@
 //
 // Unknown accounts: verifyDummy() does the same work on a fixed dummy hash, so that a login for
 // an unknown user takes as long as one with a wrong password.
+//
+// Concurrency cap: one hash costs about 0.5-0.6 s of CPU and 64-128 MiB, and the thread pool
+// (UV_THREADPOOL_SIZE, 4 threads per process by default) is shared with the journal's fdatasync,
+// DNS lookups (SMTP, Google sign-in) and file reads. Without a cap, a burst of logins fills the
+// pool of every worker and takes the cores from the game event loops. createHashLimiter() is a
+// bounded FIFO semaphore (PASSWORD_HASH_CONCURRENCY running, PASSWORD_HASH_QUEUE_MAX waiting for
+// at most PASSWORD_HASH_QUEUE_TIMEOUT_MS); limitHasher() sends every hash and verification of a
+// hasher through it, the dummy verification included, so that an unknown account still costs
+// the same wait and the same work. The auth service owns one limiter per worker process; a call
+// the limiter refuses rejects with PasswordBusyError before any work is done.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { promisify } from 'node:util';
+import { metrics } from '../metrics.js';
 
 const scryptAsync = promisify(crypto.scrypt);
+
+const mInFlight = metrics.gauge('scacelith_password_hash_in_flight', 'Password hashes and verifications running (libuv thread pool)', [], { perShard: true });
+const mQueued = metrics.gauge('scacelith_password_hash_queued', 'Password hashes and verifications waiting for a slot', [], { perShard: true });
+const mWaitMs = metrics.histogram('scacelith_password_hash_wait_ms', 'Time a password hash waited for its slot (granted ones)',
+    [1, 10, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 20000]);
+const mRejected = metrics.counter('scacelith_password_hash_rejected_total', 'Password hashes refused (503 server_busy)', ['reason']);
+const mRejectedFull = mRejected.labels('queue_full');
+const mRejectedTimeout = mRejected.labels('timeout');
 
 export const PASSWORD_MAX_BYTES = 256;
 export const SCRYPT_DEFAULTS = Object.freeze({ logN: 17, r: 8, p: 1, keyLen: 64, saltLen: 16 });
@@ -180,4 +199,115 @@ export function createPasswordHasher(opts = {}) {
     }
 
     return { hash, verify, verifyDummy, warmUp, algorithm: preferred, parse };
+}
+
+/** A password hash the limiter refused: `reason` is 'queue_full' or 'timeout' (nothing was hashed). */
+export class PasswordBusyError extends Error {
+    /** @param {'queue_full'|'timeout'} reason */
+    constructor(reason) {
+        super(reason === 'timeout' ? 'password hashing: the wait for a slot expired' : 'password hashing: the queue is full');
+        this.name = 'PasswordBusyError';
+        this.code = 'password_busy';
+        this.reason = reason;
+    }
+}
+
+/**
+ * Bounded FIFO semaphore for the password hashes of one process.
+ *
+ * At most `concurrency` tasks run at once; the others wait in arrival order. A task that finds
+ * `queueMax` tasks already waiting is refused at once, and a waiting task gives up after
+ * `queueTimeoutMs` (it leaves the queue); both reject with PasswordBusyError. A finished task
+ * (resolved, rejected or thrown) hands its slot straight to the oldest waiter.
+ * @param {{ concurrency?: number, queueMax?: number, queueTimeoutMs?: number }} [opts]
+ */
+export function createHashLimiter({ concurrency = 1, queueMax = 32, queueTimeoutMs = 10000 } = {}) {
+    if (!Number.isInteger(concurrency) || concurrency < 1) throw new RangeError('concurrency must be an integer >= 1');
+    if (!Number.isInteger(queueMax) || queueMax < 0) throw new RangeError('queueMax must be an integer >= 0');
+    if (!Number.isFinite(queueTimeoutMs) || queueTimeoutMs < 0) throw new RangeError('queueTimeoutMs must be >= 0');
+    let active = 0;
+    const waiting = [];     // { resolve, reject, since, timer }, oldest first
+
+    // Invariant: `waiting` is empty whenever active < concurrency (release() hands a slot over
+    // instead of freeing it while someone waits), so a newcomer never overtakes a waiter.
+    function acquire() {
+        if (active < concurrency) {
+            active++;
+            mInFlight.inc();
+            mWaitMs.observe(0);
+            return Promise.resolve();
+        }
+        if (waiting.length >= queueMax) {
+            mRejectedFull.inc();
+            return Promise.reject(new PasswordBusyError('queue_full'));
+        }
+        return new Promise((resolve, reject) => {
+            const w = { resolve, reject, since: performance.now(), timer: null };
+            w.timer = setTimeout(() => {
+                const i = waiting.indexOf(w);
+                if (i < 0) return;
+                waiting.splice(i, 1);
+                mQueued.dec();
+                mRejectedTimeout.inc();
+                reject(new PasswordBusyError('timeout'));
+            }, queueTimeoutMs);
+            waiting.push(w);
+            mQueued.inc();
+        });
+    }
+
+    function release() {
+        const w = waiting.shift();
+        if (w) {
+            clearTimeout(w.timer);
+            mQueued.dec();
+            mWaitMs.observe(performance.now() - w.since);
+            w.resolve();            // the slot passes to the oldest waiter: `active` is unchanged
+            return;
+        }
+        active--;
+        mInFlight.dec();
+    }
+
+    /**
+     * Runs `fn` when a slot is free and returns its result.
+     * @template T
+     * @param {() => T|Promise<T>} fn
+     * @returns {Promise<T>} rejects with PasswordBusyError when refused (fn is then not called)
+     */
+    async function run(fn) {
+        await acquire();
+        try {
+            return await fn();
+        } finally {
+            release();
+        }
+    }
+
+    return {
+        run,
+        /** Current state (tests, logs). */
+        stats: () => ({ active, waiting: waiting.length, concurrency, queueMax, queueTimeoutMs }),
+    };
+}
+
+/**
+ * The same hasher with every hash and verification (the dummy one and the warm-up included) run
+ * through `limiter`.
+ * @param {ReturnType<typeof createPasswordHasher>} hasher
+ * @param {ReturnType<typeof createHashLimiter>} limiter
+ * @param {{ onBusy?: (err: PasswordBusyError) => Error }} [opts] maps a refusal to the error
+ *   thrown instead (the auth service answers 503 server_busy)
+ */
+export function limitHasher(hasher, limiter, { onBusy = (err) => err } = {}) {
+    const run = (fn) => limiter.run(fn).catch((err) => { throw err instanceof PasswordBusyError ? onBusy(err) : err; });
+    return {
+        algorithm: hasher.algorithm,
+        parse: hasher.parse,
+        hash: (password) => run(() => hasher.hash(password)),
+        verify: (stored, password) => run(() => hasher.verify(stored, password)),
+        verifyDummy: (password) => run(() => hasher.verifyDummy(password)),
+        warmUp: () => (typeof hasher.warmUp === 'function' ? run(() => hasher.warmUp()) : Promise.resolve()),
+        limiter,
+    };
 }

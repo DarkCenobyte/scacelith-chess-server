@@ -129,7 +129,14 @@ key('AUTH_FAILURES_PER_ACCOUNT', { section: 'limits', type: 'int', default: 5, m
     desc: 'Failed logins on one account before each further attempt is delayed exponentially (up to 15 minutes).' });
 key('POW_REGISTER_BITS', { section: 'limits', type: 'int', default: 18, min: 0, max: 26, desc: 'Proof-of-work difficulty (leading zero bits of SHA-256) required to register; 0 disables it.' });
 key('POW_LOGIN_BITS', { section: 'limits', type: 'int', default: 18, min: 0, max: 26, desc: 'Proof-of-work difficulty required to log in while the server sees a credential-stuffing wave; 0 disables it.' });
-key('POW_LOGIN_TRIGGER_PER_MIN', { section: 'limits', type: 'int', default: 300, min: 1, desc: 'Failed logins per minute (whole server) that turn on the login proof-of-work.' });
+key('POW_LOGIN_TRIGGER_PER_MIN', { section: 'limits', type: 'int', default: 30, min: 1,
+    desc: 'Failed logins per minute (whole server) that turn on the login proof-of-work. Every failed login costs a password hash (about 0.5 s of CPU), so 30 per minute already keeps a quarter of a core busy, and a few hundred would need several cores: with PASSWORD_HASH_CONCURRENCY at 1 per worker, a small server could never reach such a trigger. Raise it only on a large server where honest typos alone come near it.' });
+key('PASSWORD_HASH_CONCURRENCY', { section: 'limits', type: 'int', default: 1, min: 1, max: 64,
+    desc: 'Password hashes and verifications (login, registration, password change and reset, account changes that ask for the password) that one worker process runs at once. Each costs about 0.5 s of CPU and 64-128 MiB in the libuv thread pool; 1 leaves the rest of the core to the games of the worker. Keep it below UV_THREADPOOL_SIZE (4 by default) so that the journal and DNS keep free threads.' });
+key('PASSWORD_HASH_QUEUE_MAX', { section: 'limits', type: 'int', default: 32, min: 0,
+    desc: 'Password hashes that may wait for a free slot in one worker process; one more is refused at once with 503 server_busy and a Retry-After of 5 to 15 s (0: no waiting at all).' });
+key('PASSWORD_HASH_QUEUE_TIMEOUT_MS', { section: 'limits', type: 'int', default: 10000, min: 100, max: 30000,
+    desc: 'Longest wait for a password hash slot; the request is then refused with 503 server_busy. Keep it below the 15 s HTTP timeout of the game, minus a second or two for the hash itself, so that the player sees the "busy" answer rather than a timeout.' });
 
 // ---- Games -------------------------------------------------------------------------------------------
 key('RATED_CATEGORIES', { section: 'games', type: 'list', default: '1+0,3+0,3+2,5+0,5+3,10+0,10+5,15+10,30+0,30+20,90+30',

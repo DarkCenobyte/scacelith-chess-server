@@ -11,9 +11,16 @@
 // `primary` is the IPC client ({ request(type, payload) -> Promise }); it may be null (single
 // process, tests): the rate limits and single-use keys then live in this process. When the
 // primary does not answer, the same local implementation is used as a fallback.
+//
+// Password hashing: `svc.hasher` runs every hash and verification (the dummy one of unknown
+// accounts included) through this service's hash limiter, one per worker process
+// (PASSWORD_HASH_CONCURRENCY at once, PASSWORD_HASH_QUEUE_MAX waiting, PASSWORD_HASH_QUEUE_TIMEOUT_MS,
+// security/password.js). A refused hash fails the request with 503 server_busy and a random
+// Retry-After of 5 to 15 s before the account changed: no failed login is counted and a reset
+// link stays valid (a proof of work already given is spent, as for any answer).
 
 import { createAccounts } from './accounts.js';
-import { AuthError } from './errors.js';
+import { AuthError, serverBusy } from './errors.js';
 import { createLogin } from './login.js';
 import { createMfa } from './mfa.js';
 import { createOidcClient, GOOGLE_OIDC } from './oidc.js';
@@ -21,7 +28,7 @@ import { createSessionManager } from './sessions.js';
 import { createSso } from './sso.js';
 import { createMailer, secretText } from '../mail/index.js';
 import { deriveAuthKeys } from '../security/keys.js';
-import { createPasswordHasher } from '../security/password.js';
+import { createHashLimiter, createPasswordHasher, limitHasher } from '../security/password.js';
 import { createPow } from '../security/pow.js';
 import { createLocalControl } from '../security/ratelimit.js';
 import { createSecurityEvents } from '../security/events.js';
@@ -72,9 +79,22 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
         return !!(r && r.fresh);
     }
 
+    const hashLimiter = createHashLimiter({
+        concurrency: config.passwordHashConcurrency, queueMax: config.passwordHashQueueMax, queueTimeoutMs: config.passwordHashQueueTimeoutMs,
+    });
+    let busyWarnAt = 0;
+    function hashBusy(err) {
+        const t = now();
+        if (t - busyWarnAt > 60000) {
+            busyWarnAt = t;
+            log.warn('password hashing saturated: requests refused with 503 server_busy', { reason: err.reason, ...hashLimiter.stats() });
+        }
+        return serverBusy();
+    }
+
     const svc = {
         config, store, log, now, primary, keys, control, once,
-        hasher: passwordHasher || createPasswordHasher(),
+        hasher: limitHasher(passwordHasher || createPasswordHasher(), hashLimiter, { onBusy: hashBusy }),
         box: createSecretBox(keys.mfa),
         events: events || createSecurityEvents({ store, log, now }),
         mailer: mailer || createMailer({ config, log }),
@@ -132,7 +152,8 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
     } else svc.oidc = null;
     svc.sso = createSso(svc);
 
-    // Prepare the dummy hash now, so that the first login of an unknown user is not faster.
+    // Prepare the dummy hash now, so that the first login of an unknown user is not faster (it
+    // takes a slot of the hash limiter like any other hash).
     Promise.resolve().then(() => svc.hasher.warmUp?.()).catch(() => {});
 
     const a = svc.accounts, l = svc.login, s = svc.sso;

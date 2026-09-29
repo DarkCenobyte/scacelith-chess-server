@@ -436,7 +436,9 @@ router.post(path, handler, { auth, body: schemaObject, rate })   // JSON only, H
 // handler(ctx) -> { status, body, headers } ; ctx = { req, ip, params, query, body, user, session, config, store, log, primary }
 ```
 Path parameters use `:name`. JSON errors are `{ "error": "<snake_case_code>", "message": "...",
-"retryAfter"?: s }`. Every response carries `Cache-Control: no-store`, `X-Content-Type-Options:
+"retryAfter"?: s }` (with a `Retry-After` header when `retryAfter` is set). An endpoint that
+hashes or checks a password may answer 503 `server_busy` when the worker's password hash queue
+is full (section 8). Every response carries `Cache-Control: no-store`, `X-Content-Type-Options:
 nosniff`, `Referrer-Policy: no-referrer`, `Strict-Transport-Security` (native TLS), and HTML
 pages a strict `Content-Security-Policy`. Route modules export `register(router, deps)`.
 
@@ -608,6 +610,21 @@ weighted by the reporter's credibility, never the level itself.
   >= 24.7) and hashes are upgraded at the next login. Length >= PASSWORD_MIN_LENGTH, <= 256
   bytes, not containing the username, not in the embedded list of common passwords. Unknown
   login -> the same work on a dummy hash (constant-time behaviour).
+* **Password hash cap**: one hash costs about 0.5-0.6 s of CPU and 64-128 MiB in the libuv thread
+  pool, which the journal's fdatasync and the DNS lookups (SMTP, Google sign-in) share. Every
+  hash and verification of a worker process (registration, login and its rehash, password change
+  and reset, the re-authentication of account changes, the dummy verification of unknown
+  accounts) goes through one bounded FIFO queue (`createHashLimiter` in
+  `src/security/password.js`): `PASSWORD_HASH_CONCURRENCY` (1) run at once,
+  `PASSWORD_HASH_QUEUE_MAX` (32) wait, for at most `PASSWORD_HASH_QUEUE_TIMEOUT_MS` (10 s, under
+  the game's 15 s HTTP timeout). A request beyond the queue, or whose wait expired, is answered
+  HTTP 503 `{ "error": "server_busy", "retryAfter": s }` with a `Retry-After` header (a random
+  5-15 s, so that the refused clients do not come back together) before anything changed: no
+  failed login is counted and a reset link stays valid. With one hash per worker, each game event
+  loop keeps at least half a core during a login burst on a 2-core machine, and the thread pool
+  (`UV_THREADPOOL_SIZE`, 4 by default; keep it at 4 or more) keeps free threads for the file
+  system and DNS. Metrics: `scacelith_password_hash_in_flight`, `scacelith_password_hash_queued`
+  (per shard), `scacelith_password_hash_wait_ms`, `scacelith_password_hash_rejected_total{reason}`.
 * **Tokens**: 32 random bytes, only their SHA-256 is stored; e-mail verification (24 h),
   password reset (1 h, revokes all sessions), MFA login challenge (5 min), SSO attempt (10 min),
   all single-use.
@@ -620,7 +637,9 @@ weighted by the reporter's credibility, never the level itself.
   are the same for an unknown account and a wrong password; usernames are public anyway (the
   "taken" answer is rate limited).
 * **Brute force and stuffing**: per-IP token buckets (API, auth), per-account failure counter
-  with exponential delay, global failure-rate detector that turns on the login proof-of-work,
+  with exponential delay, global failure-rate detector that turns on the login proof-of-work
+  (`POW_LOGIN_TRIGGER_PER_MIN`, 30 failed logins per minute: each costs a password hash, so a
+  small server's hash throughput could never reach a much higher trigger),
   proof-of-work on registration (`SHA-256(challenge || nonce)` with N leading zero bits; the
   challenge is HMAC-signed, bound to the IP and the endpoint, single use).
 * **WebSocket surface**: one message type table, strict decoding, size limit checked from the

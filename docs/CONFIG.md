@@ -132,7 +132,10 @@ Sections:
 | `AUTH_FAILURES_PER_ACCOUNT` | integer (&gt;= 1) | `5` | Failed logins on one account before each further attempt is delayed exponentially (up to 15 minutes). |
 | `POW_REGISTER_BITS` | integer (0-26) | `18` | Proof-of-work difficulty (leading zero bits of SHA-256) required to register; 0 disables it. |
 | `POW_LOGIN_BITS` | integer (0-26) | `18` | Proof-of-work difficulty required to log in while the server sees a credential-stuffing wave; 0 disables it. |
-| `POW_LOGIN_TRIGGER_PER_MIN` | integer (&gt;= 1) | `300` | Failed logins per minute (whole server) that turn on the login proof-of-work. |
+| `POW_LOGIN_TRIGGER_PER_MIN` | integer (&gt;= 1) | `30` | Failed logins per minute (whole server) that turn on the login proof-of-work. Every failed login costs a password hash (about 0.5 s of CPU), so 30 per minute already keeps a quarter of a core busy, and a few hundred would need several cores: with PASSWORD_HASH_CONCURRENCY at 1 per worker, a small server could never reach such a trigger. Raise it only on a large server where honest typos alone come near it. |
+| `PASSWORD_HASH_CONCURRENCY` | integer (1-64) | `1` | Password hashes and verifications (login, registration, password change and reset, account changes that ask for the password) that one worker process runs at once. Each costs about 0.5 s of CPU and 64-128 MiB in the libuv thread pool; 1 leaves the rest of the core to the games of the worker. Keep it below UV_THREADPOOL_SIZE (4 by default) so that the journal and DNS keep free threads. |
+| `PASSWORD_HASH_QUEUE_MAX` | integer (&gt;= 0) | `32` | Password hashes that may wait for a free slot in one worker process; one more is refused at once with 503 server_busy and a Retry-After of 5 to 15 s (0: no waiting at all). |
+| `PASSWORD_HASH_QUEUE_TIMEOUT_MS` | integer (100-30000) | `10000` | Longest wait for a password hash slot; the request is then refused with 503 server_busy. Keep it below the 15 s HTTP timeout of the game, minus a second or two for the hash itself, so that the player sees the "busy" answer rather than a timeout. |
 
 ## Games
 

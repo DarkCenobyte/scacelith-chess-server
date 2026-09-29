@@ -25,6 +25,19 @@ export function tooManyAttempts(retryAfterMs) {
         { retryAfter: Math.max(1, Math.ceil(retryAfterMs / 1000)) });
 }
 
+/** Retry-After range of a 503 server_busy answer, in seconds (drawn at random in it). */
+export const BUSY_RETRY_AFTER_SEC = Object.freeze({ min: 5, max: 15 });
+
+/**
+ * 503 when this process cannot hash a password now (the password hash queue is full or the
+ * wait expired, security/password.js). The delay is random so that the clients refused during
+ * one burst do not all come back together.
+ * @param {number} [retryAfterSec]
+ */
+export function serverBusy(retryAfterSec = BUSY_RETRY_AFTER_SEC.min + Math.floor(Math.random() * (BUSY_RETRY_AFTER_SEC.max - BUSY_RETRY_AFTER_SEC.min + 1))) {
+    return new AuthError(503, 'server_busy', 'The server is busy; try again in a few seconds.', { retryAfter: retryAfterSec });
+}
+
 /** The single answer of every failed password login (unknown account, wrong password, no password). */
 export function invalidCredentials() {
     return new AuthError(401, 'invalid_credentials', 'Wrong user name, e-mail or password.');

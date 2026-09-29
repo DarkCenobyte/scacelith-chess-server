@@ -233,6 +233,35 @@ running when the server stopped come back from the journal, and both players the
 - Every server is a separate trust boundary: the game keeps one login per server address and
   never sends a server the credentials or tokens of another one.
 
+## Password hashing on a small server
+
+Every login, registration, password change or reset and every account change that asks for the
+password computes a password hash: about 0.5-0.6 s of CPU and 64-128 MiB of memory (scrypt, or
+Argon2id on Node 24.7+) in Node's libuv thread pool. Each worker process runs at most
+`PASSWORD_HASH_CONCURRENCY` (1) of them at once; up to `PASSWORD_HASH_QUEUE_MAX` (32) more wait
+their turn, each for at most `PASSWORD_HASH_QUEUE_TIMEOUT_MS` (10 s). A request that finds the
+queue full, or that waited too long, is answered HTTP 503 `server_busy` with a `Retry-After` of 5
+to 15 seconds, and nothing changes on the server: the player simply tries again a little later.
+With one hash per worker, a login burst on a 2-core VPS still leaves each shard at least half a
+core for its games, and the extra memory stays at about 128 MiB per worker.
+
+- Raise `PASSWORD_HASH_CONCURRENCY` only when the machine has idle cores: each hash in flight
+  keeps a whole core busy for half a second.
+- Keep `UV_THREADPOOL_SIZE` (an environment variable Node reads at start, 4 threads per process
+  by default) at 4 or more, and above `PASSWORD_HASH_CONCURRENCY`: the same threads write and
+  fsync the game journal and resolve host names for SMTP and Google sign-in, which would
+  otherwise wait behind the hashes. Set it in the process environment (for example the systemd
+  `EnvironmentFile`), not in the server's `.env` file: the server reads its own settings from it,
+  but the thread pool only sees the real environment.
+- Keep `PASSWORD_HASH_QUEUE_TIMEOUT_MS` below the game's 15 s HTTP timeout, minus a second or two
+  for the hash itself, so that a refused player gets the "busy" answer rather than a timeout.
+- `POW_LOGIN_TRIGGER_PER_MIN` (30) turns the login proof of work on during a credential-stuffing
+  wave. Each failed login costs a hash, so a much higher trigger could never be reached on a
+  small machine.
+- On the metrics endpoint, `scacelith_password_hash_queued`, `scacelith_password_hash_wait_ms`
+  and `scacelith_password_hash_rejected_total` show the queue. Regular refusals outside an attack
+  mean the machine needs more cores, not a higher cap.
+
 ## Secrets
 
 Nothing secret is ever committed: `.env`, keys and certificates are in `.gitignore`, and only
