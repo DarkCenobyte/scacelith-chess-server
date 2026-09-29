@@ -497,14 +497,15 @@ closes the sockets it refuses with an RST, before any TLS work, and counts them 
   later, outside the gate's accounting.
 * On the listener that carries the WebSocket upgrade, the gate also sheds load while the server is
   full. `Router.isFull()` is true while the primary's last answer to `conn.ipAcquire` was a
-  `MAX_CONNECTIONS` refusal less than 5 s ago (an admitted upgrade ends it), or while the worker
+  server-full refusal (`global`: `MAX_CONNECTIONS` plus its reserve) less than 5 s ago (an admitted upgrade ends it), or while the worker
   holds `ceil(MAX_CONNECTIONS * 1.2 / WORKERS)` WebSocket connections; its times come from the
   monotonic clock (`performance.now()`), as do the gate's, so a step of the wall clock neither
   prolongs nor shortens the state. New connections then pass at `MAX_PENDING_HANDSHAKES / 2` per
   second (token bucket, one second of burst; `server_full`) and the others are closed before TLS.
-  What passes reaches the API or the upgrade, where `conn.ipAcquire` stays the exact check and
-  refreshes the signal; a slot freed by a leaving player is found by the next upgrade that passes.
-  The HTTP 503 of that check is the only way a client learns that the server is full: `GET /info`
+  What passes reaches the API or the upgrade, where `conn.ipAcquire` (then the `MAX_CONNECTIONS`
+  check at Hello) stays exact and refreshes the signal; a slot freed by a leaving player is found
+  by the next upgrade that passes. The HTTP 503 of that check, or `ServerFull` at Hello, is the only
+  way a client learns that the server is full: `GET /info`
   has no such field, and a client closed before TLS sees a network error and retries with its
   short backoff. Only WebSocket connections are counted, never API requests.
 * Compromise: before TLS the gate cannot tell an API request from an upgrade on the shared port

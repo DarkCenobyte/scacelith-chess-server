@@ -48,11 +48,12 @@
 // with its backoff. An attacker with enough address groups can still fill the caps: see
 // docs/DESIGN.md 5.8 for what remains possible.
 // On the listener that carries the WebSocket upgrade, the gate also sheds load while the server is
-// full (the `full` predicate, Router.isFull: the primary refused an upgrade for MAX_CONNECTIONS, or
-// this worker holds 1.2 times its share): new connections then pass at MAX_PENDING_HANDSHAKES / 2
-// per second, and the others are closed before the handshake. What passes reaches the exact check
-// at the upgrade, whose HTTP 503 is the only way a client learns that the server is full (GET
-// /info does not say it). On a shared API/WSS port the gate cannot tell an API request from an
+// full (the `full` predicate, Router.isFull: the primary refused an upgrade because the server is
+// full, or this worker holds 1.2 times its share): new connections then pass at
+// MAX_PENDING_HANDSHAKES / 2 per second, and the others are closed before the handshake. What
+// passes reaches the primary's checks (at the upgrade, MAX_CONNECTIONS plus a small reserve; at
+// Hello, MAX_CONNECTIONS itself, except for a player whose game is in progress), whose HTTP 503 or
+// ServerFull is the only way a client learns that the server is full (GET /info does not say it). On a shared API/WSS port the gate cannot tell an API request from an
 // upgrade (both are inside TLS), so the API is let through at that rate too, which keeps part of
 // the API traffic working; with WS_PORT != API_PORT the API listener is never shed, the better
 // layout for a server that expects to be full. Plain modes (proxy, off) have no gate: there is no
