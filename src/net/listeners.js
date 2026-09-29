@@ -47,14 +47,19 @@
 // handshake at once and finishing none before the clients' deadline; a refused client retries
 // with its backoff. An attacker with enough address groups can still fill the caps: see
 // docs/DESIGN.md 5.8 for what remains possible.
-// On the listener that carries the WebSocket upgrade, the gate also sheds load while the server is
-// full (the `full` predicate, Router.isFull: the primary refused an upgrade because the server is
-// full, or this worker holds 1.2 times its share): new connections then pass at
-// MAX_PENDING_HANDSHAKES / 2 per second, and the others are closed before the handshake. What
-// passes reaches the primary's checks (at the upgrade, MAX_CONNECTIONS plus a small reserve; at
-// Hello, MAX_CONNECTIONS itself, except for a player whose game is in progress), whose HTTP 503 or
-// ServerFull is the only way a client learns that the server is full (GET /info does not say it). On a shared API/WSS port the gate cannot tell an API request from an
-// upgrade (both are inside TLS), so the API is let through at that rate too, which keeps part of
+// On the listener that carries the WebSocket upgrade, the gate also sheds load while the `full`
+// predicate says so (Router.isFull: for up to 5 s after the primary refused an upgrade because the
+// server is full, or while this worker holds 1.2 times its share of MAX_CONNECTIONS): new
+// connections then pass at MAX_PENDING_HANDSHAKES / 2 per second, and the others are closed before
+// the handshake. The primary has two checks. At the upgrade it refuses (HTTP 503, which starts the
+// shedding) only beyond MAX_CONNECTIONS plus a reserve of max(16, 2 %), kept for the players whose
+// game is in progress; at Hello it refuses newcomers at MAX_CONNECTIONS itself (ServerFull), which
+// does not start the shedding. So a server at MAX_CONNECTIONS does not shed: each newcomer completes
+// the handshake and the upgrade and gets ServerFull (scacelith_ws_hello_total{result="server_full"}),
+// and a player coming back to a game in progress does not compete with newcomers for the shed rate.
+// That 503 or ServerFull is the only way a client learns that the server is full (GET /info does
+// not say it). On a shared API/WSS port the gate cannot tell an API request from an upgrade (both
+// are inside TLS), so while it sheds the API is let through at that rate too, which keeps part of
 // the API traffic working; with WS_PORT != API_PORT the API listener is never shed, the better
 // layout for a server that expects to be full. Plain modes (proxy, off) have no gate: there is no
 // TLS work to save.
@@ -69,6 +74,7 @@ import https from 'node:https';
 import net from 'node:net';
 import { performance } from 'node:perf_hooks';
 import tls from 'node:tls';
+import { defaultPendingPerGroup } from '../config.js';
 import { metrics as defaultRegistry } from '../metrics.js';
 import { ipGroupKey, ipMatcher, normalizeIp, resolveClientIp } from './ip.js';
 
@@ -83,16 +89,11 @@ const MAX_RECORD_BODY = 16384;
 const kSlot = Symbol('scacelith.tlsGateSlot');   // address group of a socket holding a handshake slot
 const kWait = Symbol('scacelith.tlsGateWait');   // state of a socket waiting for its ClientHello
 
-function noop() {}
+// Default handshake slots per address group (MAX_PENDING_HANDSHAKES_PER_IP empty): config.js computes
+// it, so that check-config prints the value the gate uses.
+export { defaultPendingPerGroup };
 
-/**
- * Default handshake slots per address group: MAX_PENDING_HANDSHAKES / 32 with a floor of 2, but
- * below the total when the total is at least 2 (4 for the default 128, 1 for a total of 2).
- * @param {number} maxPending
- */
-export function defaultPendingPerGroup(maxPending) {
-    return Math.max(1, Math.min(maxPending - 1, Math.max(2, Math.floor(maxPending / 32))));
-}
+function noop() {}
 
 // Closes a refused socket with an RST: nothing is sent, and the server keeps no TIME_WAIT for it.
 function refuseSocket(socket) {
@@ -452,7 +453,7 @@ export class Listeners {
         if (this.native) {
             this.gate = new TlsGate({
                 maxPending: config.maxPendingHandshakes ?? 128,
-                maxPendingPerIp: config.maxPendingHandshakesPerIp ?? 0,      // 0: the default share of maxPending
+                maxPendingPerIp: config.maxPendingHandshakesPerIp ?? 0,      // loadConfig fills it; 0: the default share
                 helloTimeoutMs,
                 full,
                 registry,

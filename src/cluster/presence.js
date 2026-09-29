@@ -10,7 +10,9 @@
 // ControlPlane.presenceClaim refuses newcomers (ServerFull, close 4006) but still admits a player
 // whose game is in progress. A player who lost the connection during a game on a full server can
 // thus come back before the reconnection grace runs out instead of competing with newcomers for
-// the slots that free up.
+// the slots that free up. For the same reason only the refusal at the upgrade ('global', beyond
+// the reserve) makes a worker shed new TLS connections (Router.isFull): at MAX_CONNECTIONS itself
+// each newcomer completes the handshake and the upgrade and gets ServerFull at Hello.
 //
 // All operations are O(1).
 

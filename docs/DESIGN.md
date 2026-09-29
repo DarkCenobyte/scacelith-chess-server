@@ -162,8 +162,9 @@ each `Welcome` and then follows that interval. Every ping costs a TLS record eac
 connected player, so a lower value makes the indicator more reactive at a measurable price on a
 small machine (docs/BENCHMARK.md). The router answers at most one client `Ping` per 950 ms per
 connection. The client's liveness check does not depend on that interval: when nothing came for
-1.5 heartbeats (7.5 s at least) it sends one `Ping` at once, and it calls the connection dead
-after two heartbeats (10 s at least) with nothing received.
+1.5 heartbeats (at least 7.5 s, at most 90 s) it sends one `Ping` at once, and it calls the
+connection dead after two heartbeats (at least 10 s, at most 120 s) with nothing received: it
+counts `Welcome.heartbeatMs` as 60 s at most.
 
 ## 4. Shared foundations (exist already)
 
@@ -538,8 +539,9 @@ closes the sockets it refuses with an RST, before any TLS work, and counts them 
   or its close. Beyond `MAX_PENDING_HANDSHAKES` slots per worker (`handshakes`), or
   `MAX_PENDING_HANDSHAKES_PER_IP` for one address group (`per_ip`), it is closed. The per-group
   cap is separate from `MAX_CONNECTIONS_PER_IP` and small: by default
-  `MAX_PENDING_HANDSHAKES / 32` with a floor of 2, so 4, and config.js refuses a value that is
-  not below `MAX_PENDING_HANDSHAKES`. An address group here is an IPv4 address or an IPv6 /48,
+  `MAX_PENDING_HANDSHAKES / 32` with a floor of 2, so 4 (config.js computes it, so `check-config`
+  prints the value in use), and config.js refuses a value that is not below
+  `MAX_PENDING_HANDSHAKES`. An address group here is an IPv4 address or an IPv6 /48,
   the usual allocation of one customer (presence.js counts WebSocket connections per /64). A
   worker is one thread: starting 10,000 handshakes together (1-3.5 ms of CPU each) makes all of
   them late, while a bounded number in flight lets the CPU finish them in turn; the refused
@@ -554,19 +556,34 @@ closes the sockets it refuses with an RST, before any TLS work, and counts them 
   later, outside the gate's accounting.
 * On the listener that carries the WebSocket upgrade, the gate also sheds load while the server is
   full. `Router.isFull()` is true while the primary's last answer to `conn.ipAcquire` was a
-  server-full refusal (`global`: `MAX_CONNECTIONS` plus its reserve) less than 5 s ago (an admitted upgrade ends it), or while the worker
-  holds `ceil(MAX_CONNECTIONS * 1.2 / WORKERS)` WebSocket connections; its times come from the
-  monotonic clock (`performance.now()`), as do the gate's, so a step of the wall clock neither
-  prolongs nor shortens the state. New connections then pass at `MAX_PENDING_HANDSHAKES / 2` per
-  second (token bucket, one second of burst; `server_full`) and the others are closed before TLS.
-  What passes reaches the API or the upgrade, where `conn.ipAcquire` (then the `MAX_CONNECTIONS`
-  check at Hello) stays exact and refreshes the signal; a slot freed by a leaving player is found
-  by the next upgrade that passes. The HTTP 503 of that check, or `ServerFull` at Hello, is the only
-  way a client learns that the server is full: `GET /info`
-  has no such field, and a client closed before TLS sees a network error and retries with its
-  short backoff. Only WebSocket connections are counted, never API requests.
+  server-full refusal (`global`: `MAX_CONNECTIONS` plus its reserve of max(16, 2 %)) less than 5 s
+  ago (an admitted upgrade ends it), or while the worker holds `ceil(MAX_CONNECTIONS * 1.2 /
+  WORKERS)` WebSocket connections; its times come from the monotonic clock (`performance.now()`),
+  as do the gate's, so a step of the wall clock neither prolongs nor shortens the state. New
+  connections then pass at `MAX_PENDING_HANDSHAKES / 2` per second (token bucket, one second of
+  burst; `server_full`) and the others are closed before TLS. What passes reaches the API or the
+  upgrade, where `conn.ipAcquire` (then the `MAX_CONNECTIONS` check at Hello) stays exact and
+  refreshes the signal; a slot freed by a leaving player is found by the next upgrade that passes.
+  The HTTP 503 of that check, or `ServerFull` at Hello, is the only way a client learns that the
+  server is full: `GET /info` has no such field, and a client closed before TLS sees a network
+  error and retries with its short backoff. Only WebSocket connections are counted, never API
+  requests.
+* Players first at `MAX_CONNECTIONS`. A `ServerFull` at Hello does not feed `isFull()`, and an
+  upgrade admitted inside the reserve ends the state like any other. So a server at exactly
+  `MAX_CONNECTIONS` does not shed: each newcomer completes the TLS handshake and the upgrade, gets
+  `ServerFull` at Hello (close 4006), and the official game then waits 60 to 120 s. Shedding there
+  would make a player coming back to a game in progress (admitted at Hello whatever the count)
+  compete with the newcomers for the `MAX_PENDING_HANDSHAKES / 2` connections let through per
+  second. The price is one handshake, one upgrade and one Hello per attempt of a newcomer, and no
+  server-wide rate on the attempts of clients that ignore the backoff (the per-address caps still
+  apply) until the connections counted at the upgrade reach the reserve's bound. The metric of a
+  full server is therefore `scacelith_ws_hello_total{result="server_full"}`. The 503 of the
+  upgrade (`scacelith_ws_handshakes_rejected_total{reason="server_full"}`) only comes once the
+  reserve is in use as well, and the shedding (`scacelith_tls_refused_total{reason="server_full"}`)
+  only after such a 503 or while a worker holds 1.2 times its share.
+  `test/integration/admission.test.js` checks this on a real server.
 * Compromise: before TLS the gate cannot tell an API request from an upgrade on the shared port
-  (both are inside the TLS stream), so while the server is full new API connections are let
+  (both are inside the TLS stream), so while the gate sheds, new API connections are let
   through at the rate above too, together with the upgrades: the API keeps working for players
   already logged in, more slowly (connections already open are past the gate and not affected).
   With `WS_PORT != API_PORT` the API listener is never shed, the better layout for a server that
@@ -941,7 +958,8 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   frame header before buffering, no compression, no fragmentation beyond the size limit,
   Hello timeout, per-connection token bucket, per-IP and global connection limits, slow
   consumers closed, heartbeat timeout, `Origin` refused by default. Before TLS: handshakes in
-  progress capped per worker and per address, and load shed while the server is full (5.8).
+  progress capped per worker and per address, and load shed once the upgrades are refused because
+  the server is full (5.8).
 * **Proof of work format**: an endpoint that wants one answers HTTP 428
   `{ "error": "pow_required", "pow": { "challenge": "<opaque ASCII>", "bits": 18, "expiresAt": ms } }`.
   The client finds a nonce, a decimal ASCII string, such that

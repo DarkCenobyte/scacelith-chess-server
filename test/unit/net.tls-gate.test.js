@@ -4,7 +4,7 @@
 // by completed and failed handshakes, and the sockets closed after a handshake timeout.
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import https from 'node:https';
@@ -15,8 +15,9 @@ import { performance } from 'node:perf_hooks';
 import { Duplex } from 'node:stream';
 import tls from 'node:tls';
 import { after, before, describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { FULL_HOLD_MS, Router } from '../../src/cluster/router.js';
-import { testConfig } from '../../src/config.js';
+import { describe as describeConfig, testConfig } from '../../src/config.js';
 import { Registry } from '../../src/metrics.js';
 import { Listeners, TlsGate, defaultPendingPerGroup } from '../../src/net/listeners.js';
 import { connectWs } from '../../src/net/ws-raw-client.js';
@@ -610,6 +611,7 @@ describe('TlsGate on a real TLS server', { skip: !hasOpenssl && 'openssl not ava
             assert.deepEqual(backlogs, [4096, 4096]);
             assert.equal(lst.gate.maxPending, 2);
             assert.equal(lst.gate.maxPendingPerIp, 1, 'MAX_PENDING_HANDSHAKES / 32, below the total; not MAX_CONNECTIONS_PER_IP');
+            assert.equal(config.maxPendingHandshakesPerIp, 1, 'the configuration holds the same value (check-config prints it)');
             assert.equal(lst.gate.fullRate, 1);
             // API listener (WS_PORT != API_PORT): never shed while full.
             for (let i = 0; i < 3; i++) open.push(await tlsConnect(apiPort));
@@ -740,12 +742,40 @@ describe('Router.isFull (server-full signal)', () => {
 
 describe('config: MAX_PENDING_HANDSHAKES_PER_IP', () => {
     it('defaults to a share of MAX_PENDING_HANDSHAKES and must stay below it', () => {
-        assert.equal(testConfig().maxPendingHandshakesPerIp, null, 'empty: the gate derives it');
+        // Empty: loadConfig stores the effective value (before, it stayed null and only the gate
+        // derived it, so check-config could not show it).
+        assert.equal(testConfig().maxPendingHandshakesPerIp, 4, 'empty: MAX_PENDING_HANDSHAKES / 32');
+        assert.equal(testConfig({ MAX_PENDING_HANDSHAKES: '2' }).maxPendingHandshakesPerIp, 1, 'always below the total');
+        assert.equal(testConfig({ MAX_PENDING_HANDSHAKES: '64' }).maxPendingHandshakesPerIp, 2, 'floor of 2');
+        assert.equal(testConfig({ MAX_PENDING_HANDSHAKES: '4096' }).maxPendingHandshakesPerIp, 128);
+        assert.equal(describeConfig(testConfig()).maxPendingHandshakesPerIp, 4, 'what check-config prints');
         assert.equal(testConfig({ MAX_PENDING_HANDSHAKES_PER_IP: '8' }).maxPendingHandshakesPerIp, 8);
-        assert.equal(testConfig({ MAX_CONNECTIONS_PER_IP: '100000' }).maxPendingHandshakesPerIp, null, 'not tied to MAX_CONNECTIONS_PER_IP');
+        assert.equal(testConfig({ MAX_CONNECTIONS_PER_IP: '100000' }).maxPendingHandshakesPerIp, 4, 'not tied to MAX_CONNECTIONS_PER_IP');
         assert.throws(() => testConfig({ MAX_PENDING_HANDSHAKES_PER_IP: '128' }), /MAX_PENDING_HANDSHAKES_PER_IP must be lower than MAX_PENDING_HANDSHAKES/);
         assert.throws(() => testConfig({ MAX_PENDING_HANDSHAKES: '16', MAX_PENDING_HANDSHAKES_PER_IP: '20' }), /must be lower/);
         assert.throws(() => testConfig({ MAX_PENDING_HANDSHAKES: '1' }), /MAX_PENDING_HANDSHAKES: at least 2/);
         assert.equal(testConfig({ MAX_PENDING_HANDSHAKES: '16', MAX_PENDING_HANDSHAKES_PER_IP: '15' }).maxPendingHandshakesPerIp, 15);
+    });
+
+    it('check-config prints the value the gate uses', () => {
+        const run = (extra) => {
+            const r = spawnSync(process.execPath, [fileURLToPath(new URL('../../bin/scacelith-server.js', import.meta.url)), 'check-config'], {
+                cwd: os.tmpdir(), encoding: 'utf8',
+                env: {
+                    PATH: process.env.PATH, SCACELITH_ENV_FILE: '', SERVER_SECRET: Buffer.alloc(48, 7).toString('base64'),
+                    TLS_MODE: 'off', ALLOW_INSECURE_DEV: '1', ...extra,
+                },
+            });
+            assert.equal(r.status, 0, r.stderr);
+            return JSON.parse(r.stdout);
+        };
+        const def = run({});
+        assert.deepEqual([def.maxPendingHandshakes, def.maxPendingHandshakesPerIp], [128, 4]);
+        const small = run({ MAX_PENDING_HANDSHAKES: '2' });
+        assert.deepEqual([small.maxPendingHandshakes, small.maxPendingHandshakesPerIp], [2, 1]);
+        for (const n of [2, 64, 128, 4096]) {
+            const gate = new TlsGate({ maxPending: n, maxPendingPerIp: testConfig({ MAX_PENDING_HANDSHAKES: String(n) }).maxPendingHandshakesPerIp, registry: new Registry() });
+            assert.equal(gate.maxPendingPerIp, new TlsGate({ maxPending: n, registry: new Registry() }).maxPendingPerIp, `same value as the gate's own default (${n})`);
+        }
     });
 });
