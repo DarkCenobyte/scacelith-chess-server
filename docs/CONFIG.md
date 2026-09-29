@@ -125,6 +125,7 @@ Sections:
 | `WS_HELLO_TIMEOUT_MS` | integer (&gt;= 1000) | `10000` | Time a new connection has to authenticate. |
 | `HEARTBEAT_INTERVAL_MS` | integer (&gt;= 1000) | `10000` | Server ping interval (also measures each player's latency). |
 | `HEARTBEAT_TIMEOUT_MS` | integer (&gt;= 3000) | `30000` | A connection silent for this long is considered dead. |
+| `CLIENT_PING_INTERVAL_MS` | integer (1000-60000) | `10000` | Interval of the game client's own Ping, announced in Welcome (the client measures its round trip for the ping indicator and its estimate of the server clock with it). Lower is a more reactive ping indicator but costs more server CPU for every connected player: at 2000 these pings alone take a third or more of the server CPU of a player in a 3+2 game. After each connection the client sends a few quick pings anyway. |
 | `HTTP_BODY_LIMIT` | integer (&gt;= 1024) | `16384` | Largest API request body in bytes. |
 | `HTTP_RATE_PER_IP` | integer (&gt;= 1) | `120` | API requests per minute from one IP address (all endpoints). |
 | `AUTH_RATE_PER_IP` | integer (&gt;= 1) | `20` | Login / register / reset attempts per 10 minutes from one IP address. |

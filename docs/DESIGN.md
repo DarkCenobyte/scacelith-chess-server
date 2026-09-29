@@ -108,7 +108,24 @@ another process's write lock. After the commit it sends `RatingUpdate` and tells
 **Reconnection.** A lost connection keeps the game running (the player's clock too). The
 opponent gets `GameEvent{PlayerDisconnected, arg = grace ms}`. A new connection (any shard)
 says `Hello`; the primary knows the active game; the client receives `GameSnapshot` and goes on.
-After the grace period without a connection: section 6.4.
+After the grace period without a connection: section 6.4. The game client spreads its
+reconnections so that a restart or a full server does not bring every player back at the same
+instant: full jitter (a random delay between 0.5 s and min(30 s, 2 s x 2^n)), 60 to 120 s after
+`ServerFull` (HTTP 503 at the upgrade or close 4006), a first attempt 5 to 35 s after a shutdown
+(`Notice{ServerShutdown}` or close 4008), and no `/api/v1/info` request for 10 minutes after
+losing a connection that had reached `Welcome` (PROTOCOL.md, lifecycle step 6). A player whose
+game is in progress is the exception: the grace is short (15 s by default, given again after a
+restart), so their attempts are never more than 8 s apart and the first one after a shutdown
+comes 1 to 8 s after it.
+
+**Client pings.** Besides answering the server's heartbeat (`HEARTBEAT_INTERVAL_MS`, which also
+measures the round trip used for lag compensation), the game client sends its own `Ping` for its
+ping indicator and its estimate of the server clock. The server chooses how often:
+`Welcome.clientPingMs` = `CLIENT_PING_INTERVAL_MS` (10 s by default, 1 s to 60 s). The client
+sends four quick pings after each `Welcome` and then follows that interval. Every ping costs a
+TLS record each way for every connected player, so a lower value makes the indicator more reactive
+at a measurable price on a small machine (docs/BENCHMARK.md). The router answers at most one
+client `Ping` per 950 ms per connection.
 
 ## 4. Shared foundations (exist already)
 

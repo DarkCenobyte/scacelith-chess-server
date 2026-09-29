@@ -159,9 +159,10 @@ export const messages = [
       fields: [['seq', 'u32'], ['game', 'id53'], ['accept', 'bool']] },
 
     // ---- server -> client ----
-    { id: 0x80, name: 'Welcome', dir: S2C, doc: 'Hello accepted. When activeGame != 0 a GameSnapshot follows.',
+    { id: 0x80, name: 'Welcome', dir: S2C,
+      doc: 'Hello accepted. When activeGame != 0 a GameSnapshot follows. heartbeatMs: interval of the server Ping; clientPingMs: interval the client should use for its own Ping (CLIENT_PING_INTERVAL_MS; 0 = the client\'s default).',
       fields: [['proto', 'u16'], ['serverTime', 'f64'], ['userId', 'u32'], ['username', 'str8', { max: 24 }], ['serverName', 'str8', { max: 64 }],
-               ['heartbeatMs', 'u32'], ['maxMsgPerSec', 'u16'], ['activeGame', 'id53']] },
+               ['heartbeatMs', 'u32'], ['clientPingMs', 'u32'], ['maxMsgPerSec', 'u16'], ['activeGame', 'id53']] },
     { id: 0x81, name: 'Error', dir: S2C, doc: 'A request was refused. fatal: the server closes the connection after it.',
       fields: [['ref', 'u32'], ['code', 'enum:ErrorCode'], ['fatal', 'bool'], ['game', 'id53']] },
     { id: 0x82, name: 'Ping', dir: S2C, doc: 'Heartbeat; answer with Pong at once (the server measures the latency with it).',

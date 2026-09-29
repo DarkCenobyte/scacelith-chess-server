@@ -438,7 +438,7 @@ async function fakeServer(script = {}) {
             if (m.type === P.MSG.Hello) {
                 if (script.hello) script.hello(s, m);
                 else if (m.token !== TOKEN) { s.send('Error', { ref: m.seq, code: P.enums.ErrorCode.Unauthorized, fatal: true, game: 0 }); peer.close(4003, 'unauthorized'); }
-                else s.send('Welcome', { proto: 1, serverTime: Date.now(), userId: 17, username: 'alice', serverName: 'Fake', heartbeatMs: 10000, maxMsgPerSec: 20, activeGame: 0 });
+                else s.send('Welcome', { proto: 1, serverTime: Date.now(), userId: 17, username: 'alice', serverName: 'Fake', heartbeatMs: 10000, clientPingMs: 10000, maxMsgPerSec: 20, activeGame: 0 });
             } else if (m.type === P.MSG.C_Ping) {
                 s.send('S_Pong', { nonce: m.nonce, serverTime: Date.now() + (script.clockAhead ?? 0) });
             } else if (script.onMessage) script.onMessage(s, m);

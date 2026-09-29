@@ -88,7 +88,7 @@ test('encode validates ranges, bounds, enums, strings and lists', () => {
     assert.throws(() => P.encode.QueueJoin({ seq: 1, category: '12345678', rated: true }), isPE('category bad length'));
     assert.throws(() => P.encode.QueueJoin({ seq: 1, category: 'ab\0c', rated: true }), isPE('category contains NUL'));
     assert.throws(() => P.encode.QueueJoin({ seq: 1, category: 32, rated: true }), isPE('category not a string'));
-    assert.throws(() => P.encode.Welcome({ proto: 1, serverTime: 0, userId: 1, username: 'ユキユキユキユキa', serverName: '', heartbeatMs: 1, maxMsgPerSec: 1, activeGame: 0 }), isPE('username bad length'));
+    assert.throws(() => P.encode.Welcome({ proto: 1, serverTime: 0, userId: 1, username: 'ユキユキユキユキa', serverName: '', heartbeatMs: 1, clientPingMs: 1, maxMsgPerSec: 1, activeGame: 0 }), isPE('username bad length'));
     assert.throws(() => P.encode.S_Ping({ nonce: 1, serverTime: Infinity }), isPE('serverTime not finite'));
     assert.throws(() => P.encode.Notice({ code: 1, arg: -Infinity }), isPE('arg not finite'));
     const snap = { game: 1, gseq: 1, category: '3+2', baseMs: 1, incMs: 0, rated: false, white: { userId: 1, name: 'a', rating: 1, provisional: false },
@@ -121,7 +121,7 @@ test('encode keeps the placeholder defaults for omitted bool, f64, id53, string 
 
 test('strings: UTF-8 round trip, BOM kept, lone surrogates become U+FFFD', () => {
     for (const s of ['Łukasz', 'ユキ', 'مُحَمَّد', '🐴♞', '﻿bom', 'aÿb']) {
-        const b = P.encode.Welcome({ proto: 1, serverTime: 0, userId: 1, username: s, serverName: s, heartbeatMs: 1, maxMsgPerSec: 1, activeGame: 0 });
+        const b = P.encode.Welcome({ proto: 1, serverTime: 0, userId: 1, username: s, serverName: s, heartbeatMs: 1, clientPingMs: 1, maxMsgPerSec: 1, activeGame: 0 });
         const m = P.decode(b);
         assert.equal(m.username, s);
         assert.equal(m.serverName, s);

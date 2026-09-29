@@ -681,7 +681,7 @@ export class Router {
         conn.sendFrame(encode.Welcome({
             proto: msg.proto, serverTime: now, userId: conn.userId, username: conn.username,
             serverName: this.config.serverName, heartbeatMs: this.config.heartbeatIntervalMs,
-            maxMsgPerSec: Math.min(65535, this.rate), activeGame,
+            clientPingMs: this.config.clientPingIntervalMs, maxMsgPerSec: Math.min(65535, this.rate), activeGame,
         }));
         this._hello.labels('ok').inc();
         this._helloMs.observe(now - conn.openedAt);
