@@ -156,8 +156,8 @@ event-loop lag. The rows marked 2.1 GHz ran on the slower host (see above).
   only answers the heartbeat costs about 5-6 µs per second. No connection was dropped during any
   hold.
 - **TLS session resumption does not lower the cost of a connection** (2.4 ms of server CPU with
-  96 % of the sessions resumed, 2.5 ms without): a TLS 1.3 resumption still does a key exchange,
-  and most of the per-connection cost is outside the certificate signature.
+  96 % of the sessions resumed, 2.5 ms without): a TLS 1.3 resumption still performs a key
+  exchange, so it saves little here.
 
 ### Games at a realistic pace (`games`) and throughput (`burst`)
 
@@ -268,10 +268,23 @@ resources to watch: the primary (presence, challenges, matchmaking) and the sing
 - **Game placement under overload.** A new game goes to the creator's shard unless that shard
   reports overload (`SHARD_OVERLOAD_LAG_MS`, event-loop p99 above 50 ms); then the primary picks
   the shard with the fewest games in the last `shard.load` report (sent every 2 s), and every game
-  created before the next report goes to that same shard. In the burst 1000 run one shard hosted
-  433 games against 159-199 for the others; in the staggered run 3,447 against 1,935-2,270; with
-  `--via queue` 3,414 against 1,831-2,470. Those games usually have no local player, which raises
-  the relays (64-67 % of the moves in the staggered and 20k runs).
+  created before the next report goes to that same shard. On a busy machine every shard's p99 lag
+  hovers around 50 ms (a single 40-50 ms GC pause is enough), so the flag flips from report to
+  report: in the burst 1000 run one shard hosted 433 games against 159-199 for the others, in the
+  staggered run 3,447 against 1,935-2,270, with `--via queue` 3,414 against 1,831-2,470. The moved
+  games usually have no local player, so 64-67 % of the moves crossed the bus instead of 35-41 %,
+  and the "overloaded" shard keeps its connections (the TLS and socket work, most of its CPU)
+  anyway. With `--server-env SHARD_OVERLOAD_LAG_MS=5000` the same runs placed 210-276 and
+  2,322-2,522 games per shard and relayed 39 % and 33 % of the moves (rows below; the machine was
+  busier during those two runs, so their latencies are not comparable).
+
+| run | command | games per shard | moves relayed | moves/s | move RTT p50 / p99 ms | other processes |
+|---|---|---|---|---|---|---|
+| burst 1000 | `--scenario burst --games 1000` | 195 / 199 / 159 / 433 | 41 % | 16,532 | 38 / 150 | 0.67 core |
+| burst 1000, threshold 5 s | `... --server-env SHARD_OVERLOAD_LAG_MS=5000` | 240 / 276 / 210 / 253 | 39 % | 10,937 | 58 / 227 | 1.44 cores |
+| 10k staggered | `--scenario games --games 10000 --start-rate 125 --warmup-s 20 --duration-s 60` | 2,270 / 3,447 / 1,935 / 2,211 | 64 % | 9,174 | 23 / 244 | 0.5 core |
+| 10k staggered, threshold 5 s | `... --server-env SHARD_OVERLOAD_LAG_MS=5000` | 2,522 / 2,456 / 2,322 / 2,506 | 33 % | 7,057 | 182 / 893 | 1.53 cores |
+
 - **Commits on the event loop.** A shard commits its finished games with a synchronous SQLite
   transaction (`synchronous=FULL`) that may also wait for the write lock of another process; the
   shard's players wait meanwhile (commit p99 up to 214 ms).
@@ -294,6 +307,8 @@ resources to watch: the primary (presence, challenges, matchmaking) and the sing
   separate machine it removes a quarter to a third of the server's CPU per move, half of the CPU
   of a new connection and about 40 KB per connection (the `--plain` rows); on the same machine it
   only moves that cost to the proxy (not measured here).
+- **`SHARD_OVERLOAD_LAG_MS`**: on a machine that runs near its CPU limit, raise it (a few hundred
+  ms) so that games stay on the creator's shard (see above).
 - **Heartbeat**: `HEARTBEAT_INTERVAL_MS` 10 s -> 20 s halves the server's share of the idle cost,
   at the price of a slower detection of dead connections (`HEARTBEAT_TIMEOUT_MS`).
 - **Kernel settings** for 100,000+ sockets: `fs.nr_open` and `LimitNOFILE`, `net.core.somaxconn`
