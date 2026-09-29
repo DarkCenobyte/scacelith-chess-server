@@ -112,6 +112,26 @@ describe('global rate limiter', () => {
         assert.equal(l.peek('k'), 0);
     });
 
+    it('refund() takes back a granted take from the window that counted it', () => {
+        let t = 0;
+        const l = new SlidingWindowLimiter({ now: () => t });
+        const take = () => l.take({ key: 'k', limit: 2, windowMs: 1000 }).allowed;
+        assert.deepEqual([take(), take(), take()], [true, true, false]);
+        assert.deepEqual(l.refund({ key: 'k', windowMs: 1000, cost: 1, ageMs: 0 }), { refunded: true });
+        assert.deepEqual([take(), take()], [true, false]);
+        // A take of the previous window: taken back there (it weighs 0.75 at 1250).
+        t = 1250;
+        assert.deepEqual(l.refund({ key: 'k', windowMs: 1000, cost: 1, ageMs: 1150 }), { refunded: true });
+        assert.equal(take(), true, 'prev 1 x 0.75 + 1 <= 2 (without the refund: 2 x 0.75 + 1 > 2)');
+        assert.equal(take(), false);
+        // Never below zero; unknown keys, other windows and older takes change nothing.
+        for (let i = 0; i < 5; i++) l.refund({ key: 'k', windowMs: 1000, cost: 1, ageMs: 0 });
+        assert.ok(l.peek('k') >= 0);
+        assert.deepEqual(l.refund({ key: 'nope', windowMs: 1000 }), { refunded: false });
+        assert.deepEqual(l.refund({ key: 'k', windowMs: 60000 }), { refunded: false });
+        assert.deepEqual(l.refund({ key: 'k', windowMs: 1000, ageMs: 5000 }), { refunded: false });
+    });
+
     it('honours cost and stays bounded', () => {
         let t = 0;
         const l = new SlidingWindowLimiter({ now: () => t, maxKeys: 100 });

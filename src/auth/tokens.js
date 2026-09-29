@@ -3,7 +3,7 @@
 //   kind           lifetime   token given to               data
 //   email_verify   24 h       e-mail link                  { email }
 //   password_reset 1 h        e-mail link                  { email }
-//   mfa_login      5 min      login answer (mfa_...)       { attempts, clientLabel, method }
+//   mfa_login      5 min      login answer (mfa_...)       { attempts, clientLabel, method, pwh? }
 //   sso_attempt    10 min     SSO start answer (sso_...)   { challenge, status, result }
 //   sso_state      10 min     Google (state parameter)     { attempt, nonce, verifier }
 //   sso_ticket     10 min     SSO poll answer (sso_...)    { sub, email }

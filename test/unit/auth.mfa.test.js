@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { base32Decode, hotp, totp, totpStep } from '../../src/security/totp.js';
-import { startTestServer } from './helpers/auth-fakes.js';
+import { linkIn, startTestServer } from './helpers/auth-fakes.js';
 
 const PW = 'correct horse battery';
 
@@ -200,4 +200,81 @@ test('enable without setup', async (t) => {
     const { token } = await s.login('alice', PW);
     const r = await s.request('POST', '/api/v1/account/mfa/totp/enable', { token, body: { code: '123456' } });
     assert.deepEqual([r.status, r.json.error], [409, 'mfa_setup_required']);
+});
+
+// A password reset or change between the two steps of a login ends the MFA step: no session opens
+// with a password that was replaced (DESIGN 8, "a password reset always wins").
+const NEW = 'a brand new passphrase';
+const liveSessions = (s, userId) => s.store.sessions.listForUser(userId).filter((x) => !x.revokedAt).length;
+
+test('a password reset between the two steps of a login ends the MFA step', async (t) => {
+    const { s, u, secret, recoveryCodes } = await enrolled();
+    t.after(s.close);
+    const step = await mfaStep(s);                  // someone who has the old password
+    const step2 = await mfaStep(s);
+    await s.request('POST', '/api/v1/auth/password/forgot', { body: { email: 'alice@example.com' } });
+    await s.mailer.idle();
+    const mail = [...s.mailer.sent].reverse().find((m) => /Reset your/.test(m.subject));
+    const resetToken = new URL(linkIn(mail.text)).searchParams.get('token');
+    assert.equal((await s.request('POST', '/api/v1/auth/password/reset', { body: { token: resetToken, newPassword: NEW } })).status, 200);
+    assert.equal(liveSessions(s, u.id), 0);
+    let r = await s.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: step, code: totp(secret, s.now()) } });
+    assert.deepEqual([r.status, r.json.error], [401, 'invalid_mfa_token'], r.text);
+    assert.equal(liveSessions(s, u.id), 0, 'no session opened with the old password');
+    // Refused before the code is checked: no recovery code is spent on a dead step.
+    r = await s.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: step2, recoveryCode: recoveryCodes[0] } });
+    assert.deepEqual([r.status, r.json.error], [401, 'invalid_mfa_token']);
+    assert.equal(s.store.mfa.countRecoveryCodes(u.id), 10);
+    // The step is spent.
+    r = await s.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: step, code: totp(secret, s.now()) } });
+    assert.equal(r.json.error, 'invalid_mfa_token');
+    // A login with the new password goes through both steps.
+    const fresh = await s.request('POST', '/api/v1/auth/login', { body: { login: 'alice', password: NEW } });
+    assert.equal(fresh.json.mfaRequired, true);
+    r = await s.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: fresh.json.mfaToken, recoveryCode: recoveryCodes[0] } });
+    assert.equal(r.status, 200, r.text);
+});
+
+test('a password change (POST /account/password) between the two steps of a login ends the MFA step', async (t) => {
+    const { s, u, token, secret } = await enrolled();
+    t.after(s.close);
+    const step = await mfaStep(s);
+    const r0 = await s.request('POST', '/api/v1/account/password', { token, body: { currentPassword: PW, newPassword: NEW } });
+    assert.equal(r0.status, 200, r0.text);
+    const before = liveSessions(s, u.id);
+    const r = await s.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: step, code: totp(secret, s.now()) } });
+    assert.deepEqual([r.status, r.json.error], [401, 'invalid_mfa_token'], r.text);
+    assert.equal(liveSessions(s, u.id), before, 'no session opened with the old password');
+});
+
+test('a password change that lands while the MFA step checks the code (another process) still wins', async (t) => {
+    const { s, u, secret } = await enrolled();
+    t.after(s.close);
+    const step = await mfaStep(s);
+    const advance = s.store.users.advanceMfaStep;
+    t.after(() => { s.store.users.advanceMfaStep = advance; });
+    // The code check stores the TOTP step; another worker's reset writes a new hash meanwhile.
+    s.store.users.advanceMfaStep = (id, st) => {
+        s.store.users.update(id, { passwordHash: 'scrypt$10$8$1$AAAAAAAAAAAAAAAAAAAAAA$BBBBBBBBBBBBBBBBBBBBBBBBBBBB' });
+        return advance(id, st);
+    };
+    const before = liveSessions(s, u.id);
+    const r = await s.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: step, code: totp(secret, s.now()) } });
+    assert.deepEqual([r.status, r.json.error], [401, 'invalid_mfa_token'], r.text);
+    assert.equal(liveSessions(s, u.id), before, 'no session opened');
+});
+
+test('the MFA step keeps a digest of the password hash; a step written by an earlier build (without it) still completes', async (t) => {
+    const { s, u, secret } = await enrolled();
+    t.after(s.close);
+    const step = await mfaStep(s);
+    const row = [...s.store._raw.tokens.values()].find((x) => x.kind === 'mfa_login' && x.userId === u.id && !x.usedAt);
+    const data = JSON.parse(row.data);
+    assert.match(data.pwh, /^[0-9a-f]{64}$/);
+    assert.ok(!row.data.includes(s.store.users.byId(u.id).passwordHash), 'not the stored hash itself');
+    // The row as an earlier build wrote it: { attempts, clientLabel, method }.
+    delete data.pwh;
+    row.data = JSON.stringify(data);
+    const r = await s.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: step, code: totp(secret, s.now()) } });
+    assert.equal(r.status, 200, r.text);
 });

@@ -145,6 +145,8 @@ describe('control plane: presence', () => {
         assert.equal(cp.presence.get(5).shard, 3);
         assert.equal((await shardSide.request('ratelimit.take', { key: 'login:1.2.3.4', limit: 1, windowMs: 1000 })).allowed, true);
         assert.equal((await shardSide.request('ratelimit.take', { key: 'login:1.2.3.4', limit: 1, windowMs: 1000 })).allowed, false);
+        assert.deepEqual(await shardSide.request('ratelimit.refund', { key: 'login:1.2.3.4', windowMs: 1000, cost: 1, ageMs: 0 }), { refunded: true });
+        assert.equal((await shardSide.request('ratelimit.take', { key: 'login:1.2.3.4', limit: 1, windowMs: 1000 })).allowed, true);
         assert.equal((await shardSide.request('once.consume', { key: 'totp:5:123456', ttlMs: 90000 })).fresh, true);
         assert.equal((await shardSide.request('once.consume', { key: 'totp:5:123456', ttlMs: 90000 })).fresh, false);
         assert.deepEqual(await shardSide.request('conn.ipAcquire', { ip: '192.0.2.9' }), { ok: true });

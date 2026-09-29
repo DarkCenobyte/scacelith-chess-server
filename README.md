@@ -213,8 +213,10 @@ it waits; a connection that stays silent is closed. Each worker then performs at
 closed at once, before any TLS work, and the game retries after a random delay. The CPU then
 completes the handshakes in turn instead of starting all of them together and finishing none before
 the clients give up. Raise `MAX_PENDING_HANDSHAKES_PER_IP` when many players share one address group
-(a school or a company network). These limits stop a few hosts from blocking everyone, not a
-distributed attack: see the connection storms part of section 5.8 in
+(a school or a company network), and `PASSWORD_HASH_WAITERS_PER_SOURCE` if they log in together
+while the server is busy (see [Password hashing on a small
+server](#password-hashing-on-a-small-server)). These limits stop a few hosts from blocking everyone,
+not a distributed attack: see the connection storms part of section 5.8 in
 [docs/DESIGN.md](docs/DESIGN.md). Games that were running when the server stopped come back from the
 journal, and both players then have `RECOVERY_GRACE_MS` (90 s) to reconnect instead of the normal
 grace. The clock of the side to move stays stopped until that player is back, for
@@ -276,20 +278,31 @@ server: the player simply tries again a little later. With one hash per worker, 
 a 2-core VPS still leaves each shard at least half a core for its games, and the extra memory
 stays at about 128 MiB per worker.
 
-One client cannot take the whole queue: an IPv4 address, or an IPv6 /48, may have at most 2
-hashes waiting in a worker, and its next request is answered 429 `rate_limited` (the game shows
-its usual "Too many attempts" message with the delay). The per-address limit of the password
-endpoints (`AUTH_RATE_PER_IP`, 20 per 10 minutes for an IPv4 address or an IPv6 /64) is also
-applied to each IPv6 /48 as a whole (`AUTH_RATE_PER_PREFIX`, 5 times as much by default), because
-a single customer often gets a /56 (256 /64 networks) or a /48 (65536).
+One client cannot take the whole queue. While less than half of the queue waits, one client may
+queue as many hashes as it needs, so a class or a club that logs in at the same moment behind one
+IPv4 address is served in turn. Once half of the queue waits, an IPv4 address, or an IPv6 /48,
+may have at most `PASSWORD_HASH_WAITERS_PER_SOURCE` (2) hashes waiting in a worker, and its next
+request is answered 429 `rate_limited` (the game shows its usual "Too many attempts" message with
+the delay). Such a refusal does not use up one of the client's `AUTH_RATE_PER_IP` attempts. For a
+school or a company network whose players log in together while the server is busy, raise
+`PASSWORD_HASH_WAITERS_PER_SOURCE`, together with `MAX_PENDING_HANDSHAKES_PER_IP` and
+`AUTH_RATE_PER_IP`. The per-address limit of the password endpoints (`AUTH_RATE_PER_IP`, 20 per
+10 minutes for an IPv4 address or an IPv6 /64) is also applied to each IPv6 /48 as a whole
+(`AUTH_RATE_PER_PREFIX`, 5 times as much by default), because a single customer often gets a /56
+(256 /64 networks) or a /48 (65536).
 
 When a stored hash is outdated (for example scrypt after an upgrade to Node 24.7, where new
 hashes use Argon2id), the login upgrades it with the password it just checked, but only when a
 hash slot is free at once; otherwise the next login does it. That new hash, like the one of a
 password change, is only written when the stored hash did not change meanwhile, and a login whose
-password was replaced while it was being checked fails: a password reset always wins. A failed login is held until it took as long as the slowest password check of the
-last 10 to 20 minutes (at most 2 s, after the hash slot is freed), so that its time does not
-reveal whether the e-mail address or user name has an account, whatever algorithm its hash uses.
+password was replaced while it was being checked fails: a password reset always wins, also
+against a login that is waiting for its two-step verification code. A failed login is held until
+it took as long as the slowest password check of the last 10 to 20 minutes, and at least as long
+as the slowest kind of check the worker measured when it started (at most 2 s, after the hash
+slot is freed), so that its time does not reveal whether the e-mail address or user name has an
+account, whatever algorithm its hash uses. On Node 24.7 or later, where new hashes use Argon2id
+but older accounts keep their scrypt hash until they log in, a failed login therefore takes about
+as long as a scrypt check (0.5 s).
 
 - Raise `PASSWORD_HASH_CONCURRENCY` only when the machine has idle cores: each hash in flight
   keeps a whole core busy for half a second.
@@ -299,7 +312,9 @@ reveal whether the e-mail address or user name has an account, whatever algorith
   otherwise wait behind the hashes. Set it in the process environment (for example the systemd
   `EnvironmentFile`), not in the server's `.env` file: the server reads its own settings from it,
   but the thread pool only sees the real environment. The server logs a warning at start (and
-  `check-config` prints it) when `PASSWORD_HASH_CONCURRENCY` is not below the pool size.
+  `check-config` prints it) when `PASSWORD_HASH_CONCURRENCY` is not below the pool size. Beware
+  of an empty or non-numeric value (a bare `UV_THREADPOOL_SIZE=` line): libuv reads it, and 0, as
+  a pool of 1 thread, and the warning says so.
 - `PASSWORD_HASH_QUEUE_TIMEOUT_MS` is at most 13000: the game gives up after 15 s, and the hash
   itself takes a second or two, so that a refused player gets the "busy" answer rather than a
   timeout.
@@ -309,7 +324,8 @@ reveal whether the e-mail address or user name has an account, whatever algorith
 - On the metrics endpoint, `scacelith_password_hash_queued`, `scacelith_password_hash_wait_ms`
   and `scacelith_password_hash_rejected_total` show the queue. Regular refusals with the reasons
   `queue_full` or `timeout` outside an attack mean the machine needs more cores, not a higher
-  cap; the reason `source_limit` counts the clients held back to their 2 waiting hashes.
+  cap; the reason `source_limit` counts the clients held back to their
+  `PASSWORD_HASH_WAITERS_PER_SOURCE` waiting hashes while the queue was at least half full.
 
 ## Secrets
 

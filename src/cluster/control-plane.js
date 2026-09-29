@@ -134,6 +134,7 @@ export class ControlPlane {
             'game.recovered': (p) => this.gameActive(p),
             'conduct.record': (p) => this.conductRecord(p),
             'ratelimit.take': (p) => this.limiter.take(p),
+            'ratelimit.refund': (p) => this.limiter.refund(p),
             'once.consume': (p) => this.once.consume(p),
             'sanction.applied': (p) => this.sanctionApplied(p),
             'session.revoked': (p) => this.sessionRevoked(p),

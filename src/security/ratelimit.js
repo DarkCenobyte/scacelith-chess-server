@@ -4,10 +4,10 @@
 //   TokenBucketLimiter     per-key token buckets (per-IP API limits, local first stage)
 //   FailureCounter         per-key failure counter with exponential delay (login brute force)
 //   SlidingWindowCounter   approximate count of events over the last window (failure-rate detector)
-//   createLocalControl()   in-process implementation of the primary's `ratelimit.take` and
-//                          `once.consume` IPC requests (docs/DESIGN.md 5.7). Used when no primary
-//                          is available (single process, tests) and as the fallback when the
-//                          primary does not answer.
+//   createLocalControl()   in-process implementation of the primary's `ratelimit.take`,
+//                          `ratelimit.refund` and `once.consume` IPC requests (docs/DESIGN.md
+//                          5.7). Used when no primary is available (single process, tests) and as
+//                          the fallback when the primary does not answer.
 //
 // Complexity: every operation is O(1) (amortised), no timers: expiry is lazy.
 
@@ -107,6 +107,17 @@ export class TokenBucketLimiter {
         }
         return { allowed: false, retryAfterMs: Math.ceil((cost - b.tokens) / rate), remaining: 0 };
     }
+    /**
+     * Gives back `cost` tokens that take() granted to `key` (a request that did nothing, see
+     * http/server.js), never beyond `limit`. A bucket evicted meanwhile is full already.
+     */
+    give(key, limit, windowMs, cost = 1) {
+        const b = this.buckets.peek(key);
+        if (!b) return;
+        const t = this.now();
+        b.tokens = Math.min(limit, b.tokens + Math.max(0, t - b.at) * (limit / windowMs) + cost);
+        b.at = t;
+    }
     reset(key) { this.buckets.delete(key); }
 }
 
@@ -184,10 +195,12 @@ export class SlidingWindowCounter {
 /**
  * In-process implementation of the primary's rate-limit and single-use-token requests, with the
  * reply shapes of the IPC catalog:
- *   ratelimit.take { key, limit, windowMs, cost } -> { allowed, retryAfterMs, count }
- *   once.consume   { key, ttlMs }                 -> { fresh }
+ *   ratelimit.take   { key, limit, windowMs, cost }   -> { allowed, retryAfterMs, count }
+ *   ratelimit.refund { key, windowMs, cost, ageMs }   -> { refunded }
+ *   once.consume     { key, ttlMs }                   -> { fresh }
  * ratelimit.take counts over a sliding window (two weighted fixed windows); a refused take is
- * not counted.
+ * not counted. ratelimit.refund takes back `cost` from the fixed window that counted a take made
+ * `ageMs` ago (the current one or the one before; an older one no longer counts anyway).
  * @param {{ now?: () => number, maxKeys?: number }} [opts]
  * @returns {{ request(type: string, payload: object): Promise<object>, take(p: object): object, consume(p: object): object }}
  */
@@ -216,6 +229,17 @@ export function createLocalControl({ now = Date.now, maxKeys = 200000 } = {}) {
         w.cur += cost;
         return { allowed: true, retryAfterMs: 0, count: Math.ceil(est + cost) };
     }
+    function refund({ key, windowMs, cost = 1, ageMs = 0 }) {
+        const t = now();
+        const w = windows.peek(`${key}\u0001${windowMs}`);
+        if (!w) return { refunded: false };
+        const at = t - Math.max(0, +ageMs || 0);
+        const start = Math.floor(at / windowMs) * windowMs;
+        if (start === w.start) w.cur = Math.max(0, w.cur - cost);
+        else if (start === w.start - windowMs) w.prev = Math.max(0, w.prev - cost);
+        else return { refunded: false };
+        return { refunded: true };
+    }
     function consume({ key, ttlMs }) {
         const t = now();
         const exp = once.peek(key);
@@ -225,9 +249,11 @@ export function createLocalControl({ now = Date.now, maxKeys = 200000 } = {}) {
     }
     return {
         take,
+        refund,
         consume,
         async request(type, payload) {
             if (type === 'ratelimit.take') return take(payload);
+            if (type === 'ratelimit.refund') return refund(payload);
             if (type === 'once.consume') return consume(payload);
             return {};
         },

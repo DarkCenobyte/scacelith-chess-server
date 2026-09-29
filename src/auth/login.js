@@ -19,7 +19,9 @@
 //  * A matching outdated hash is upgraded only when a hash slot is free at once, and only while the
 //    stored hash is unchanged; a login whose password a reset replaced during the check fails.
 //  * The MFA step: an `mfa_` token (5 min, 5 wrong codes at most, single use) and a per-account
-//    failure counter.
+//    failure counter. The token of a password login holds a digest of the password hash it was
+//    issued for (`pwh`); a password reset or change between the two steps makes the step fail
+//    (invalid_mfa_token), so no session opens with a password the reset replaced.
 
 import { AuthError, invalidCredentials, tooManyAttempts } from './errors.js';
 import { MFA_TOKEN_RE, TOKEN_TTL_MS, dataOf, isLive } from './tokens.js';
@@ -81,13 +83,19 @@ export function createLogin(svc) {
         return { token: s.token, expiresAt: s.expiresAt, user: svc.accountView(store.users.byId(user.id) || user) };
     }
 
+    /** Digest of a stored password hash, kept in an MFA step instead of the hash itself. */
+    const passwordHashDigest = (passwordHash) => sha256Hex(passwordHash || '');
+
     /** After the first factor: the MFA challenge, or the session. */
     function finishLogin(user, { clientLabel = null, ip = null, method = 'password' }) {
         if (user.mfaEnabled) {
             const mfaToken = randomToken('mfa_');
+            const data = { attempts: 0, clientLabel, method };
+            // A password login's step is only good for the password hash it was issued for.
+            if (method === 'password') data.pwh = passwordHashDigest(user.passwordHash);
             store.tokens.create({
                 kind: 'mfa_login', tokenHash: sha256Hex(mfaToken), userId: user.id,
-                data: { attempts: 0, clientLabel, method }, expiresAt: now() + TOKEN_TTL_MS.mfa_login,
+                data, expiresAt: now() + TOKEN_TTL_MS.mfa_login,
             });
             loginMfa.inc();
             return { mfaRequired: true, mfaToken, expiresIn: TOKEN_TTL_MS.mfa_login / 1000 };
@@ -161,6 +169,15 @@ export function createLogin(svc) {
     }
 
     /**
+     * False when the step was issued for a password hash that is no longer the stored one (a
+     * reset or a change landed between the two steps). Steps without `pwh` (a Google sign-in, or
+     * one written by an earlier build, which expires within 5 minutes) are not bound.
+     */
+    function samePassword(data, user) {
+        return typeof data.pwh !== 'string' || data.pwh === passwordHashDigest(user.passwordHash);
+    }
+
+    /**
      * POST /auth/login/mfa.
      * @param {{ mfaToken: string, code?: string, recoveryCode?: string, ip: string }} p
      */
@@ -171,7 +188,8 @@ export function createLogin(svc) {
         if (!isLive(row, now())) throw invalidMfaToken();
         const data = dataOf(row);
         const user = store.users.byId(row.userId);
-        if (!user || user.status !== 'active' || !user.mfaEnabled) {
+        // Checked before the code, so that a recovery code is not spent on a dead step.
+        if (!user || user.status !== 'active' || !user.mfaEnabled || !samePassword(data, user)) {
             store.tokens.consume('mfa_login', h, now());
             throw invalidMfaToken();
         }
@@ -191,6 +209,9 @@ export function createLogin(svc) {
         if (!store.tokens.consume('mfa_login', h, now())) throw invalidMfaToken();
         mfaFailures.reset(fkey);
         const fresh = store.users.byId(user.id) || user;
+        // Again after the code check (an await: a reset in this process or in another worker may
+        // land meanwhile); the reset wins.
+        if (fresh.status !== 'active' || !samePassword(data, fresh)) throw invalidMfaToken();
         checkAccountAllowed(fresh);
         return sessionAnswer(fresh, { clientLabel: data.clientLabel ?? null, ip, method: `${data.method || 'password'}+totp` });
     }

@@ -19,8 +19,9 @@
 // DNS lookups (SMTP, Google sign-in) and file reads. Without a cap, a burst of logins fills the
 // pool of every worker and takes the cores from the game event loops. createHashLimiter() is a
 // bounded FIFO semaphore (PASSWORD_HASH_CONCURRENCY running, PASSWORD_HASH_QUEUE_MAX waiting for
-// at most PASSWORD_HASH_QUEUE_TIMEOUT_MS, and at most `perSourceMax` of the waiting ones from one
-// client source); limitHasher() sends every hash and verification of a hasher through it, the
+// at most PASSWORD_HASH_QUEUE_TIMEOUT_MS, and, once the queue is half full, no more than
+// `perSourceMax` of the waiting ones from one client source, PASSWORD_HASH_WAITERS_PER_SOURCE);
+// limitHasher() sends every hash and verification of a hasher through it, the
 // dummy verification included, so that an unknown account still costs the same wait and the same
 // work. A call may bring its own, shorter wait budget (`maxWaitMs`): a request that hashes twice
 // (a password change) spends one queue timeout in all, and `maxWaitMs: 0` runs an optional hash
@@ -30,9 +31,14 @@
 //
 // Padding of failed checks: checkPassword() records how long each check worked in its slot and,
 // when the password is wrong or the account unknown, waits after releasing the slot until the
-// check took as long as the slowest check of the last 10 to 20 minutes (at most 2 s). The wait
-// uses no hash capacity, and a failure then takes the same time whatever algorithm, parameters or
-// dummy was behind it, so that the time of a failed login does not tell whether the account exists.
+// check took as long as the slowest check of the last 10 to 20 minutes, and never less than the
+// baseline the warm-up measured (at most 2 s in all). The warm-up times a verification of the
+// slowest kind of hash the database can hold: the preferred algorithm (computing the dummy hash
+// is that work) and, when that is argon2id, the scrypt hashes stored before the runtime had
+// argon2. The baseline does not decay, so the first failed check after a start or after a quiet
+// period is padded too. The wait uses no hash capacity, and a failure then takes the same time
+// whatever algorithm, parameters or dummy was behind it, so that the time of a failed login does
+// not tell whether the account exists.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -212,10 +218,32 @@ export function createPasswordHasher(opts = {}) {
         return false;
     }
 
-    /** Computes the dummy hash in advance (so the first unknown login is not faster). */
-    function warmUp() {
-        if (!dummy) dummy = hash(crypto.randomBytes(18).toString('base64'));
-        return dummy.then(() => undefined);
+    /**
+     * Computes the dummy hash in advance (so the first unknown login is not faster), and measures
+     * the slowest verification a failed login can cost: one of the preferred algorithm (computing
+     * the dummy hash is that work) and, when argon2id is preferred, one with the scrypt parameters
+     * of the hashes stored before (they stay in the database until their owner logs in again).
+     * @returns {Promise<number>} the slowest measured verification, in ms
+     */
+    async function warmUp() {
+        let slowest = 0;
+        const timed = async (work) => {
+            const t0 = performance.now();
+            await work();
+            slowest = Math.max(slowest, performance.now() - t0);
+        };
+        const pw = Buffer.from(crypto.randomBytes(18).toString('base64'), 'utf8');
+        if (!dummy) {
+            dummy = hash(crypto.randomBytes(18).toString('base64'));
+            await timed(() => dummy);
+        } else {
+            await dummy;
+            await timed(() => dummyWork(pw));
+        }
+        if (preferred === 'argon2id') {
+            await timed(() => scryptKey(pw, crypto.randomBytes(sc.saltLen), sc.logN, sc.r, sc.p, sc.keyLen));
+        }
+        return slowest;
     }
 
     return { hash, verify, verifyDummy, warmUp, algorithm: preferred, parse };
@@ -250,11 +278,13 @@ export class PasswordBusyError extends Error {
  * Bounded FIFO semaphore for the password hashes of one process.
  *
  * At most `concurrency` tasks run at once; the others wait in arrival order. A task that finds
- * `queueMax` tasks already waiting is refused at once, and so is a task whose `source` (a client
- * address or network prefix) already has `perSourceMax` tasks waiting. A waiting task gives up
- * after `queueTimeoutMs`, or after its own shorter `maxWaitMs` (it leaves the queue). All of these
- * reject with PasswordBusyError. A finished task (resolved, rejected or thrown) hands its slot
- * straight to the oldest waiter.
+ * `queueMax` tasks already waiting is refused at once. So is a task whose `source` (a client
+ * address or network prefix) already has `perSourceMax` tasks waiting, but only under contention,
+ * once at least half of `queueMax` tasks wait: one source (a classroom behind one IPv4 address)
+ * may use an idle queue, and it cannot take more than half of it, so the other half stays open to
+ * the other sources. A waiting task gives up after `queueTimeoutMs`, or after its own shorter
+ * `maxWaitMs` (it leaves the queue). All of these reject with PasswordBusyError. A finished task
+ * (resolved, rejected or thrown) hands its slot straight to the oldest waiter.
  * @param {{ concurrency?: number, queueMax?: number, queueTimeoutMs?: number, perSourceMax?: number }} [opts]
  */
 export function createHashLimiter({ concurrency = 1, queueMax = 32, queueTimeoutMs = 10000, perSourceMax = Infinity } = {}) {
@@ -265,6 +295,7 @@ export function createHashLimiter({ concurrency = 1, queueMax = 32, queueTimeout
     let active = 0;
     const waiting = [];             // { resolve, reject, since, timer, source }, oldest first
     const bySource = new Map();     // source -> number of its tasks waiting (sources with at least one)
+    const contended = Math.floor(queueMax / 2);     // from this many waiting on, perSourceMax applies
 
     function leave(w) {
         mQueued.dec();
@@ -284,7 +315,7 @@ export function createHashLimiter({ concurrency = 1, queueMax = 32, queueTimeout
             return Promise.resolve();
         }
         if (noWait) return Promise.reject(new PasswordBusyError('no_wait'));
-        if (source !== null && (bySource.get(source) || 0) >= perSourceMax) {
+        if (source !== null && waiting.length >= contended && (bySource.get(source) || 0) >= perSourceMax) {
             mRejectedSource.inc();
             return Promise.reject(new PasswordBusyError('source_limit'));
         }
@@ -345,6 +376,8 @@ export function createHashLimiter({ concurrency = 1, queueMax = 32, queueTimeout
         run,
         /** Current state (tests, logs). */
         stats: () => ({ active, waiting: waiting.length, concurrency, queueMax, queueTimeoutMs }),
+        /** The per-source cap (Infinity: none). */
+        perSourceMax,
         /** Number of tasks of `source` waiting now (tests). */
         waitingFrom: (source) => bySource.get(source) || 0,
     };
@@ -352,13 +385,14 @@ export function createHashLimiter({ concurrency = 1, queueMax = 32, queueTimeout
 
 /**
  * The slowest recent password check: the longest duration recorded in the current period of
- * `periodMs` or in the one before (a value is remembered for one to two periods), at most `capMs`.
+ * `periodMs` or in the one before (a value is remembered for one to two periods), never less than
+ * the baseline (setBaseline(), which does not decay), at most `capMs`.
  * @param {{ capMs?: number, periodMs?: number, clock?: () => number }} [opts] `clock` in ms
  *   (performance.now by default: the periods do not follow the server's configured clock)
  */
 export function createCheckFloor({ capMs = 2000, periodMs = 10 * 60000, clock = () => performance.now() } = {}) {
     const origin = clock();
-    let period = 0, cur = 0, prev = 0;
+    let period = 0, cur = 0, prev = 0, baseline = 0;
     function roll(t) {
         const p = Math.floor((t - origin) / periodMs);
         if (p === period) return;
@@ -372,10 +406,19 @@ export function createCheckFloor({ capMs = 2000, periodMs = 10 * 60000, clock = 
             roll(clock());
             if (ms > cur) cur = ms;
         },
+        /**
+         * Sets the part of the floor that does not decay (the warm-up's measure of the slowest
+         * kind of verification), in ms; a value below the current baseline is ignored.
+         */
+        setBaseline(ms) {
+            if (Number.isFinite(ms) && ms > baseline) baseline = ms;
+        },
+        /** The baseline, in ms. */
+        baselineMs: () => baseline,
         /** The duration a failed check is padded to, in ms. */
         floorMs() {
             roll(clock());
-            return Math.min(capMs, Math.max(cur, prev));
+            return Math.min(capMs, Math.max(cur, prev, baseline));
         },
     };
 }
@@ -383,7 +426,8 @@ export function createCheckFloor({ capMs = 2000, periodMs = 10 * 60000, clock = 
 /**
  * The same hasher with every hash and verification (the dummy one and the warm-up included) run
  * through `limiter`. hash, verify and verifyDummy take the options of the limiter's run() as their
- * last argument ({ maxWaitMs, source }). checkPassword() is the check of a login (file header).
+ * last argument ({ maxWaitMs, source }). checkPassword() is the check of a login (file header);
+ * warmUp() also sets the floor's baseline to the slowest verification the hasher's warm-up timed.
  * @param {ReturnType<typeof createPasswordHasher>} hasher
  * @param {ReturnType<typeof createHashLimiter>} limiter
  * @param {{ onBusy?: (err: PasswordBusyError) => Error, floor?: ReturnType<typeof createCheckFloor> }} [opts]
@@ -427,7 +471,10 @@ export function limitHasher(hasher, limiter, { onBusy = (err) => err, floor = cr
         verify: (stored, password, opts) => run(() => hasher.verify(stored, password), opts),
         verifyDummy: (password, opts) => run(() => hasher.verifyDummy(password), opts),
         checkPassword,
-        warmUp: () => (typeof hasher.warmUp === 'function' ? run(() => hasher.warmUp()) : Promise.resolve()),
+        warmUp: async () => {
+            if (typeof hasher.warmUp !== 'function') return;
+            floor.setBaseline(await run(() => hasher.warmUp()));
+        },
         limiter,
         floor,
     };

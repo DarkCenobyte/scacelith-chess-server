@@ -478,6 +478,7 @@ Shard -> primary:
 | `game.rematch` | `{ gameId, white, black, category, baseMs, incMs, rated }` | `{ ok, gameId }` / `{ error }` |
 | `conduct.record` | `{ userId, kind }` | - |
 | `ratelimit.take` | `{ key, limit, windowMs, cost }` | `{ allowed, retryAfterMs, count }` |
+| `ratelimit.refund` | `{ key, windowMs, cost, ageMs }` | `{ refunded }` (gives back a take granted `ageMs` ago, in the window that counted it) |
 | `once.consume` | `{ key, ttlMs }` | `{ fresh }` |
 | `sanction.applied` | `{ userId, until, reason }` | - (primary kicks the user everywhere) |
 | `session.revoked` | `{ userId, tokenHashes }` | - (broadcast to every shard's auth cache) |
@@ -614,7 +615,9 @@ router.post(path, handler, { auth, body: schemaObject, rate })   // JSON only, H
 Path parameters use `:name`. JSON errors are `{ "error": "<snake_case_code>", "message": "...",
 "retryAfter"?: s }` (with a `Retry-After` header when `retryAfter` is set). An endpoint that
 hashes or checks a password may answer 503 `server_busy` when the worker's password hash queue
-is full, or 429 `rate_limited` when the client already has 2 hashes waiting there (section 8).
+is full, or 429 `rate_limited` when the queue is at least half full and the client already has
+`PASSWORD_HASH_WAITERS_PER_SOURCE` hashes waiting there (section 8); that 429 gives the tokens the
+request took from the route's rate limits back.
 Every response carries `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: no-referrer`, `Strict-Transport-Security` (native TLS), and HTML pages a
 strict `Content-Security-Policy`. Route modules export `register(router, deps)`.
@@ -626,7 +629,7 @@ Endpoints (prefix `/api/v1`):
 | `GET /info` | auth | `{ name, serverId, motd, protocol: {min, max, schema, subprotocol}, wsPort, wsPath: '/ws', registration, emailVerification, sso: { google }, mfa: true, pow: { register }, categories: [{id, baseSec, incSec}], limits }` |
 | `POST /auth/register` | auth | `{ username, email, password, pow? }` -> 202 `{ status: 'verification_sent' }` (same answer when the e-mail exists) |
 | `POST /auth/login` | auth | `{ login, password, clientLabel?, pow? }` -> `{ token, expiresAt, user }` or `{ mfaRequired: true, mfaToken }` |
-| `POST /auth/login/mfa` | auth | `{ mfaToken, code? , recoveryCode? }` |
+| `POST /auth/login/mfa` | auth | `{ mfaToken, code? , recoveryCode? }` (401 `invalid_mfa_token` once the step expired or was used, or when the password was reset or changed since the first step) |
 | `POST /auth/logout`, `POST /auth/logout-all` | auth | bearer |
 | `GET /auth/sessions`, `DELETE /auth/sessions/:id` | auth | |
 | `POST /auth/verify-email/resend` | auth | `{ email }` -> 202 always |
@@ -636,7 +639,12 @@ Endpoints (prefix `/api/v1`):
 | `POST /auth/sso/google/poll` | auth | `{ attemptId, codeVerifier }` -> `{ status: 'pending' }` / login answer / `{ needsUsername, ssoTicket }` |
 | `POST /auth/sso/complete` | auth | `{ ssoTicket, username }` |
 | `GET /account/me` | auth | user, ratings, active sanctions, integrity level is NOT exposed |
-| `POST /account/password`, `/account/mfa/totp/setup`, `/account/mfa/totp/enable`, `/account/mfa/totp/disable`, `/account/mfa/recovery-codes`, `/account/delete`, `PUT /account/preferences` | auth | re-authentication with password (+ TOTP when enabled) |
+| `POST /account/password` | auth | `{ currentPassword, newPassword }`: the current password only, never a second factor (by design, even with MFA on); revokes the other sessions |
+| `POST /account/mfa/totp/setup` | auth | `{ password }` -> `{ secret, uri, algorithm, digits, period }` (409 when MFA is already on) |
+| `POST /account/mfa/totp/enable` | auth | `{ code }`: a code of the secret from setup only, no password -> `{ status, recoveryCodes }` |
+| `POST /account/mfa/totp/disable`, `POST /account/delete` | auth | `{ password, code?, recoveryCode? }`: the password, plus a TOTP code or a recovery code when MFA is on (disable requires MFA on) |
+| `POST /account/mfa/recovery-codes` | auth | `{ password, code }`: the password and a TOTP code (a recovery code is refused) -> `{ recoveryCodes }` |
+| `PUT /account/preferences` | auth | `{ acceptChallenges: 'all'\|'none' }`: the session only, no re-authentication |
 | `GET /players/:username`, `GET /players/:username/games`, `GET /games/:id`, `GET /leaderboard?category=` | store | public data only |
 | `POST /reports` | anticheat | `{ gameId, reported, category: 'cheating'|'abuse'|'other', comment }` |
 | `GET /healthz`, `GET /readyz` | net | also on the metrics port |
@@ -902,9 +910,14 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   login -> the same work on a dummy hash (constant-time behaviour); a stored argon2id hash on a
   runtime without argon2 costs the same dummy work. The dummy uses the preferred algorithm, while
   stored hashes keep theirs until the next password login, so every failed login check (known
-  account or not) is also padded to the slowest check of the last 10 to 20 minutes of the worker
-  (at most 2 s), with a timer that runs after the hash slot is released and uses no hash
-  capacity: the time of a failure does not tell which e-mail addresses are registered.
+  account or not) is also padded to the slowest check of the last 10 to 20 minutes of the worker,
+  and never less than a baseline the worker measured at start (at most 2 s in all), with a timer
+  that runs after the hash slot is released and uses no hash capacity. The start-up warm-up times
+  one verification of the preferred algorithm and, when that is argon2id, one with the scrypt
+  parameters, the slowest kind of hash the database can still hold; this baseline does not decay,
+  so the first failure after a start or a quiet period is padded too (on Node 24.7+ a failed login
+  therefore takes about the time of a scrypt check, 0.5 s). The time of a failure does not tell
+  which e-mail addresses are registered.
 * **Password hash cap**: one hash costs about 0.5-0.6 s of CPU and 64-128 MiB in the libuv thread
   pool, which the journal's fdatasync and the DNS lookups (SMTP, Google sign-in) share. Every
   hash and verification of a worker process (registration, login and its rehash, password change
@@ -917,10 +930,13 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   and hashes the new one within it. A request beyond the queue, or whose budget ran out, is
   answered HTTP 503 `{ "error": "server_busy", "retryAfter": s }` with a `Retry-After` header (a
   random 5-15 s, so that the refused clients do not come back together) before anything changed:
-  no failed login is counted and a reset link stays valid. One client source (an IPv4 address or
-  an IPv6 /48) may have at most 2 hashes waiting; its next request is answered 429
-  `rate_limited` the same way, so that one network cannot fill the queue while staying under the
-  per-address limits. With one hash per worker, each game event loop keeps at least half a core
+  no failed login is counted and a reset link stays valid. Once the queue is at least half full,
+  one client source (an IPv4 address or an IPv6 /48) may have at most
+  `PASSWORD_HASH_WAITERS_PER_SOURCE` (2) hashes waiting; its next request is answered 429
+  `rate_limited` the same way and gets back the tokens it took from the auth rate limits (the
+  local bucket, and the primary's window through `ratelimit.refund`). So one network cannot hold
+  more than half of the queue while staying under the per-address limits, and a classroom behind
+  one IPv4 address still uses an idle queue in full. With one hash per worker, each game event loop keeps at least half a core
   during a login burst on a 2-core machine, and the thread pool (`UV_THREADPOOL_SIZE`, 4 by
   default; keep it at 4 or more, the primary warns at start when `PASSWORD_HASH_CONCURRENCY` is
   not below it) keeps free threads for the file system and DNS. Metrics:
@@ -933,9 +949,11 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   compare-and-set on the hash that was checked (`svc.setPasswordHashIf` in `src/auth/index.js`,
   one store transaction). After a check, the login and the re-authentication read the account
   again: when the stored hash changed while the check waited or ran, the password is checked
-  once more against the new hash. So a password reset always wins against a login, a rehash or
-  a password change that was in flight, and no session is opened with a password the reset has
-  replaced.
+  once more against the new hash. The MFA step of a password login keeps a SHA-256 digest of the
+  hash the password matched, and the second step (`POST /auth/login/mfa`) fails with
+  `invalid_mfa_token` when the stored hash is no longer that one. So a password reset always wins
+  against a login (both of its steps), a rehash or a password change that was in flight, and no
+  session is opened with a password the reset has replaced.
 * **Tokens**: 32 random bytes, only their SHA-256 is stored; e-mail verification (24 h),
   password reset (1 h, revokes all sessions), MFA login challenge (5 min), SSO attempt (10 min),
   all single-use.

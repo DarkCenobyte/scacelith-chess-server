@@ -26,6 +26,46 @@ test('token bucket: burst, refusal with retry time, refill', () => {
     assert.ok(l.take('other', 3, 60000).allowed, 'keys are independent');
 });
 
+test('token bucket: give() returns granted tokens, never beyond the limit', () => {
+    const now = createClock();
+    const l = new TokenBucketLimiter({ now });
+    for (let i = 0; i < 3; i++) assert.ok(l.take('k', 3, 60000).allowed);
+    assert.equal(l.take('k', 3, 60000).allowed, false);
+    l.give('k', 3, 60000);
+    assert.ok(l.take('k', 3, 60000).allowed, 'the given-back token is taken again');
+    assert.equal(l.take('k', 3, 60000).allowed, false);
+    // The refill up to now counts first, then the token; the bucket never holds more than the limit.
+    now.advance(20000);
+    l.give('k', 3, 60000);
+    l.give('k', 3, 60000);
+    l.give('k', 3, 60000);
+    for (let i = 0; i < 3; i++) assert.ok(l.take('k', 3, 60000).allowed);
+    assert.equal(l.take('k', 3, 60000).allowed, false);
+    l.give('unknown', 3, 60000);       // an evicted or unknown bucket is full already
+    assert.equal(l.buckets.size, 1);
+});
+
+test('local control: ratelimit.refund takes back a counted take, in its own window', async () => {
+    const now = createClock(0);
+    const ctl = createLocalControl({ now });
+    const take = () => ctl.request('ratelimit.take', { key: 'k', limit: 2, windowMs: 1000, cost: 1 });
+    const refund = (ageMs) => ctl.request('ratelimit.refund', { key: 'k', windowMs: 1000, cost: 1, ageMs });
+    assert.equal((await take()).allowed, true);
+    assert.equal((await take()).allowed, true);
+    assert.equal((await take()).allowed, false);
+    assert.deepEqual(await refund(0), { refunded: true });
+    assert.equal((await take()).allowed, true, 'the refunded unit is free again');
+    assert.equal((await take()).allowed, false);
+    // A take of the previous window is taken back from that window.
+    now.advance(1250);                 // window [1000, 2000): the previous window (2) weighs 0.75
+    assert.deepEqual(await refund(1150), { refunded: true });   // taken at 100, in window [0, 1000)
+    assert.equal((await take()).allowed, true, 'prev 1 x 0.75 + 1 <= 2 (without the refund: 2 x 0.75 + 1 > 2)');
+    assert.equal((await take()).allowed, false);
+    // Unknown keys and takes older than the previous window change nothing.
+    assert.deepEqual(await ctl.request('ratelimit.refund', { key: 'nope', windowMs: 1000, cost: 1, ageMs: 0 }), { refunded: false });
+    assert.deepEqual(await refund(5000), { refunded: false });
+});
+
 test('token bucket memory is bounded', () => {
     const l = new TokenBucketLimiter({ maxKeys: 100 });
     for (let i = 0; i < 1000; i++) l.take(`k${i}`, 1, 1000);

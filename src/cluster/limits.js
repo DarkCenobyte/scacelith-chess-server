@@ -1,5 +1,5 @@
-// Global rate limiter and single-use keys, kept in the primary (IPC 'ratelimit.take' and
-// 'once.consume', DESIGN 5.7) so that every shard sees the same counters.
+// Global rate limiter and single-use keys, kept in the primary (IPC 'ratelimit.take',
+// 'ratelimit.refund' and 'once.consume', DESIGN 5.7) so that every shard sees the same counters.
 //
 // SlidingWindowLimiter: sliding-window counter (the previous fixed window weighted by how much
 // of it still overlaps the sliding window + the current window). Accurate to a few percent,
@@ -52,6 +52,27 @@ export class SlidingWindowLimiter {
             return { allowed: true, retryAfterMs: 0, count: Math.ceil(estimate + cost) };
         }
         return { allowed: false, retryAfterMs: this._retryAfter(e, now, limit, cost), count: Math.ceil(estimate) };
+    }
+
+    /**
+     * Gives back `cost` units that take() granted `ageMs` ago, from the fixed window that counted
+     * them (the current one or the one before; an older window no longer counts). Used for a
+     * request that ended without doing the work the limit protects (http/server.js).
+     * @param {{ key: string, windowMs: number, cost?: number, ageMs?: number }} p
+     * @returns {{ refunded: boolean }}
+     */
+    refund({ key, windowMs, cost = 1, ageMs = 0 }, now = this.now()) {
+        windowMs = Math.max(1, windowMs | 0);
+        cost = Math.max(0, +cost || 0);
+        const e = this.entries.get(key);
+        if (!e || e.windowMs !== windowMs) return { refunded: false };
+        this._advance(e, now);
+        const at = now - Math.max(0, +ageMs || 0);
+        const start = at - (at % windowMs);
+        if (start === e.start) e.cur = Math.max(0, e.cur - cost);
+        else if (start === e.start - windowMs) e.prev = Math.max(0, e.prev - cost);
+        else return { refunded: false };
+        return { refunded: true };
     }
 
     /**
