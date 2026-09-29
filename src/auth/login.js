@@ -10,15 +10,21 @@
 //    (`ratelimit.take` on a server-wide key with limit POW_LOGIN_TRIGGER_PER_MIN / min). Above the
 //    trigger, every login needs a proof of work (POW_LOGIN_BITS) for the next 5 minutes.
 //  * Unknown account, wrong password and account without password (Google-only) all do the same
-//    hashing work, in the same per-worker hash queue (a refusal there is 503 server_busy for all
-//    of them and counts no failure), and give the same `invalid_credentials` answer;
-//    `email_unverified` and `banned` are only answered after the password matched.
+//    hashing work, in the same per-worker hash queue (a refusal there is 503 server_busy, or 429
+//    rate_limited for a source with too many waiting, for all of them and counts no failure), and
+//    give the same `invalid_credentials` answer after the same time: a failed check is padded to
+//    the slowest recent check (security/password.js checkPassword), so a stored hash of another
+//    algorithm than the dummy's does not tell that the account exists. `email_unverified` and
+//    `banned` are only answered after the password matched.
+//  * A matching outdated hash is upgraded only when a hash slot is free at once, and only while the
+//    stored hash is unchanged; a login whose password a reset replaced during the check fails.
 //  * The MFA step: an `mfa_` token (5 min, 5 wrong codes at most, single use) and a per-account
 //    failure counter.
 
 import { AuthError, invalidCredentials, tooManyAttempts } from './errors.js';
 import { MFA_TOKEN_RE, TOKEN_TTL_MS, dataOf, isLive } from './tokens.js';
 import { normalizeEmail } from './identity.js';
+import { PasswordBusyError } from '../security/password.js';
 import { FailureCounter, SlidingWindowCounter } from '../security/ratelimit.js';
 import { randomToken, sha256Hex } from '../security/keys.js';
 import { metrics } from '../metrics.js';
@@ -108,11 +114,17 @@ export function createLogin(svc) {
             throw tooManyAttempts(wait);
         }
         if (powActive()) await svc.requirePow('login', config.powLoginBits, ip, pow);
+        const budget = svc.hashBudget(ip);
         const user = findLoginUser(loginName);
-        let ok = false, needsRehash = false;
-        if (user && user.passwordHash) ({ ok, needsRehash } = await hasher.verify(user.passwordHash, password));
-        else await hasher.verifyDummy(password);
-        if (!ok) {
+        const stored = user && user.passwordHash ? user.passwordHash : null;
+        // Unknown account or no password: the dummy check, in the same queue, padded alike.
+        const { ok, needsRehash } = await hasher.checkPassword(stored, password, budget.next());
+        let current = null;
+        if (ok) {
+            const checked = needsRehash ? await rehash(user.id, stored, password, budget) : stored;
+            current = await svc.stillCurrent(user.id, checked, password, budget.next());
+        }
+        if (!current) {
             const f = failures.fail(key);
             noteFailure();
             loginFailed.inc();
@@ -121,13 +133,27 @@ export function createLogin(svc) {
             throw invalidCredentials();
         }
         failures.reset(key);
-        if (needsRehash) {
-            try { store.users.update(user.id, { passwordHash: await hasher.hash(password) }); } catch (err) {
-                svc.log.warn('password rehash failed', { userId: user.id, err: { message: err.message } });
+        checkAccountAllowed(current);
+        return finishLogin(current, { clientLabel, ip, method: 'password' });
+    }
+
+    /**
+     * Upgrades an outdated hash with the password just checked. It runs only when a hash slot is
+     * free at once (otherwise the next login does it, and this one does not wait a second time),
+     * and it is written only while the stored hash is still the one checked, so that it never
+     * overwrites a password reset or change that landed meanwhile.
+     * @returns {Promise<string>} the hash the account should now have
+     */
+    async function rehash(userId, stored, password, budget) {
+        try {
+            const next = await hasher.hash(password, budget.noWait());
+            return svc.setPasswordHashIf(userId, stored, next) ? next : stored;
+        } catch (err) {
+            if (!(err instanceof PasswordBusyError && err.reason === 'no_wait')) {
+                svc.log.warn('password rehash failed', { userId, err: { message: err.message } });
             }
+            return stored;
         }
-        checkAccountAllowed(user);
-        return finishLogin(user, { clientLabel, ip, method: 'password' });
     }
 
     function invalidMfaToken() {

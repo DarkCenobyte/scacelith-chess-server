@@ -10,7 +10,8 @@
 //   POST /account/delete { password, code?, recoveryCode? } -> { status: 'deleted' }
 //   PUT  /account/preferences { acceptChallenges: 'all'|'none' } -> { preferences }
 // Re-authentication errors: 403 invalid_password | mfa_code_required | invalid_code, 400 password_not_set,
-// 429 too_many_attempts, 503 server_busy{retryAfter} (password hash queue full, nothing changed).
+// 429 too_many_attempts, 503 server_busy{retryAfter} (password hash queue full, nothing changed),
+// 429 rate_limited{retryAfter} (2 password hashes of this client already wait, nothing changed).
 
 const PASSWORD = { type: 'string', min: 1, max: 1024 };
 const CODE = { type: 'string', min: 1, max: 32 };
@@ -20,7 +21,7 @@ const CODE = { type: 'string', min: 1, max: 32 };
  * @param {{ config: object, auth: object }} deps
  */
 export function register(router, { config, auth }) {
-    const reauthRate = { key: 'reauth', limit: config.authRatePerIp, windowMs: 600000, shared: true };
+    const reauthRate = { key: 'reauth', limit: config.authRatePerIp, prefixLimit: config.authRatePerPrefix, windowMs: 600000, shared: true };
     const readRate = { key: 'account', limit: 60, windowMs: 60000, by: 'user' };
     const opts = (body, rate = reauthRate) => ({ auth: 'required', rate, body });
 

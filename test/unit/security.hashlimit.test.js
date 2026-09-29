@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHashLimiter, limitHasher, PasswordBusyError } from '../../src/security/password.js';
+import { createCheckFloor, createHashLimiter, limitHasher, PasswordBusyError } from '../../src/security/password.js';
 import { metrics } from '../../src/metrics.js';
 
 // A task that runs until release() is called (or fail(err)).
@@ -170,4 +170,146 @@ test('limitHasher: hash, verify, the dummy verification and the warm-up share th
     await assert.rejects(failing.hash('x'), /scrypt failed/);
     // A hasher without warmUp (test doubles) is accepted.
     await limitHasher({ ...stub, warmUp: undefined }, createHashLimiter()).warmUp();
+});
+
+test('maxWaitMs: a call waits at most its own budget, never more than queueTimeoutMs', async () => {
+    const lim = createHashLimiter({ concurrency: 1, queueMax: 5, queueTimeoutMs: 5000 });
+    const h = held();
+    const before = rejected('timeout');
+    const running = lim.run(() => h.done);
+    let called = false;
+    const t0 = performance.now();
+    await assert.rejects(lim.run(async () => { called = true; }, { maxWaitMs: 60 }), (err) => err instanceof PasswordBusyError && err.reason === 'timeout');
+    const waited = performance.now() - t0;
+    assert.ok(waited >= 55 && waited < 1000, `waited ${waited.toFixed(0)} ms for a budget of 60 ms (queue timeout 5000 ms)`);
+    assert.equal(called, false);
+    assert.equal(rejected('timeout'), before + 1);
+    assert.equal(lim.stats().waiting, 0);
+
+    // A budget above the queue timeout is capped by it.
+    const short = createHashLimiter({ concurrency: 1, queueMax: 5, queueTimeoutMs: 40 });
+    const h2 = held();
+    const r2 = short.run(() => h2.done);
+    const t1 = performance.now();
+    await assert.rejects(short.run(async () => {}, { maxWaitMs: 60000 }), { reason: 'timeout' });
+    assert.ok(performance.now() - t1 < 1000);
+    h.release(); h2.release();
+    await Promise.all([running, r2]);
+    // A granted call with a budget still runs normally.
+    assert.equal(await lim.run(async () => 'ran', { maxWaitMs: 60 }), 'ran');
+});
+
+test('maxWaitMs 0: runs only when a slot is free at once, else refused as no_wait without counting a refusal', async () => {
+    const lim = createHashLimiter({ concurrency: 1, queueMax: 5, queueTimeoutMs: 5000 });
+    assert.equal(await lim.run(async () => 'free', { maxWaitMs: 0 }), 'free');
+    const h = held();
+    const running = lim.run(() => h.done);
+    const counts = () => ['queue_full', 'timeout', 'source_limit'].map(rejected);
+    const c0 = counts(), q0 = queued();
+    let called = false;
+    const t0 = performance.now();
+    await assert.rejects(lim.run(async () => { called = true; }, { maxWaitMs: 0, source: 'x' }), (err) => err instanceof PasswordBusyError && err.reason === 'no_wait');
+    await assert.rejects(lim.run(async () => { called = true; }, { maxWaitMs: -5 }), { reason: 'no_wait' });
+    assert.ok(performance.now() - t0 < 1000, 'refused at once');
+    assert.equal(called, false);
+    assert.deepEqual(counts(), c0, 'an optional task skipped is not a refused request');
+    assert.equal(queued(), q0);
+    assert.deepEqual([lim.stats().active, lim.stats().waiting, lim.waitingFrom('x')], [1, 0, 0]);
+    h.release();
+    await running;
+});
+
+test('perSourceMax: one source has at most that many tasks waiting; others still queue; FIFO is kept', async () => {
+    const lim = createHashLimiter({ concurrency: 1, queueMax: 10, queueTimeoutMs: 5000, perSourceMax: 2 });
+    const order = [];
+    const h = held();
+    const s0 = rejected('source_limit'), f0 = rejected('queue_full');
+    // The running task does not count: only waiting ones do.
+    const running = lim.run(async () => { order.push('run'); await h.done; }, { source: 'A' });
+    await tick();
+    const a1 = lim.run(async () => { order.push('a1'); }, { source: 'A' });
+    const b1 = lim.run(async () => { order.push('b1'); }, { source: 'B' });
+    const a2 = lim.run(async () => { order.push('a2'); }, { source: 'A' });
+    let called = false;
+    await assert.rejects(lim.run(async () => { called = true; }, { source: 'A' }), (err) => err instanceof PasswordBusyError && err.reason === 'source_limit');
+    assert.equal(called, false);
+    assert.equal(rejected('source_limit'), s0 + 1);
+    assert.equal(rejected('queue_full'), f0);
+    const n1 = lim.run(async () => { order.push('n1'); });          // no source: never limited
+    const n2 = lim.run(async () => { order.push('n2'); }, { source: null });
+    const b2 = lim.run(async () => { order.push('b2'); }, { source: 'B' });
+    assert.deepEqual([lim.waitingFrom('A'), lim.waitingFrom('B'), lim.stats().waiting], [2, 2, 6]);
+    h.release();
+    await Promise.all([running, a1, b1, a2, n1, n2, b2]);
+    assert.deepEqual(order, ['run', 'a1', 'b1', 'a2', 'n1', 'n2', 'b2']);
+    assert.deepEqual([lim.waitingFrom('A'), lim.waitingFrom('B')], [0, 0], 'granted waiters are no longer counted');
+
+    // An expired waiter is no longer counted either.
+    const h2 = held();
+    const r2 = lim.run(() => h2.done);
+    const e1 = lim.run(async () => {}, { source: 'C', maxWaitMs: 20 });
+    const e2 = lim.run(async () => {}, { source: 'C', maxWaitMs: 20 });
+    await Promise.all([assert.rejects(e1, { reason: 'timeout' }), assert.rejects(e2, { reason: 'timeout' })]);
+    assert.equal(lim.waitingFrom('C'), 0);
+    const c3 = lim.run(async () => 'c3', { source: 'C' });
+    h2.release();
+    assert.equal(await c3, 'c3');
+    await r2;
+    assert.throws(() => createHashLimiter({ perSourceMax: 0 }), RangeError);
+    assert.throws(() => createHashLimiter({ perSourceMax: 1.5 }), RangeError);
+});
+
+test('createCheckFloor: the slowest check of the current or previous period, capped', () => {
+    let t = 1000;
+    const f = createCheckFloor({ capMs: 500, periodMs: 100, clock: () => t });
+    assert.equal(f.floorMs(), 0);
+    f.record(30); f.record(80); f.record(40);
+    assert.equal(f.floorMs(), 80);
+    t += 100;                   // next period: the previous one still counts
+    f.record(20);
+    assert.equal(f.floorMs(), 80);
+    t += 100;                   // one period later again: only the last period's 20
+    assert.equal(f.floorMs(), 20);
+    t += 250;                   // a gap of more than one period forgets everything
+    assert.equal(f.floorMs(), 0);
+    f.record(9000);
+    assert.equal(f.floorMs(), 500, 'capped');
+});
+
+test('limitHasher.checkPassword: a failure is padded to the floor after the slot is released', async () => {
+    const stub = {
+        algorithm: 'stub', parse: () => null,
+        hash: async (pw) => `h:${pw}`,
+        verify: async (stored, pw) => { await sleep(stored.startsWith('slow') ? 80 : 5); return { ok: stored.endsWith(`:${pw}`), needsRehash: false }; },
+        verifyDummy: async () => { await sleep(5); return false; },
+    };
+    const lim = createHashLimiter({ concurrency: 1, queueMax: 10, queueTimeoutMs: 5000 });
+    const capped = limitHasher(stub, lim, { floor: createCheckFloor({ capMs: 2000 }) });
+    const time = async (f) => { const t0 = performance.now(); const r = await f(); return [r, performance.now() - t0]; };
+    // A slow stored hash sets the floor; the fast dummy failure then takes as long.
+    const [slowWrong, t1] = await time(() => capped.checkPassword('slow:pw', 'nope'));
+    assert.deepEqual(slowWrong, { ok: false, needsRehash: false });
+    assert.ok(capped.floor.floorMs() >= 75, `floor ${capped.floor.floorMs()}`);
+    const [dummy, t2] = await time(() => capped.checkPassword(null, 'anything'));
+    assert.deepEqual(dummy, { ok: false, needsRehash: false });
+    assert.ok(t2 >= capped.floor.floorMs() - 5, `dummy failure took ${t2.toFixed(0)} ms, floor ${capped.floor.floorMs().toFixed(0)} ms (slow failure ${t1.toFixed(0)} ms)`);
+    // A success is not padded.
+    const [good, t3] = await time(() => capped.checkPassword('fast:pw', 'pw'));
+    assert.deepEqual(good, { ok: true, needsRehash: false });
+    assert.ok(t3 < 60, `success took ${t3.toFixed(0)} ms`);
+    // The padding holds no slot: the next task runs while the failure still waits.
+    let padded = false;
+    const failing = capped.checkPassword(null, 'x').then(() => { padded = true; });
+    await sleep(20);
+    assert.equal(await lim.run(async () => (padded ? 'after' : 'during')), 'during');
+    await failing;
+    // The options reach the limiter.
+    const h = held();
+    const busy = lim.run(() => h.done);
+    await assert.rejects(capped.checkPassword(null, 'x', { maxWaitMs: 0 }), { reason: 'no_wait' });
+    await assert.rejects(capped.hash('x', { maxWaitMs: 0 }), { reason: 'no_wait' });
+    await assert.rejects(capped.verify('fast:x', 'x', { maxWaitMs: 0 }), { reason: 'no_wait' });
+    await assert.rejects(capped.verifyDummy('x', { maxWaitMs: 0 }), { reason: 'no_wait' });
+    h.release();
+    await busy;
 });

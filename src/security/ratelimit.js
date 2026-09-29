@@ -44,7 +44,7 @@ export class LruMap {
 
 /**
  * Normalises a client address for rate limiting: IPv4-mapped IPv6 becomes IPv4, IPv6 is reduced
- * to its /64 (one customer network), everything else is kept as is.
+ * to its /64 (one customer network), everything else is kept as is. See also prefixKey().
  * @param {string} ip
  * @returns {string}
  */
@@ -54,6 +54,22 @@ export function ipKey(ip) {
     if (a.includes(':')) {
         const parts = expandIPv6(a);
         if (parts) return parts.slice(0, 4).join(':') + '::/64';
+    }
+    return a;
+}
+
+/**
+ * The wider source of a client address: an IPv4 address itself (IPv4-mapped IPv6 included), or the
+ * /48 of an IPv6 address. A /48 is one site: it holds 65536 /64 networks, each with its own ipKey()
+ * bucket, and one customer or one hosting provider's client often gets a whole /48 or /56.
+ * @param {string} ip
+ * @returns {string}
+ */
+export function prefixKey(ip) {
+    const a = normalizeIp(ip);
+    if (a.includes(':')) {
+        const parts = expandIPv6(a);
+        if (parts) return parts.slice(0, 3).join(':') + '::/48';
     }
     return a;
 }

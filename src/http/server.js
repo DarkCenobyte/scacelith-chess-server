@@ -7,7 +7,8 @@
 // Pipeline of a request: security headers -> URL checks -> /healthz, /readyz -> global per-IP
 // token bucket (HTTP_RATE_PER_IP / min) -> route match (404, 405 + Allow, OPTIONS -> 204 + Allow,
 // HEAD = GET without body) -> authentication (Authorization: Bearer sct_...) -> route rate limits
-// (local token bucket, then the primary's `ratelimit.take` for `shared` limits) -> body (JSON only
+// (local token bucket, then the primary's `ratelimit.take` for `shared` limits; the password
+// endpoints also limit each IPv6 /48 as a whole, see checkRates) -> body (JSON only
 // for the API, form-urlencoded for HTML pages, HTTP_BODY_LIMIT enforced while streaming: 413;
 // Content-Type checked: 415; body read timeout: 408) -> strict schema validation (400) -> handler
 // (timeout: 503) -> JSON or HTML answer.
@@ -23,7 +24,7 @@
 
 import { API_PREFIX, HttpError, Router, validate } from './router.js';
 import { PAGE_CSP, renderMessage } from './pages/layout.js';
-import { TokenBucketLimiter, ipKey, normalizeIp } from '../security/ratelimit.js';
+import { TokenBucketLimiter, ipKey, normalizeIp, prefixKey } from '../security/ratelimit.js';
 import { ipForLog } from '../log.js';
 import { metrics } from '../metrics.js';
 import * as infoRoutes from './routes/info.js';
@@ -201,22 +202,34 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
         return v;
     }
 
+    /** Takes one token of `key` (local bucket, then the primary's shared window for `shared` rates). */
+    async function take(rate, key, limit, label) {
+        const local = limiter.take(key, limit, rate.windowMs, 1);
+        if (!local.allowed) throw rateLimited(local.retryAfterMs, label);
+        if (rate.shared && primary) {
+            let r = null;
+            try {
+                r = await primary.request('ratelimit.take', { key, limit, windowMs: rate.windowMs, cost: 1 });
+            } catch (err) {
+                // Fail open on the shared stage: the local bucket above still applies.
+                const t = now();
+                if (t - primaryWarnAt > 60000) { primaryWarnAt = t; log.warn('shared rate limit unavailable', { err: { message: err.message } }); }
+            }
+            if (r && r.allowed === false) throw rateLimited(r.retryAfterMs || 1000, label);
+        }
+    }
+
+    // A rate { key, limit, windowMs, shared?, by?: 'user', prefixLimit? } takes from the bucket of
+    // the user or of the client's ipKey() (an IPv4 address or an IPv6 /64). With `prefixLimit`, a
+    // client on IPv6 also takes from the bucket of its /48 (prefixKey()), which bounds the 65536
+    // /64 networks of one site together: without it, one /48 or /56 would multiply the limit by
+    // the number of its /64s.
     async function checkRates(rates, ctx) {
         for (const rate of rates) {
-            const who = rate.by === 'user' && ctx.user ? `u${ctx.user.userId}` : ipKey(ctx.ip);
-            const key = `${rate.key}:${who}`;
-            const local = limiter.take(key, rate.limit, rate.windowMs, 1);
-            if (!local.allowed) throw rateLimited(local.retryAfterMs, rate.key);
-            if (rate.shared && primary) {
-                let r = null;
-                try {
-                    r = await primary.request('ratelimit.take', { key, limit: rate.limit, windowMs: rate.windowMs, cost: 1 });
-                } catch (err) {
-                    // Fail open on the shared stage: the local bucket above still applies.
-                    const t = now();
-                    if (t - primaryWarnAt > 60000) { primaryWarnAt = t; log.warn('shared rate limit unavailable', { err: { message: err.message } }); }
-                }
-                if (r && r.allowed === false) throw rateLimited(r.retryAfterMs || 1000, rate.key);
+            const byUser = rate.by === 'user' && ctx.user;
+            await take(rate, `${rate.key}:${byUser ? `u${ctx.user.userId}` : ipKey(ctx.ip)}`, rate.limit, rate.key);
+            if (rate.prefixLimit && !byUser && ctx.ip.includes(':')) {
+                await take(rate, `${rate.key}/48:${prefixKey(ctx.ip)}`, rate.prefixLimit, `${rate.key}/48`);
             }
         }
     }

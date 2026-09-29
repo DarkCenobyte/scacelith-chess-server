@@ -130,7 +130,9 @@ key('CLIENT_PING_INTERVAL_MS', { section: 'limits', type: 'int', default: 10000,
     desc: 'Interval of the game client\'s own Ping, announced in Welcome (the client measures its round trip for the ping indicator and its estimate of the server clock with it). Lower is a more reactive ping indicator but costs more server CPU for every connected player: at 2000 these pings alone take a third or more of the server CPU of a player in a 3+2 game. After each connection the client sends a few quick pings anyway.' });
 key('HTTP_BODY_LIMIT', { section: 'limits', type: 'int', default: 16384, min: 1024, desc: 'Largest API request body in bytes.' });
 key('HTTP_RATE_PER_IP', { section: 'limits', type: 'int', default: 120, min: 1, desc: 'API requests per minute from one IP address (all endpoints).' });
-key('AUTH_RATE_PER_IP', { section: 'limits', type: 'int', default: 20, min: 1, desc: 'Login / register / reset attempts per 10 minutes from one IP address.' });
+key('AUTH_RATE_PER_IP', { section: 'limits', type: 'int', default: 20, min: 1, desc: 'Login / register / reset attempts per 10 minutes from one IP address (one IPv6 /64).' });
+key('AUTH_RATE_PER_PREFIX', { section: 'limits', type: 'int', default: 0, min: 0,
+    desc: 'The AUTH_RATE_PER_IP limits (login / register / reset attempts, and account changes that ask for the password), per 10 minutes for one IPv6 /48 as a whole, on top of the limit of each of its /64 networks: a /48 holds 65536 of them, and one customer often gets a /56 or a /48. 0 means 5 x AUTH_RATE_PER_IP. Raise it for a site that brings many players at once over one IPv6 prefix (a campus, a club event). IPv4 addresses are only limited one by one.' });
 key('AUTH_FAILURES_PER_ACCOUNT', { section: 'limits', type: 'int', default: 5, min: 1,
     desc: 'Failed logins on one account before each further attempt is delayed exponentially (up to 15 minutes).' });
 key('POW_REGISTER_BITS', { section: 'limits', type: 'int', default: 18, min: 0, max: 26, desc: 'Proof-of-work difficulty (leading zero bits of SHA-256) required to register; 0 disables it.' });
@@ -138,11 +140,11 @@ key('POW_LOGIN_BITS', { section: 'limits', type: 'int', default: 18, min: 0, max
 key('POW_LOGIN_TRIGGER_PER_MIN', { section: 'limits', type: 'int', default: 30, min: 1,
     desc: 'Failed logins per minute (whole server) that turn on the login proof-of-work. Every failed login costs a password hash (about 0.5 s of CPU), so 30 per minute already keeps a quarter of a core busy, and a few hundred would need several cores: with PASSWORD_HASH_CONCURRENCY at 1 per worker, a small server could never reach such a trigger. Raise it only on a large server where honest typos alone come near it.' });
 key('PASSWORD_HASH_CONCURRENCY', { section: 'limits', type: 'int', default: 1, min: 1, max: 64,
-    desc: 'Password hashes and verifications (login, registration, password change and reset, account changes that ask for the password) that one worker process runs at once. Each costs about 0.5 s of CPU and 64-128 MiB in the libuv thread pool; 1 leaves the rest of the core to the games of the worker. Keep it below UV_THREADPOOL_SIZE (4 by default) so that the journal and DNS keep free threads.' });
+    desc: 'Password hashes and verifications (login, registration, password change and reset, account changes that ask for the password) that one worker process runs at once. Each costs about 0.5 s of CPU and 64-128 MiB in the libuv thread pool; 1 leaves the rest of the core to the games of the worker. Keep it below UV_THREADPOOL_SIZE (4 by default) so that the journal and DNS keep free threads: the server warns at start (and check-config) when it is not.' });
 key('PASSWORD_HASH_QUEUE_MAX', { section: 'limits', type: 'int', default: 32, min: 0,
-    desc: 'Password hashes that may wait for a free slot in one worker process; one more is refused at once with 503 server_busy and a Retry-After of 5 to 15 s (0: no waiting at all).' });
-key('PASSWORD_HASH_QUEUE_TIMEOUT_MS', { section: 'limits', type: 'int', default: 10000, min: 100, max: 30000,
-    desc: 'Longest wait for a password hash slot; the request is then refused with 503 server_busy. Keep it below the 15 s HTTP timeout of the game, minus a second or two for the hash itself, so that the player sees the "busy" answer rather than a timeout.' });
+    desc: 'Password hashes that may wait for a free slot in one worker process; one more is refused at once with 503 server_busy and a Retry-After of 5 to 15 s (0: no waiting at all). One client (an IPv4 address, or an IPv6 /48) may have at most 2 of them waiting; its next one is refused with 429 rate_limited.' });
+key('PASSWORD_HASH_QUEUE_TIMEOUT_MS', { section: 'limits', type: 'int', default: 10000, min: 100, max: 13000,
+    desc: 'Longest wait for a password hash slot, for all the hashes of one request together (a password change hashes twice); the request is then refused with 503 server_busy. At most 13000: the game gives up after 15 s, and the hash itself takes a second or two, so that the player sees the "busy" answer rather than a timeout.' });
 
 // ---- Games -------------------------------------------------------------------------------------------
 key('RATED_CATEGORIES', { section: 'games', type: 'list', default: '1+0,3+0,3+2,5+0,5+3,10+0,10+5,15+10,30+0,30+20,90+30',
@@ -338,6 +340,7 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     cfg.publicApiPort = cfg.publicApiPort || cfg.apiPort;
     cfg.publicWsPort = cfg.publicWsPort || cfg.wsPort;
     cfg.instanceId = cfg.instanceId || os.hostname();
+    if (!cfg.authRatePerPrefix && Number.isInteger(cfg.authRatePerIp)) cfg.authRatePerPrefix = 5 * cfg.authRatePerIp;
     const w = String(cfg.workers).trim().toLowerCase();
     if (w === 'auto') cfg.workers = Math.max(1, Math.min(16, os.availableParallelism ? os.availableParallelism() : os.cpus().length));
     else if (/^\d+$/.test(w) && +w >= 1 && +w <= 64) cfg.workers = +w;
@@ -367,6 +370,25 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     if (errors.length) throw new ConfigError('Invalid configuration:\n  - ' + errors.join('\n  - '));
     Object.defineProperty(cfg, 'toJSON', { value: () => describe(cfg), enumerable: false });
     return Object.freeze(cfg);
+}
+
+/**
+ * Settings that are valid but work against the design, as sentences for the operator (logged once
+ * at start by the primary, and printed by check-config). `env` is the real process environment:
+ * UV_THREADPOOL_SIZE only counts there, not in the .env file.
+ * @param {object} cfg a loaded configuration
+ * @param {object} [env]
+ * @returns {string[]}
+ */
+export function configWarnings(cfg, env = process.env) {
+    const out = [];
+    const pool = Number(env.UV_THREADPOOL_SIZE) || 4;
+    if (cfg.passwordHashConcurrency >= pool) {
+        out.push(`PASSWORD_HASH_CONCURRENCY (${cfg.passwordHashConcurrency}) is not below the size of the libuv thread pool `
+            + `(${pool} threads, from UV_THREADPOOL_SIZE or the default 4): password hashes can then take every thread, `
+            + 'and the journal\'s writes and the DNS lookups wait behind them. Lower it, or raise UV_THREADPOOL_SIZE in the process environment.');
+    }
+    return out;
 }
 
 // The configuration without secrets (for logs and the admin CLI).
