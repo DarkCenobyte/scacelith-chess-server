@@ -295,6 +295,9 @@ game lives on one shard; relays between shards cost part of the CPU above), with
 resources to watch: the primary (presence, challenges, matchmaking) and the single SQLite writer
 (every shard commits finished games to the same database file).
 
+[SIZING.md](SIZING.md) applies these costs to a small VPS of 2 or 4 vCores, with the memory, disk,
+restart and settings figures that go with it.
+
 ## Server behaviours seen in these runs
 
 - **Game placement under overload.** A new game goes to the creator's shard unless that shard
