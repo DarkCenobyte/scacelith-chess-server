@@ -438,26 +438,40 @@ function benchAccounts(ctx) {
 // VACUUM INTO writes a consistent snapshot in one pass. The sqlite3 shell's .backup copies 100
 // pages at a time and starts over whenever another connection writes, so on a busy server it may
 // never finish. The copy holds e-mail addresses and recent IPs: it is created with mode 600, and
-// should be encrypted before it leaves the host.
+// should be encrypted before it leaves the host. The source must be the server's database: a
+// missing file (opening it would create an empty one) or a database without the schema (a wrong
+// DB_PATH or DATA_DIR) is refused, so that a scheduled backup never silently copies nothing.
 function backupCmd(ctx) {
     const target = ctx.args.positional[1];
     if (!target) throw new AdminError('backup <file>: the new file to write');
     const src = ctx.config?.dbPath;
     if (!src || src === ':memory:' || path.basename(src) === ':memory:') throw new AdminError('no database file to back up (DB_PATH)');
+    const notOurs = (why) => new AdminError(`no Scacelith database at ${src} (${why}); check DB_PATH and DATA_DIR`);
+    if (!fs.existsSync(src)) throw notOurs('no such file');
     const out = path.resolve(target);
-    try {
-        fs.writeFileSync(out, '', { flag: 'wx', mode: 0o600 });   // VACUUM INTO accepts an empty file
-    } catch (e) {
-        throw new AdminError(e.code === 'EEXIST' ? `${target} exists: choose a new file` : `cannot create ${target}: ${e.message}`);
-    }
     const t0 = performance.now();
-    const db = new DatabaseSync(src);
+    let db;
     try {
+        db = new DatabaseSync(src);
         db.exec('PRAGMA busy_timeout = 5000');
-        db.prepare('VACUUM INTO ?').run(out);
+        if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get()
+            || !db.prepare('SELECT 1 FROM schema_migrations LIMIT 1').get()) throw notOurs('no schema_migrations');
     } catch (e) {
-        try { fs.unlinkSync(out); } catch { /* already gone */ }
-        throw new AdminError(`backup failed: ${e.message}`);
+        db?.close();
+        throw e instanceof AdminError ? e : notOurs(e.message);
+    }
+    try {
+        try {
+            fs.writeFileSync(out, '', { flag: 'wx', mode: 0o600 });   // VACUUM INTO accepts an empty file
+        } catch (e) {
+            throw new AdminError(e.code === 'EEXIST' ? `${target} exists: choose a new file` : `cannot create ${target}: ${e.message}`);
+        }
+        try {
+            db.prepare('VACUUM INTO ?').run(out);
+        } catch (e) {
+            try { fs.unlinkSync(out); } catch { /* already gone */ }
+            throw new AdminError(`backup failed: ${e.message}`);
+        }
     } finally {
         db.close();
     }

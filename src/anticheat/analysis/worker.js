@@ -1,6 +1,7 @@
 // Analysis worker: claims finished rated games from the analysis queue, runs the engine over
-// them, stores the features and updates both players' integrity level and the population
-// statistics. One loop per engine (ANALYSIS_WORKERS engines, one core each).
+// them, stores the features and updates both players' integrity level and, for the games of the
+// ordinary random sample only, the population statistics. One loop per engine (ANALYSIS_WORKERS
+// engines, one core each).
 
 import os from 'node:os';
 import { metrics } from '../../metrics.js';
@@ -8,6 +9,10 @@ import { UciEngine, EngineError } from './engine.js';
 import { analyseGame, normaliseGame } from './analyzer.js';
 import { Population, updatePlayerIntegrity, updatePopulationFromGame } from '../scoring.js';
 import { readIntegrity, writeStructured } from '../util.js';
+
+// AnalysisPriority.ordinary of src/store/index.js (not imported: this module only sees the Store
+// API): jobs of the random sample, the only games that feed the population statistics.
+const ORDINARY_PRIORITY = 0;
 
 const gamesCounter = metrics.counter('scacelith_anticheat_analysis_games_total', 'Games analysed by the engine', ['result']);
 const okGames = gamesCounter.labels('ok');
@@ -75,12 +80,17 @@ export function createAnalysisWorker({ config, store, log = null, engineFactory 
             features.gameId = features.gameId ?? gameId;
             writeStructured((f) => store.analysis.complete(gameId, f), features);
             // Score the players first (their new game is judged against the population as it
-            // was), then let the game join the population.
+            // was), then let the game join the population, but only a game claimed at ordinary
+            // priority: those are the random sample of the rated games (ANALYSIS_SAMPLE_RATE).
+            // Flagged, reported and moderator-requested games are analysed first and in full, so
+            // counting them would shift the baseline towards the suspects it is meant to judge.
             for (const uid of [g.whiteId, g.blackId]) {
                 if (!uid) continue;
                 try { updatePlayerIntegrity({ store, userId: uid, population, now: now(), log }); } catch (e) { log?.error('integrity update failed', { err: e, userId: uid }); }
             }
-            updatePopulationFromGame(population, features, (uid) => readIntegrity(store, uid).level);
+            if (job?.priority === ORDINARY_PRIORITY) {
+                updatePopulationFromGame(population, features, (uid) => readIntegrity(store, uid).level);
+            }
             stats.analysed++;
             okGames.inc();
             analysisSeconds.observe((now() - started) / 1000);

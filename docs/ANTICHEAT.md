@@ -80,16 +80,20 @@ Single thread, fixed depth and controlled hash make the analysis **reproducible*
 engine build: a moderator can re-run it and get the same numbers.
 
 **Queue policy** (docs/DESIGN.md 6.5). The engine takes the highest priority first, then the
-oldest job: a moderator request, then a game a player reported (`cheating` or `other`), then a
-game with a suspicion signal at its end (either player's integrity level above `none`, an open
-`cheating` or `other` report of weight 0.5 or more against either player in the last 30 days, a
-`suspicious` or `certain` anomaly in that game), then the ordinary games. The first three are
-always queued. An ordinary game is queued with probability `ANALYSIS_SAMPLE_RATE` (default 1) and
-only while fewer than `ANALYSIS_QUEUE_MAX` (default 5000) ordinary games wait; otherwise it is
-not analysed (`scacelith_anticheat_analysis_skipped_total`). A report on such a game queues it
-afterwards. So a busy server never makes a suspicious game wait weeks behind ordinary ones, and
-the population statistics keep being fed by a steady sample of ordinary games. The policy
-changes no level and no sanction.
+oldest job: a moderator request, then a game a credible player reported (`cheating` or `other`,
+stored weight 0.5 or more), then a game with a suspicion signal at its end (either player's
+integrity level above `none`, an open `cheating` or `other` report of weight 0.5 or more against
+either player in the last 30 days, a `suspicious` or `certain` anomaly in that game) or a report
+of lower weight, then the ordinary games. The first three are queued whatever the backlog, but
+at most 20 flagged games of one player wait at a time (a further one is skipped). An ordinary
+game is queued with probability `ANALYSIS_SAMPLE_RATE` (default 1) and only while fewer than
+`ANALYSIS_QUEUE_MAX` (default 5000) ordinary games wait; otherwise it is not analysed
+(`scacelith_anticheat_analysis_skipped_total`). A report on such a game queues it afterwards.
+Every fourth claim takes the oldest ordinary game first, so ordinary games keep at least a
+quarter of the engine time however many prioritized games arrive. So a busy server never makes
+a suspicious game wait weeks behind ordinary ones, and the population statistics keep being fed
+by a steady random sample of ordinary games: only games claimed at ordinary priority feed them
+(section 4). The policy changes no level and no sanction.
 
 Cost (Stockfish 16, one core of the test container): depth 10 MultiPV 3 about 60 ms per
 position, depth 14 about 0.4 s, depth 18 about 2 s. With the defaults (10/18) a 40- to 60-move
@@ -112,9 +116,12 @@ Guid & Bratko engine-matching studies; accuracy derived from the ACPL row throug
 our pipeline measures, accuracy ~ 100 - 0.23 ACPL), adjusted by time class (bullet, blitz,
 rapid, classical: faster games are less accurate). The prior counts as 40 games and its standard
 deviations are inflated by 25%, so a young server is deliberately cautious; the server's own
-data takes over bucket by bucket. Values entering the population are winsorised at 4 sd, and
-games of players already `high_confidence` or `confirmed` are left out (cheaters must not make
-cheating look normal).
+data takes over bucket by bucket. Only the games of the random sample feed the population (the
+jobs claimed at ordinary priority, drawn with `ANALYSIS_SAMPLE_RATE`): reported, flagged and
+moderator-requested games are analysed first and in full, so counting them would shift the
+baseline towards the very players it judges. Values entering the population are winsorised at
+4 sd, and games of players already `high_confidence` or `confirmed` are left out (cheaters must
+not make cheating look normal).
 
 ### Scores
 
@@ -204,8 +211,10 @@ comment? }`:
 * one report per (reporter, reported, game): a duplicate gets the same `202 { status: 'received' }`
   as a new report, and nothing in the answer depends on the reported account;
 * a `cheating` or `other` report queues the engine analysis of the reported game ahead of the
-  ordinary games (section 3), even when the queue policy had left the game out; this only
-  produces evidence for moderators.
+  ordinary games (section 3), even when the queue policy had left the game out: at report
+  priority when the report is credible (stored weight 0.5 or more), otherwise only at the
+  priority of a suspicion signal, so that reports from new accounts cannot push the games of
+  statistically suspected players back; this only produces evidence for moderators.
 
 Reporter credibility (0.02 .. 2): `base = 0.1 + 0.9 sqrt(age x games)` with age = min(1, days/30)
 and games = min(1, games played/50) (both needed: fresh account farms and idle old accounts
@@ -267,7 +276,9 @@ the running server); `--revoke-sessions` also logs them out (shards drop cached 
 * Improvement: the jump test allows a 0.75 sd improvement and requires it to last.
 * One lucky game: windows and "lasting" rules; one game cannot weigh more than its moves.
 * Correlated metrics are not counted twice: high confidence needs independent kinds of evidence.
-* Contamination: flagged players do not shape the population; outliers are winsorised.
+* Contamination: only the random sample of ordinary games feeds the population (flagged and
+  reported games, analysed first and in full, never do), players already `high_confidence` or
+  `confirmed` are left out of it too, and outliers are winsorised.
 * Brigading: capped report weights; reports never change the level.
 * Nothing statistical is automatic: a human decides.
 
@@ -291,12 +302,17 @@ No IP address is stored by this module (reports and moderator events carry `ip: 
 DESIGN.md names some Store methods without their exact arguments; this module assumes (see the
 header of `src/anticheat/index.js`):
 
-* `integrity.populationStats(key)` / `updatePopulation(key, stats)` with `key =
-  '<category>|<bucket>'` and `stats = { v: 1, metrics: { <metric>: { n, mean, m2 } } }`;
+* `integrity.populationStats('<category>|<bucket>')` returns `{ <metric>: { n, mean, m2 } }`,
+  and `integrity.updatePopulation([{ key: '<category>|<bucket>|<metric>', value }], now)` sends
+  one observation per metric and game, which the store merges (Welford); the analysis process
+  is the only writer;
 * `analysis.forUser(userId, limit)` returns the player's completed analyses, newest first, each
   row with the `features` given to `complete()`;
 * `reports.forReported(userId)` rows carry `weight` and `at`; the optional
   `reports.forReporter(userId)` (rows with `outcome`) feeds the reporter's track record;
-* the optional `analysis.request(gameId, 'report', now)` queues a reported game (without it a
-  report does not touch the analysis queue);
+* the optional `analysis.request(gameId, 'report' | 'signal', now)` queues a reported game,
+  at `report` priority for a credible report and `signal` for a low-credibility one (without it
+  a report does not touch the analysis queue);
+* `analysis.next()` returns each job with its `priority` (0 for the ordinary sample, the only
+  jobs that feed the population);
 * free-form values are passed as objects and retried as JSON text if the store refuses them.

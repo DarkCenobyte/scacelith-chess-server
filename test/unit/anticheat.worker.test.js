@@ -4,6 +4,7 @@ import { testConfig } from '../../src/config.js';
 import { createAnalysisWorker } from '../../src/anticheat/analysis/worker.js';
 import { EngineError } from '../../src/anticheat/analysis/engine.js';
 import { createFakeStore } from '../../src/anticheat/testing/fake-store.js';
+import { AnalysisPriority } from '../../src/store/index.js';
 
 const config = testConfig({ ANALYSIS_ENGINE_PATH: '/fake/engine', ANALYSIS_DEPTH_FAST: '4', ANALYSIS_DEPTH_DEEP: '8', ANALYSIS_POLL_MS: '100' });
 
@@ -23,12 +24,12 @@ function fakeEngine(uciOf) {
     };
 }
 
-function addGame(store, id, plies = 40) {
+function addGame(store, id, plies = 40, priority = AnalysisPriority.ordinary) {
     const w = store._.addUser(`w${id}`), b = store._.addUser(`b${id}`);
     const moves = Array.from({ length: plies }, (_, i) => (i % 64) | (((i + 9) % 64) << 6));
     store._.addGame({ id, category: '5+0', rated: true, baseMs: 300000, incMs: 0, whiteId: w, blackId: b, whiteRating: 1500, blackRating: 1500,
         endedAt: 1_800_000_000_000 + id, moves: Uint16Array.from(moves), spentMs: Uint32Array.from(moves.map((_, i) => 1000 + (i * 37) % 900)) });
-    store._.enqueue(id);
+    store._.enqueue(id, priority);
     return { w, b, moves };
 }
 
@@ -49,6 +50,36 @@ test('processJob: features stored, both players scored, population updated', asy
     assert.equal(store.integrity.get(b).evidence.statistics.games, 1);
     assert.equal(store._.population.get('5+0|1500|accuracy').n, 2);
     assert.equal(worker.stats.analysed, 1);
+});
+
+test('only games claimed at ordinary priority (the random sample) feed the population statistics', async () => {
+    const store = createFakeStore();
+    const P = AnalysisPriority;
+    // Flagged, reported and moderator-requested games are analysed first and in full: counted in
+    // the population, they would shift the baseline towards the suspects it judges.
+    const flagged = [addGame(store, 41, 40, P.signal), addGame(store, 42, 40, P.report), addGame(store, 43, 40, P.manual)];
+    const { moveToUci } = await import('../../src/anticheat/analysis/moves.js');
+    const engine = fakeEngine((ply) => (ply < flagged[0].moves.length ? moveToUci(flagged[0].moves[ply]) : null));
+    const worker = createAnalysisWorker({ config, store, engineFactory: () => engine, workerId: 't' });
+    for (let i = 0; i < 3; i++) {
+        const job = store.analysis.next(1, 't', Date.now())[0];
+        assert.notEqual(job.priority, P.ordinary);
+        assert.ok(await worker.processJob(engine, job));
+    }
+    assert.equal(store._.population.size, 0, 'no population update from prioritized games');
+    for (const g of flagged) assert.equal(store.integrity.get(g.b).evidence.statistics.games, 1, 'the players are scored all the same');
+    // A job without a priority (another caller) is not a sample either.
+    const other = addGame(store, 44);
+    store._.jobs.get(44).status = 'running';
+    assert.ok(await worker.processJob(engine, { gameId: 44 }));
+    assert.equal(store._.population.size, 0);
+    assert.equal(store.integrity.get(other.w).evidence.statistics.games, 1);
+    // An ordinary job does.
+    addGame(store, 45);
+    const job = store.analysis.next(1, 't', Date.now())[0];
+    assert.deepEqual([job.gameId, job.priority], [45, P.ordinary]);
+    await worker.processJob(engine, job);
+    assert.equal(store._.population.get('5+0|1500|accuracy').n, 2);
 });
 
 test('a job whose game is missing, or whose engine crashes, is marked failed', async () => {

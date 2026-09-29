@@ -12,7 +12,7 @@ import { startRetention } from '../../src/cluster/retention.js';
 import { Registry } from '../../src/metrics.js';
 import { configureLogging, logger } from '../../src/log.js';
 import { openStore, migrate } from '../../src/store/index.js';
-import { testConfig } from '../../src/config.js';
+import { testConfig, CONFIG_KEYS } from '../../src/config.js';
 
 const DAY = 86400000;
 const ZERO = { sessions: 0, tokens: 0, securityEvents: 0, anomalies: 0, conductEvents: 0, analysisJobs: 0, ipErased: 0 };
@@ -108,9 +108,37 @@ test('first run a minute after the start, then every RETENTION_INTERVAL_MS after
     assert.equal(timers.live().length, 0);
 });
 
-test('RETENTION_INTERVAL_MS: default one hour, at least one minute', () => {
+test('RETENTION_INTERVAL_MS: default one hour, at least one minute, at most the longest Node.js timer', () => {
     assert.equal(testConfig().retentionIntervalMs, 3600000);
     assert.throws(() => testConfig({ RETENTION_INTERVAL_MS: '59999' }), /RETENTION_INTERVAL_MS: at least 60000/);
+    // 30 days would overflow setTimeout, which then fires after 1 ms: the purge would run in a loop.
+    assert.throws(() => testConfig({ RETENTION_INTERVAL_MS: '2592000000' }), /RETENTION_INTERVAL_MS: at most 2147483647/);
+    assert.equal(testConfig({ RETENTION_INTERVAL_MS: '2147483647' }).retentionIntervalMs, 2147483647);
+});
+
+test('an interval beyond the longest timer (a configuration not checked by loadConfig) is clamped, never a 1 ms loop', async () => {
+    const timers = fakeTimers(), store = fakeStore(), registry = new Registry();
+    const config = { ...testConfig(), retentionIntervalMs: 30 * DAY };
+    startRetention({ config, store, registry, timers });
+    timers.fire();
+    store.calls[0].resolve(ZERO);
+    await settle();
+    assert.equal(timers.live().length, 1);
+    assert.equal(timers.live()[0].ms, 2147483647);
+});
+
+// Every key whose value reaches a Node.js timer (setTimeout / setInterval) is bounded below the
+// longest delay (2^31 - 1 ms), since a longer one fires after 1 ms instead.
+test('configuration keys that reach a timer are bounded (loadConfig refuses an overflowing value)', () => {
+    const TIMER_KEYS = ['RETENTION_INTERVAL_MS', 'ANALYSIS_POLL_MS', 'ANALYSIS_POSITION_TIMEOUT_MS', 'WS_HELLO_TIMEOUT_MS',
+        'MATCH_TICK_MS', 'SHUTDOWN_GRACE_MS', 'JOURNAL_FLUSH_MS', 'DB_COMMIT_MS', 'PASSWORD_HASH_QUEUE_TIMEOUT_MS',
+        'CLIENT_PING_INTERVAL_MS'];
+    for (const name of TIMER_KEYS) {
+        const k = CONFIG_KEYS.find((x) => x.name === name);
+        assert.ok(k, name);
+        assert.ok(Number.isInteger(k.max) && k.max <= 2147483647, `${name} has a max below 2^31 (${k.max})`);
+        assert.throws(() => testConfig({ [name]: String(k.max + 1) }), new RegExp(`${name}: at most ${k.max}`));
+    }
 });
 
 test('runs never overlap: runNow waits for the run in progress, the timer waits for runNow', async () => {

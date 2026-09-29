@@ -4,8 +4,9 @@
 // RETENTION_INTERVAL_MS, the first time about a minute after the start.
 //
 // The primary is the control plane (presence, matchmaking), so the purge must never hold its
-// event loop for long: runAsync deletes at most 1000 rows per statement (one short transaction)
-// and returns to the event loop whenever `sliceMs` of work has been done. Runs never overlap:
+// event loop, nor the database's write lock, for long: runAsync adapts the rows per statement (one
+// short transaction, at most 1000 rows) so that a statement takes about sliceMs / 2, and pauses
+// for sliceMs whenever `sliceMs` of work has been done. Runs never overlap:
 // the next one is scheduled when the previous one ends. stop() aborts a run between two
 // statements and waits for it, so the store can be closed right after (nothing runs after
 // store.close()). Each run is logged at info level with its counts only (no personal data) and
@@ -18,6 +19,9 @@
 import { metrics as defaultRegistry } from '../metrics.js';
 
 const FIRST_RUN_DELAY_MS = 60000;
+// Longest delay of a Node.js timer: a longer one fires after 1 ms (TimeoutOverflowWarning), which
+// would run the purge in a loop. RETENTION_INTERVAL_MS is bounded by the configuration as well.
+const MAX_TIMER_MS = 2147483647;
 
 // store.retention counts -> metric label of the rows deleted.
 const PURGED_KINDS = Object.freeze({
@@ -43,12 +47,12 @@ function logFields(counts) {
  * @param {() => number} [o.now]
  * @param {{ setTimeout: Function, clearTimeout: Function }} [o.timers]
  * @param {number} [o.firstDelayMs]   delay of the first run
- * @param {number} [o.sliceMs]        work done before returning to the event loop
+ * @param {number} [o.sliceMs]        work done before a pause of the same length
  * @returns {{ runNow: () => Promise<object|null>, stop: () => Promise<void>, readonly running: boolean }}
  */
 export function startRetention({ config, store, log = null, registry = defaultRegistry, now = Date.now,
     timers = { setTimeout, clearTimeout }, firstDelayMs = FIRST_RUN_DELAY_MS, sliceMs = 10 }) {
-    const intervalMs = config.retentionIntervalMs ?? 3600000;
+    const intervalMs = Math.min(MAX_TIMER_MS, config.retentionIntervalMs ?? 3600000);
     const purged = registry.counter('scacelith_retention_purged_total', 'Rows deleted by the retention purge', ['kind']);
     const ipErased = registry.counter('scacelith_retention_ip_erased_total', 'Stored IP addresses erased by the retention purge');
     const runs = registry.counter('scacelith_retention_runs_total', 'Retention purge runs, by result', ['result']);

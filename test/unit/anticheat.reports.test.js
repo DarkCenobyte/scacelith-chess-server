@@ -166,6 +166,23 @@ test('brigading: reports against one player do not add up linearly', () => {
     assert.ok(store._.reports[10].weight >= 0.9);
 });
 
+test('only a credible report asks for the analysis at report priority; a low-credibility one at signal priority', () => {
+    const { store, call, users, game } = setup();
+    const requests = () => store.calls.filter((c) => c.name === 'analysis.request').map((c) => c.args[1]);
+    // Credible reporters (a year old, 200 games): weight about 1 each, up to the daily cap of 2.
+    call(users.alice, { gameId: game(users.alice, users.bob), reported: 'bob', category: 'cheating' });
+    call(users.carol, { gameId: game(users.carol, users.bob), reported: 'bob', category: 'other' });
+    // Beyond the cap the stored weight is 0: no longer credible.
+    call(users.dave, { gameId: game(users.dave, users.bob), reported: 'bob', category: 'cheating' });
+    // A brand-new account.
+    const id = store._.addUser('fresh');
+    const fresh = store.users.byId(id);
+    fresh.createdAt = NOW - 3600000;
+    call(fresh, { gameId: game(fresh, users.carol), reported: 'carol', category: 'cheating' });
+    assert.deepEqual(store._.reports.map((r) => r.weight >= REPORT_RULES.lowCredibility), [true, true, false, false]);
+    assert.deepEqual(requests(), ['report', 'report', 'signal', 'signal']);
+});
+
 test('review priority grows with level, score and (logarithmically) with reports', () => {
     assert.equal(reviewPriority({}), 0);
     const one = reviewPriority({ reportWeight: 1 });

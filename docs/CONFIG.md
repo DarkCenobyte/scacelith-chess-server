@@ -124,7 +124,7 @@ Sections:
 | `WS_MSG_RATE` | integer (&gt;= 1) | `20` | Messages per second a client may send (sustained). |
 | `WS_MSG_BURST` | integer (&gt;= 1) | `40` | Message burst a client may send. |
 | `WS_SEND_BUFFER_LIMIT` | integer (&gt;= 4096) | `262144` | Bytes queued for a client that does not read; beyond it the connection is closed (the client reconnects and resynchronises). |
-| `WS_HELLO_TIMEOUT_MS` | integer (&gt;= 1000) | `10000` | Time a new connection has to authenticate. |
+| `WS_HELLO_TIMEOUT_MS` | integer (1000-600000) | `10000` | Time a new connection has to authenticate. |
 | `HEARTBEAT_INTERVAL_MS` | integer (&gt;= 1000) | `10000` | Server ping interval: each connection gets a ping every half interval to one interval (it also measures each player's latency). The game client considers the connection dead after twice this (10 s at least) with nothing received. |
 | `HEARTBEAT_TIMEOUT_MS` | integer (&gt;= 3000) | `30000` | A connection silent for this long is considered dead. |
 | `CLIENT_PING_INTERVAL_MS` | integer (1000-60000) | `10000` | Interval of the game client's own Ping, announced in Welcome (the client measures its round trip for the ping indicator and its estimate of the server clock with it). Lower is a more reactive ping indicator but costs more server CPU for every connected player: at 2000 these pings alone take a third or more of the server CPU of a player in a 3+2 game. After each connection the client sends a few quick pings anyway. |
@@ -187,9 +187,9 @@ Sections:
 | `ANALYSIS_MIN_PLIES` | integer (&gt;= 10) | `30` | Shorter games are not analysed. |
 | `REPORTS_PER_DAY` | integer (&gt;= 1) | `5` | Reports one player may file per day. |
 | `ANALYSIS_HASH_MB` | integer (1-4096) | `32` | Transposition table of each analysis engine, in MB. |
-| `ANALYSIS_POSITION_TIMEOUT_MS` | integer (&gt;= 1000) | `120000` | Longest search of one position; an engine that exceeds it is restarted and the game is marked failed. |
-| `ANALYSIS_POLL_MS` | integer (&gt;= 100) | `5000` | Interval at which an idle analysis engine looks for new games to analyse. |
-| `ANALYSIS_QUEUE_MAX` | integer (&gt;= 0) | `5000` | Most ordinary games waiting for engine analysis: while this many wait, a newly finished ordinary game is not queued (the engines could not catch up anyway). Games with a report, a suspicion signal or a moderator request are always queued and analysed first. 0 analyses only those. |
+| `ANALYSIS_POSITION_TIMEOUT_MS` | integer (1000-3600000) | `120000` | Longest search of one position; an engine that exceeds it is restarted and the game is marked failed. |
+| `ANALYSIS_POLL_MS` | integer (100-3600000) | `5000` | Interval at which an idle analysis engine looks for new games to analyse. |
+| `ANALYSIS_QUEUE_MAX` | integer (0-100000) | `5000` | Most ordinary games waiting for engine analysis: while this many wait, a newly finished ordinary game is not queued (the engines could not catch up anyway). Games with a report, a suspicion signal (at most 20 waiting per player) or a moderator request are queued anyway and mostly analysed first; one engine claim in four still goes to the oldest ordinary game. 0 analyses only those (and then no game feeds the population statistics). At most 100000: the waiting ordinary games are counted in every commit of finished games, under the database write lock. |
 | `ANALYSIS_SAMPLE_RATE` | number (0-1) | `1` | Share of the ordinary rated games queued for analysis (0 to 1, drawn at random when the game ends). Lower it when the engine cannot keep up with the games played. |
 
 ## Observability
@@ -204,4 +204,4 @@ Sections:
 | `LOG_IP` | one of truncated, full, hashed | `truncated` | How client addresses appear in the logs: truncated (IPv4 /24, IPv6 /48), full, or hashed (keyed HMAC, rotated daily). |
 | `RETENTION_SECURITY_DAYS` | integer (&gt;= 1) | `90` | Security events (failed logins, anomalies without sanction) are deleted after this many days. |
 | `RETENTION_IP_DAYS` | integer (&gt;= 1) | `30` | Stored IP addresses (sessions, security events) are erased after this many days. |
-| `RETENTION_INTERVAL_MS` | integer (&gt;= 60000) | `3600000` | Interval of the retention purge run by the primary (expired sessions and tokens, old security events, anomalies, conduct events and failed analysis jobs, IP erasure). The first run starts about a minute after the server starts. |
+| `RETENTION_INTERVAL_MS` | integer (60000-2147483647) | `3600000` | Interval of the retention purge run by the primary (expired sessions and tokens, old security events, anomalies, conduct events and failed analysis jobs, IP erasure). The first run starts about a minute after the server starts. At most 2147483647 (about 24.8 days, the longest timer of Node.js). |
