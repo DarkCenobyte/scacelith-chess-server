@@ -179,7 +179,7 @@ export const messages = [
       fields: [['id', 'u32'], ['state', 'enum:ChallengeState'], ['target', 'str8', { max: 24 }], ['code', 'str8', { max: 12 }], ['baseSec', 'u16'], ['incSec', 'u8'], ['rated', 'bool']] },
 
     { id: 0xA0, name: 'GameSnapshot', dir: S2C,
-      doc: 'Complete authoritative state of a game: sent when it starts, after a (re)connection and on Resync. Clocks are the remaining times at serverTime; the `running` side keeps counting from there.',
+      doc: 'Complete authoritative state of a game: sent when it starts, after a (re)connection and on Resync, and also to the opponent when the held clock of a game restored after a restart starts (lifecycle step 6). Clocks are the remaining times at serverTime; the `running` side keeps counting from there (`running` is None while such a clock is held).',
       fields: [['game', 'id53'], ['gseq', 'u32'], ['category', 'str8', { max: 7 }], ['baseMs', 'u32'], ['incMs', 'u32'], ['rated', 'bool'],
                ['white', 'struct:PlayerInfo'], ['black', 'struct:PlayerInfo'], ['you', 'enum:Color'],
                ['moves', 'list16:struct:MoveRec', { max: 1200 }],

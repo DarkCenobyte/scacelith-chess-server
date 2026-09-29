@@ -269,24 +269,33 @@ For a dedicated 4-core, 16 GB machine running only the server (Linux, `nofile` r
   2-2.6 cores of 4. Memory: about 7.5 GB.
 - **The first hard limits beyond that are memory (about 150,000-180,000 TLS connections in 16 GB)
   and the reconnection storm after a restart**: at 2-2.7 ms per handshake, 4 cores accept about
-  1,500-2,000 connections/s, so 100,000 players need about a minute to come back (about two after
-  a graceful restart, where each client reads `/info` first). The game client spreads that wave:
-  after a shutdown its first attempt waits a random 5 to 35 s, later attempts use full jitter (a
-  random delay between 0.5 s and min(30 s, 2 s x 2^n)), a full server is tried again after 60 to
-  120 s, and for 10 minutes after losing a connection that had reached `Welcome` the automatic
-  attempts skip the `/api/v1/info` request (one TLS handshake per player instead of two), except
-  after a graceful shutdown, since a restart may bring another server (a reinstall). Players with
+  1,500-2,000 connections/s, so 100,000 players need about a minute to come back, after a graceful
+  restart as after a crash. The game client spreads that wave: after a shutdown its first attempt
+  waits a random 5 to 35 s, later attempts use full jitter (a random delay between 0.5 s and
+  min(30 s, 2 s x 2^n)), a full server is tried again after 60 to 120 s, and for 10 minutes after
+  losing a connection that had reached `Welcome` the automatic attempts skip the `/api/v1/info`
+  request (one TLS handshake per player instead of two), after a graceful shutdown too: the server
+  id in the `101` answer of the upgrade still tells the client that a restart brought another
+  server (a reinstall) before it sends its session. Players with
   a game in progress wait 8 s at most between attempts, so that part of the wave stays
   concentrated. During the storm each worker keeps at most
   `MAX_PENDING_HANDSHAKES` (128) handshakes in flight and closes the extra connections before any
   TLS work, so the handshakes it starts finish in time and the refused clients come back later;
   the kernel queue in front of it is `LISTEN_BACKLOG` (2048), capped by `net.core.somaxconn`.
   Games in progress give both players `RECOVERY_GRACE_MS` (90 s) to come back, instead of the
-  normal grace of 15 to 60 s. On a small machine (2 cores at 2.4 GHz, 2.5-3.5 ms per full
-  handshake) 10,000 players need about 30 s of CPU, 15 s on its two cores, to reconnect (twice
-  that after a graceful restart): inside the recovery grace, but without the handshake limit every
-  handshake waited for all the others, and a capacity study lost 32 % of a 10,000-client herd to
-  the clients' 10 s deadline.
+  normal grace of 15 to 60 s, and the clock of the side to move stays stopped until that player
+  is back, `RECOVERY_CLOCK_HOLD_MS` (20 s) at most. On a small machine (2 cores at 2.4 GHz,
+  2.5-3.5 ms per full handshake) 10,000 players need about 30 s of CPU, 15 s on its two cores, to
+  reconnect, after a graceful restart as after a crash: inside the recovery grace, but without the
+  handshake limit every handshake waited for all the others, and a capacity study lost 32 % of a
+  10,000-client herd to the clients' 10 s deadline. A discrete-event model of the wave (not a
+  measurement: the client's delays above, 128 handshake slots per worker, these handshake costs,
+  70 % of the players in a game, 5 s of downtime) brings every player with a game in progress
+  back within the 20 s clock hold on that small machine (99 % within 13-17 s). For 100,000 players
+  on 4 cores only 35-47 % of them are back within the hold (half after 21-30 s, the last after
+  about a minute, all within the 90 s grace): there a player to move loses on their clock the part
+  of their reconnection time beyond the hold, 7-13 s on average over all of them (those back in
+  time lose nothing) and up to about 45 s.
 - The chess logic is not a concern (under 100 µs per move at p99); the primary is not on the move
   path (under 0.3 core in every run, 0.1-0.35 core during the connection ramps).
 

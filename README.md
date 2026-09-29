@@ -225,7 +225,13 @@ everyone, not a distributed attack: see the connection storms part of section 5.
 [docs/DESIGN.md](docs/DESIGN.md). Games that were running when the server stopped come back from the
 journal, and both players then have `RECOVERY_GRACE_MS` (90 s) to reconnect instead of the normal
 grace. The clock of the side to move stays stopped until that player is back, for
-`RECOVERY_CLOCK_HOLD_MS` (20 s) at most, so a slow reconnection does not cost them time.
+`RECOVERY_CLOCK_HOLD_MS` (20 s) at most, so coming back within that time costs them nothing. After
+it their clock runs again even while they are away, and the rest of their reconnection time is
+charged to it. A model of the reconnection wave brings everyone back in time with 10,000 players
+on 2 cores. With 100,000 players on 4 cores the wave takes about a minute, and more than half of
+the players to move lose part of their reconnection time on their clock, while their games are
+kept for the 90 s (capacity section of
+[docs/BENCHMARK.md](docs/BENCHMARK.md#capacity-of-a-dedicated-machine)).
 
 ## Accounts, e-mail and Google sign-in
 
