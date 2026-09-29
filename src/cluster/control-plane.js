@@ -249,6 +249,10 @@ export class ControlPlane {
         for (const u of ids) this.starting.add(u);
         let r = null;
         const shard = this._chooseShard(preferredShard);
+        // The shards report their load every 2 s: count the games placed since the last report, so
+        // that a burst of placements does not pile onto the shard that looked the least loaded.
+        const load = this.loads.get(shard);
+        if (load) load.games = (load.games || 0) + 1;
         try {
             if (shard >= 0) r = await this.shards.request(shard, 'game.create', { spec }, { timeoutMs: 5000 });
         } catch (e) {

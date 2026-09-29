@@ -43,7 +43,7 @@ Sections:
 | `WS_ALLOWED_ORIGINS` | comma-separated list | (empty) | Origin header values allowed to open the game WebSocket (e.g. https://play.example.org). The game client sends no Origin; browsers always send one, so they are refused unless listed here. |
 | `SHUTDOWN_GRACE_MS` | integer (0-120000) | `3000` | On SIGTERM/SIGINT players are warned (ServerShutdown notice) this long before their connections close. Games in progress survive the restart (journal). |
 | `LISTEN_REUSE_PORT` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Linux: every worker binds its own listening socket (SO_REUSEPORT) and the kernel spreads new connections, instead of the primary accepting them and handing them out round-robin. Ignored on other systems. |
-| `SHARD_OVERLOAD_LAG_MS` | integer (5-5000) | `50` | Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker. |
+| `SHARD_OVERLOAD_LAG_MS` | integer (5-5000) | `250` | Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker. |
 
 ## TLS
 

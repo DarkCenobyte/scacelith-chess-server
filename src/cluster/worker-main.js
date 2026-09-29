@@ -1,5 +1,6 @@
 // Shard worker bootstrap (cluster worker, env SHARD=<n>): store, journal, anti-cheat, auth, the
-// GameHost (its journal is replayed with recover() before anything listens), the HTTPS API
+// GameHost (its journal is replayed with recover() before anything listens; its finished games
+// are committed by a store writer thread, src/store/writer.js), the HTTPS API
 // handler, then the shard itself (bus, router, WebSocket server, listeners). Stops gracefully on
 // the primary's 'shutdown' message or SIGTERM, and at once if the primary disappears.
 
@@ -14,6 +15,7 @@ import { configureLogging, logger } from '../log.js';
 import { applyGame } from '../match/elo.js';
 import { openStore } from '../store/index.js';
 import { openJournal } from '../store/journal.js';
+import { startStoreWriter } from '../store/writer.js';
 import { Ipc } from './ipc.js';
 import { createBus, startShard } from './shard.js';
 
@@ -34,8 +36,11 @@ export async function main() {
     const anticheat = createAnticheat({ config, store, primary, log: logger.child('anticheat') });
     const auth = createAuth({ config, store, primary, log: logger.child('auth') });
     const bus = createBus({ config, shard, serverId, log: log.child('bus') });
+    // Finished-game commits run on a writer thread: the event loop never waits for SQLite.
+    const writer = startStoreWriter({ config, shard, log: log.child('writer') });
+    const hostStore = { games: { finishBatch: (records) => writer.finishBatch(records) } };
     const host = new GameHost({
-        shard, config, store, journal, anticheat, bus, primary, log: logger.child('game'),
+        shard, config, store: hostStore, journal, anticheat, bus, primary, log: logger.child('game'),
         createChessGame: () => new ChessGame(),
     });
     // Replays the journal; the host announces each restored game to the primary
@@ -48,6 +53,7 @@ export async function main() {
         config, shard, serverId, primary, host, auth, anticheat, store, apiHandler, bus, log,
         onStopped: async () => {
             try { await journal.flush?.(); await journal.close?.(); } catch (e) { log.error('journal close failed', { err: e }); }
+            try { await writer.close(); } catch (e) { log.error('store writer close failed', { err: e }); }
             try { store.close(); } catch (e) { log.error('store close failed', { err: e }); }
             primary.flush();
             setTimeout(() => process.exit(0), 50);

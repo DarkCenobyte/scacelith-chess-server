@@ -398,6 +398,26 @@ test('rematch agreement is sent to the primary with colours swapped', async () =
     assert.deepEqual([last(ew).type, last(ew).code], [MSG.Error, EC.RematchUnavailable]);
 });
 
+test('asynchronous store (writer thread): one bad record does not block the batch either', async () => {
+    const { host, clock, store, journal } = mkHost();
+    store.async = true;
+    const ids = [newGame(host, 1, 2), newGame(host, 3, 4), newGame(host, 5, 6)];
+    for (const id of ids) {
+        play(host, id, clock); play(host, id, clock);
+        host.onClientMessage(id, host.room(id).black.userId, { type: MSG.Resign, seq: 2, game: id }, null);
+    }
+    store.badIds.add(ids[1]);
+    clock.t += 100;
+    const res = host.pollCommits(clock.t);
+    assert.equal(typeof res.then, 'function');
+    assert.equal(await res, false);
+    assert.equal(host.commitInFlight, null);
+    assert.deepEqual(store.committedIds.sort(), [ids[0], ids[2]].sort());
+    assert.ok(journal.done.has(ids[0]) && journal.done.has(ids[2]));
+    assert.equal(journal.done.has(ids[1]), false, 'the bad game stays in the journal');
+    assert.equal(host.stats().pendingCommits, 1);
+});
+
 test('abort is forwarded as conduct.record; forfeitUser; shutdown flushes commits and the journal', async () => {
     const { host, clock, primary, store, journal } = mkHost();
     const a = newGame(host, 1, 2);

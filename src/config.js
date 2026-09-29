@@ -43,7 +43,7 @@ key('SHUTDOWN_GRACE_MS', { section: 'server', type: 'int', default: 3000, min: 0
     desc: 'On SIGTERM/SIGINT players are warned (ServerShutdown notice) this long before their connections close. Games in progress survive the restart (journal).' });
 key('LISTEN_REUSE_PORT', { section: 'server', type: 'bool', default: false,
     desc: 'Linux: every worker binds its own listening socket (SO_REUSEPORT) and the kernel spreads new connections, instead of the primary accepting them and handing them out round-robin. Ignored on other systems.' });
-key('SHARD_OVERLOAD_LAG_MS', { section: 'server', type: 'int', default: 50, min: 5, max: 5000,
+key('SHARD_OVERLOAD_LAG_MS', { section: 'server', type: 'int', default: 250, min: 5, max: 5000,
     desc: 'Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker.' });
 
 // ---- TLS -----------------------------------------------------------------------------------------

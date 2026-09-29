@@ -100,7 +100,9 @@ animates the other robot playing it. A's client treats its own `MoveMade` as the
 abandonment, abort...), the host sends `GameEnd` to both, journals it, and queues the game for
 the database. Every `DB_COMMIT_MS` the host commits the queued games in one transaction
 (`store.games.finishBatch`): game record + both ratings (read and written inside the
-transaction) + analysis job. After the commit it sends `RatingUpdate` and tells the primary
+transaction) + analysis job. The transaction runs on the shard's store writer thread
+(`src/store/writer.js`, its own SQLite connection), so the event loop never waits for the disk or
+another process's write lock. After the commit it sends `RatingUpdate` and tells the primary
 `game.ended`.
 
 **Reconnection.** A lost connection keeps the game running (the player's clock too). The

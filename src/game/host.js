@@ -607,7 +607,13 @@ export class GameHost {
         if (res && typeof res.then === 'function') {
             this.commitInFlight = res.then(
                 (r) => { this.commitInFlight = null; this._commitDone(batch, r, t0, this.now()); return true; },
-                (err) => { this.commitInFlight = null; this._commitFailed(err, batch.length, this.now()); return false; });
+                (err) => {
+                    this.commitInFlight = null;
+                    // Same fallback as the synchronous path: one bad record must not hold the others.
+                    if (batch.length > 1 && err && err.gameId !== undefined) return (this.commitInFlight = this._commitEachAsync(batch, records));
+                    this._commitFailed(err, batch.length, this.now());
+                    return false;
+                });
             return this.commitInFlight;
         }
         this._commitDone(batch, res, t0, t);
@@ -660,6 +666,19 @@ export class GameHost {
             this._commitDone([batch[i]], res, t0, t);
         }
         if (failed) { this._commitFailed(failed, this.pending.size, t); return false; }
+        return true;
+    }
+
+    async _commitEachAsync(batch, records) {
+        let failed = null;
+        for (let i = 0; i < batch.length; i++) {
+            const t0 = performance.now();
+            let res;
+            try { res = await this.store.games.finishBatch([records[i]]); } catch (err) { failed = err; continue; }
+            this._commitDone([batch[i]], res, t0, this.now());
+        }
+        this.commitInFlight = null;
+        if (failed) { this._commitFailed(failed, this.pending.size, this.now()); return false; }
         return true;
     }
 

@@ -892,7 +892,7 @@ export class Router {
         const lag = this.lagP99();
         this.primary.notify('shard.load', {
             shard: this.shard, conns: this.conns.size, players: this.byUser.size, games, lagP99: lag,
-            overloaded: lag > (this.config.shardOverloadLagMs || 50),
+            overloaded: lag > (this.config.shardOverloadLagMs || 250),
         });
     }
 

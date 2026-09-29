@@ -277,6 +277,9 @@ resources to watch: the primary (presence, challenges, matchmaking) and the sing
   anyway. With `--server-env SHARD_OVERLOAD_LAG_MS=5000` the same runs placed 210-276 and
   2,322-2,522 games per shard and relayed 39 % and 33 % of the moves (rows below; the machine was
   busier during those two runs, so their latencies are not comparable).
+  Since these runs the default threshold is 250 ms, and the primary counts the games it places
+  between two reports, so a burst of new games is spread over the shards still eligible (a
+  staggered run with that counting placed 2,437 / 2,522 / 2,460 / 2,396 games).
 
 | run | command | games per shard | moves relayed | moves/s | move RTT p50 / p99 ms | other processes |
 |---|---|---|---|---|---|---|
@@ -285,9 +288,12 @@ resources to watch: the primary (presence, challenges, matchmaking) and the sing
 | 10k staggered | `--scenario games --games 10000 --start-rate 125 --warmup-s 20 --duration-s 60` | 2,270 / 3,447 / 1,935 / 2,211 | 64 % | 9,174 | 23 / 244 | 0.5 core |
 | 10k staggered, threshold 5 s | `... --server-env SHARD_OVERLOAD_LAG_MS=5000` | 2,522 / 2,456 / 2,322 / 2,506 | 33 % | 7,057 | 182 / 893 | 1.53 cores |
 
-- **Commits on the event loop.** A shard commits its finished games with a synchronous SQLite
-  transaction (`synchronous=FULL`) that may also wait for the write lock of another process; the
-  shard's players wait meanwhile (commit p99 up to 214 ms).
+- **Commits on the event loop.** During these runs a shard committed its finished games with a
+  synchronous SQLite transaction (`synchronous=FULL`) that may also wait for the write lock of
+  another process; the shard's players waited meanwhile (commit p99 up to 214 ms). The commits now
+  run on a writer thread per shard (`src/store/writer.js`); a 10k staggered run through it
+  committed 15,676 rated games with no error, but its effect on latency was not measured (the host
+  was too busy to compare).
 - **TLS writes.** A quarter to a third of the CPU per move and 40 of the 55-60 KB per connection are
   TLS; `writev` on uncork (`src/net/ws.js`) is the largest item of the shard profile.
 
@@ -307,8 +313,8 @@ resources to watch: the primary (presence, challenges, matchmaking) and the sing
   separate machine it removes a quarter to a third of the server's CPU per move, half of the CPU
   of a new connection and about 40 KB per connection (the `--plain` rows); on the same machine it
   only moves that cost to the proxy (not measured here).
-- **`SHARD_OVERLOAD_LAG_MS`**: on a machine that runs near its CPU limit, raise it (a few hundred
-  ms) so that games stay on the creator's shard (see above).
+- **`SHARD_OVERLOAD_LAG_MS`** (250 ms by default, 50 ms during the runs above): on a machine that
+  runs near its CPU limit, raise it further so that games stay on the creator's shard (see above).
 - **Heartbeat**: `HEARTBEAT_INTERVAL_MS` 10 s -> 20 s halves the server's share of the idle cost,
   at the price of a slower detection of dead connections (`HEARTBEAT_TIMEOUT_MS`).
 - **Kernel settings** for 100,000+ sockets: `fs.nr_open` and `LimitNOFILE`, `net.core.somaxconn`

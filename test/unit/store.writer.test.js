@@ -1,0 +1,72 @@
+// Store writer thread (src/store/writer.js): GameHost commits finished games through it into the
+// real SQLite store; the results (ratings), StoreError codes and gameId come back from the thread.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { GameHost } from '../../src/game/host.js';
+import { FakeAnticheat, FakePrimary, FakeEndpoint, silentLog } from '../../src/game/testing.js';
+import { ChessGame, parseSquare } from '../../src/chess/index.js';
+import { openStore, migrate } from '../../src/store/index.js';
+import { startStoreWriter } from '../../src/store/writer.js';
+import { applyGame } from '../../src/match/elo.js';
+import { enums, encodeMove, MSG } from '../../src/protocol/index.js';
+import { Registry } from '../../src/metrics.js';
+import { testConfig } from '../../src/config.js';
+
+const { GameStatus: GS } = enums;
+const T0 = 1_800_000_000_000;
+const uci = (s) => encodeMove(parseSquare(s.slice(0, 2)), parseSquare(s.slice(2, 4)), 0);
+
+test('writer thread: a rated game is committed with its ratings; errors keep their code and gameId', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-writer-'));
+    const config = testConfig({ DB_PATH: path.join(dir, 'scacelith.db'), DATA_DIR: dir });
+    const store = openStore(config, { applyGame, log: silentLog });
+    migrate(store);
+    const writer = startStoreWriter({ config, logging: false });
+    try {
+        const alice = store.users.create({ username: 'alice', email: 'alice@example.org' });
+        const bob = store.users.create({ username: 'bob', email: 'bob@example.org' });
+        const clock = { t: T0 };
+        const host = new GameHost({
+            shard: 0, config, store: { games: { finishBatch: (r) => writer.finishBatch(r) } }, anticheat: new FakeAnticheat(),
+            primary: new FakePrimary(), log: silentLog, createChessGame: () => new ChessGame(), now: () => clock.t,
+            metrics: new Registry(), autoStart: false,
+        });
+        const p = (userId, name) => ({ userId, name, rating: 1500, provisional: true });
+        const id = host.createGame({ white: p(alice, 'alice'), black: p(bob, 'bob'), rated: true, baseMs: 180000, incMs: 2000 });
+        const ew = new FakeEndpoint(1), eb = new FakeEndpoint(2);
+        host.attach(id, alice, ew);
+        host.attach(id, bob, eb);
+        for (const m of ['f2f3', 'e7e5', 'g2g4', 'd8h4']) {
+            const room = host.room(id);
+            clock.t += 1000;
+            host.onClientMessage(id, room.playerOf(room.ply & 1).userId, {
+                type: MSG.Move, seq: room.ply + 1, game: id, ply: room.ply, move: uci(m),
+                posHash: room.game.position.digest(), thinkMs: 900, drawOffer: false,
+            }, room.ply & 1 ? eb : ew);
+        }
+        const record = host.room(id).record();
+        clock.t += 100;
+        const pending = host.pollCommits(clock.t);
+        assert.equal(typeof pending.then, 'function', 'the commit runs on the thread');
+        assert.equal(await pending, true);
+        const rated = eb.msgs().find((m) => m.type === MSG.RatingUpdate);
+        assert.deepEqual([rated.black.before, rated.black.after, rated.white.after], [1500, 1520, 1480]);
+        // Written by the thread's own connection, visible to the shard's.
+        assert.equal(store.games.byId(id).status, GS.BlackWins);
+        assert.equal(store.ratings.get(bob, '3+2').rating, 1520);
+
+        // A committed game sent again is a duplicate, not a second rating change.
+        const again = await writer.finishBatch([record]);
+        assert.equal(again[0].duplicate, true);
+        assert.equal(store.ratings.get(bob, '3+2').rating, 1520);
+        await assert.rejects(writer.finishBatch([{ id: 424242, status: 99 }]), (e) => e.code === 'invalid_record' && e.gameId === 424242);
+    } finally {
+        await writer.close();
+        await assert.rejects(writer.finishBatch([]), /closed/);
+        store.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});

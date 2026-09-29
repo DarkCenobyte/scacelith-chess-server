@@ -248,4 +248,4 @@ accepts players.
 One machine: `WORKERS` shards (one per core by default); games live on one shard and the others
 relay to it over a local socket bus. Several machines behind a load balancer: see the scaling
 section of [docs/DESIGN.md](docs/DESIGN.md) (shard ranges with `SHARD_BASE`, a TCP bus, a shared
-database). Load tests: `npm run bench` (see `bench/`).
+database). Load tests: `npm run bench`; measured results and capacity estimate in [docs/BENCHMARK.md](docs/BENCHMARK.md).

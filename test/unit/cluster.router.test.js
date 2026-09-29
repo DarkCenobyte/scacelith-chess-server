@@ -420,10 +420,10 @@ describe('router: primary and bus', () => {
     it('reports its load to the primary', async () => {
         const env = await setup();
         env.host.games = 3;
-        env.router.lagP99 = () => 80;
+        env.router.lagP99 = () => 300;
         env.router._reportLoad();
         await waitFor(() => env.seen.some((x) => x.type === 'shard.load'));
         const l = env.seen.find((x) => x.type === 'shard.load').p;
-        assert.deepEqual([l.shard, l.games, l.lagP99, l.overloaded], [0, 3, 80, true]);
+        assert.deepEqual([l.shard, l.games, l.lagP99, l.overloaded], [0, 3, 300, true]);
     });
 });
