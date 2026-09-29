@@ -129,6 +129,9 @@ machine). The full tables (more columns) come from `node bench/table.js bench/re
 | 10k | `--scenario connect --conns 10000 --hold-s 20` | 10,000 (0) | 864 | 356 / 582 | 89 / 223 | 2.5 ms | 60.2 KB (8.1) | 947 MB | 0.27 core | 0.6 / 4.8 |
 | 10k, `LISTEN_REUSE_PORT` | `... --conns 10000 --hold-s 20 --reuse-port` | 10,000 (0) | 962 | 324 / 520 | 79 / 186 | 2.2 ms | 60.3 KB (7.3) | 947 MB | 0.29 core | 0.6 / 4.4 |
 | 10k, no TLS | `... --conns 10000 --hold-s 20 --plain` | 10,000 (0) | 2,320 | 162 / 260 | 6 / 30 | 1.2 ms | 17.8 KB (5.5) | 525 MB | 0.26 core | 0.3 / 2.0 |
+| 10k, TLS session resumption (96 % resumed) | `... --conns 10000 --hold-s 20 --tls-resume` | 10,000 (0) | 888 | 324 / 696 | 81 / 260 | 2.4 ms | 57.8 KB (7.5) | 919 MB | 0.29 core | 0.7 / 9.1 |
+| 20k (other processes 1.2-1.4 cores) | `... --conns 20000 --hold-s 40` | 20,000 (0) | 365 | 909 / 1,556 | 59 / 827 | 3.7 ms | 56.2 KB (7.5) | 1,453 MB | 0.35 core | 3.0 / 22.3 |
+| 20k, server heartbeat only (other processes 1-2.4 cores) | `... --conns 20000 --hold-s 40 --ping-interval-ms 0` | 20,000 (0) | 536 | 422 / 1,589 | 112 / 532 | 2.8 ms | 58.0 KB (7.3) | 1,491 MB | 0.17 core | - |
 
 "Server CPU per connection" is the server's CPU time during the ramp divided by the connections
 opened; it includes the heartbeats of the connections already open, which is why it grows with the
@@ -148,7 +151,13 @@ event-loop lag. The rows marked 2.1 GHz ran on the slower host (see above).
   box with both sides on it.
 - **Idle cost: about 11 µs of server CPU per connection per second** at 100,000 connections
   (1.07 cores) with the server heartbeat and one client Ping every 10 s, i.e. four small TLS
-  records per connection per 10 s. No connection was dropped during any hold.
+  records per connection per 10 s. The client Ping doubles it: 20,000 connections cost 0.35 core
+  with it and 0.17 core with the server heartbeat alone (`--ping-interval-ms 0`), so a client that
+  only answers the heartbeat costs about 5-6 µs per second. No connection was dropped during any
+  hold.
+- **TLS session resumption does not lower the cost of a connection** (2.4 ms of server CPU with
+  96 % of the sessions resumed, 2.5 ms without): a TLS 1.3 resumption still does a key exchange,
+  and most of the per-connection cost is outside the certificate signature.
 
 ### Games at a realistic pace (`games`) and throughput (`burst`)
 
@@ -229,7 +238,7 @@ take them as ±30 %):
 | cost | measured |
 |---|---|
 | new connection (TLS 1.3 full handshake, upgrade, Hello) | 2-2.7 ms of CPU (1.2 ms without TLS) |
-| idle connection (10 s server heartbeat + a client Ping every 10 s) | about 11 µs of CPU per second |
+| idle connection (10 s server heartbeat + a client Ping every 10 s) | about 11 µs of CPU per second (about half without the client Ping) |
 | move (validation, clock, journal, frames to both players, relays) | about 120-160 µs of CPU at a high rate (about 100-120 µs without TLS) |
 | game start and end (challenge through the primary, snapshots, commit, rating update) | about 3 ms of CPU per game (estimated from the staggered run) |
 | memory | 55-60 KB per idle connection, 65-85 KB with a game in progress, plus about 350 MB for the processes |
@@ -238,9 +247,10 @@ For a dedicated 4-core, 16 GB machine running only the server (Linux, `nofile` r
 `WORKERS=4`), keeping the CPU under about 70 % for the latency:
 
 - **About 100,000 connected players with 30,000-40,000 simultaneous blitz games.** 100,000
-  connections cost about 1.1 cores for their heartbeats; 35,000 games at a 3+2 pace (one ply every
-  4-5 s per game) are about 7,500 moves/s, i.e. about 1-1.2 cores, and about 90 games end and
-  start per second, about 0.3 core; total about 2.4-2.6 cores of 4. Memory: about 7.5 GB.
+  connections cost about 1.1 cores for their heartbeats (about 0.6 if the clients send no Ping of
+  their own); 35,000 games at a 3+2 pace (one ply every 4-5 s per game) are about 7,500 moves/s,
+  i.e. about 1-1.2 cores, and about 90 games end and start per second, about 0.3 core; total about
+  2-2.6 cores of 4. Memory: about 7.5 GB.
 - **The first hard limits beyond that are memory (about 150,000-180,000 TLS connections in 16 GB)
   and the reconnection storm after a restart**: at 2-2.7 ms per handshake, 4 cores accept about
   1,500-2,000 connections/s, so 100,000 players need about a minute to come back (clients should
