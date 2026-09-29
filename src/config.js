@@ -116,6 +116,8 @@ key('WS_SEND_BUFFER_LIMIT', { section: 'limits', type: 'int', default: 262144, m
 key('WS_HELLO_TIMEOUT_MS', { section: 'limits', type: 'int', default: 10000, min: 1000, desc: 'Time a new connection has to authenticate.' });
 key('HEARTBEAT_INTERVAL_MS', { section: 'limits', type: 'int', default: 10000, min: 1000, desc: 'Server ping interval (also measures each player\'s latency).' });
 key('HEARTBEAT_TIMEOUT_MS', { section: 'limits', type: 'int', default: 30000, min: 3000, desc: 'A connection silent for this long is considered dead.' });
+key('CLIENT_PING_INTERVAL_MS', { section: 'limits', type: 'int', default: 10000, min: 1000, max: 60000,
+    desc: 'Interval of the game client\'s own Ping, announced in Welcome (the client measures its round trip for the ping indicator and its estimate of the server clock with it). Lower is a more reactive ping indicator but costs more server CPU for every connected player: at 2000 these pings alone take a third or more of the server CPU of a player in a 3+2 game. After each connection the client sends a few quick pings anyway.' });
 key('HTTP_BODY_LIMIT', { section: 'limits', type: 'int', default: 16384, min: 1024, desc: 'Largest API request body in bytes.' });
 key('HTTP_RATE_PER_IP', { section: 'limits', type: 'int', default: 120, min: 1, desc: 'API requests per minute from one IP address (all endpoints).' });
 key('AUTH_RATE_PER_IP', { section: 'limits', type: 'int', default: 20, min: 1, desc: 'Login / register / reset attempts per 10 minutes from one IP address.' });

@@ -225,6 +225,9 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
   applied migration was modified or is unknown to its version (a downgrade).
 - A crash loses at most the last journal flush (`JOURNAL_FLUSH_MS`, 50 ms) of moves in progress;
   finished games and rating changes are committed in database transactions.
+- Players come back by themselves after a restart. The game spreads their reconnections over
+  about half a minute (players with a game in progress within 8 s, since their reconnection grace
+  is short), so a restart does not turn into a burst of TLS handshakes.
 
 ## Moderation
 
@@ -249,3 +252,9 @@ One machine: `WORKERS` shards (one per core by default); games live on one shard
 relay to it over a local socket bus. Several machines behind a load balancer: see the scaling
 section of [docs/DESIGN.md](docs/DESIGN.md) (shard ranges with `SHARD_BASE`, a TCP bus, a shared
 database). Load tests: `npm run bench`; measured results and capacity estimate in [docs/BENCHMARK.md](docs/BENCHMARK.md).
+
+On a small machine, `CLIENT_PING_INTERVAL_MS` is the idle cost you control: the game pings the
+server at that interval (announced in `Welcome`) for its ping indicator and its estimate of the
+server clock, and each ping costs server CPU for every connected player. The default, 10 s, keeps
+it at about half of an idle player's cost; 2 s would make it a third or more of the cost of a
+player in a 3+2 game.

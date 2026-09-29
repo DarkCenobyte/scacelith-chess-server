@@ -190,6 +190,7 @@ class Client {
         this.sentAt = 0;
         this.pingNonce = 0;
         this.pingAt = 0;
+        this.pingEveryMs = 0; // client Ping interval of this connection (0 = none)
         this.reqs = null;     // Map seq -> kind
         this.pair = null;
         this.queuedAt = 0;
@@ -387,7 +388,8 @@ function onWelcome(c, m) {
     hist.hello.add((now() - c.tHello) * 1000);
     cnt.connOk++;
     lastWelcomeAt = Date.now();
-    if (cfg.pingIntervalMs > 0) schedule(now() + Math.random() * cfg.pingIntervalMs, c, K_PING, 0);
+    c.pingEveryMs = cfg.pingIntervalMs >= 0 ? cfg.pingIntervalMs : clientPingMs(m.clientPingMs);
+    if (c.pingEveryMs > 0) schedule(now() + Math.random() * c.pingEveryMs, c, K_PING, 0);
     pumpRamp();
 }
 
@@ -436,7 +438,12 @@ function doPing(c) {
     c.pingAt = now();
     send(c, pingFrame(++c.seq, c.pingNonce, c.mask));
     cnt.pingsSent++;
-    schedule(now() + cfg.pingIntervalMs, c, K_PING, 0);
+    schedule(now() + c.pingEveryMs, c, K_PING, 0);
+}
+
+// The interval the game client uses for Welcome.clientPingMs: 0 = 10 s, else within 1 s..60 s.
+function clientPingMs(announced) {
+    return announced > 0 ? Math.min(60000, Math.max(1000, announced)) : 10000;
 }
 
 // ---- ramp -------------------------------------------------------------------------------------------

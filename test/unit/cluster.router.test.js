@@ -101,6 +101,7 @@ describe('router: hello', () => {
         assert.equal(w.username, 'alice');
         assert.equal(w.serverName, env.cfg.serverName);
         assert.equal(w.heartbeatMs, 1000);
+        assert.equal(w.clientPingMs, 10000);          // CLIENT_PING_INTERVAL_MS default
         assert.equal(w.activeGame, 0);
         const claim = env.seen.find((x) => x.type === 'presence.claim').p;
         assert.deepEqual([claim.userId, claim.username, claim.shard, claim.ip], [1, 'alice', 0, '127.0.0.1']);
@@ -109,6 +110,18 @@ describe('router: hello', () => {
         await waitFor(() => env.seen.some((x) => x.type === 'presence.release'));
         assert.deepEqual(env.seen.find((x) => x.type === 'presence.release').p, { userId: 1, connId: claim.connId });
         await waitFor(() => env.seen.some((x) => x.type === 'conn.ipRelease'));
+    });
+
+    it('announces CLIENT_PING_INTERVAL_MS in Welcome (1 s to 60 s)', async () => {
+        const env = await setup({ config: { CLIENT_PING_INTERVAL_MS: '25000' } });
+        const { c, w } = await env.login();
+        assert.equal(w.clientPingMs, 25000);
+        assert.equal(w.heartbeatMs, 1000);
+        c.ws.close(1000);
+        assert.equal(testConfig({ CLIENT_PING_INTERVAL_MS: '1000' }).clientPingIntervalMs, 1000);
+        assert.equal(testConfig({ CLIENT_PING_INTERVAL_MS: '60000' }).clientPingIntervalMs, 60000);
+        assert.throws(() => testConfig({ CLIENT_PING_INTERVAL_MS: '999' }), /CLIENT_PING_INTERVAL_MS: at least 1000/);
+        assert.throws(() => testConfig({ CLIENT_PING_INTERVAL_MS: '60001' }), /CLIENT_PING_INTERVAL_MS: at most 60000/);
     });
 
     it('refuses an upgrade the primary refuses (429 per IP, 503 when full)', async () => {

@@ -48,7 +48,7 @@ Load
   --inflight N           handshakes in flight per process                   [200]
   --connect-timeout-ms N handshake + Hello deadline                         [30000]
   --hold-s S             connect: idle hold after the ramp                  [30]
-  --ping-interval-ms N   client Ping (round trip) per connection, 0 = off   [10000]
+  --ping-interval-ms N   client Ping (round trip) per connection, 0 = off   [the server's Welcome.clientPingMs]
   --tls-resume           resume TLS sessions (one ticket per process) instead of full handshakes
   --plain                own server only: TLS_MODE=off + ALLOW_INSECURE_DEV (measures the cost of TLS)
 
@@ -119,7 +119,7 @@ function options(raw) {
         inflight: num(raw.inflight, 200),
         connectTimeoutMs: num(raw.connectTimeoutMs, 30000),
         holdS: num(raw.holdS, 30),
-        pingIntervalMs: num(raw.pingIntervalMs, 10000),
+        pingIntervalMs: num(raw.pingIntervalMs, -1),     // -1: Welcome.clientPingMs, like the game
         tlsResume: !!raw.tlsResume,
         plain: !!raw.plain,
         via: raw.via || 'challenge',
@@ -475,7 +475,9 @@ async function main() {
 
         if (o.scenario === 'connect') {
             // ---- hold ---------------------------------------------------------------------------------
-            say(`hold: ${o.holdS} s idle (server heartbeat + client Ping every ${o.pingIntervalMs} ms)`);
+            const pingText = o.pingIntervalMs < 0 ? ' + client Ping every Welcome.clientPingMs'
+                : o.pingIntervalMs > 0 ? ` + client Ping every ${o.pingIntervalMs} ms` : ', no client Ping';
+            say(`hold: ${o.holdS} s idle (server heartbeat${pingText})`);
             m0 = await startPhase('hold');
             await sleep(o.holdS * 1000);
             await sleep(1100);

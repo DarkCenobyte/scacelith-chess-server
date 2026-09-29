@@ -77,7 +77,7 @@ workers and load processes (7 of each for 100,000 connections on 4 cores). On a 
 
 | scenario | load | measures |
 |---|---|---|
-| `connect` | ramps `--conns` authenticated WSS connections (TCP, TLS 1.3 full handshake, HTTP upgrade, Hello with the session token, Welcome) with `--inflight` handshakes in flight per process, then holds them idle for `--hold-s` with the server heartbeat (every 10 s) and one client Ping per connection every `--ping-interval-ms` | connections/s, failures and their reason, handshake (TCP+TLS+101) and Hello->Welcome latency, server CPU per connection, server memory per connection (RSS, V8 heap and external deltas of every server process, from `/metrics`, before and after, no forced GC), idle CPU, heartbeat round trip (client Ping->Pong, and the server's own RTT histogram), connections dropped during the hold |
+| `connect` | ramps `--conns` authenticated WSS connections (TCP, TLS 1.3 full handshake, HTTP upgrade, Hello with the session token, Welcome) with `--inflight` handshakes in flight per process, then holds them idle for `--hold-s` with the server heartbeat (every 10 s) and one client Ping per connection every `--ping-interval-ms` (by default the interval the server announces in `Welcome.clientPingMs`, `CLIENT_PING_INTERVAL_MS`, 10 s, as the game does) | connections/s, failures and their reason, handshake (TCP+TLS+101) and Hello->Welcome latency, server CPU per connection, server memory per connection (RSS, V8 heap and external deltas of every server process, from `/metrics`, before and after, no forced GC), idle CPU, heartbeat round trip (client Ping->Pong, and the server's own RTT histogram), connections dropped during the hold |
 | `games` | `--games` pairs start games by direct challenge (ChallengeCreate -> ChallengeAccept) or with `--via queue` through the matchmaking queue, at `--start-rate` games/s, then play legal random moves every `--move-interval-ms` (1000 ms +-50 % by default) per move; a game resigns at `--max-plies` (80) and the pair starts a new one after `--between-games-ms` | move round trip (Move sent -> the mover's own MoveMade) p50/p90/p99/p99.9/max, moves/s, games started and finished, end reasons, rejected moves, errors, game start latency (challenge -> both snapshots), server move processing time (inside the host), CPU and event-loop lag per shard, store commit latency and batch size, relayed frames/s, memory with games |
 | `burst` | like `games` with no think time (each player answers the opponent's move at once) | the throughput limit of the server on the machine, and the latency at that limit |
 
@@ -153,8 +153,9 @@ event-loop lag. The rows marked 2.1 GHz ran on the slower host (see above).
   (1.07 cores) with the server heartbeat and one client Ping every 10 s, i.e. four small TLS
   records per connection per 10 s. The client Ping doubles it: 20,000 connections cost 0.35 core
   with it and 0.17 core with the server heartbeat alone (`--ping-interval-ms 0`), so a client that
-  only answers the heartbeat costs about 5-6 µs per second. No connection was dropped during any
-  hold.
+  only answers the heartbeat costs about 5-6 µs per second. The game client pings at the interval
+  the server announces in `Welcome` (`CLIENT_PING_INTERVAL_MS`, 10 s by default, as in these runs).
+  No connection was dropped during any hold.
 - **TLS session resumption does not lower the cost of a connection** (2.4 ms of server CPU with
   96 % of the sessions resumed, 2.5 ms without): a TLS 1.3 resumption still performs a key
   exchange, so it saves little here.
@@ -238,7 +239,7 @@ take them as ±30 %):
 | cost | measured |
 |---|---|
 | new connection (TLS 1.3 full handshake, upgrade, Hello) | 2-2.7 ms of CPU (1.2 ms without TLS) |
-| idle connection (10 s server heartbeat + a client Ping every 10 s) | about 11 µs of CPU per second (about half without the client Ping) |
+| idle connection (10 s server heartbeat + a client Ping every 10 s, the default `CLIENT_PING_INTERVAL_MS`) | about 11 µs of CPU per second (about half without the client Ping) |
 | move (validation, clock, journal, frames to both players, relays) | about 120-160 µs of CPU at a high rate (about 100-120 µs without TLS) |
 | game start and end (challenge through the primary, snapshots, commit, rating update) | about 3 ms of CPU per game (estimated from the staggered run) |
 | memory | 55-60 KB per idle connection, 65-85 KB with a game in progress, plus about 350 MB for the processes |
@@ -253,8 +254,13 @@ For a dedicated 4-core, 16 GB machine running only the server (Linux, `nofile` r
   2-2.6 cores of 4. Memory: about 7.5 GB.
 - **The first hard limits beyond that are memory (about 150,000-180,000 TLS connections in 16 GB)
   and the reconnection storm after a restart**: at 2-2.7 ms per handshake, 4 cores accept about
-  1,500-2,000 connections/s, so 100,000 players need about a minute to come back (clients should
-  reconnect with a random delay).
+  1,500-2,000 connections/s, so 100,000 players need about a minute to come back. The game client
+  spreads that wave: after a shutdown its first attempt waits a random 5 to 35 s, later attempts
+  use full jitter (a random delay between 0.5 s and min(30 s, 2 s x 2^n)), a full server is tried
+  again after 60 to 120 s, and for 10 minutes after losing a connection that had reached `Welcome`
+  the automatic attempts skip the `/api/v1/info` request (one TLS handshake per player instead of
+  two). Players with a game in progress never wait more than 8 s between attempts (their
+  reconnection grace is 15 s by default), so that part of the wave stays concentrated.
 - The chess logic is not a concern (under 100 µs per move at p99); the primary is not on the move
   path (under 0.3 core in every run, 0.1-0.35 core during the connection ramps).
 

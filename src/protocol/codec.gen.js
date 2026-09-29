@@ -13,7 +13,7 @@
 export const PROTOCOL_VERSION = 1;
 export const PROTOCOL_MIN = 1;
 export const WS_SUBPROTOCOL = 'scacelith.v1';
-export const SCHEMA_HASH = 0xf05042b2;
+export const SCHEMA_HASH = 0x7b5d5600;
 
 export const enums = Object.freeze({
     Color: Object.freeze({ White: 0, Black: 1, None: 2 }),
@@ -589,16 +589,17 @@ function e_Welcome(m) {
     if (L7 < 0) efail('serverName contains NUL');
     if (L7 > 64) efail('serverName bad length');
     const v8 = m.heartbeatMs;
-    const v9 = m.maxMsgPerSec;
-    const v10 = m.activeGame;
-    const b = Buffer.allocUnsafe(31 + L5 + L7);
+    const v9 = m.clientPingMs;
+    const v10 = m.maxMsgPerSec;
+    const v11 = m.activeGame;
+    const b = Buffer.allocUnsafe(35 + L5 + L7);
     b[0] = 0x80;
     let o = 0;
     if ((v1 & 65535) !== v1) efail('proto out of range');
     b[1] = v1; b[2] = v1 >>> 8;
-    const d11 = Number(v2) || 0;
-    if (d11 - d11 !== 0) efail('serverTime not finite');
-    wf64(b, 3, d11);
+    const d12 = Number(v2) || 0;
+    if (d12 - d12 !== 0) efail('serverTime not finite');
+    wf64(b, 3, d12);
     if ((v3 >>> 0) !== v3) efail('userId out of range');
     b[11] = v3; b[12] = v3 >>> 8; b[13] = v3 >>> 16; b[14] = v3 >>> 24;
     b[15] = L5;
@@ -609,13 +610,15 @@ function e_Welcome(m) {
     if (L7 !== 0) { wstr(b, o, v6, L7); o += L7; }
     if ((v8 >>> 0) !== v8) efail('heartbeatMs out of range');
     b[o] = v8; b[o + 1] = v8 >>> 8; b[o + 2] = v8 >>> 16; b[o + 3] = v8 >>> 24;
-    if ((v9 & 65535) !== v9) efail('maxMsgPerSec out of range');
-    b[o + 4] = v9; b[o + 5] = v9 >>> 8;
-    const g12 = v10 || 0;
-    if (!Number.isSafeInteger(g12) || g12 < 0) efail('activeGame not an id53');
-    const lo13 = g12 >>> 0, hi14 = (g12 - lo13) / 4294967296;
-    b[o + 6] = lo13; b[o + 7] = lo13 >>> 8; b[o + 8] = lo13 >>> 16; b[o + 9] = lo13 >>> 24;
-    b[o + 10] = hi14; b[o + 11] = hi14 >>> 8; b[o + 12] = hi14 >>> 16; b[o + 13] = hi14 >>> 24;
+    if ((v9 >>> 0) !== v9) efail('clientPingMs out of range');
+    b[o + 4] = v9; b[o + 5] = v9 >>> 8; b[o + 6] = v9 >>> 16; b[o + 7] = v9 >>> 24;
+    if ((v10 & 65535) !== v10) efail('maxMsgPerSec out of range');
+    b[o + 8] = v10; b[o + 9] = v10 >>> 8;
+    const g13 = v11 || 0;
+    if (!Number.isSafeInteger(g13) || g13 < 0) efail('activeGame not an id53');
+    const lo14 = g13 >>> 0, hi15 = (g13 - lo14) / 4294967296;
+    b[o + 10] = lo14; b[o + 11] = lo14 >>> 8; b[o + 12] = lo14 >>> 16; b[o + 13] = lo14 >>> 24;
+    b[o + 14] = hi15; b[o + 15] = hi15 >>> 8; b[o + 16] = hi15 >>> 16; b[o + 17] = hi15 >>> 24;
     return b;
 }
 
@@ -1394,14 +1397,15 @@ function d_Welcome(b, n) {
     if (o + l6 > n) fail('truncated');
     const v7 = l6 === 0 ? '' : rstr(b, o, o + l6, 'serverName');
     o += l6;
-    if (o + 14 > n) fail('truncated');
+    if (o + 18 > n) fail('truncated');
     const v8 = (b[o] | b[o + 1] << 8 | b[o + 2] << 16 | b[o + 3] << 24) >>> 0;
-    const v9 = b[o + 4] | b[o + 5] << 8;
-    const h11 = (b[o + 10] | b[o + 11] << 8 | b[o + 12] << 16 | b[o + 13] << 24) >>> 0;
-    if (h11 >= 0x200000) fail('activeGame above 2^53');
-    const v10 = h11 * 4294967296 + ((b[o + 6] | b[o + 7] << 8 | b[o + 8] << 16 | b[o + 9] << 24) >>> 0);
-    if (o + 14 !== n) fail('trailing bytes');
-    return { type: 0x80, proto: v1, serverTime: v2, userId: v3, username: v5, serverName: v7, heartbeatMs: v8, maxMsgPerSec: v9, activeGame: v10 };
+    const v9 = (b[o + 4] | b[o + 5] << 8 | b[o + 6] << 16 | b[o + 7] << 24) >>> 0;
+    const v10 = b[o + 8] | b[o + 9] << 8;
+    const h12 = (b[o + 14] | b[o + 15] << 8 | b[o + 16] << 16 | b[o + 17] << 24) >>> 0;
+    if (h12 >= 0x200000) fail('activeGame above 2^53');
+    const v11 = h12 * 4294967296 + ((b[o + 10] | b[o + 11] << 8 | b[o + 12] << 16 | b[o + 13] << 24) >>> 0);
+    if (o + 18 !== n) fail('trailing bytes');
+    return { type: 0x80, proto: v1, serverTime: v2, userId: v3, username: v5, serverName: v7, heartbeatMs: v8, clientPingMs: v9, maxMsgPerSec: v10, activeGame: v11 };
 }
 
 // 0x81 Error (s2c)

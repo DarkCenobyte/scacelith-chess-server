@@ -114,7 +114,7 @@ const TYPICAL = {
     Abort: { seq: 9, game: GAME },
     Resync: { seq: 10, game: GAME },
     Rematch: { seq: 30, game: GAME, accept: true },
-    Welcome: { proto: 1, serverTime: T0, userId: 1017, username: 'Łukasz', serverName: 'Scacelith Community Server', heartbeatMs: 10000, maxMsgPerSec: 20, activeGame: 0 },
+    Welcome: { proto: 1, serverTime: T0, userId: 1017, username: 'Łukasz', serverName: 'Scacelith Community Server', heartbeatMs: 10000, clientPingMs: 10000, maxMsgPerSec: 20, activeGame: 0 },
     Error: { ref: 12, code: E.IllegalMove, fatal: false, game: GAME },
     S_Ping: { nonce: 991, serverTime: T0 },
     S_Pong: { nonce: 123456, serverTime: T0 + 12.25 },
@@ -313,9 +313,9 @@ export function buildVectors() {
     ok('Move', { seq: 14, game: 0xffffffff, ply: 8, move: mv('e1g1'), posHash: 0x12345678, thinkMs: 812, drawOffer: false }, 'game = 2^32 - 1, castling e1g1');
     ok('Resign', { seq: 1, game: 1 }, 'smallest game id');
     ok('Rematch', { seq: 31, game: MAX53 - 1, accept: false }, 'decline, game = 2^53 - 2');
-    ok('Welcome', { proto: 1, serverTime: 0, userId: 0xffffffff, username: 'ユキユキユキユキ', serverName: '♜'.repeat(21) + 'x', heartbeatMs: 0, maxMsgPerSec: 0xffff, activeGame: MAX53 },
+    ok('Welcome', { proto: 1, serverTime: 0, userId: 0xffffffff, username: 'ユキユキユキユキ', serverName: '♜'.repeat(21) + 'x', heartbeatMs: 0, clientPingMs: 0xffffffff, maxMsgPerSec: 0xffff, activeGame: MAX53 },
         'username at its maximum (24 bytes of 3-byte characters), serverName at its maximum (64 bytes), activeGame = 2^53 - 1, serverTime 0');
-    ok('Welcome', { proto: 1, serverTime: -123456.789, userId: 1, username: 'مُحَمَّد', serverName: '', heartbeatMs: 10000, maxMsgPerSec: 20, activeGame: GAME },
+    ok('Welcome', { proto: 1, serverTime: -123456.789, userId: 1, username: 'مُحَمَّد', serverName: '', heartbeatMs: 10000, clientPingMs: 0, maxMsgPerSec: 20, activeGame: GAME },
         'negative f64, Arabic username, empty serverName');
     ok('Error', { ref: 0, code: E.CheatDetected, fatal: true, game: 0 }, 'fatal, no request, no game');
     ok('Error', { ref: 1, code: E.Malformed, fatal: true, game: 0 }, 'smallest ErrorCode');
