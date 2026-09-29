@@ -113,8 +113,9 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
    connection is dead when nothing at all was received for twice `heartbeatMs` (10 s at least).
    After 1.5 times `heartbeatMs` (7.5 s at least) without anything, it sends one `Ping` of its own
    at once: its `Pong` keeps a live connection when a heartbeat comes late.
-6. **Reconnection.** A lost connection does not stop a game: the player's clock keeps running and the
-   opponent receives `GameEvent{PlayerDisconnected, arg = grace ms}`. The client reconnects with
+6. **Reconnection.** A lost connection does not stop a game: the player's clock keeps running (except
+   in a game restored after a restart, below) and the opponent receives
+   `GameEvent{PlayerDisconnected, arg = grace ms}`. The client reconnects with
    exponential backoff and full jitter (attempt n waits a uniform random time between 0.5 s and
    min(30 s, 2 s x 2^n); n is reset by a successful `Welcome`), sends a new `Hello` (seq starts
    again at 1 on the new connection) and receives `Welcome` then `GameSnapshot`. A full server
@@ -126,18 +127,30 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
    `RECONNECT_GRACE_MIN_MS` (15 s by default), and `RECOVERY_GRACE_MS` (90 s by default) for a
    game the server restored after a restart. Their attempts are 8 s apart at most, whatever the
    cause, unless the server gave a `Retry-After`, and their first attempt after a shutdown waits
-   1 s to 8 s. For 10 minutes after losing a connection that had reached `Welcome` (not after a
-   shutdown), the automatic attempts reuse the `/api/v1/info` answer (`wsPath`) that
-   connection was made with instead of asking for it again (one TLS handshake instead of two). A
-   5xx at the upgrade keeps that answer (a reverse proxy answers 502 while the server restarts); a
-   4xx other than 429 makes the next attempt read it again. A connection the player asks for always
-   reads it first. The client never replays move intents from the old connection blindly: the
-   snapshot says which moves the server accepted. It does not reconnect after `Replaced`,
-   `Banned`, `Unauthorized`, `UnsupportedProtocol` or `CheatDetected`.
+   1 s to 8 s. In a game the server restored after a restart, the clock of the side to move (its
+   first-move timer at plies 0 and 1) stays stopped until that player is back, for
+   `RECOVERY_CLOCK_HOLD_MS` at most (20 s by default, never more than the recovery grace). While
+   it is held, the game's `GameSnapshot` has `running = None` even from ply 2 on (where a clock
+   normally runs), and at plies 0 and 1 its `firstMoveMs` includes the rest of the hold. When
+   the held clock starts (its player is back, or the hold is over while they are still away), the
+   opponent receives a `GameSnapshot` it did not ask for, with that clock running; the player who
+   is back receives theirs after `Welcome`, as after any reconnection. A player back within the
+   hold loses no clock time to the restart; after it, their clock runs whether they are back or
+   not. For 10 minutes after losing a connection that had reached `Welcome`, after a shutdown as
+   after a network failure, the automatic attempts reuse the `/api/v1/info` answer (`wsPath`)
+   that connection was made with instead of asking for it again (one TLS handshake instead of two,
+   so the reconnection wave of a restart costs one per player). What a restart can change is still
+   caught: another server at that origin by the server id of the `101` answer (step 1), before
+   `Hello`; another protocol at `Hello` (close 4002). A 5xx at the upgrade keeps that answer (a
+   reverse proxy answers 502 while the server restarts); a 4xx other than 429 (404 for another
+   path, 426 for another subprotocol) makes the next attempt read it again. A connection the
+   player asks for always reads it first. The client never replays move intents from the old
+   connection blindly: the snapshot says which moves the server accepted. It does not reconnect
+   after `Replaced`, `Banned`, `Unauthorized`, `UnsupportedProtocol` or `CheatDetected`.
 7. **Closing.** The server closes with the codes below; a fatal `Error` precedes the close when there
    is one. `Notice{ServerShutdown, arg = ms}` announces a restart: the client reconnects afterwards
    (games in progress are replayed from the server's journal, and their players then have
-   `RECOVERY_GRACE_MS`, 90 s by default, to come back).
+   `RECOVERY_GRACE_MS`, 90 s by default, to come back, with the clock hold of step 6).
 
 ## Game flow
 
@@ -190,8 +203,9 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
   `shown(running side) = xMs - (serverNow - serverTime)`; the other side's clock is `xMs` as sent.
 * `whiteMs` / `blackMs` are the remaining times **at `serverTime`** (server wall clock, epoch ms).
   `running` is the colour whose clock is running from that instant (`None` before the clocks start,
-  after the end, or while waiting for a first move). In `MoveMade` the clock of the side to move
-  runs from `serverTime` unless `firstMoveMs > 0`.
+  after the end, while waiting for a first move, or while the clock of a game restored after a
+  restart waits for its player, `RECOVERY_CLOCK_HOLD_MS` at most: lifecycle step 6). In
+  `MoveMade` the clock of the side to move runs from `serverTime` unless `firstMoveMs > 0`.
 * Plies 0 and 1 (each side's first move) do not run the clock: each player has `firstMoveMs`
   (`FIRST_MOVE_TIMEOUT_MS`) to make it, otherwise the game is aborted (`NoShow`, unrated). No
   increment for them. The clocks start with White's second move.
@@ -575,7 +589,7 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
 
 ### GameSnapshot
 
-`0xA0`, server -> client, at least 81 bytes. Complete authoritative state of a game: sent when it starts, after a (re)connection and on Resync. Clocks are the remaining times at serverTime; the `running` side keeps counting from there.
+`0xA0`, server -> client, at least 81 bytes. Complete authoritative state of a game: sent when it starts, after a (re)connection and on Resync, and also to the opponent when the held clock of a game restored after a restart starts (lifecycle step 6). Clocks are the remaining times at serverTime; the `running` side keeps counting from there (`running` is None while such a clock is held).
 
 | Field | Type | Bytes | Limits |
 |---|---|---|---|

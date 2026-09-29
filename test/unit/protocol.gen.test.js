@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import * as schema from '../../src/protocol/schema.js';
+import { CONFIG_KEYS } from '../../src/config.js';
 import { generateCodec, generateDocs, buildModel, CODEC_PATH, DOCS_PATH } from '../../tools/gen-protocol.js';
 import { renderVectors, VECTORS_PATH } from '../../tools/gen-protocol-vectors.js';
 
@@ -18,6 +19,34 @@ test('docs/PROTOCOL.md is what the schema generates', () => {
 
 test('test/fixtures/protocol-vectors.json is what the codec generates', () => {
     assert.equal(fs.readFileSync(VECTORS_PATH, 'utf8'), renderVectors());
+});
+
+test('docs/PROTOCOL.md tells clients about the clock hold of a game restored after a restart', () => {
+    // The server holds the clock of the side to move of a restored game (RECOVERY_CLOCK_HOLD_MS),
+    // shows running = None meanwhile, even after ply 1 (room.js snapshot), and sends the opponent a
+    // GameSnapshot of its own accord when the held clock starts (host.js, Outcome.clockStarted).
+    // Third-party clients follow the protocol reference, so it must say so.
+    const docs = generateDocs();
+    const flat = (s) => s.replace(/\s+/g, ' ');
+    const section = (title) => {
+        const i = docs.indexOf(`\n## ${title}\n`);
+        assert.ok(i >= 0, `section ${title}`);
+        const j = docs.indexOf('\n## ', i + 1);
+        return flat(docs.slice(i, j < 0 ? undefined : j));
+    };
+    const lifecycle = section('Connection lifecycle');
+    const step6 = lifecycle.slice(lifecycle.indexOf(' 6. **Reconnection.**'), lifecycle.indexOf(' 7. **Closing.**'));
+    const hold = CONFIG_KEYS.find((k) => k.name === 'RECOVERY_CLOCK_HOLD_MS');
+    assert.ok(hold && hold.default > 0);
+    assert.match(step6, /`RECOVERY_CLOCK_HOLD_MS` at most/);
+    assert.ok(step6.includes(`${hold.default / 1000} s by default`), 'the default hold');
+    assert.match(step6, /`running = None` even from ply 2 on/);
+    assert.match(step6, /the opponent receives a `GameSnapshot` it did not ask for/);
+    assert.doesNotMatch(step6, /the player's clock keeps running and/);
+    assert.match(section('Clocks'), /`running` is the colour whose clock is running [^*]*restored after a restart waits for its player, `RECOVERY_CLOCK_HOLD_MS` at most/);
+    const snapshot = flat(docs.split('\n').find((l) => l.startsWith('`0xA0`')) || '');
+    assert.match(snapshot, /also to the opponent when the held clock of a game restored after a restart starts/);
+    assert.match(schema.messages.find((m) => m.name === 'GameSnapshot').doc, /held clock/);
 });
 
 test('generation is deterministic', () => {

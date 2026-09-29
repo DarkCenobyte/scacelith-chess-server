@@ -114,16 +114,19 @@ store writer thread (`src/store/writer.js`, its own SQLite connection), so the e
 waits for the disk or another process's write lock. After the commit it sends `RatingUpdate` and tells the primary
 `game.ended`.
 
-**Reconnection.** A lost connection keeps the game running (the player's clock too). The
-opponent gets `GameEvent{PlayerDisconnected, arg = grace ms}`. A new connection (any shard)
+**Reconnection.** A lost connection keeps the game running (the player's clock too, except
+for the clock hold of a game restored after a restart: section 6.4). The opponent gets
+`GameEvent{PlayerDisconnected, arg = grace ms}`. A new connection (any shard)
 says `Hello`; the primary knows the active game; the client receives `GameSnapshot` and goes on.
 After the grace period without a connection: section 6.4. The game client spreads its
 reconnections so that a restart or a full server does not bring every player back at the same
 instant: full jitter (a random delay between 0.5 s and min(30 s, 2 s x 2^n)), 60 to 120 s after
 `ServerFull` (HTTP 503 at the upgrade or close 4006), a first attempt 5 to 35 s after a shutdown
 (`Notice{ServerShutdown}` or close 4008), and no `/api/v1/info` request for 10 minutes after
-losing a connection that had reached `Welcome`, except after a shutdown (PROTOCOL.md, lifecycle
-step 6). A player whose game is in progress is the exception: the grace is short (at least
+losing a connection that had reached `Welcome`, after a shutdown too, so a restart costs one TLS
+handshake per player (another server at the same origin is caught by the server id of the `101`
+answer, before `Hello`; PROTOCOL.md, lifecycle step 6). A player whose game is in progress is
+the exception: the grace is short (at least
 `RECONNECT_GRACE_MIN_MS`, 15 s by default, and `RECOVERY_GRACE_MS`, 90 s by default, for a game
 restored after a restart), so their attempts are 8 s apart at most unless the server gave a
 `Retry-After`, and the first one after a shutdown comes 1 to 8 s after it.
@@ -675,7 +678,7 @@ rules before sending, so steps 6 and 7 only happen with a modified client.
   journaled value and stays stopped until that player is back: it starts at the reconnection, or
   `RECOVERY_CLOCK_HOLD_MS` (20 s, lower than the recovery grace) after the replay when the player
   is still away, so that staying away on purpose gives little free thinking time. Until then the
-  snapshots show no running clock; when the clock starts without its player, the opponent gets a
+  snapshots show no running clock; when the clock starts (its player is back or the hold ends), the opponent gets a
   new `GameSnapshot`. Both the hold and its end are journaled (the `recovered` record carries the
   hold, and a checkpoint marks its end), so a later replay rebuilds the same clocks. Once the
   clock runs, a side to move with less time left than its reconnection delay can still lose on
