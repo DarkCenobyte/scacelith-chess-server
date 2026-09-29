@@ -513,9 +513,15 @@ async function main() {
             const ms = phaseResult('measure', phase, m0, m1, {});
             const secs = ms.seconds;
             const withGames = memoryDelta(base, m1, sumG('ready'));
+            // Shared hosts: the 2-second windows of the measurement when the other processes of the
+            // machine used less than 0.3 core, and their median throughput.
+            const quiet = report.timeline.filter((row) => row.phase === 'measure' && row.otherCores !== null && row.otherCores < 0.3 && row.movesPerSec > 0);
+            const med = (a) => { const x = [...a].sort((p, q) => p - q); return x.length ? x[Math.floor(x.length / 2)] : null; };
             report.results.games = {
                 activeGames: sumG('whitePlaying'),
                 movesPerSec: Math.round((phase.c.movesOk || 0) / secs),
+                quietWindows: quiet.length, quietMovesPerSecMedian: med(quiet.map((row) => row.movesPerSec)),
+                quietMoveRttP99MsMedian: med(quiet.map((row) => row.moveRttP99Ms).filter((v) => v !== null)),
                 movesSent: phase.c.movesSent || 0, movesConfirmed: phase.c.movesOk || 0,
                 moveRttMs: ms.latencyMs.move || null,
                 serverMoveProcessingUs: ms.server?.moveUs || null,
@@ -691,6 +697,7 @@ function printSummary(r) {
     const g = r.results?.games;
     if (g) {
         L.push(`games: ${g.activeGames} active, ${g.movesPerSec} moves/s confirmed, ${g.gamesFinished} finished (${g.gamesPerMinute}/min), ${g.gamesStarted} started in the window`);
+        if (g.quietWindows) L.push(`  quiet 2 s windows (other processes < 0.3 core): ${g.quietWindows}, median ${g.quietMovesPerSecMedian} moves/s, median p99 ${g.quietMoveRttP99MsMedian} ms`);
         if (g.moveRttMs) L.push(`  move round trip ms: p50 ${g.moveRttMs.p50} p90 ${g.moveRttMs.p90} p99 ${g.moveRttMs.p99} p99.9 ${g.moveRttMs.p999} max ${g.moveRttMs.max}`);
         if (g.serverMoveProcessingUs?.n) L.push(`  server move processing us (bucketed): p50 ${g.serverMoveProcessingUs.p50} p99 ${g.serverMoveProcessingUs.p99}`);
         if (g.gameStartMs) L.push(`  game start (challenge -> both snapshots) ms: p50 ${g.gameStartMs.p50} p99 ${g.gameStartMs.p99}`);
