@@ -65,6 +65,19 @@ export function graceFor(baseMs, config = {}) {
 }
 
 /**
+ * Reconnection grace of both players of a game restored from the journal (server restart or
+ * crash): RECOVERY_GRACE_MS, or graceFor(baseMs) when that is longer. The server broke the
+ * connections and every client comes back at once, so the normal grace would be too short.
+ * @param {number} baseMs
+ * @param {object} config
+ * @returns {number} integer milliseconds
+ */
+export function recoveryGraceFor(baseMs, config = {}) {
+    const r = Number.isFinite(config.recoveryGraceMs) ? Math.max(0, Math.floor(config.recoveryGraceMs)) : 90000;
+    return Math.max(r, graceFor(baseMs, config));
+}
+
+/**
  * One exponential-moving-average step of a round-trip measurement, capped at RTT_EMA_MAX_MS.
  * @param {number} prev previous average (NaN or undefined: none yet)
  * @param {number} sample new measurement in ms

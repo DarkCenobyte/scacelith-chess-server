@@ -143,7 +143,7 @@ test('journalState() is a compact journal that rebuilds the same room', () => {
     assert.equal(ended.gseq, room.gseq);
 });
 
-test('recover(): both players disconnected with a fresh grace, downtime not charged', () => {
+test('recover(): both players disconnected with the recovery grace, downtime not charged', () => {
     const { room, log, t } = busyGame();
     // The side to move is Black; its clock value at the last journaled move:
     assert.equal(room.sideToMove, B);
@@ -160,16 +160,20 @@ test('recover(): both players disconnected with a fresh grace, downtime not char
     assert.equal(s.blackMs, blackMs - 1000);
     assert.equal(s.whiteConnected, false);
     assert.equal(s.blackConnected, false);
-    assert.equal(s.graceMs, 30000 - 1000);           // 5+3: grace = 30 s
+    assert.equal(s.graceMs, 90000 - 1000);           // RECOVERY_GRACE_MS (the normal 5+3 grace is 30 s)
+    assert.equal(out.journal[0].payload.readUInt32LE(8), 90000, 'the recovery record keeps the grace');
     // Nobody comes back: aborted (both disconnected together), unrated.
-    assert.equal(copy.nextDeadline(), restartAt + 30000);
-    copy.tick(restartAt + 30000);
-    assert.deepEqual([copy.result.status, copy.result.reason], [GS.Aborted, ER.BothDisconnected]);
-    // The recovery record replays too.
+    assert.equal(copy.nextDeadline(), restartAt + 90000);
+    // The recovery record replays too (before the tick below ends the game).
     const again = GameRoom.fromJournal([...log, ...out.journal], opts());
     assert.deepEqual(again.connected, [false, false]);
     assert.equal(again.clock.turnStart, restartAt);
     assert.equal(again.gseq, room.gseq + RECOVERY_GSEQ_JUMP);
+    assert.equal(again.nextDeadline(), restartAt + 90000);
+    copy.tick(restartAt + 90000 - 1);
+    assert.equal(copy.isOver, false);
+    copy.tick(restartAt + 90000);
+    assert.deepEqual([copy.result.status, copy.result.reason], [GS.Aborted, ER.BothDisconnected]);
 });
 
 test('recover(): one player comes back, the other abandons', () => {
@@ -179,7 +183,9 @@ test('recover(): one player comes back, the other abandons', () => {
     copy.recover(at);
     const o = copy.onReconnect(W, at + 2000);
     assert.equal(decode(o.broadcast[0]).kind, EV.PlayerReconnected);
-    copy.tick(at + 30000);
+    copy.tick(at + 30000);                           // the normal grace of a 5+3 game: not yet
+    assert.equal(copy.isOver, false);
+    copy.tick(at + 90000);
     assert.deepEqual([copy.result.status, copy.result.reason], [GS.WhiteWins, ER.Abandonment]);
 });
 

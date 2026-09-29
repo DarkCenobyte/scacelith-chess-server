@@ -58,7 +58,10 @@ export async function startShard({ config, shard, serverId, primary, host, auth,
         handshakeTimeoutMs: Math.min(10000, config.wsHelloTimeoutMs),
     });
     let ready = false, draining = false, stopping = null;
-    const listeners = new Listeners({ config, apiHandler, wsServer: wss, log: log.child('listen'), ready: () => ready && !draining, reusePort });
+    const listeners = new Listeners({
+        config, apiHandler, wsServer: wss, log: log.child('listen'), ready: () => ready && !draining, reusePort,
+        full: () => router.isFull(), registry,
+    });
 
     router.bindPrimary(primary);
     primary.on('metrics.snapshot', () => registry.snapshot());

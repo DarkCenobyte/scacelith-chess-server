@@ -382,6 +382,33 @@ ac.sanctionCertain({ userId, gameId, kind }) -> { banUntil }  // ban + primary '
 ac.classify(kind, ctx) -> { severity, certain }
 ```
 
+Connection storms (`src/net/listeners.js`, `Router.isFull`). Every listener listens with
+`LISTEN_BACKLOG` (the kernel caps it at `net.core.somaxconn`; the primary's round-robin handle
+honours it too). With native TLS, a gate (`TlsGate`) runs in front of the TLS servers' own
+'connection' listener, which is where Node starts the TLS work on a new TCP socket:
+
+* A socket holds a handshake slot from its accept until 'secureConnection', 'tlsClientError' or
+  its close (the handshake timeout, 10 s, bounds it). Beyond `MAX_PENDING_HANDSHAKES` slots per
+  worker, or `MAX_CONNECTIONS_PER_IP` for one address group (IPv4 address, IPv6 /64), a new
+  socket is closed with an RST before any TLS work and counted in
+  `scacelith_tls_refused_total{reason}`. A worker is one thread: starting 10,000 handshakes
+  together (1-3.5 ms of CPU each) makes all of them late, while a bounded number in flight lets
+  the CPU finish them in turn; the refused clients retry with their backoff. The per-address cap
+  keeps a few idle sockets from one host from holding every slot.
+* On the listener that carries the WebSocket upgrade, the gate also sheds load while the server is
+  full. `Router.isFull()` is true while the primary's last answer to `conn.ipAcquire` was a
+  `MAX_CONNECTIONS` refusal less than 5 s ago (an admitted upgrade ends it), or while the worker
+  holds `ceil(MAX_CONNECTIONS * 1.2 / WORKERS)` WebSocket connections. New connections then pass at
+  `MAX_PENDING_HANDSHAKES / 2` per second (token bucket, one second of burst) and the others are
+  closed before TLS. What passes reaches the API (`GET /info` works, so a client learns that the
+  server is full) or the upgrade, where `conn.ipAcquire` stays the exact check (HTTP 503) and
+  refreshes the signal; a slot freed by a leaving player is found by the next upgrade that passes.
+  Only WebSocket connections are counted, never API requests.
+* Compromise: before TLS the gate cannot tell an API request from an upgrade on the shared port
+  (both are inside the TLS stream), so while the server is full the API shares the rate above
+  with the upgrades. With `WS_PORT != API_PORT` the API listener is never shed.
+* `TLS_MODE=proxy` and `off` have no gate: the TLS work (and its limits) belongs to the proxy.
+
 ### 5.9 HTTP (`src/http/`)
 
 `createApiHandler({ config, store, auth, primary, anticheat, log }) -> (req, res)`, mounted by
@@ -493,9 +520,18 @@ rules before sending, so steps 6 and 7 only happen with a modified client.
   15 min, then 1 h, then 6 h (level decays after 24 h without incident). Direct challenges stay
   possible.
 * Server restart: games are replayed from the journal (section 7) with both players marked
-  disconnected and a fresh grace; the downtime is not charged to anyone (the running clock
-  restarts from its journaled value at recovery). Games that cannot be rebuilt end as
-  `ServerAborted` (unrated) and are committed as such.
+  disconnected; the downtime is not charged to anyone (the running clock restarts from its
+  journaled value at recovery). Both players get the recovery grace, `RECOVERY_GRACE_MS` (90 s,
+  or the normal grace when that is longer), instead of the normal grace: the server broke the
+  connections, and every client reconnects at the same moment (after a `ServerShutdown` notice
+  the clients spread their first attempt over several seconds). The grace starts at the replay,
+  before the shard listens, and is written in the `recovered` journal record. The disconnections
+  journaled by the drain before a graceful stop are superseded by the recovery, so they do not
+  shorten it. A player who comes back and then loses the connection again gets the normal grace;
+  the deadlines above use each player's own grace (with equal graces they are the rules above).
+  The running clock and the first-move timer are unchanged: a side to move with less time left
+  than its reconnection delay can still lose on time (or be aborted `NoShow` before the second
+  ply). Games that cannot be rebuilt end as `ServerAborted` (unrated) and are committed as such.
 
 ### 6.5 Anomalies, certain cheats, suspicion
 
@@ -537,7 +573,7 @@ weighted by the reporter's credibility, never the level itself.
 | Accounts, e-mail, password hashes, MFA secrets (encrypted), recovery-code hashes, SSO links | SQLite | immediately (transaction) | kept |
 | Sessions | SQLite (+ 30 s cache per shard) | login/logout immediately; `lastSeen` at most every 5 min | kept (revocations immediate: cache invalidation broadcast) |
 | Ratings, finished games, analysis queue | SQLite | batched every `DB_COMMIT_MS`, one transaction per batch | kept once committed; games ended but not committed are in the journal and committed at recovery |
-| Games in progress (moves, clocks, offers) | memory of the host shard + journal | journal flushed every `JOURNAL_FLUSH_MS` | replayed; at most `JOURNAL_FLUSH_MS` of moves lost (clients resend: stale ply / resync) |
+| Games in progress (moves, clocks, offers) | memory of the host shard + journal | journal flushed every `JOURNAL_FLUSH_MS` | replayed; at most `JOURNAL_FLUSH_MS` of moves lost (clients resend: stale ply / resync); both players get `RECOVERY_GRACE_MS` to come back (6.4) |
 | Sanctions, anomalies (certain), integrity levels, reports | SQLite | sanctions immediately; anomalies batched (1 s) | kept (a batch in flight may be lost for `info` anomalies) |
 | Presence, queues, challenges, private codes, rate-limit counters | primary memory | - | lost: clients reconnect and re-queue |
 | Security events (failed logins...) | SQLite | batched (1 s) | kept, purged after `RETENTION_SECURITY_DAYS` |
@@ -573,7 +609,8 @@ weighted by the reporter's credibility, never the level itself.
 * **WebSocket surface**: one message type table, strict decoding, size limit checked from the
   frame header before buffering, no compression, no fragmentation beyond the size limit,
   Hello timeout, per-connection token bucket, per-IP and global connection limits, slow
-  consumers closed, heartbeat timeout, `Origin` refused by default.
+  consumers closed, heartbeat timeout, `Origin` refused by default. Before TLS: handshakes in
+  progress capped per worker and per address, and load shed while the server is full (5.8).
 * **Proof of work format**: an endpoint that wants one answers HTTP 428
   `{ "error": "pow_required", "pow": { "challenge": "<opaque ASCII>", "bits": 18, "expiresAt": ms } }`.
   The client finds a nonce, a decimal ASCII string, such that

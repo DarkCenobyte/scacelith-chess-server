@@ -15,8 +15,11 @@
 //   still attached, journal.committed(id), primary 'game.ended'. A finished room stays in memory
 //   until it is committed and its rematch window is closed.
 // * recover() replays the journal at start-up: unfinished games are restored (both players
-//   disconnected with a fresh grace, clocks restarted), ended-but-uncommitted games are queued for
-//   the commit, games that cannot be rebuilt end ServerAborted and are committed as such.
+//   disconnected with the recovery grace, RECOVERY_GRACE_MS or the normal grace when longer,
+//   clocks restarted), ended-but-uncommitted games are queued for the commit, games that cannot
+//   be rebuilt end ServerAborted and are committed as such. The grace starts at the replay,
+//   before the shard listens: the players' connections were closed by the server (shutdown or
+//   crash), and every client comes back at once.
 //
 // Deviations and additions to the DESIGN 5.3 contract:
 //   * options: `createChessGame` (rules factory, required), `now` (clock function, default

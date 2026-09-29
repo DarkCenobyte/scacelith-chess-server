@@ -68,6 +68,14 @@ that 100,000 connections do not run out of ephemeral ports (28,232 per source ad
 coordinator samples `/metrics` and, for a local server on Linux, the CPU time of every server and
 load process from `/proc`; the rest of the machine's CPU time is reported as "other processes".
 
+**Handshakes in flight.** With native TLS every worker performs at most `MAX_PENDING_HANDSHAKES`
+(128) handshakes at a time and closes the connections beyond that before any TLS work (counted in
+`scacelith_tls_refused_total{reason="handshakes"}` on the server and as failed connections by the
+tool, which does not retry). The runs below predate that limit. To measure the raw handshake rate
+again, keep `--inflight` times the load processes below `MAX_PENDING_HANDSHAKES` times `WORKERS`,
+or raise the key with `--server-env MAX_PENDING_HANDSHAKES=100000`; with the default, a ramp that
+opens connections faster than the server completes them measures the gate instead.
+
 **Open files.** The container used here has a hard `nofile` limit of 20,000 per process that
 cannot be raised without `CAP_SYS_RESOURCE`, so the tool uses at least `clients / 15000` server
 workers and load processes (7 of each for 100,000 connections on 4 cores). On a real server raise
@@ -253,8 +261,16 @@ For a dedicated 4-core, 16 GB machine running only the server (Linux, `nofile` r
   2-2.6 cores of 4. Memory: about 7.5 GB.
 - **The first hard limits beyond that are memory (about 150,000-180,000 TLS connections in 16 GB)
   and the reconnection storm after a restart**: at 2-2.7 ms per handshake, 4 cores accept about
-  1,500-2,000 connections/s, so 100,000 players need about a minute to come back (clients should
-  reconnect with a random delay).
+  1,500-2,000 connections/s, so 100,000 players need about a minute to come back (clients
+  reconnect with a random delay). During the storm each worker keeps at most
+  `MAX_PENDING_HANDSHAKES` (128) handshakes in flight and closes the extra connections before any
+  TLS work, so the handshakes it starts finish in time and the refused clients come back later;
+  the kernel queue in front of it is `LISTEN_BACKLOG` (2048), capped by `net.core.somaxconn`.
+  Games in progress give both players `RECOVERY_GRACE_MS` (90 s) to come back, instead of the
+  normal grace of 15 to 60 s. On a small machine (2 cores at 2.4 GHz, 2.5-3.5 ms per full
+  handshake) 10,000 players need about 30 s of CPU, 15 s on its two cores, to reconnect: well
+  inside the recovery grace, but without the handshake limit every handshake waited for all the
+  others, and a capacity study lost 32 % of a 10,000-client herd to the clients' 10 s deadline.
 - The chess logic is not a concern (under 100 µs per move at p99); the primary is not on the move
   path (under 0.3 core in every run, 0.1-0.35 core during the connection ramps).
 
@@ -318,8 +334,16 @@ resources to watch: the primary (presence, challenges, matchmaking) and the sing
 - **Heartbeat**: `HEARTBEAT_INTERVAL_MS` 10 s -> 20 s halves the server's share of the idle cost,
   at the price of a slower detection of dead connections (`HEARTBEAT_TIMEOUT_MS`).
 - **Kernel settings** for 100,000+ sockets: `fs.nr_open` and `LimitNOFILE`, `net.core.somaxconn`
-  (4096 here), `net.ipv4.tcp_mem` and the socket buffer defaults, and on the load machines
+  (4096 here; it caps `LISTEN_BACKLOG`) and `net.ipv4.tcp_max_syn_backlog` (8192) for the
+  reconnection storms, `net.ipv4.ip_local_reserved_ports=44664` (the server port is inside the
+  ephemeral range, and a restart can fail with `EADDRINUSE` otherwise; README, kernel settings),
+  `net.ipv4.tcp_mem` and the socket buffer defaults, and on the load machines
   `net.ipv4.ip_local_port_range` or several source addresses.
+- **`MAX_PENDING_HANDSHAKES`** (128 per worker): enough to keep a core busy with handshakes (at
+  1-3.5 ms each, 128 in flight are 0.1-0.5 s of work) while every started handshake finishes long
+  before a client's deadline. A higher value only helps when the clients are far away (each
+  handshake then waits for round trips, not for the CPU). While the server is full it also sets
+  the rate of new TLS connections let through (half of it per second and per worker).
 - **Several machines**: DESIGN.md section 9 (shard ranges with `SHARD_BASE`, a TCP bus between
   machines, the control plane as a service, a PostgreSQL store, a layer-4 load balancer in front).
 - **Profiling**: `--server-cpu-prof DIR` and `node bench/profile-summary.js DIR/*.cpuprofile`
