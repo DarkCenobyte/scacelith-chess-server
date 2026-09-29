@@ -319,7 +319,8 @@ store.ratings.forUser(userId) -> [{ category, ... }] ; leaderboard(category, lim
 store.games.finishBatch(records) -> [{ gameId, ratings: null | { white: RatingChange, black: RatingChange } }]
   // One transaction for the batch: inserts each game, applies match/elo.applyGame to rated games
   // with the ratings read inside the transaction, queues rated games of >= ANALYSIS_MIN_PLIES for analysis
-  // (section 6.5: a game left out by the policy has analysisSkipped: 'sample' | 'backlog' | 'player' in its entry).
+  // (section 6.5: a game left out by the policy has analysisSkipped: 'sample' | 'backlog' | 'player' in its entry,
+  // and a game that took over waiting jobs past the per-player cap has analysisDisplaced: [gameId]).
   // record: { id, category, rated, baseMs, incMs, whiteId, blackId, whiteName, blackName, whiteRating, blackRating,
   //           startedAt, endedAt, status, reason, moves: Uint16Array, spentMs: Uint32Array, clockMs: Uint32Array,
   //           rematchOf, flags }
@@ -679,11 +680,19 @@ rules before sending, so steps 6 and 7 only happen with a modified client.
   new `GameSnapshot`. Both the hold and its end are journaled (the `recovered` record carries the
   hold, and a checkpoint marks its end), so a later replay rebuilds the same clocks. Once the
   clock runs, a side to move with less time left than its reconnection delay can still lose on
-  time. A restored game aborted `NoShow` because its side to move never came back before the
-  end of the first-move timer records no `noshow` conduct incident (the server broke the
-  connection); it is still aborted, unrated. A player who came back and then does not move gets
-  the incident as usual. Games that cannot be rebuilt end as `ServerAborted` (unrated) and are
-  committed as such.
+  time. Before the second ply, the first reconnection of a player after the restart also
+  restarts that player's first-move timer when it is its turn, even after the hold ended or
+  after the opponent's first move: a player who is back late but before its first-move time ran
+  out (for example 48 s after the replay, when 2 s of it were left) gets the whole
+  `FIRST_MOVE_TIMEOUT_MS` from its reconnection. Only the first reconnection after a restart
+  counts, so leaving and coming back again gives no more time. The players not back yet are
+  journaled (the `recovered` record asks for this restart, and every checkpoint carries it), so a
+  replay, a compaction snapshot and a second restart rebuild it; a journal of an older build,
+  which carries neither, replays without the restart. A restored game aborted `NoShow` because
+  its side to move never came back before the end of the first-move timer records no `noshow`
+  conduct incident (the server broke the connection); it is still aborted, unrated. A player who
+  came back and then does not move within that whole first-move time gets the incident as
+  usual. Games that cannot be rebuilt end as `ServerAborted` (unrated) and are committed as such.
 
 ### 6.5 Anomalies, certain cheats, suspicion
 
@@ -737,14 +746,22 @@ then the oldest:
    `ANALYSIS_MIN_PLIES` plies.
 
 Games of the first three kinds are queued whatever the backlog, with one bound: at most 20
-`signal` jobs of one player wait at a time. A flagged game one of whose players already has 20
-waiting (as white or black) is not queued, and a low-credibility report does not raise a game
-past that bound either; the scoring reads a player's 30 latest analysed games, so these 20
-renew most of that window, and one prolific flagged player cannot grow the tier without end.
-An ordinary game is queued with probability `ANALYSIS_SAMPLE_RATE` (default 1), and only while
-fewer than `ANALYSIS_QUEUE_MAX` (default 5000, at most 100,000) ordinary jobs wait. A game left
-out gets no job at all and is counted in
-`scacelith_anticheat_analysis_skipped_total{reason="sample"|"backlog"|"player"}`.
+`signal` jobs of one player wait at a time. The scoring reads a player's 30 latest analysed
+games, so these 20 renew most of that window, and one prolific flagged player cannot grow the
+tier without end. When one of its players already has 20 waiting (as white or black), a game
+flagged only through its players (integrity level or report) is not queued, and a
+low-credibility report does not raise a game past that bound either. A game with a
+`suspicious` or `certain` anomaly of its own is still queued: in the same transaction it takes
+the place of the oldest waiting job of that player whose game has no such anomaly (one for each
+capped player, or one job for both when it is one of their games), so the count stays at 20.
+It is skipped only when every job the player has waiting carries an anomaly of its own. A
+player who fills the bound with quick games (flagged only because the player is) therefore
+cannot keep a game with evidence out of the analysis, while the games with evidence are never
+displaced by any other game. An ordinary game is queued with probability
+`ANALYSIS_SAMPLE_RATE` (default 1), and only while fewer than `ANALYSIS_QUEUE_MAX` (default
+5000, at most 100,000) ordinary jobs wait. A game left out gets no job at all and is counted in
+`scacelith_anticheat_analysis_skipped_total{reason="sample"|"backlog"|"player"}`, and a waiting
+job removed for a game with evidence is counted there with `reason="displaced"`.
 
 The highest priority is not taken every time: every fourth claim of the analysis process takes
 the oldest ordinary job first when one waits. Ordinary games, the random sample of the rated

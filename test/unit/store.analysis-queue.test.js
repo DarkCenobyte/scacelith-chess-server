@@ -322,6 +322,110 @@ test('at most 20 flagged games of one player wait; more are skipped and counted 
     store.close();
 });
 
+// The waiting signal jobs of player `userId`, oldest first (queued_at, then game id).
+const signalJobsOf = (store, userId) => store.analysis.forUser(userId, 1000).filter((j) => j.status === 'queued')
+    .map((j) => j.gameId).sort((x, y) => x - y);
+const anomaly = (store, userId, g, severity = 'suspicious') => store.anomalies.insertBatch([
+    { userId, gameId: g.id, kind: 'clock_implausible', severity, at: Date.now() - 1000 },
+]);
+
+test('per-player signal cap: a game with an anomaly of its own takes over the oldest waiting job without one', () => {
+    const { store, ids: [a, b, c, d] } = setup();
+    store.integrity.set(c, { level: 'suspected', score: 3 });
+    // c fills the cap with 20 quick games flagged only by its integrity level.
+    const junk = Array.from({ length: 20 }, (_, i) => (i % 2 ? record(c, a) : record(b, c)));
+    store.games.finishBatch(junk);
+    assert.deepEqual(signalJobsOf(store, c), junk.map((g) => g.id));
+    // A plain flagged game is still skipped.
+    const before = { player: skippedMetric('player'), displaced: skippedMetric('displaced') };
+    const plain = record(c, d);
+    assert.equal(store.games.finishBatch([plain])[0].analysisSkipped, 'player');
+    // So is one with only an info anomaly, or an anomaly of another game.
+    const info = record(c, d);
+    anomaly(store, c, info, 'info');
+    anomaly(store, c, { id: 777 });
+    assert.equal(store.games.finishBatch([info])[0].analysisSkipped, 'player');
+    // The game with a suspicious anomaly of its own is queued, in place of the oldest junk job.
+    const real = record(c, d);
+    anomaly(store, c, real);
+    const res = store.games.finishBatch([real])[0];
+    assert.equal(res.analysisSkipped, undefined);
+    assert.deepEqual(res.analysisDisplaced, [junk[0].id]);
+    assert.ok(res.ratings, 'rated as usual');
+    assert.deepEqual(signalJobsOf(store, c), [...junk.slice(1), real].map((g) => g.id), 'still 20 waiting');
+    assert.deepEqual(store.analysis.backlog(), { ordinary: 0, priority: 20 });
+    assert.equal(skippedMetric('player') - before.player, 2);
+    assert.equal(skippedMetric('displaced') - before.displaced, 1);
+    // A game whose anomaly is the opponent's counts too; the displaced job is always the oldest
+    // one without an anomaly of its own, never one with.
+    const byOpponent = record(d, c);
+    anomaly(store, d, byOpponent);
+    assert.deepEqual(store.games.finishBatch([byOpponent])[0].analysisDisplaced, [junk[1].id]);
+    store.close();
+});
+
+test('per-player signal cap: with 20 anomaly games waiting, a 21st is skipped; the jobs of both capped players are replaced', () => {
+    const { store, ids: [a, b, c] } = setup();
+    store.integrity.set(c, { level: 'suspected', score: 3 });
+    const withAnomaly = Array.from({ length: 20 }, () => record(c, a));
+    for (const g of withAnomaly) anomaly(store, c, g);
+    store.games.finishBatch(withAnomaly);
+    assert.equal(signalJobsOf(store, c).length, 20);
+    const next = record(c, b);
+    anomaly(store, c, next);
+    assert.equal(store.games.finishBatch([next])[0].analysisSkipped, 'player', 'every waiting job has evidence');
+    assert.deepEqual(signalJobsOf(store, c), withAnomaly.map((g) => g.id));
+    store.close();
+
+    // 19 games with an anomaly, then a plain one: the plain one is replaced although it is the newest.
+    const mix = setup();
+    const [m, n, o] = mix.ids;
+    mix.store.integrity.set(m, { level: 'suspected' });
+    const evidence = Array.from({ length: 19 }, () => record(m, n));
+    for (const g of evidence) anomaly(mix.store, m, g);
+    const plain = record(o, m);
+    mix.store.games.finishBatch([...evidence, plain]);
+    const last = record(m, o);
+    anomaly(mix.store, m, last);
+    assert.deepEqual(mix.store.games.finishBatch([last])[0].analysisDisplaced, [plain.id]);
+    assert.deepEqual(signalJobsOf(mix.store, m), [...evidence, last].map((g) => g.id));
+    mix.store.close();
+
+    // Both players capped: one job of each is replaced (the oldest without an anomaly of its own).
+    const two = setup();
+    const [x, y, z, w] = two.ids;
+    for (const p of [x, y]) two.store.integrity.set(p, { level: 'suspected' });
+    const xs = Array.from({ length: 20 }, () => record(x, z));
+    const ys = Array.from({ length: 20 }, () => record(w, y));
+    two.store.games.finishBatch([...xs, ...ys]);
+    const both = record(x, y);
+    anomaly(two.store, y, both);
+    const r2 = two.store.games.finishBatch([both])[0];
+    assert.deepEqual(r2.analysisDisplaced, [xs[0].id, ys[0].id]);
+    assert.deepEqual([signalJobsOf(two.store, x).length, signalJobsOf(two.store, y).length], [20, 20]);
+    // One capped player has no job to give: nothing is removed, the game is skipped.
+    const ys2 = signalJobsOf(two.store, y);
+    const xs2 = signalJobsOf(two.store, x);
+    for (const id of ys2) if (id !== both.id) anomaly(two.store, y, { id });
+    const third = record(x, y);
+    anomaly(two.store, x, third);
+    assert.equal(two.store.games.finishBatch([third])[0].analysisSkipped, 'player');
+    assert.deepEqual([signalJobsOf(two.store, x), signalJobsOf(two.store, y)], [xs2, ys2], 'no job removed');
+    two.store.close();
+
+    // Both players capped by the same 20 games between them: one job replaced serves both.
+    const pair = setup();
+    const [p, q] = pair.ids;
+    pair.store.integrity.set(p, { level: 'suspected' });
+    const pq = Array.from({ length: 20 }, (_, i) => (i % 2 ? record(p, q) : record(q, p)));
+    pair.store.games.finishBatch(pq);
+    const ev = record(p, q);
+    anomaly(pair.store, p, ev);
+    assert.deepEqual(pair.store.games.finishBatch([ev])[0].analysisDisplaced, [pq[0].id]);
+    assert.deepEqual(signalJobsOf(pair.store, p), [...pq.slice(1), ev].map((g) => g.id));
+    pair.store.close();
+});
+
 test('the backlog gauge counts at most 100000 jobs per tier', (t) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-backlog-'));
     t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -388,4 +492,14 @@ test('writer thread: the skipped games are counted in the shard registry from th
     assert.deepEqual(res.map((r) => r.analysisSkipped ?? null), [null, 'backlog', 'backlog']);
     assert.equal(skippedMetric('backlog') - before, 2);
     assert.deepEqual(store.analysis.backlog(), { ordinary: 1, priority: 0 });
+    // A game with an anomaly of its own that takes over a waiting job: 'displaced'.
+    store.integrity.set(a, { level: 'suspected' });
+    const junk = Array.from({ length: 20 }, () => record(a, b));
+    await writer.finishBatch(junk);
+    const real = record(b, a);
+    anomaly(store, a, real);
+    const d0 = skippedMetric('displaced');
+    const [r] = await writer.finishBatch([real]);
+    assert.deepEqual(r.analysisDisplaced, [junk[0].id]);
+    assert.equal(skippedMetric('displaced') - d0, 1);
 });

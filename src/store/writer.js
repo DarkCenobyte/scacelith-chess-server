@@ -55,7 +55,7 @@ export function startStoreWriter({ config, shard = 0, logging = true, log = null
     const mGames = metrics.counter('scacelith_store_games_committed_total', 'Finished games written to the database');
     const mBusy = metrics.counter('scacelith_store_busy_total', 'Store operations that gave up waiting for the database lock');
     const mSkipped = metrics.counter('scacelith_anticheat_analysis_skipped_total',
-        'Finished rated games not queued for engine analysis (sample: ANALYSIS_SAMPLE_RATE, backlog: ANALYSIS_QUEUE_MAX reached, player: 20 flagged games of a player already waiting)', ['reason']);
+        'Finished rated games not queued for engine analysis (sample: ANALYSIS_SAMPLE_RATE, backlog: ANALYSIS_QUEUE_MAX reached, player: 20 flagged games of a player already waiting, displaced: a waiting flagged game without an anomaly of its own gave its place to a game with one)', ['reason']);
     const waiting = new Map();
     let next = 1, w = null, closing = null;
 
@@ -84,7 +84,12 @@ export function startStoreWriter({ config, shard = 0, logging = true, log = null
             }
             mBatchMs.observe(ms);
             mGames.inc(Array.isArray(result) ? result.reduce((n, x) => n + (x && x.duplicate ? 0 : 1), 0) : 0);
-            if (Array.isArray(result)) for (const x of result) if (x && x.analysisSkipped) mSkipped.labels(x.analysisSkipped).inc();
+            if (Array.isArray(result)) {
+                for (const x of result) {
+                    if (x && x.analysisSkipped) mSkipped.labels(x.analysisSkipped).inc();
+                    if (x && x.analysisDisplaced) mSkipped.labels('displaced').inc(x.analysisDisplaced.length);
+                }
+            }
             p.resolve(result);
         });
         t.on('error', fail);

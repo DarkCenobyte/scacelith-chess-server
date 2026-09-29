@@ -85,10 +85,17 @@ stored weight 0.5 or more), then a game with a suspicion signal at its end (eith
 integrity level above `none`, an open `cheating` or `other` report of weight 0.5 or more against
 either player in the last 30 days, a `suspicious` or `certain` anomaly in that game) or a report
 of lower weight, then the ordinary games. The first three are queued whatever the backlog, but
-at most 20 flagged games of one player wait at a time (a further one is skipped). An ordinary
-game is queued with probability `ANALYSIS_SAMPLE_RATE` (default 1) and only while fewer than
-`ANALYSIS_QUEUE_MAX` (default 5000) ordinary games wait; otherwise it is not analysed
-(`scacelith_anticheat_analysis_skipped_total`). A report on such a game queues it afterwards.
+at most 20 flagged games of one player wait at a time. Past that bound, a further game flagged
+only through its players (integrity level or report) is skipped, while a game with a
+`suspicious` or `certain` anomaly of its own replaces the oldest waiting game of that player
+without one (in the same transaction, so the bound stays at 20); it is skipped only when every
+waiting game of the player has an anomaly of its own. Quick games flagged only because the
+player is flagged can therefore never keep a game with evidence out of the analysis, and a game
+with evidence is never removed from the queue. An ordinary game is queued with probability
+`ANALYSIS_SAMPLE_RATE` (default 1) and only while fewer than `ANALYSIS_QUEUE_MAX` (default 5000)
+ordinary games wait; otherwise it is not analysed (`scacelith_anticheat_analysis_skipped_total`,
+where `reason="displaced"` counts the waiting games replaced by a game with evidence). A report
+on such a game queues it afterwards.
 Every fourth claim takes the oldest ordinary game first, so ordinary games keep at least a
 quarter of the engine time however many prioritized games arrive. So a busy server never makes
 a suspicious game wait weeks behind ordinary ones, and the population statistics keep being fed

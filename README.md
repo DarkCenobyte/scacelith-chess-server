@@ -362,7 +362,8 @@ One analysis engine handles roughly 1,000 to 12,000 games a day, fewer than a bu
 plays. Moderator requests, games reported by credible players, and games of players already
 under suspicion (integrity level, open credible report) or with a suspicious anomaly are
 analysed first, but one engine claim in four still takes the oldest ordinary game, and at most
-20 flagged games of one player wait at a time. Ordinary games are sampled
+20 flagged games of one player wait at a time (past that, a game with an anomaly of its own
+takes the place of a waiting one that has none). Ordinary games are sampled
 (`ANALYSIS_SAMPLE_RATE`) and skipped while `ANALYSIS_QUEUE_MAX` (5000) of them already wait;
 only they feed the population statistics the players are compared with. If
 `scacelith_anticheat_analysis_queue_ordinary` stays at that cap, add engines
