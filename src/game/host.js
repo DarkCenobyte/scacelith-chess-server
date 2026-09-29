@@ -11,15 +11,25 @@
 //   to the primary (conduct.record), a rematch agreement to the primary (game.rematch).
 // * Persistence queue: finished games are committed with ONE store.games.finishBatch(records)
 //   call at most DB_COMMIT_MS after the first of them ended (retry with exponential backoff on
-//   error; the journal keeps them meanwhile). After the commit: RatingUpdate to both endpoints
-//   still attached, journal.committed(id), primary 'game.ended'. A finished room stays in memory
-//   until it is committed and its rematch window is closed.
+//   error; the journal keeps them meanwhile). A batch is committed only once the journal has
+//   written (and fsynced) every record appended before it was chosen, their `ended` records
+//   included (journal.hasUnwritten(), then journal.flush()): a crash can then never find a game
+//   in the database whose journal says it is still running. When a journal write failed since
+//   the last commit or fails meanwhile (journal.failedWrites), the games waiting for their commit
+//   are journaled again as snapshots (the failed write may have held their `ended` records), and
+//   in the second case the commit is retried later. Right before finishBatch, the anti-cheat's buffered anomalies are
+//   written (anticheat.flush() when anticheat.pendingCount > 0), so that the analysis queue
+//   policy of the commit sees those of the game's last second. After the commit: RatingUpdate to
+//   both endpoints still attached, journal.committed(id), primary 'game.ended'. A finished room
+//   stays in memory until it is committed and its rematch window is closed.
 // * recover() replays the journal at start-up: unfinished games are restored (both players
-//   disconnected with the recovery grace, RECOVERY_GRACE_MS or the normal grace when longer,
-//   clocks restarted), ended-but-uncommitted games are queued for the commit, games that cannot
-//   be rebuilt end ServerAborted and are committed as such. The grace starts at the replay,
-//   before the shard listens: the players' connections were closed by the server (shutdown or
-//   crash), and every client comes back at once.
+//   disconnected with the recovery grace, RECOVERY_GRACE_MS or the normal grace when longer; the
+//   clock of the side to move restarts when that player is back, RECOVERY_CLOCK_HOLD_MS later at
+//   most), ended-but-uncommitted games are queued for the commit, games that cannot be rebuilt
+//   end ServerAborted and are committed as such. The grace starts at the replay, before the
+//   shard listens: the players' connections were closed by the server (shutdown or crash), and
+//   every client comes back at once. When a held clock starts (Outcome.clockStarted), the other
+//   player gets a new snapshot (theirs showed the clock stopped).
 //
 // Deviations and additions to the DESIGN 5.3 contract:
 //   * options: `createChessGame` (rules factory, required), `now` (clock function, default
@@ -112,8 +122,9 @@ export class GameHost {
      * @param {number} opts.shard
      * @param {object} opts.config
      * @param {object} [opts.store] Store (store.games.finishBatch)
-     * @param {object} [opts.journal] Journal (append, committed, recover, flush)
-     * @param {object} [opts.anticheat] { recordAnomaly, sanctionCertain }
+     * @param {object} [opts.journal] Journal (append, committed, recover, flush; hasUnwritten()
+     *   and failedWrites when its writes are asynchronous)
+     * @param {object} [opts.anticheat] { recordAnomaly, sanctionCertain, flush?, pendingCount? }
      * @param {object} [opts.bus] unused
      * @param {object} [opts.primary] { request(type, payload) -> Promise }
      * @param {object} [opts.log]
@@ -130,6 +141,7 @@ export class GameHost {
         this.config = config;
         this.store = store;
         this.journal = journal;
+        this.journalFailures = journal && typeof journal.failedWrites === 'number' ? journal.failedWrites : 0;   // see _journalAgain
         this.anticheat = anticheat;
         this.bus = bus;
         this.primary = primary;
@@ -528,6 +540,11 @@ export class GameHost {
         if (out.rejected) this._rejectCounter(out.rejected).inc();
         if (out.ended) this._onEnded(entry);
         if (out.rematch) this._requestRematch(entry, out.rematch);
+        if ((out.clockStarted === 0 || out.clockStarted === 1) && !out.moved && !room.isOver) {
+            // A clock held since a recovery started: the opponent's display shows it stopped.
+            const opp = out.clockStarted ^ 1;
+            if (entry.ep[opp]) this._send(entry.ep[opp], room.snapshotBuffer(opp, this.now()));
+        }
         this._reschedule(entry);
         if (out.anomaly) {
             const a = out.anomaly;
@@ -620,7 +637,7 @@ export class GameHost {
     }
 
     // One store.games.finishBatch call for the pending games. Returns true / false, or a Promise
-    // of it when the store is asynchronous.
+    // of it when the store is asynchronous or the journal is flushed first.
     _commit(t = this.now()) {
         const batch = [];
         for (const entry of this.pending.values()) {
@@ -628,11 +645,69 @@ export class GameHost {
             if (batch.length >= this.commitBatchMax) break;
         }
         if (!batch.length) return true;
+        // The database must not have a game before its `ended` record is in the journal (and
+        // fsynced): a crash in between would bring the committed game back as a live one. When a
+        // journal write failed since the last commit, it may have lost such records: the games
+        // waiting for their commit are journaled again (one snapshot each). When the journal
+        // still holds records not written yet (or being written), the batch, chosen now, is
+        // committed once they are; when a write fails meanwhile, the games are journaled again and
+        // the commit is retried after the backoff.
+        const j = this.journal;
+        if (j && typeof j.hasUnwritten === 'function') {
+            this._journalAgain(t, false);
+            if (j.hasUnwritten()) {
+                const failures = j.failedWrites;
+                let flushed;
+                try { flushed = Promise.resolve(j.flush()); } catch (err) { flushed = Promise.reject(err); }
+                this.commitInFlight = flushed.then(
+                    () => (j.failedWrites === failures ? null : new Error('journal write failed')),
+                    (err) => err || new Error('journal write failed'),
+                ).then((err) => {
+                    this.commitInFlight = null;
+                    const now = this.now();
+                    if (!err) {
+                        try { return this._commitBatch(batch, now); } catch (e) { err = e; }
+                    } else {
+                        this._journalAgain(now, true);
+                    }
+                    this._commitFailed(err, batch.length, now);
+                    return false;
+                });
+                return this.commitInFlight;
+            }
+        }
+        return this._commitBatch(batch, t);
+    }
+
+    // A snapshot record of each game waiting for its commit, whose `ended` record may have been
+    // lost with a failed journal write: when journal.failedWrites changed since the last call, or
+    // when `force`.
+    _journalAgain(t, force) {
+        const f = this.journal.failedWrites;
+        if (!force && (typeof f !== 'number' || f === this.journalFailures)) return;
+        if (typeof f === 'number') this.journalFailures = f;
+        for (const entry of this.pending.values()) {
+            let rec;
+            try { rec = entry.room.journalSnapshot(t); } catch (err) {
+                this.log.error('journal snapshot failed', { err, gameId: entry.room.id });
+                continue;
+            }
+            this._append(entry.room.id, rec);
+        }
+    }
+
+    _commitBatch(batch, t) {
         const records = batch.map((e) => e.room.record());
         const t0 = performance.now();
         if (!this.store || !this.store.games || typeof this.store.games.finishBatch !== 'function') {
             this._commitDone(batch, null, t0, t);
             return true;
+        }
+        // The anomalies still buffered by the anti-cheat (up to a second old) are written first:
+        // the commit's analysis queue policy looks for the game's suspicious anomalies.
+        const ac = this.anticheat;
+        if (ac && typeof ac.flush === 'function' && ac.pendingCount > 0) {
+            try { ac.flush(); } catch (err) { this.log.warn('anticheat flush failed', { err }); }
         }
         let res;
         try { res = this.store.games.finishBatch(records); } catch (err) {

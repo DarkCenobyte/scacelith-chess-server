@@ -14,7 +14,10 @@
 //     rematch: null | { gameId, white, black, category, baseMs, incMs, rated },  // both accepted: game.rematch
 //     rejected: 0 | ErrorCode,   // the request was refused with this code (metrics)
 //     moved: bool,               // a move was accepted
-//     duplicate: bool }          // an already played move was resent (idempotent reply)
+//     duplicate: bool,           // an already played move was resent (idempotent reply)
+//     clockStarted: 2 | colour } // the clock of that colour, held since a recovery, started: the
+//                                // host sends the other player a new snapshot once the call is
+//                                // done (unless a MoveMade or a GameEnd already told it)
 // Buffers are encoded once with the codec (the MoveMade of a move is one Buffer for both players).
 // The host sends `broadcast` to both players, then `toWhite` / `toBlack`, then `reply`.
 // `gseq` increments on every broadcast event (MoveMade, GameEvent, GameEnd).
@@ -30,6 +33,18 @@
 //     (graceFor) after a Disconnect, RECOVERY_GRACE_MS (recoveryGraceFor) for both after a
 //     recovery, until the player is back. The deadlines below use them; with equal graces they
 //     are the rules of DESIGN 6.4 unchanged.
+//   * Clock hold after a recovery (DESIGN 6.4): the clock (or first-move timer) of the side to
+//     move restarts at the reconnection of that player, or RECOVERY_CLOCK_HOLD_MS
+//     (recoveryHoldFor) after the recovery when that comes first: until then its turn start is in
+//     the future, so nothing is charged, the deadlines move with it, and snapshots show no
+//     running clock (running = 2). When the hold ends without its player, the room journals a
+//     checkpoint that clears `clockHeld` (a replay rebuilds the same room) and sets
+//     Outcome.clockStarted. The implausible-thinkMs anomaly of a move is measured from the
+//     previous move (the client counts its thinking time from there), not from a turn start that
+//     a restart moved.
+//   * A restored game (RecordFlag.Recovered) aborted NoShow because the side to move is still
+//     away when its first-move time runs out records no 'noshow' conduct incident: the server
+//     broke the connection. A player who is back and does not move still gets one.
 //   * The 'game_over' anomaly kind (info) is reported for a Move on a finished game (DESIGN 6.2
 //     step 2 says "info" without naming it).
 //   * A game reaching 1200 plies (the protocol's Move.ply limit) ends ServerAborted.
@@ -46,9 +61,11 @@
 //   3 event    12 bytes: u8 kind | u8 color | u16 0 | u32 gseqAfter | u32 arg
 //              kinds (JournalEvent): 1 draw offer, 2 draw declined (color = decliner),
 //              3 disconnect (arg = grace), 4 reconnect, 5 desync, 6 recovered (server restart,
-//              arg = the recovery grace given to both players; 0 = RECOVERY_GRACE_MS),
-//              7 checkpoint (68 bytes, written only by journalState(), see _checkpointRecord;
-//              60-byte ones without the graces are read too)
+//              arg = the recovery grace given to both players, 0 = RECOVERY_GRACE_MS; 16 bytes:
+//              + u32 clock hold in ms, the 12-byte ones of older builds have no hold),
+//              7 checkpoint (68 bytes, see _checkpointRecord: in journalState(), and appended when
+//              a clock held since a recovery starts without its player; 60-byte ones without the
+//              graces are read too)
 //   4 ended    24 bytes: u8 status | u8 reason | u8 culprit colour | u8 0 | u32 whiteMs |
 //              u32 blackMs | u32 gseq (of its GameEnd) | f64 endedAt
 //   6 snapshot the records of journalState() in one record (journal compaction, journalSnapshot()):
@@ -57,7 +74,7 @@
 // The round-trip averages are not journaled (they restart from the default after a restart).
 
 import { encode, enums } from '../protocol/index.js';
-import { GameClock, clockPolicy, graceFor, recoveryGraceFor } from './clock.js';
+import { GameClock, IMPLAUSIBLE_MARGIN_MS, clockPolicy, graceFor, recoveryGraceFor, recoveryHoldFor } from './clock.js';
 
 const { GameStatus: GS, EndReason: ER, GameEventKind: EV, ErrorCode: EC } = enums;
 const WHITE = 0, BLACK = 1, NONE = 2;
@@ -84,7 +101,9 @@ export const RECOVERY_GSEQ_JUMP = 256;
 
 const MB_OFFER = 1, MB_DECLINED = 2;
 const RM_NONE = 0, RM_OPEN = 1, RM_AGREED = 2, RM_CLOSED = 3;
-const MOVE_REC_BYTES = 32, EVENT_REC_BYTES = 12, ENDED_REC_BYTES = 24, CHECKPOINT_BYTES = 68, CHECKPOINT_V1_BYTES = 60;
+const MOVE_REC_BYTES = 32, EVENT_REC_BYTES = 12, RECOVERED_REC_BYTES = 16, ENDED_REC_BYTES = 24, CHECKPOINT_BYTES = 68, CHECKPOINT_V1_BYTES = 60;
+// Bits of the presence byte of a checkpoint.
+const CP_WHITE_CONNECTED = 1, CP_BLACK_CONNECTED = 2, CP_CLOCK_HELD = 4;
 
 /** Thrown when a journal cannot be replayed. */
 export class JournalError extends Error {
@@ -142,6 +161,7 @@ export class Outcome {
         this.rejected = 0;
         this.moved = false;
         this.duplicate = false;
+        this.clockStarted = NONE;
     }
 }
 
@@ -210,6 +230,7 @@ export class GameRoom {
         this.policy = clockPolicy(config);
         this.graceMs = graceFor(this.baseMs, config);
         this.recoveryGraceMs = recoveryGraceFor(this.baseMs, config);
+        this.recoveryHoldMs = recoveryHoldFor(this.baseMs, config);
         this.drawOfferLimit = Number.isFinite(config.drawOffersPerGame) ? config.drawOffersPerGame : 3;
 
         this.game = createChessGame();
@@ -225,6 +246,7 @@ export class GameRoom {
         this.connected = [true, true];
         this.disconnectedAt = [0, 0];
         this.disconnectGrace = [this.graceMs, this.graceMs];   // grace of each player's current disconnection
+        this.clockHeld = false;      // the side to move's clock is held since a recovery, until clock.turnStart
         this._over = false;
         this.result = null;          // { status, reason, whiteMs, blackMs, endedAt }
         this.endGseq = 0;
@@ -261,7 +283,10 @@ export class GameRoom {
 
     /** Earliest moment at which tick() has something to do (Infinity: nothing). */
     nextDeadline() {
-        if (!this._over) return Math.min(this.clock.deadline(this.ply), this._graceDeadline());
+        if (!this._over) {
+            const d = Math.min(this.clock.deadline(this.ply), this._graceDeadline());
+            return this.clockHeld ? Math.min(d, this.clock.turnStart) : d;
+        }
         if (this.rematchState === RM_OPEN) return this.result.endedAt + REMATCH_WINDOW_MS;
         return Infinity;
     }
@@ -312,7 +337,10 @@ export class GameRoom {
         // 8. Clock, then play.
         const idx = this.ply;
         const c = this.clock.check(color, idx, now, msg.thinkMs);
-        if (c.implausible) {
+        // The client counts its thinking time from the previous move. After a restart the turn
+        // starts later than that: only a thinkMs longer than the time since that move is impossible.
+        const sincePrev = now - (idx ? this.recvTime[idx - 1] : this.createdAt);
+        if (c.implausible && Math.floor(+msg.thinkMs || 0) > sincePrev + IMPLAUSIBLE_MARGIN_MS) {
             out.anomaly = { color, kind: 'clock_implausible', detail: `ply ${idx} thinkMs ${msg.thinkMs >>> 0} elapsed ${c.elapsed}`, posMatched: true };
         }
         if (c.flagged) {
@@ -490,10 +518,12 @@ export class GameRoom {
             return out;
         }
         if (this.connected[color]) return out;
-        this._applyEvent(JournalEvent.Reconnect, color, 0, now);
+        const held = this.clockHeld && color === (this.ply & 1);
+        this._applyEvent(JournalEvent.Reconnect, color, 0, now);    // a clock held for this player starts now
         this.gseq++;
         out.broadcast.push(this._gameEvent(EV.PlayerReconnected, color, 0));
         out.journal.push(this._eventRecord(JournalEvent.Reconnect, color, 0, now));
+        if (held) out.clockStarted = color;
         return out;
     }
 
@@ -543,9 +573,10 @@ export class GameRoom {
     /**
      * Server restart semantics (DESIGN 6.4) on a room rebuilt by fromJournal(): both players are
      * marked disconnected with the recovery grace (recoveryGraceFor: RECOVERY_GRACE_MS, or the
-     * normal grace when longer), and the running clock (or first-move timer) restarts at `now`
-     * from its journaled value. A finished game only loses its rematch window. The Outcome
-     * carries the journal record of the recovery (to append; it records the grace).
+     * normal grace when longer), and the running clock (or first-move timer) restarts from its
+     * journaled value when the side to move is back, RECOVERY_CLOCK_HOLD_MS after `now` at the
+     * latest (recoveryHoldFor). A finished game only loses its rematch window. The Outcome
+     * carries the journal record of the recovery (to append; it records the grace and the hold).
      */
     recover(now) {
         now = Math.floor(now);
@@ -560,9 +591,9 @@ export class GameRoom {
             this.rematchBy = NONE;
             return out;
         }
-        this._applyEvent(JournalEvent.Recovered, NONE, this.recoveryGraceMs, now);
+        this._applyEvent(JournalEvent.Recovered, NONE, this.recoveryGraceMs, now, this.recoveryHoldMs);
         this.gseq += RECOVERY_GSEQ_JUMP;
-        out.journal.push(this._eventRecord(JournalEvent.Recovered, NONE, this.recoveryGraceMs, now));
+        out.journal.push(this._eventRecord(JournalEvent.Recovered, NONE, this.recoveryGraceMs, now, this.recoveryHoldMs));
         return out;
     }
 
@@ -589,7 +620,9 @@ export class GameRoom {
             black: this.black,
             you: forColor === WHITE || forColor === BLACK ? forColor : NONE,
             moves,
-            running: !over && n >= 2 ? (n & 1) : NONE,
+            // A clock held after a recovery is not running yet (the client counts the running
+            // clock down from serverTime).
+            running: !over && n >= 2 && !this.clock.heldAt(now) ? (n & 1) : NONE,
             whiteMs: over ? r.whiteMs : this.clock.remainingAt(WHITE, n, now),
             blackMs: over ? r.blackMs : this.clock.remainingAt(BLACK, n, now),
             serverTime: now,
@@ -761,6 +794,7 @@ export class GameRoom {
         this.gseqMove[i] = gseqMove;
         this.recvTime[i] = at;
         this.clock.apply(color, clockAfter, quotaAfter, at);
+        this.clockHeld = false;       // the next turn starts now (the MoveMade tells both players)
         this.ply = i + 1;
         if (bits & MB_DECLINED) {
             this.drawOffer = NONE;
@@ -772,7 +806,7 @@ export class GameRoom {
         }
     }
 
-    _applyEvent(kind, color, arg, at) {
+    _applyEvent(kind, color, arg, at, hold = 0) {
         switch (kind) {
             case JournalEvent.DrawOffer:
                 this.drawOffer = color;
@@ -789,6 +823,11 @@ export class GameRoom {
                 break;
             case JournalEvent.Reconnect:
                 this.connected[color] = true;
+                if (this.clockHeld && color === (this.ply & 1)) {
+                    // The side to move is back before the end of the hold: its clock starts now.
+                    if (at < this.clock.turnStart) this.clock.restart(at);
+                    this.clockHeld = false;
+                }
                 break;
             case JournalEvent.Desync:
                 this.desyncs[color]++;
@@ -797,7 +836,8 @@ export class GameRoom {
                 this.connected[WHITE] = this.connected[BLACK] = false;
                 this.disconnectedAt[WHITE] = this.disconnectedAt[BLACK] = at;
                 this.disconnectGrace[WHITE] = this.disconnectGrace[BLACK] = arg > 0 ? arg : this.recoveryGraceMs;
-                this.clock.restart(at);
+                this.clock.restart(at + hold);   // held until the side to move is back, `hold` at most
+                this.clockHeld = hold > 0;
                 this.flags |= RecordFlag.Recovered;
                 break;
             default:
@@ -810,6 +850,7 @@ export class GameRoom {
         this.result = { status, reason, whiteMs, blackMs, endedAt: at };
         this.culprit = culprit;
         this.drawOffer = NONE;
+        this.clockHeld = false;
         if (reason === ER.Forfeit) this.flags |= RecordFlag.Forfeit;
         this.rematchState = reason === ER.ServerAborted ? RM_CLOSED : RM_OPEN;
         this.rematchBy = NONE;
@@ -886,6 +927,13 @@ export class GameRoom {
 
     _advance(now, out) {
         if (!this._over) {
+            if (this.clockHeld && now >= this.clock.turnStart) {
+                // The hold after a recovery is over and the side to move is still away: its clock
+                // runs from now on. Journaled (a checkpoint) so that a replay clears it too.
+                this.clockHeld = false;
+                out.journal.push(this._checkpointRecord(now));
+                out.clockStarted = this.ply & 1;
+            }
             const tm = this.clock.deadline(this.ply);
             const tg = this._graceDeadline();
             if (tm <= now && tm <= tg) this._onTimeDeadline(now, out);
@@ -900,7 +948,11 @@ export class GameRoom {
         const side = this.ply & 1;
         if (this.ply < 2) {
             this._end(GS.Aborted, ER.NoShow, now, out, side, NONE);
-            out.conduct.push({ userId: this.playerOf(side).userId, kind: 'noshow' });
+            // A restored game whose side to move is still away: the server broke the connection,
+            // not the player (the game is aborted all the same, unrated).
+            if (!(this.flags & RecordFlag.Recovered) || this.connected[side]) {
+                out.conduct.push({ userId: this.playerOf(side).userId, kind: 'noshow' });
+            }
         } else {
             this._flag(side, now, out);
         }
@@ -994,12 +1046,14 @@ export class GameRoom {
         b.writeDoubleLE(this.recvTime[i], o + 24);
     }
 
-    _eventRecord(kind, color, arg, at) {
-        const b = Buffer.alloc(EVENT_REC_BYTES);
+    // An event record; a `hold` (>= 0) makes the 16-byte form of the recovered event.
+    _eventRecord(kind, color, arg, at, hold = -1) {
+        const b = Buffer.alloc(hold >= 0 ? RECOVERED_REC_BYTES : EVENT_REC_BYTES);
         b[0] = kind;
         b[1] = color;
         b.writeUInt32LE(this.gseq >>> 0, 4);
         b.writeUInt32LE(clampInt(arg, 0, 0xffffffff), 8);
+        if (hold >= 0) b.writeUInt32LE(clampInt(hold, 0, 0xffffffff), 12);
         return { kind: JournalKind.Event, at, payload: b };
     }
 
@@ -1016,12 +1070,14 @@ export class GameRoom {
         return { kind: JournalKind.Ended, at: r.endedAt, payload: b };
     }
 
-    // Every counter that the move records do not carry (journalState() only).
-    _checkpointRecord() {
+    // Every counter that the move records do not carry (journalState(), and the end of a clock
+    // hold: see _advance).
+    _checkpointRecord(at = this.clock.turnStart) {
         const b = Buffer.alloc(CHECKPOINT_BYTES);
         b[0] = JournalEvent.Checkpoint;
         b[1] = this.drawOffer;
-        b[2] = (this.connected[WHITE] ? 1 : 0) | (this.connected[BLACK] ? 2 : 0);
+        b[2] = (this.connected[WHITE] ? CP_WHITE_CONNECTED : 0) | (this.connected[BLACK] ? CP_BLACK_CONNECTED : 0)
+            | (this.clockHeld ? CP_CLOCK_HELD : 0);
         b.writeUInt32LE(this.gseq >>> 0, 4);
         b.writeUInt16LE(Math.min(0xffff, this.drawOffersUsed[WHITE]), 8);
         b.writeUInt16LE(Math.min(0xffff, this.drawOffersUsed[BLACK]), 10);
@@ -1037,7 +1093,7 @@ export class GameRoom {
         b.writeUInt32LE(this.clock.quota[BLACK] >>> 0, 56);
         b.writeUInt32LE(clampInt(this.disconnectGrace[WHITE], 0, 0xffffffff), 60);
         b.writeUInt32LE(clampInt(this.disconnectGrace[BLACK], 0, 0xffffffff), 64);
-        return { kind: JournalKind.Event, at: this.clock.turnStart, payload: b };
+        return { kind: JournalKind.Event, at, payload: b };
     }
 
     _replayMove(b) {
@@ -1061,15 +1117,17 @@ export class GameRoom {
         if (this._over) return;   // nothing is journaled after the end; ignore defensively
         const color = b[1];
         if (kind !== JournalEvent.Recovered && color !== WHITE && color !== BLACK) throw new JournalError(`bad colour ${color}`);
-        this._applyEvent(kind, color, b.readUInt32LE(8), at);
+        const hold = kind === JournalEvent.Recovered && b.length >= RECOVERED_REC_BYTES ? b.readUInt32LE(12) : 0;
+        this._applyEvent(kind, color, b.readUInt32LE(8), at, hold);
         this.gseq = b.readUInt32LE(4);
     }
 
     _replayCheckpoint(b) {
         if (b.length < CHECKPOINT_V1_BYTES) throw new JournalError('short checkpoint record');
         this.drawOffer = b[1] <= NONE ? b[1] : NONE;
-        this.connected[WHITE] = (b[2] & 1) !== 0;
-        this.connected[BLACK] = (b[2] & 2) !== 0;
+        this.connected[WHITE] = (b[2] & CP_WHITE_CONNECTED) !== 0;
+        this.connected[BLACK] = (b[2] & CP_BLACK_CONNECTED) !== 0;
+        this.clockHeld = (b[2] & CP_CLOCK_HELD) !== 0;
         this.gseq = b.readUInt32LE(4);
         this.drawOffersUsed[WHITE] = b.readUInt16LE(8);
         this.drawOffersUsed[BLACK] = b.readUInt16LE(10);

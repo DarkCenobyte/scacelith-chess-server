@@ -78,6 +78,19 @@ export function recoveryGraceFor(baseMs, config = {}) {
 }
 
 /**
+ * Clock hold of a game restored from the journal: RECOVERY_CLOCK_HOLD_MS, at most the recovery
+ * grace of the game. The clock (or first-move timer) of the side to move starts when that player
+ * is back, or once the hold is over.
+ * @param {number} baseMs
+ * @param {object} config
+ * @returns {number} integer milliseconds
+ */
+export function recoveryHoldFor(baseMs, config = {}) {
+    const h = Number.isFinite(config.recoveryClockHoldMs) ? Math.max(0, Math.floor(config.recoveryClockHoldMs)) : 20000;
+    return Math.min(h, recoveryGraceFor(baseMs, config));
+}
+
+/**
  * One exponential-moving-average step of a round-trip measurement, capped at RTT_EMA_MAX_MS.
  * @param {number} prev previous average (NaN or undefined: none yet)
  * @param {number} sample new measurement in ms
@@ -183,8 +196,15 @@ export class GameClock {
         this.turnStart = at;
     }
 
-    /** Server restart: the running clock restarts from its journaled value at `at`. */
+    /**
+     * Server restart: the running clock restarts from its journaled value at `at`. A turn start
+     * in the future holds the clock until then: remainingAt(), check() and the deadlines charge
+     * nothing before it.
+     */
     restart(at) { this.turnStart = at; }
+
+    /** Whether the clock of the side to move is held at `nowMs` (its turn starts later). */
+    heldAt(nowMs) { return this.turnStart > nowMs; }
 }
 
 export { WHITE, BLACK };
