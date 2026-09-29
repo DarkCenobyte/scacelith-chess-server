@@ -86,6 +86,14 @@ export function createFakeStore({ textColumns = false } = {}) {
             },
             complete(gameId, features) { bind(features); const j = jobs.get(Number(gameId)) || { gameId }; j.status = 'done'; j.features = features; j.completedAt = Date.now(); jobs.set(Number(gameId), j); },
             fail(gameId, error) { const j = jobs.get(Number(gameId)); if (j) { j.status = 'failed'; j.error = error; } },
+            // Game eligibility (rated, length...) is not modelled: any known game can be requested.
+            request(gameId, reason = 'report') {
+                rec('analysis.request', [gameId, reason]);
+                const j = jobs.get(Number(gameId));
+                if (!games.has(Number(gameId)) || (j && j.status !== 'queued' && j.status !== 'failed')) return false;
+                jobs.set(Number(gameId), { ...(j || { gameId: Number(gameId), attempts: 0 }), status: 'queued', reason });
+                return true;
+            },
             forUser(userId, limit = 30) {
                 const out = [];
                 for (const j of jobs.values()) {

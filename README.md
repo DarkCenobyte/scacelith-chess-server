@@ -225,6 +225,14 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
   applied migration was modified or is unknown to its version (a downgrade).
 - A crash loses at most the last journal flush (`JOURNAL_FLUSH_MS`, 50 ms) of moves in progress;
   finished games and rating changes are committed in database transactions.
+- Retention: every `RETENTION_INTERVAL_MS` (one hour; the first run about a minute after the
+  start) the server deletes expired and revoked sessions, expired tokens, security events older
+  than `RETENTION_SECURITY_DAYS` (90), non-certain anomalies of the same age, conduct events and
+  failed analysis jobs older than 30 days, and erases stored IP addresses older than
+  `RETENTION_IP_DAYS` (30). It works in small slices while the server runs and logs one
+  `retention purge done` line with the counts. Games, ratings, analysed games, sanctions and
+  reports are kept. SQLite reuses the freed pages; the file only shrinks after a `VACUUM`
+  (server stopped). The full table is in the retention section of [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Moderation
 
@@ -236,10 +244,18 @@ with the same `.env`. See `node bin/admin.js` for the commands and
 forged server message) forfeit the game and ban for `BAN_DURATION_HOURS` (24) automatically when
 `AUTO_SANCTION_CERTAIN_CHEATS` is on; statistical suspicion never bans by itself.
 
+One analysis engine handles roughly 1,000 to 12,000 games a day, fewer than a busy server
+plays. Reported games, games of players already under suspicion (integrity level, open
+report) or with a suspicious anomaly, and moderator requests are always analysed first. Ordinary games are sampled
+(`ANALYSIS_SAMPLE_RATE`) and skipped while `ANALYSIS_QUEUE_MAX` (5000) of them already wait.
+If `scacelith_anticheat_analysis_queue_ordinary` stays at that cap, add engines
+(`ANALYSIS_WORKERS`), lower `ANALYSIS_DEPTH_DEEP`, or lower the sample rate.
+
 ## Monitoring
 
 `http://127.0.0.1:9464/metrics` (Prometheus text format; `METRICS_TOKEN` adds a bearer token):
-connections, messages, games, move latency, commits, journal, rate limits, anti-cheat, process
+connections, messages, games, move latency, commits, journal, rate limits, anti-cheat (including
+the analysis backlog and the skipped games), the retention purge (`scacelith_retention_*`), process
 memory and event-loop lag per shard. `/healthz` answers when the process runs, `/readyz` when it
 accepts players.
 

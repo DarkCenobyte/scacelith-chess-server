@@ -1,8 +1,8 @@
 // Primary process bootstrap: configuration, database migrations, server id, the match module
 // objects, the shard workers (cluster, 'advanced' IPC serialization, env SHARD=<n>), the
 // anti-cheat analysis process (when the anti-cheat module exports startAnalysisProcess), the
-// control plane, the metrics endpoint, signals (SIGTERM/SIGINT graceful stop, SIGHUP certificate
-// reload).
+// control plane, the metrics endpoint, the retention purge (retention.js) and the analysis
+// backlog gauges, signals (SIGTERM/SIGINT graceful stop, SIGHUP certificate reload).
 //
 // This file and worker-main.js are the only places that import the other modules of the server
 // (store, match, anticheat...). Everything below them receives its dependencies as parameters.
@@ -18,8 +18,10 @@ import * as conductModule from '../match/conduct.js';
 import { Challenges } from '../match/challenges.js';
 import { applyGame } from '../match/elo.js';
 import { Matchmaker } from '../match/matchmaker.js';
+import { metrics } from '../metrics.js';
 import { migrate, openStore } from '../store/index.js';
 import { startPrimary } from './primary.js';
+import { startRetention } from './retention.js';
 
 const WORKER_MAIN = fileURLToPath(new URL('./worker-main.js', import.meta.url));
 
@@ -86,6 +88,18 @@ export async function main() {
         }
     }
 
+    const retention = startRetention({ config, store, log: logger.child('retention') });
+    // Engine analysis backlog, read once per scrape (both counts are ranges of the queue index).
+    let backlog = null, backlogAt = 0;
+    const readBacklog = () => {
+        if (!backlog || Date.now() - backlogAt > 1000) { backlog = store.analysis.backlog(); backlogAt = Date.now(); }
+        return backlog;
+    };
+    metrics.gaugeFn('scacelith_anticheat_analysis_queue_ordinary', 'Ordinary games waiting for engine analysis (at most ANALYSIS_QUEUE_MAX)',
+        () => readBacklog().ordinary);
+    metrics.gaugeFn('scacelith_anticheat_analysis_queue_priority', 'Reported, flagged or moderator-requested games waiting for engine analysis',
+        () => readBacklog().priority);
+
     let stopping = false;
     const shutdown = async (signal) => {
         if (stopping) {
@@ -94,6 +108,7 @@ export async function main() {
         }
         stopping = true;
         log.info('shutting down', { signal, graceMs: config.shutdownGraceMs });
+        try { await retention.stop(); } catch (e) { log.error('retention stop failed', { err: e }); }
         try {
             if (analysis) {
                 if (typeof analysis.stop === 'function') await analysis.stop();

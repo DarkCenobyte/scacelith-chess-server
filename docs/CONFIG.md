@@ -179,6 +179,8 @@ Sections:
 | `ANALYSIS_HASH_MB` | integer (1-4096) | `32` | Transposition table of each analysis engine, in MB. |
 | `ANALYSIS_POSITION_TIMEOUT_MS` | integer (&gt;= 1000) | `120000` | Longest search of one position; an engine that exceeds it is restarted and the game is marked failed. |
 | `ANALYSIS_POLL_MS` | integer (&gt;= 100) | `5000` | Interval at which an idle analysis engine looks for new games to analyse. |
+| `ANALYSIS_QUEUE_MAX` | integer (&gt;= 0) | `5000` | Most ordinary games waiting for engine analysis: while this many wait, a newly finished ordinary game is not queued (the engines could not catch up anyway). Games with a report, a suspicion signal or a moderator request are always queued and analysed first. 0 analyses only those. |
+| `ANALYSIS_SAMPLE_RATE` | number (0-1) | `1` | Share of the ordinary rated games queued for analysis (0 to 1, drawn at random when the game ends). Lower it when the engine cannot keep up with the games played. |
 
 ## Observability
 
@@ -192,3 +194,4 @@ Sections:
 | `LOG_IP` | one of truncated, full, hashed | `truncated` | How client addresses appear in the logs: truncated (IPv4 /24, IPv6 /48), full, or hashed (keyed HMAC, rotated daily). |
 | `RETENTION_SECURITY_DAYS` | integer (&gt;= 1) | `90` | Security events (failed logins, anomalies without sanction) are deleted after this many days. |
 | `RETENTION_IP_DAYS` | integer (&gt;= 1) | `30` | Stored IP addresses (sessions, security events) are erased after this many days. |
+| `RETENTION_INTERVAL_MS` | integer (&gt;= 60000) | `3600000` | Interval of the retention purge run by the primary (expired sessions and tokens, old security events, anomalies, conduct events and failed analysis jobs, IP erasure). The first run starts about a minute after the server starts. |
