@@ -10,8 +10,9 @@
 //    (`ratelimit.take` on a server-wide key with limit POW_LOGIN_TRIGGER_PER_MIN / min). Above the
 //    trigger, every login needs a proof of work (POW_LOGIN_BITS) for the next 5 minutes.
 //  * Unknown account, wrong password and account without password (Google-only) all do the same
-//    hashing work and give the same `invalid_credentials` answer; `email_unverified` and `banned`
-//    are only answered after the password matched.
+//    hashing work, in the same per-worker hash queue (a refusal there is 503 server_busy for all
+//    of them and counts no failure), and give the same `invalid_credentials` answer;
+//    `email_unverified` and `banned` are only answered after the password matched.
 //  * The MFA step: an `mfa_` token (5 min, 5 wrong codes at most, single use) and a per-account
 //    failure counter.
 

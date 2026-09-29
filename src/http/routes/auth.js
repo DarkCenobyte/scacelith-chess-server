@@ -17,6 +17,9 @@
 //   POST /auth/verify-email/resend { email } -> 202 { status: 'accepted' }
 //   POST /auth/password/forgot { email } -> 202 { status: 'accepted' }
 //   POST /auth/password/reset { token, newPassword } -> 200 { status: 'password_reset' } | 400 invalid_token | weak_password
+// Every endpoint that hashes or checks a password (register, login, password reset) may also
+// answer 503 server_busy{retryAfter} (with a Retry-After header) when the password hash queue of
+// the worker is full or the wait expired (security/password.js); nothing was changed then.
 
 import * as verifyPages from '../pages/verify-email.js';
 import * as resetPages from '../pages/reset-password.js';
@@ -95,6 +98,10 @@ export function register(router, { config, auth }) {
         } catch (err) {
             if (err && err.code === 'weak_password') return form(err.message);
             if (err && err.code === 'invalid_token') return { status: 400, html: resetPages.resetInvalid({ serverName }) };
+            // The link is still valid: show the form again so that the user can simply resend it.
+            if (err && err.code === 'server_busy') {
+                return { ...form(err.message), status: 503, headers: { 'Retry-After': String(err.extra.retryAfter) } };
+            }
             throw err;
         }
         return { html: resetPages.resetDone({ serverName }) };

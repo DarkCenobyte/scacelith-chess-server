@@ -241,6 +241,7 @@ take them as ±30 %):
 | idle connection (10 s server heartbeat + a client Ping every 10 s) | about 11 µs of CPU per second (about half without the client Ping) |
 | move (validation, clock, journal, frames to both players, relays) | about 120-160 µs of CPU at a high rate (about 100-120 µs without TLS) |
 | game start and end (challenge through the primary, snapshots, commit, rating update) | about 3 ms of CPU per game (estimated from the staggered run) |
+| password hash (login, registration, password change; not in the runs above) | 0.5-0.6 s of CPU and 128 MiB (scrypt N=2^17) on a thread-pool thread, at most `PASSWORD_HASH_CONCURRENCY` (1) at once per worker |
 | memory | 55-60 KB per idle connection, 65-85 KB with a game in progress, plus about 350 MB for the processes |
 
 For a dedicated 4-core, 16 GB machine running only the server (Linux, `nofile` raised,
