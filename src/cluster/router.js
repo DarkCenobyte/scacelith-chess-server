@@ -212,9 +212,9 @@ export class Router {
         this.admission = {
             acquire: (ip) => this.primary.request('conn.ipAcquire', { ip, shard: this.shard }).then(
                 (res) => {
-                    if (res && res.ok) { this._admitAt = Date.now(); return true; }
+                    if (res && res.ok) { this._admitAt = performance.now(); return true; }
                     const global = res && res.reason === 'global';
-                    if (global) this._fullAt = Date.now();
+                    if (global) this._fullAt = performance.now();
                     return { ok: false, status: global ? 503 : 429, error: global ? 'server_full' : 'too_many_connections' };
                 },
                 (e) => { this.log?.warn?.('ipAcquire failed', { err: e }); return { ok: false, status: 503, error: 'unavailable' }; }),
@@ -247,12 +247,14 @@ export class Router {
      * last answer to 'conn.ipAcquire' was a MAX_CONNECTIONS refusal less than FULL_HOLD_MS ago
      * (an admitted upgrade or the delay ends it: some connections still reach the exact check,
      * so a freed slot is found), or while this worker holds 1.2 times its share of
-     * MAX_CONNECTIONS. O(1).
-     * @param {number} [now]
+     * MAX_CONNECTIONS. O(1). The times are monotonic (performance.now), so a step of the wall
+     * clock neither prolongs nor shortens the state.
+     * @param {number} [now] performance.now()
      */
-    isFull(now = Date.now()) {
+    isFull(now = performance.now()) {
         if (this.conns.size >= this.localCap) return true;
-        return this._fullAt > this._admitAt && now - this._fullAt < FULL_HOLD_MS;
+        const age = now - this._fullAt;
+        return this._fullAt > this._admitAt && age >= 0 && age < FULL_HOLD_MS;
     }
 
     /**

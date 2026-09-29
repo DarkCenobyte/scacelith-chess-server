@@ -45,6 +45,13 @@ describe('ip helpers', () => {
         assert.equal(ipGroupKey('::ffff:192.0.2.7'), '192.0.2.7');
         assert.notEqual(ipGroupKey('192.0.2.7'), ipGroupKey('192.0.2.8'));
     });
+    it('groups IPv6 by /48 on request (TLS admission gate)', () => {
+        assert.equal(ipGroupKey('2001:db8:1:2::1', 48), ipGroupKey('2001:db8:1:ffff:aaaa::1', 48));
+        assert.notEqual(ipGroupKey('2001:db8:1::1', 48), ipGroupKey('2001:db8:2::1', 48));
+        assert.notEqual(ipGroupKey('2001:db8:1::1', 48), ipGroupKey('2001:db8:1::1'), 'a /48 key is not a /64 key');
+        assert.equal(ipGroupKey('::ffff:192.0.2.7', 48), '192.0.2.7');
+        assert.equal(ipGroupKey('', 48), 'unknown');
+    });
     it('matches addresses and subnets, and rejects bad entries', () => {
         const m = ipMatcher(['127.0.0.1', '10.0.0.0/8', 'fd00::/8']);
         assert.ok(m('127.0.0.1') && m('::ffff:127.0.0.1') && m('10.200.1.1') && m('fd12::5'));

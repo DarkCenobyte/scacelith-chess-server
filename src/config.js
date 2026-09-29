@@ -113,8 +113,10 @@ key('GOOGLE_REDIRECT_URI', { section: 'sso', type: 'string', default: '',
 key('MAX_CONNECTIONS', { section: 'limits', type: 'int', default: 200000, min: 1,
     desc: 'Simultaneous players, whole server. Newcomers beyond it are refused at Hello (ServerFull), but a player whose game is in progress is still admitted, so that a full server does not make them lose it by abandonment. WebSocket upgrades may go max(16, 2 %) beyond it, so that such a player can reach Hello.' });
 key('MAX_CONNECTIONS_PER_IP', { section: 'limits', type: 'int', default: 16, min: 1, desc: 'Simultaneous WebSocket connections from one IP address (IPv6: per /64).' });
-key('MAX_PENDING_HANDSHAKES', { section: 'limits', type: 'int', default: 128, min: 1, max: 100000,
-    desc: 'TLS handshakes in progress per worker (TLS_MODE=native). A new connection beyond it, or beyond MAX_CONNECTIONS_PER_IP handshakes from one address, is closed before any TLS work and the client retries later, so a reconnection storm is served in turn instead of every handshake slowing down together. While the server is full, a worker also lets at most half this number of new TLS connections per second through.' });
+key('MAX_PENDING_HANDSHAKES', { section: 'limits', type: 'int', default: 128, min: 2, max: 100000,
+    desc: 'TLS handshakes in progress per worker (TLS_MODE=native). A new connection takes a slot once the first record of its ClientHello has arrived; it has 3 s for that and holds no slot meanwhile. A connection beyond this cap, or beyond MAX_PENDING_HANDSHAKES_PER_IP for its address group, is closed before any TLS work and the client retries later, so a reconnection storm is served in turn instead of every handshake slowing down together. While the server is full, a worker also lets at most half this number of new TLS connections per second through.' });
+key('MAX_PENDING_HANDSHAKES_PER_IP', { section: 'limits', type: 'int', min: 1, max: 99999,
+    desc: 'TLS handshakes in progress per worker for one address group: an IPv4 address or an IPv6 /48 (TLS_MODE=native). Empty (the default) = MAX_PENDING_HANDSHAKES / 32 with a floor of 2, but always below MAX_PENDING_HANDSHAKES (4 by default). A value you set must be lower than MAX_PENDING_HANDSHAKES, so that a few hosts cannot hold every handshake slot. A worker also keeps at most 4 times this number of connections of one group waiting for their ClientHello (and 16 times MAX_PENDING_HANDSHAKES in total). Raise it when many players share one public address (a school or company network); a handshake takes a fraction of a second, so a small value still serves many players.' });
 key('WS_MAX_MESSAGE_BYTES', { section: 'limits', type: 'int', default: 512, min: 128, max: 65536, desc: 'Largest message a client may send.' });
 key('WS_MSG_RATE', { section: 'limits', type: 'int', default: 20, min: 1, desc: 'Messages per second a client may send (sustained).' });
 key('WS_MSG_BURST', { section: 'limits', type: 'int', default: 40, min: 1, desc: 'Message burst a client may send.' });
@@ -347,6 +349,9 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     if (cfg.ssoGoogleEnabled && (!cfg.googleClientId || !cfg.googleClientSecret)) errors.push('SSO_GOOGLE_ENABLED needs GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.');
     if (cfg.mailTransport === 'smtp' && !cfg.smtpHost) errors.push('MAIL_TRANSPORT=smtp needs SMTP_HOST.');
     if (cfg.analysisDepthFast >= cfg.analysisDepthDeep) errors.push('ANALYSIS_DEPTH_FAST must be lower than ANALYSIS_DEPTH_DEEP.');
+    if (cfg.maxPendingHandshakesPerIp != null && cfg.maxPendingHandshakesPerIp >= cfg.maxPendingHandshakes) {
+        errors.push('MAX_PENDING_HANDSHAKES_PER_IP must be lower than MAX_PENDING_HANDSHAKES (one address group could otherwise hold every handshake slot).');
+    }
     if (!cfg.googleRedirectUri) {
         const port = cfg.publicApiPort === 443 ? '' : `:${cfg.publicApiPort}`;
         cfg.googleRedirectUri = `https://${cfg.serverPublicHost}${port}/auth/sso/google/callback`;

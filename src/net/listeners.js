@@ -25,22 +25,38 @@
 // kernel caps it at net.core.somaxconn); the round-robin handle of the primary honours it too.
 //
 // Admission before TLS (native mode; TlsGate): a TLS server wraps each accepted TCP socket in a
-// TLSSocket from its own 'connection' listener. The gate runs in front of that listener and closes
-// a new socket (RST, nothing sent) before any TLS work when this worker already has
-// MAX_PENDING_HANDSHAKES handshakes in progress, or MAX_CONNECTIONS_PER_IP of them from the
-// client's address group (so a few idle sockets from one host cannot hold every slot). A slot is
-// held from the accept until 'secureConnection', 'tlsClientError' or the close of the socket
-// (the handshake timeout, 10 s, bounds it). The CPU then serves a reconnection storm in turn
-// (one handshake is 1-3.5 ms of CPU) instead of starting every handshake at once and finishing
-// none before the clients' deadline; a refused client retries with its backoff. On the listener
-// that carries the WebSocket upgrade, the gate also sheds load while the server is full (the
-// `full` predicate, Router.isFull: the primary refused an upgrade for MAX_CONNECTIONS, or this
-// worker holds 1.2 times its share): new connections then pass at MAX_PENDING_HANDSHAKES / 2 per
-// second, enough for the API (GET /info tells a client the server is full) and for the exact
-// check (HTTP 503 at the upgrade), and the others are closed before the handshake. On a shared
-// API/WSS port the gate cannot tell an API request from an upgrade (both are inside TLS), so they
-// share that rate; with WS_PORT != API_PORT the API listener is never shed. Plain modes (proxy,
-// off) have no gate: there is no TLS work to save.
+// TLSSocket from its own 'connection' listener. The gate runs in front of that listener, in two
+// stages, and counts every socket it closes in scacelith_tls_refused_total{reason}:
+//   1. A new socket first waits, without a handshake slot, until its first TLS record has arrived
+//      whole: a handshake record of at most 16 KB that starts the ClientHello (clients send the
+//      whole ClientHello in that record, unless they fragment it on purpose). It has
+//      HELLO_TIMEOUT_MS (3 s) for that, however it splits the bytes; a socket that stays silent,
+//      is too slow, ends or sends anything else is closed. Waiting sockets cost no CPU and little
+//      memory, and they are bounded as well: 16 * MAX_PENDING_HANDSHAKES of them per worker, and
+//      4 * MAX_PENDING_HANDSHAKES_PER_IP per address group.
+//   2. The socket then takes a handshake slot and goes to Node's listener with the record still
+//      unread (a TLSSocket replays what its raw socket has buffered). Beyond
+//      MAX_PENDING_HANDSHAKES slots per worker, or MAX_PENDING_HANDSHAKES_PER_IP for one address
+//      group, it is closed with an RST instead, before any TLS work. A slot is held until
+//      'secureConnection', 'tlsClientError' or the close of the socket. The handshake timeout
+//      (10 s) bounds it: Node only reports that timeout and leaves the socket open, so the gate
+//      destroys every socket whose handshake failed or timed out.
+// An address group is an IPv4 address or an IPv6 /48 (one customer's allocation), and the
+// per-group caps are small, so a few hosts cannot hold every slot. The CPU then serves a
+// reconnection storm in turn (one handshake is 1-3.5 ms of CPU) instead of starting every
+// handshake at once and finishing none before the clients' deadline; a refused client retries
+// with its backoff. An attacker with enough address groups can still fill the caps: see
+// docs/DESIGN.md 5.8 for what remains possible.
+// On the listener that carries the WebSocket upgrade, the gate also sheds load while the server is
+// full (the `full` predicate, Router.isFull: the primary refused an upgrade for MAX_CONNECTIONS, or
+// this worker holds 1.2 times its share): new connections then pass at MAX_PENDING_HANDSHAKES / 2
+// per second, and the others are closed before the handshake. What passes reaches the exact check
+// at the upgrade, whose HTTP 503 is the only way a client learns that the server is full (GET
+// /info does not say it). On a shared API/WSS port the gate cannot tell an API request from an
+// upgrade (both are inside TLS), so the API is let through at that rate too, which keeps part of
+// the API traffic working; with WS_PORT != API_PORT the API listener is never shed, the better
+// layout for a server that expects to be full. Plain modes (proxy, off) have no gate: there is no
+// TLS work to save.
 //
 // Health: GET /api/v1/healthz and /api/v1/readyz (also /healthz, /readyz) are answered here,
 // before the API handler, so they work whatever the API module does.
@@ -50,15 +66,32 @@ import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
+import { performance } from 'node:perf_hooks';
 import tls from 'node:tls';
 import { metrics as defaultRegistry } from '../metrics.js';
 import { ipGroupKey, ipMatcher, normalizeIp, resolveClientIp } from './ip.js';
 
 const DAY_MS = 86400000;
 const DEFAULT_BACKLOG = 2048;
+/** TLS handshake timeout of the native listeners (Node's handshakeTimeout). */
+export const HANDSHAKE_TIMEOUT_MS = 10000;
+/** Time a new TLS connection has to send the first record of its ClientHello (TlsGate, before it takes a slot). */
+export const HELLO_TIMEOUT_MS = 3000;
+/** Largest body of a TLS record (RFC 8446 section 5.1: 2^14 bytes). */
+const MAX_RECORD_BODY = 16384;
 const kSlot = Symbol('scacelith.tlsGateSlot');   // address group of a socket holding a handshake slot
+const kWait = Symbol('scacelith.tlsGateWait');   // state of a socket waiting for its ClientHello
 
 function noop() {}
+
+/**
+ * Default handshake slots per address group: MAX_PENDING_HANDSHAKES / 32 with a floor of 2, but
+ * below the total when the total is at least 2 (4 for the default 128, 1 for a total of 2).
+ * @param {number} maxPending
+ */
+export function defaultPendingPerGroup(maxPending) {
+    return Math.max(1, Math.min(maxPending - 1, Math.max(2, Math.floor(maxPending / 32))));
+}
 
 // Closes a refused socket with an RST: nothing is sent, and the server keeps no TIME_WAIT for it.
 function refuseSocket(socket) {
@@ -68,21 +101,31 @@ function refuseSocket(socket) {
 
 /**
  * Admission of new TCP connections on the TLS listeners of one worker, before any TLS work (see
- * the header). O(1) per connection.
+ * the header). O(1) per connection, plus a copy of the ClientHello.
  */
 export class TlsGate {
     /**
      * @param {object} [o]
      * @param {number} [o.maxPending] handshakes in progress (MAX_PENDING_HANDSHAKES)
-     * @param {number} [o.maxPendingPerIp] handshakes in progress per address group (IPv6: /64)
+     * @param {number} [o.maxPendingPerIp] handshakes in progress per address group
+     *   (MAX_PENDING_HANDSHAKES_PER_IP; default: defaultPendingPerGroup(maxPending))
+     * @param {number} [o.maxWaiting] sockets waiting for their ClientHello (default: 16 * maxPending)
+     * @param {number} [o.maxWaitingPerIp] of them per address group (default: 4 * maxPendingPerIp)
+     * @param {number} [o.helloTimeoutMs] time a new socket has to send the first record of its ClientHello
      * @param {(() => boolean)|null} [o.full] true while the server is full (shedding on the upgrade listener)
      * @param {number} [o.fullRatePerSec] new connections let through per second while full
-     * @param {() => number} [o.now]
+     * @param {() => number} [o.now] monotonic clock, in ms
      * @param {object} [o.registry] metrics registry
      */
-    constructor({ maxPending = 128, maxPendingPerIp = Infinity, full = null, fullRatePerSec = 0, now = Date.now, registry = defaultRegistry } = {}) {
+    constructor({
+        maxPending = 128, maxPendingPerIp = 0, maxWaiting = 0, maxWaitingPerIp = 0, helloTimeoutMs = HELLO_TIMEOUT_MS,
+        full = null, fullRatePerSec = 0, now = () => performance.now(), registry = defaultRegistry,
+    } = {}) {
         this.maxPending = Math.max(1, Math.floor(maxPending) || 1);
-        this.maxPendingPerIp = Math.max(1, maxPendingPerIp || 1);
+        this.maxPendingPerIp = maxPendingPerIp >= 1 ? Math.floor(maxPendingPerIp) : defaultPendingPerGroup(this.maxPending);
+        this.maxWaiting = maxWaiting >= 1 ? Math.floor(maxWaiting) : 16 * this.maxPending;
+        this.maxWaitingPerIp = maxWaitingPerIp >= 1 ? Math.floor(maxWaitingPerIp) : 4 * this.maxPendingPerIp;
+        this.helloTimeoutMs = helloTimeoutMs > 0 ? helloTimeoutMs : HELLO_TIMEOUT_MS;
         this.full = full;
         this.fullRate = fullRatePerSec > 0 ? fullRatePerSec : Math.max(1, Math.ceil(this.maxPending / 2));
         this.now = now;
@@ -90,21 +133,35 @@ export class TlsGate {
         this.pending = 0;
         /** @type {Map<string, number>} address group -> handshakes in progress */
         this.perIp = new Map();
+        /** Sockets waiting for their ClientHello. */
+        this.waiting = 0;
+        /** @type {Map<string, number>} address group -> sockets waiting for their ClientHello */
+        this.waitingPerIp = new Map();
         this._tokens = this.fullRate;
         this._tokenAt = -Infinity;
         const r = registry;
         r.gaugeFn('scacelith_tls_handshakes_pending', 'TLS handshakes in progress', () => this.pending, { perShard: true });
+        r.gaugeFn('scacelith_tls_hello_waiting', 'New TLS connections waiting for their ClientHello (no handshake slot yet)', () => this.waiting, { perShard: true });
         const refused = r.counter('scacelith_tls_refused_total', 'New connections closed before the TLS handshake, by reason', ['reason']);
         this._refusedBusy = refused.labels('handshakes');
         this._refusedIp = refused.labels('per_ip');
         this._refusedFull = refused.labels('server_full');
+        this._refusedWaiting = refused.labels('waiting');
+        this._refusedWaitingIp = refused.labels('waiting_per_ip');
+        this._refusedTimeout = refused.labels('hello_timeout');
+        this._refusedBadHello = refused.labels('bad_hello');
         const gate = this;
         this._onClose = function onGatedSocketClose() { gate.release(this); };
+        this._onWaitData = function onWaitingData(chunk) { gate._waitData(this, chunk); };
+        this._onWaitEnd = function onWaitingEnd() { gate._drop(this, null); };
+        this._onWaitClose = function onWaitingClose() { gate._leave(this); };
+        this._onWaitTimeout = (socket) => gate._drop(socket, gate._refusedTimeout);
     }
 
     /**
      * Puts the gate in front of a tls.Server or https.Server: its own 'connection' listener (Node's,
-     * which starts the TLS work) only sees the sockets the gate admits.
+     * which starts the TLS work) only sees the sockets the gate admits, once their ClientHello
+     * has arrived.
      * @param {tls.Server} server
      * @param {{ shed?: boolean }} [o] shed: this listener carries the WebSocket upgrade (server-full shedding)
      */
@@ -113,25 +170,123 @@ export class TlsGate {
         if (!inner.length) throw new Error('TlsGate: the TLS server has no connection listener');
         server.removeAllListeners('connection');
         const gate = this;
-        server.on('connection', function gatedConnection(socket) {
-            if (!gate.admit(socket, shed)) return;
-            for (const l of inner) l.call(this, socket);
-        });
+        const ready = (socket) => { for (const l of inner) l.call(server, socket); };
+        server.on('connection', function gatedConnection(socket) { gate.accept(socket, shed, ready); });
         // A server-side TLSSocket keeps the raw socket it wraps in `_parent` (Node sets it for
         // every wrapped net.Socket); the unit tests check that completed and failed handshakes
-        // give their slot back.
+        // give their slot back. 'tlsClientError' only comes before the handshake completes, and
+        // Node does not close the socket after its handshake timeout: without the destroy, a
+        // silent client would keep the socket (and a file descriptor) forever, and could still
+        // complete the handshake later, outside the gate.
         server.on('secureConnection', (tlsSocket) => gate.release(tlsSocket?._parent));
-        server.on('tlsClientError', (err, tlsSocket) => gate.release(tlsSocket?._parent));
+        server.on('tlsClientError', (err, tlsSocket) => {
+            gate.release(tlsSocket?._parent);
+            tlsSocket?.destroy();
+        });
     }
 
     /**
-     * Takes a handshake slot for a new raw socket, or closes it (RST) and returns false.
+     * First stage for a new raw socket: it waits, without a handshake slot, until its first TLS
+     * record (the start of its ClientHello, usually all of it) has arrived, then takes a slot
+     * (admit) and is handed to `ready` with that record still unread. Returns false when the
+     * socket was closed at once.
+     * @param {import('node:net').Socket} socket
+     * @param {boolean} shed apply the server-full shedding
+     * @param {(socket: import('node:net').Socket) => void} ready
+     */
+    accept(socket, shed, ready) {
+        if (this.waiting >= this.maxWaiting) return this._refuse(socket, this._refusedWaiting);
+        const key = ipGroupKey(socket.remoteAddress, 48);
+        const n = this.waitingPerIp.get(key) || 0;
+        if (n >= this.maxWaitingPerIp) return this._refuse(socket, this._refusedWaitingIp);
+        this.waitingPerIp.set(key, n + 1);
+        this.waiting++;
+        socket[kWait] = {
+            key, shed, ready, head: Buffer.alloc(5), record: null, need: 0, len: 0,
+            timer: setTimeout(this._onWaitTimeout, this.helloTimeoutMs, socket),
+        };
+        socket.on('error', noop);
+        socket.on('data', this._onWaitData);
+        socket.on('end', this._onWaitEnd);
+        socket.on('close', this._onWaitClose);
+        return true;
+    }
+
+    // Collects the first record of a waiting socket: the 5-byte header, then the announced body.
+    _waitData(socket, chunk) {
+        const st = socket[kWait];
+        if (!st) return;
+        let off = 0;
+        if (st.record === null) {
+            off = Math.min(5 - st.len, chunk.length);
+            chunk.copy(st.head, st.len, 0, off);
+            st.len += off;
+            if (st.len < 5) return;
+            // TLSPlaintext: ContentType handshake (22), a 3.x record version, a body of 1 to 2^14
+            // bytes (RFC 8446 section 5.1 forbids empty handshake fragments).
+            const body = st.head.readUInt16BE(3);
+            if (st.head[0] !== 22 || st.head[1] !== 3 || body < 1 || body > MAX_RECORD_BODY) return this._drop(socket, this._refusedBadHello);
+            st.need = 5 + body;
+            // A ClientHello is usually 0.3-2 KB: the room for the rest is only taken once the
+            // client has sent it, so a header alone does not reserve 16 KB.
+            st.record = Buffer.allocUnsafe(Math.min(st.need, 4096));
+            st.head.copy(st.record, 0);
+        }
+        const n = Math.min(st.need - st.len, chunk.length - off);
+        if (st.len + n > st.record.length) {
+            const grown = Buffer.allocUnsafe(st.need);
+            st.record.copy(grown, 0, 0, st.len);
+            st.record = grown;
+        }
+        chunk.copy(st.record, st.len, off, off + n);
+        st.len += n;
+        off += n;
+        if (st.len < st.need) return;
+        // The record must start a ClientHello (HandshakeType 1). It need not hold all of it: a
+        // client may fragment the ClientHello over several records (some tools that get around
+        // censorship do). Requiring the whole message would protect nothing: an attacker can
+        // replay a whole captured ClientHello and then stay silent, which holds the slot just as
+        // long and costs the server more.
+        if (st.record[5] !== 1) return this._drop(socket, this._refusedBadHello);
+        this._leave(socket);
+        if (!this.admit(socket, st.shed, st.key)) return;
+        socket.pause();
+        socket.unshift(off < chunk.length ? Buffer.concat([st.record, chunk.subarray(off)]) : st.record);
+        st.ready(socket);
+    }
+
+    // Ends the waiting stage of a socket (idempotent). Returns its state, or null.
+    _leave(socket) {
+        const st = socket[kWait];
+        if (!st) return null;
+        socket[kWait] = null;
+        clearTimeout(st.timer);
+        socket.removeListener('data', this._onWaitData);
+        socket.removeListener('end', this._onWaitEnd);
+        socket.removeListener('close', this._onWaitClose);
+        socket.removeListener('error', noop);
+        this.waiting--;
+        const n = this.waitingPerIp.get(st.key) || 0;
+        if (n <= 1) this.waitingPerIp.delete(st.key); else this.waitingPerIp.set(st.key, n - 1);
+        return st;
+    }
+
+    // Closes a waiting socket: with an RST, counted, when the gate gives up on it; quietly when
+    // the client ended it first (counter null).
+    _drop(socket, counter) {
+        if (!this._leave(socket)) return;
+        if (counter === null) { socket.on('error', noop); socket.destroy(); return; }
+        this._refuse(socket, counter);
+    }
+
+    /**
+     * Takes a handshake slot for a raw socket, or closes it (RST) and returns false.
      * @param {import('node:net').Socket} socket
      * @param {boolean} [shed] apply the server-full shedding
+     * @param {string} [key] address group (IPv4 address, IPv6 /48)
      */
-    admit(socket, shed = false) {
+    admit(socket, shed = false, key = ipGroupKey(socket.remoteAddress, 48)) {
         if (this.pending >= this.maxPending) return this._refuse(socket, this._refusedBusy);
-        const key = ipGroupKey(socket.remoteAddress);
         const n = this.perIp.get(key) || 0;
         if (n >= this.maxPendingPerIp) return this._refuse(socket, this._refusedIp);
         if (shed && this.full !== null && this.full() && !this._takeFullToken()) return this._refuse(socket, this._refusedFull);
@@ -160,9 +315,10 @@ export class TlsGate {
     }
 
     // Token bucket of the connections let through while the server is full (burst: one second).
+    // The clock is monotonic, and a clock that goes back anyway adds nothing rather than a debt.
     _takeFullToken() {
         const now = this.now();
-        let t = this._tokens + (now - this._tokenAt) * this.fullRate / 1000;
+        let t = this._tokens + Math.max(0, now - this._tokenAt) * this.fullRate / 1000;
         if (!(t <= this.fullRate)) t = this.fullRate;
         this._tokenAt = now;
         if (t < 1) { this._tokens = t; return false; }
@@ -266,8 +422,13 @@ export class Listeners {
      * @param {boolean} [o.reusePort] SO_REUSEPORT exclusive listen (defaults to LISTEN_REUSE_PORT on Linux)
      * @param {(() => boolean)|null} [o.full] true while the server is full (TlsGate shedding; Router.isFull)
      * @param {object} [o.registry] metrics registry
+     * @param {number} [o.handshakeTimeoutMs] TLS handshake timeout (tests shorten it)
+     * @param {number} [o.helloTimeoutMs] time a new TLS connection has to send its ClientHello (tests shorten it)
      */
-    constructor({ config, apiHandler, wsServer, log = null, ready = () => true, reusePort, full = null, registry = defaultRegistry }) {
+    constructor({
+        config, apiHandler, wsServer, log = null, ready = () => true, reusePort, full = null, registry = defaultRegistry,
+        handshakeTimeoutMs = HANDSHAKE_TIMEOUT_MS, helloTimeoutMs = HELLO_TIMEOUT_MS,
+    }) {
         this.config = config;
         this.log = log;
         this.wsServer = wsServer;
@@ -290,18 +451,19 @@ export class Listeners {
         if (this.native) {
             this.gate = new TlsGate({
                 maxPending: config.maxPendingHandshakes ?? 128,
-                maxPendingPerIp: config.maxConnectionsPerIp ?? 16,
+                maxPendingPerIp: config.maxPendingHandshakesPerIp ?? 0,      // 0: the default share of maxPending
+                helloTimeoutMs,
                 full,
                 registry,
             });
-            const opts = { ...tlsOptions(config), handshakeTimeout: 10000, maxHeaderSize: 8192, requestTimeout: 30000 };
+            const opts = { ...tlsOptions(config), handshakeTimeout: handshakeTimeoutMs, maxHeaderSize: 8192, requestTimeout: 30000 };
             const apiServer = https.createServer(opts, api);
             hardenHttp(apiServer);
             if (shared) apiServer.on('upgrade', onUpgrade);
             this._addTls(apiServer, shared);
             this.servers.push({ kind: shared ? 'api+ws' : 'api', server: apiServer, port: config.apiPort });
             if (!shared) {
-                const wss = tls.createServer({ ...tlsOptions(config), handshakeTimeout: 10000 }, (s) => wsServer.handleSocket(s));
+                const wss = tls.createServer({ ...tlsOptions(config), handshakeTimeout: handshakeTimeoutMs }, (s) => wsServer.handleSocket(s));
                 this._addTls(wss, true);
                 this.servers.push({ kind: 'ws', server: wss, port: config.wsPort });
             }
@@ -319,9 +481,9 @@ export class Listeners {
     }
 
     // shed: the listener carries the WebSocket upgrade.
+    // Failed handshakes are not logged one by one; the gate gives their slot back and destroys them.
     _addTls(server, shed) {
         this._tlsServers.push(server);
-        server.on('tlsClientError', noop);        // failed handshakes: nothing to log per attempt
         this.gate.attach(server, { shed });
     }
 

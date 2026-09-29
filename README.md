@@ -204,17 +204,25 @@ The last line matters because 44664 lies inside Linux's default range of ephemer
 download, the SMTP relay) may get 44664 as its local port, and the restart then fails with
 `EADDRINUSE`. Reserve `WS_PORT` as well when it differs from `API_PORT` (a comma-separated list).
 
-The server protects itself during such a reconnection storm. With native TLS, each worker performs
-at most `MAX_PENDING_HANDSHAKES` (128) TLS handshakes at a time, and at most
-`MAX_CONNECTIONS_PER_IP` of them for one address; a connection beyond that is closed at once,
-before any TLS work, and the game retries after a random delay. The CPU then completes the
-handshakes in turn instead of starting all of them together and finishing none before the
-clients give up. When the server is full (`MAX_CONNECTIONS`), a worker also lets only
-`MAX_PENDING_HANDSHAKES / 2` new TLS connections per second through: enough for the API and for the
-"server full" answer, while the other attempts cost no TLS work. On the default shared port the
-API shares that rate; setting `WS_PORT` to another port keeps the API outside it. Games that were
-running when the server stopped come back from the journal, and both players then have
-`RECOVERY_GRACE_MS` (90 s) to reconnect instead of the normal grace.
+The server protects itself during such a reconnection storm. With native TLS, a new connection
+first has 3 s to send the start of its TLS handshake (the ClientHello), and holds no handshake slot
+while it waits; a connection that stays silent is closed. Each worker then performs at most
+`MAX_PENDING_HANDSHAKES` (128) TLS handshakes at a time, and at most
+`MAX_PENDING_HANDSHAKES_PER_IP` (4 by default) for one address group, an IPv4 address or an IPv6
+/48. A connection beyond that is closed at once, before any TLS work, and the game retries after a
+random delay. The CPU then completes the handshakes in turn instead of starting all of them
+together and finishing none before the clients give up. Raise `MAX_PENDING_HANDSHAKES_PER_IP` when
+many players share one address group (a school or a company network). When the server is full
+(`MAX_CONNECTIONS`), a worker also lets only `MAX_PENDING_HANDSHAKES / 2` new TLS connections per
+second through, and the other attempts cost no TLS work. The game learns that the server is full
+only from the HTTP 503 answer to its WebSocket upgrade, which the connections let through still
+get (`GET /api/v1/info` does not say it). On the default shared port new API connections are let
+through at that same rate, so the API keeps working, more slowly; setting `WS_PORT` to another port
+keeps the API outside the limit, the better layout for a server that expects to be full. These
+limits stop a few hosts from blocking everyone, not a distributed attack: see the connection storms
+part of section 5.8 in [docs/DESIGN.md](docs/DESIGN.md). Games that were running when the server
+stopped come back from the journal, and both players then have `RECOVERY_GRACE_MS` (90 s) to
+reconnect instead of the normal grace.
 
 ## Accounts, e-mail and Google sign-in
 

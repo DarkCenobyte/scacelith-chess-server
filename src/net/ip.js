@@ -31,17 +31,20 @@ export function normalizeIp(ip) {
 /**
  * Key used to count connections per client: the IPv4 address itself, or the /64 prefix of an
  * IPv6 address (one subscriber usually owns a whole /64, so counting single IPv6 addresses would
- * let one host open a practically unlimited number of connections).
+ * let one host open a practically unlimited number of connections). With `v6Prefix` 48, IPv6 is
+ * grouped by /48 instead, the usual size of one customer's allocation: the TLS admission gate
+ * uses it, so that one customer cannot pass for many address groups.
  * @param {string} ip
+ * @param {48|64} [v6Prefix]
  * @returns {string}
  */
-export function ipGroupKey(ip) {
+export function ipGroupKey(ip, v6Prefix = 64) {
     const a = normalizeIp(ip);
     if (!a) return 'unknown';
     if (net.isIP(a) === 4) return a;
     const parts = expandIPv6(a);
     if (!parts) return a;
-    return parts.slice(0, 4).join(':') + '::/64';
+    return v6Prefix === 48 ? parts.slice(0, 3).join(':') + '::/48' : parts.slice(0, 4).join(':') + '::/64';
 }
 
 /**
