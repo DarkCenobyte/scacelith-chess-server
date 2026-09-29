@@ -287,7 +287,10 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
   consistent snapshot in one pass while the server runs; do not use the `sqlite3` shell's
   `.backup`, which copies 100 pages at a time, starts over whenever the server writes, and may
   never finish on a busy server. The copy is created with mode 600 and holds e-mail addresses and
-  recent IPs: encrypt it and move it off the host. Keep `SERVER_SECRET` and `MFA_ENCRYPTION_KEY`
+  recent IPs: encrypt it and move it off the host. `bin/admin.js` refuses to run when `DB_PATH`
+  (by default `DATA_DIR/scacelith.db`, and a relative `DATA_DIR` is resolved from the current
+  directory) is not an existing Scacelith database, so a scheduled backup run from the wrong
+  place fails instead of copying an empty database. Keep `SERVER_SECRET` and `MFA_ENCRYPTION_KEY`
   backed up too, but separately from the database copies (together they decrypt the players'
   TOTP secrets).
 - Upgrading: stop the server, update the code, `node bin/scacelith-server.js migrate` (or just
@@ -303,10 +306,12 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
   start) the server deletes expired and revoked sessions, expired tokens, security events older
   than `RETENTION_SECURITY_DAYS` (90), non-certain anomalies of the same age, conduct events and
   failed analysis jobs older than 30 days, and erases stored IP addresses older than
-  `RETENTION_IP_DAYS` (30). It works in small slices while the server runs and logs one
-  `retention purge done` line with the counts. Games, ratings, analysed games, sanctions and
-  reports are kept. SQLite reuses the freed pages; the file only shrinks after a `VACUUM`
-  (server stopped). The full table is in the retention section of [docs/DESIGN.md](docs/DESIGN.md).
+  `RETENTION_IP_DAYS` (30). It works in small slices while the server runs, pausing between
+  them so that the workers can write, and logs one `retention purge done` line with the counts.
+  Games, ratings, analysed games, sanctions and reports are kept. The database overwrites deleted
+  and erased data with zeros (`secure_delete`), so it does not stay readable in the file. SQLite
+  reuses the freed pages; the file only shrinks after a `VACUUM` (server stopped). The full table
+  is in the retention section of [docs/DESIGN.md](docs/DESIGN.md).
 - The journal of each worker (`journal/shard-<n>/`) keeps about `JOURNAL_COMPACT_SEGMENTS + 1`
   segments of 16 MB (80 MB by default), however long the games last: a game still running after
   that many segments is rewritten as one snapshot record and its older segments are deleted. Plan
@@ -323,10 +328,13 @@ forged server message) forfeit the game and ban for `BAN_DURATION_HOURS` (24) au
 `AUTO_SANCTION_CERTAIN_CHEATS` is on; statistical suspicion never bans by itself.
 
 One analysis engine handles roughly 1,000 to 12,000 games a day, fewer than a busy server
-plays. Reported games, games of players already under suspicion (integrity level, open
-report) or with a suspicious anomaly, and moderator requests are always analysed first. Ordinary games are sampled
-(`ANALYSIS_SAMPLE_RATE`) and skipped while `ANALYSIS_QUEUE_MAX` (5000) of them already wait.
-If `scacelith_anticheat_analysis_queue_ordinary` stays at that cap, add engines
+plays. Moderator requests, games reported by credible players, and games of players already
+under suspicion (integrity level, open credible report) or with a suspicious anomaly are
+analysed first, but one engine claim in four still takes the oldest ordinary game, and at most
+20 flagged games of one player wait at a time. Ordinary games are sampled
+(`ANALYSIS_SAMPLE_RATE`) and skipped while `ANALYSIS_QUEUE_MAX` (5000) of them already wait;
+only they feed the population statistics the players are compared with. If
+`scacelith_anticheat_analysis_queue_ordinary` stays at that cap, add engines
 (`ANALYSIS_WORKERS`), lower `ANALYSIS_DEPTH_DEEP`, or lower the sample rate.
 
 ## Monitoring

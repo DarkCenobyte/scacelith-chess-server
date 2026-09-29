@@ -119,7 +119,7 @@ key('WS_MSG_RATE', { section: 'limits', type: 'int', default: 20, min: 1, desc: 
 key('WS_MSG_BURST', { section: 'limits', type: 'int', default: 40, min: 1, desc: 'Message burst a client may send.' });
 key('WS_SEND_BUFFER_LIMIT', { section: 'limits', type: 'int', default: 262144, min: 4096,
     desc: 'Bytes queued for a client that does not read; beyond it the connection is closed (the client reconnects and resynchronises).' });
-key('WS_HELLO_TIMEOUT_MS', { section: 'limits', type: 'int', default: 10000, min: 1000, desc: 'Time a new connection has to authenticate.' });
+key('WS_HELLO_TIMEOUT_MS', { section: 'limits', type: 'int', default: 10000, min: 1000, max: 600000, desc: 'Time a new connection has to authenticate.' });
 key('HEARTBEAT_INTERVAL_MS', { section: 'limits', type: 'int', default: 10000, min: 1000, desc: 'Server ping interval (also measures each player\'s latency).' });
 key('HEARTBEAT_TIMEOUT_MS', { section: 'limits', type: 'int', default: 30000, min: 3000, desc: 'A connection silent for this long is considered dead.' });
 key('CLIENT_PING_INTERVAL_MS', { section: 'limits', type: 'int', default: 10000, min: 1000, max: 60000,
@@ -185,11 +185,11 @@ key('ANALYSIS_DEPTH_DEEP', { section: 'anticheat', type: 'int', default: 18, min
 key('ANALYSIS_MIN_PLIES', { section: 'anticheat', type: 'int', default: 30, min: 10, desc: 'Shorter games are not analysed.' });
 key('REPORTS_PER_DAY', { section: 'anticheat', type: 'int', default: 5, min: 1, desc: 'Reports one player may file per day.' });
 key('ANALYSIS_HASH_MB', { section: 'anticheat', type: 'int', default: 32, min: 1, max: 4096, desc: 'Transposition table of each analysis engine, in MB.' });
-key('ANALYSIS_POSITION_TIMEOUT_MS', { section: 'anticheat', type: 'int', default: 120000, min: 1000,
+key('ANALYSIS_POSITION_TIMEOUT_MS', { section: 'anticheat', type: 'int', default: 120000, min: 1000, max: 3600000,
     desc: 'Longest search of one position; an engine that exceeds it is restarted and the game is marked failed.' });
-key('ANALYSIS_POLL_MS', { section: 'anticheat', type: 'int', default: 5000, min: 100, desc: 'Interval at which an idle analysis engine looks for new games to analyse.' });
-key('ANALYSIS_QUEUE_MAX', { section: 'anticheat', type: 'int', default: 5000, min: 0,
-    desc: 'Most ordinary games waiting for engine analysis: while this many wait, a newly finished ordinary game is not queued (the engines could not catch up anyway). Games with a report, a suspicion signal or a moderator request are always queued and analysed first. 0 analyses only those.' });
+key('ANALYSIS_POLL_MS', { section: 'anticheat', type: 'int', default: 5000, min: 100, max: 3600000, desc: 'Interval at which an idle analysis engine looks for new games to analyse.' });
+key('ANALYSIS_QUEUE_MAX', { section: 'anticheat', type: 'int', default: 5000, min: 0, max: 100000,
+    desc: 'Most ordinary games waiting for engine analysis: while this many wait, a newly finished ordinary game is not queued (the engines could not catch up anyway). Games with a report, a suspicion signal (at most 20 waiting per player) or a moderator request are queued anyway and mostly analysed first; one engine claim in four still goes to the oldest ordinary game. 0 analyses only those (and then no game feeds the population statistics). At most 100000: the waiting ordinary games are counted in every commit of finished games, under the database write lock.' });
 key('ANALYSIS_SAMPLE_RATE', { section: 'anticheat', type: 'number', default: 1, min: 0, max: 1,
     desc: 'Share of the ordinary rated games queued for analysis (0 to 1, drawn at random when the game ends). Lower it when the engine cannot keep up with the games played.' });
 
@@ -203,8 +203,8 @@ key('LOG_IP', { section: 'observability', type: 'enum', values: ['truncated', 'f
     desc: 'How client addresses appear in the logs: truncated (IPv4 /24, IPv6 /48), full, or hashed (keyed HMAC, rotated daily).' });
 key('RETENTION_SECURITY_DAYS', { section: 'observability', type: 'int', default: 90, min: 1, desc: 'Security events (failed logins, anomalies without sanction) are deleted after this many days.' });
 key('RETENTION_IP_DAYS', { section: 'observability', type: 'int', default: 30, min: 1, desc: 'Stored IP addresses (sessions, security events) are erased after this many days.' });
-key('RETENTION_INTERVAL_MS', { section: 'observability', type: 'int', default: 3600000, min: 60000,
-    desc: 'Interval of the retention purge run by the primary (expired sessions and tokens, old security events, anomalies, conduct events and failed analysis jobs, IP erasure). The first run starts about a minute after the server starts.' });
+key('RETENTION_INTERVAL_MS', { section: 'observability', type: 'int', default: 3600000, min: 60000, max: 2147483647,
+    desc: 'Interval of the retention purge run by the primary (expired sessions and tokens, old security events, anomalies, conduct events and failed analysis jobs, IP erasure). The first run starts about a minute after the server starts. At most 2147483647 (about 24.8 days, the longest timer of Node.js).' });
 
 // ---------------------------------------------------------------------------------------------------------
 

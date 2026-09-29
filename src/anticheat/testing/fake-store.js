@@ -7,6 +7,9 @@
 
 import { LEVELS } from '../util.js';
 
+// AnalysisPriority of src/store/index.js.
+const PRIORITY = Object.freeze({ ordinary: 0, signal: 1, report: 2, manual: 3 });
+
 /**
  * @param {{ textColumns?: boolean }} [o]
  */
@@ -76,11 +79,14 @@ export function createFakeStore({ textColumns = false } = {}) {
             insertBatch(rows) { rows.forEach((r) => bind(r.detail)); for (const r of rows) security.push(r); },
         },
         analysis: {
+            // Highest priority first, then the order of queueing (the real store's reserved
+            // ordinary share is not modelled).
             next(limit, workerId, now) {
                 const out = [];
-                for (const j of jobs.values()) {
-                    if (out.length >= limit) break;
-                    if (j.status === 'queued') { j.status = 'running'; j.workerId = workerId; j.claimedAt = now; out.push({ gameId: j.gameId, attempts: ++j.attempts }); }
+                const queued = [...jobs.values()].filter((j) => j.status === 'queued').sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+                for (const j of queued.slice(0, limit)) {
+                    j.status = 'running'; j.workerId = workerId; j.claimedAt = now;
+                    out.push({ gameId: j.gameId, attempts: ++j.attempts, priority: j.priority ?? 0 });
                 }
                 return out;
             },
@@ -91,7 +97,8 @@ export function createFakeStore({ textColumns = false } = {}) {
                 rec('analysis.request', [gameId, reason]);
                 const j = jobs.get(Number(gameId));
                 if (!games.has(Number(gameId)) || (j && j.status !== 'queued' && j.status !== 'failed')) return false;
-                jobs.set(Number(gameId), { ...(j || { gameId: Number(gameId), attempts: 0 }), status: 'queued', reason });
+                const priority = Math.max(j?.priority ?? 0, PRIORITY[reason] ?? PRIORITY.report);
+                jobs.set(Number(gameId), { ...(j || { gameId: Number(gameId), attempts: 0 }), status: 'queued', reason, priority });
                 return true;
             },
             forUser(userId, limit = 30) {
@@ -157,7 +164,8 @@ export function createFakeStore({ textColumns = false } = {}) {
             addUser(username, extra = {}) { const id = store.users.create({ username, email: `${username}@example.test`, passwordHash: 'x', emailVerified: true }); Object.assign(users.get(id), extra); return id; },
             setRating(userId, category, fields) { ratings.set(`${userId}|${category}`, { rating: 1500, games: 0, wins: 0, draws: 0, losses: 0, peak: 1500, reachedSenior: false, ...fields }); },
             addGame(g) { games.set(Number(g.id), g); return g.id; },
-            enqueue(gameId) { jobs.set(Number(gameId), { gameId: Number(gameId), status: 'queued', attempts: 0 }); },
+            /** priority: AnalysisPriority of the real store (0 ordinary .. 3 manual). */
+            enqueue(gameId, priority = PRIORITY.ordinary) { jobs.set(Number(gameId), { gameId: Number(gameId), status: 'queued', attempts: 0, priority }); },
         },
     };
     return store;

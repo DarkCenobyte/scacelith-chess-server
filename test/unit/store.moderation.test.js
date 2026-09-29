@@ -197,8 +197,9 @@ test('retention: expired sessions and tokens, old security events and anomalies,
     store.conduct.record(a, 'abandon', now - DAY);
 
     const counts = store.retention.run(now);
-    // IPs erased: the 40-day-old live session and the 31-day-old event (older rows were deleted outright).
-    assert.deepEqual(counts, { sessions: 3, tokens: 1, securityEvents: 1, anomalies: 2, conductEvents: 1, analysisJobs: 0, ipErased: 2 });
+    // IPs erased: the 40-day-old live session and the 31-day-old event, and those of the older rows
+    // (the expired session, the 91-day-old event), erased before the rows are deleted.
+    assert.deepEqual(counts, { sessions: 3, tokens: 1, securityEvents: 1, anomalies: 2, conductEvents: 1, analysisJobs: 0, ipErased: 4 });
     assert.equal(store.sessions.byTokenHash('s-exp'), null);
     assert.equal(store.sessions.byTokenHash('s-idle'), null);
     assert.equal(store.sessions.byTokenHash('s-rev'), null);

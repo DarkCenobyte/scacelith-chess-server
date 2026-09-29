@@ -3,7 +3,8 @@
 //
 // A report never changes a player's integrity level; it only raises the review priority that
 // moderators see (bin/admin.js), in proportion to the reporter's credibility, and asks for the
-// engine analysis of the reported game ahead of the ordinary games. Many reports from
+// engine analysis of the reported game ahead of the ordinary games (a low-credibility report only
+// at the priority of a suspicion signal). Many reports from
 // new or low-credibility accounts do not add up: the weight stored for a report is capped so
 // that the reports received by one player in 24 hours sum to at most DAILY_WEIGHT_CAP, and
 // low-credibility reports to at most LOW_CRED_DAILY_CAP.
@@ -188,10 +189,15 @@ export function handleReport(ctx, deps = {}) {
     const id = store.reports.create({ reporterId: user.id, reportedId: opponentId, gameId, category, comment, weight, at: now });
     log?.security?.('report.filed', { reportId: id, reporterId: user.id, reportedId: opponentId, gameId, category, weight, rawWeight: raw.weight });
     // The reported game is analysed ahead of the ordinary ones, even when the queue policy left
-    // it out (ANALYSIS_QUEUE_MAX, ANALYSIS_SAMPLE_RATE). An abuse report is not about how the game
-    // was played. This only produces evidence for moderators: it never changes a level by itself.
+    // it out (ANALYSIS_QUEUE_MAX, ANALYSIS_SAMPLE_RATE): at 'report' priority when the report is
+    // credible (its stored weight reaches lowCredibility), otherwise at 'signal' priority, beside
+    // the statistical suspicion signals and not ahead of them, so that new or brigading accounts
+    // cannot push the games of statistically suspected players back. An abuse report is not
+    // about how the game was played. This only produces evidence for moderators: it never
+    // changes a level by itself.
     if (category !== 'abuse' && typeof store.analysis?.request === 'function') {
-        try { store.analysis.request(gameId, 'report', now); } catch (e) { log?.warn?.('analysis request of a reported game failed', { err: e, gameId }); }
+        const reason = weight >= REPORT_RULES.lowCredibility ? 'report' : 'signal';
+        try { store.analysis.request(gameId, reason, now); } catch (e) { log?.warn?.('analysis request of a reported game failed', { err: e, gameId }); }
     }
     return ACCEPTED;
 }

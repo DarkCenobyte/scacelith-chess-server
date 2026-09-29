@@ -55,7 +55,7 @@ export function startStoreWriter({ config, shard = 0, logging = true, log = null
     const mGames = metrics.counter('scacelith_store_games_committed_total', 'Finished games written to the database');
     const mBusy = metrics.counter('scacelith_store_busy_total', 'Store operations that gave up waiting for the database lock');
     const mSkipped = metrics.counter('scacelith_anticheat_analysis_skipped_total',
-        'Finished rated games not queued for engine analysis (sample: ANALYSIS_SAMPLE_RATE, backlog: ANALYSIS_QUEUE_MAX reached)', ['reason']);
+        'Finished rated games not queued for engine analysis (sample: ANALYSIS_SAMPLE_RATE, backlog: ANALYSIS_QUEUE_MAX reached, player: 20 flagged games of a player already waiting)', ['reason']);
     const waiting = new Map();
     let next = 1, w = null, closing = null;
 

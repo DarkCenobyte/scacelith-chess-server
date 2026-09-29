@@ -305,7 +305,7 @@ store.ratings.forUser(userId) -> [{ category, ... }] ; leaderboard(category, lim
 store.games.finishBatch(records) -> [{ gameId, ratings: null | { white: RatingChange, black: RatingChange } }]
   // One transaction for the batch: inserts each game, applies match/elo.applyGame to rated games
   // with the ratings read inside the transaction, queues rated games of >= ANALYSIS_MIN_PLIES for analysis
-  // (section 6.5: an ordinary game left out by the policy has analysisSkipped: 'sample' | 'backlog' in its entry).
+  // (section 6.5: a game left out by the policy has analysisSkipped: 'sample' | 'backlog' | 'player' in its entry).
   // record: { id, category, rated, baseMs, incMs, whiteId, blackId, whiteName, blackName, whiteRating, blackRating,
   //           startedAt, endedAt, status, reason, moves: Uint16Array, spentMs: Uint32Array, clockMs: Uint32Array,
   //           rematchOf, flags }
@@ -316,9 +316,11 @@ store.sanctions.activeBan(userId, now) -> sanction | null ; list(userId) ; lift(
 store.anomalies.insertBatch([{ userId, gameId, kind, severity /* 'info'|'suspicious'|'certain' */, detail, at }]) ; forUser(userId, limit)
 store.security.insertBatch([{ kind, userId, ip, detail, at }]) ; purge(now, cfg)
 store.analysis.next(limit, workerId, now) -> [job] ; complete(gameId, features) ; fail(gameId, error) ; forUser(userId, limit)
-  // next() takes the highest priority first, then the oldest; job: { gameId, priority, attempts, queuedAt, startedAt, worker }
-store.analysis.enqueue(gameId, now) ; request(gameId, 'report', now) -> bool ; backlog() -> { ordinary, priority }
-  // enqueue: moderator re-analysis (priority manual); request: a reported game (section 6.5)
+  // next() takes the highest priority first, then the oldest, but every fourth claim the oldest ordinary job first
+  // (section 6.5); job: { gameId, priority, attempts, queuedAt, startedAt, worker }
+store.analysis.enqueue(gameId, now) ; request(gameId, 'report' | 'signal', now) -> bool ; backlog() -> { ordinary, priority }
+  // enqueue: moderator re-analysis (priority manual); request: a reported game, 'signal' for a low-credibility
+  // report (section 6.5); backlog counts each tier up to 100,000
 store.integrity.get(userId) -> { level /* 'none'|'suspected'|'high_confidence'|'confirmed' */, score, evidence, updatedAt, reviewedBy }
 store.integrity.set(userId, fields) ; listFlagged(minLevel, limit) ; populationStats(ratingBucket) / updatePopulation(...)
 store.reports.create({ reporterId, reportedId, gameId, category, comment, weight, at }) -> id
@@ -642,8 +644,11 @@ instead of growing without end. Every job has a priority and the engine takes th
 then the oldest:
 
 1. `manual`: a moderator asked for the (re-)analysis of a game (`store.analysis.enqueue`);
-2. `report`: a player reported the game (category `cheating` or `other`); the report queues it
-   even if the policy had left it out, and re-queues it if its analysis had failed;
+2. `report`: a credible player reported the game (category `cheating` or `other`, stored weight
+   at least 0.5); the report queues it even if the policy had left it out, and re-queues it if
+   its analysis had failed. A report of lower weight (a new account, or one beyond the daily cap
+   of report weight a player receives) asks for `signal` priority only, so that such reports
+   cannot push the games of statistically suspected players back;
 3. `signal`: a suspicion signal at the end of the game: the integrity level of either player is
    above `none`, either player has an open `cheating` or `other` report from the last 30 days
    by a credible reporter (stored weight at least 0.5, so sock puppets never flag anyone), or a
@@ -651,14 +656,26 @@ then the oldest:
 4. `ordinary`: every other rated game of an official category with at least
    `ANALYSIS_MIN_PLIES` plies.
 
-Games of the first three kinds are always queued. An ordinary game is queued with probability
-`ANALYSIS_SAMPLE_RATE` (default 1), and only while fewer than `ANALYSIS_QUEUE_MAX` (default 5000)
-ordinary jobs wait; otherwise it gets no job at all and is counted in
-`scacelith_anticheat_analysis_skipped_total{reason="sample"|"backlog"}`. An ordinary game
-therefore waits at most about `ANALYSIS_QUEUE_MAX` divided by the engine throughput, and a
-suspicious game never waits behind ordinary ones. `scacelith_anticheat_analysis_queue_ordinary`
-and `scacelith_anticheat_analysis_queue_priority` show the backlog. The policy only decides what
-is analysed and when: it changes no level and no sanction, and statistics never ban.
+Games of the first three kinds are queued whatever the backlog, with one bound: at most 20
+`signal` jobs of one player wait at a time. A flagged game one of whose players already has 20
+waiting (as white or black) is not queued, and a low-credibility report does not raise a game
+past that bound either; the scoring reads a player's 30 latest analysed games, so these 20
+renew most of that window, and one prolific flagged player cannot grow the tier without end.
+An ordinary game is queued with probability `ANALYSIS_SAMPLE_RATE` (default 1), and only while
+fewer than `ANALYSIS_QUEUE_MAX` (default 5000, at most 100,000) ordinary jobs wait. A game left
+out gets no job at all and is counted in
+`scacelith_anticheat_analysis_skipped_total{reason="sample"|"backlog"|"player"}`.
+
+The highest priority is not taken every time: every fourth claim of the analysis process takes
+the oldest ordinary job first when one waits. Ordinary games, the random sample of the rated
+games and the only ones that feed the population statistics the players are compared with
+(docs/ANTICHEAT.md 4), therefore keep at least a quarter of the engine time however many
+prioritized games arrive. An ordinary game waits at most about `ANALYSIS_QUEUE_MAX` divided by
+that quarter of the engine throughput (4 x `ANALYSIS_QUEUE_MAX` / throughput), and a suspicious
+game waits behind at most one ordinary game in four. `scacelith_anticheat_analysis_queue_ordinary`
+and `scacelith_anticheat_analysis_queue_priority` show the backlog (each counted up to 100,000).
+The policy only decides what is analysed and when: it changes no level and no sanction, and
+statistics never ban.
 
 ## 7. What lives where, and what survives a crash
 
@@ -686,14 +703,37 @@ minute after the start):
 | Analysis jobs | failed ones 30 days after the failure; done ones are kept (their features are each player's analysed history, read by the scoring and by `bin/admin.js integrity show` without a time limit); waiting and running jobs are never purged |
 
 Accounts (anonymized when deleted), games, ratings, sanctions, reports and integrity records are
-kept. The primary is the control plane, so the purge must not hold its event loop: every
-statement deletes at most 1000 rows in its own short transaction, and the run returns to the
-event loop whenever 10 ms of work have been done (measured on the development container: 350,000
-rows purged in 1.5 s, the event loop never held for more than about 30 ms). Runs never overlap.
+kept. The primary is the control plane, so the purge must not hold its event loop, nor the
+database's write lock that the workers need for their own writes (sessions, security events,
+reports, finished games). IP addresses are erased first, then the old rows deleted. Every
+statement touches at most 1000 rows in its own short transaction: it starts at 200 rows and
+adapts so that one statement takes about 5 ms (half of the 10 ms slice, never fewer than 50
+rows), and once 10 ms of work have been done the run pauses for 10 ms. Measured on the
+development container with a backlog of 100,000 expired sessions and 100,000 old security
+events, all with IP addresses: purged in 11 to 12 s with the event loop busy 59% of the time
+(delay p99 about 22 ms, at most about 50 ms when a statement ran SQLite's automatic WAL
+checkpoint), while a thread committing one row every 20 ms waited about 20 ms at the 99th
+percentile. In chunks of 1000 rows without pauses, the same purge took 3 s but kept the event
+loop busy all the time and made that thread wait up to 180 to 330 ms. `RETENTION_INTERVAL_MS` is
+at most 2147483647 (about 24.8 days), the longest delay of a Node.js timer. Runs never overlap.
 On shutdown the run in progress is aborted between two statements and awaited before the
 database is closed. Each run logs its counts at info level (numbers only, no personal data) and
 feeds `scacelith_retention_purged_total{kind}`, `scacelith_retention_ip_erased_total`,
 `scacelith_retention_runs_total{result}` and `scacelith_retention_run_seconds`.
+
+**Erased data does not stay in the file.** Every writable connection runs with
+`PRAGMA secure_delete = ON`: SQLite overwrites deleted rows and erased columns with zeros, freed
+pages included, so an IP address, an e-mail address or a password hash does not stay readable in
+the free space of the database file after the purge or `users.anonymize`. (`FAST` would leave
+the content of freed pages, for instance a purge of whole pages of expired sessions.) No cost
+was measurable on the purge or on the commits of finished games. Two limits remain. When SQLite
+rebalances a table after a deletion it can leave stale copies of the rows it moved in the unused
+part of a page, which `secure_delete` does not clear; the purge erases IP addresses before it
+deletes rows so that the rows moved around them no longer hold one (a test with 80,000 erased or
+deleted addresses found none left in the file). And the WAL file keeps the page images written
+before, until it is overwritten as it is reused after each checkpoint (it is truncated to 64 MB,
+`journal_size_limit`, and removed when the server stops). A backup made with
+`bin/admin.js backup` (`VACUUM INTO`) holds neither.
 
 ## 8. Security model
 

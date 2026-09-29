@@ -4,7 +4,9 @@
 // SQLite file (WAL mode lets it run while the server is up). `scacelith-admin --help` lists the
 // commands; every moderator action is audited (security event + reviewed_by / created_by).
 
+import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { loadConfig, ConfigError } from '../src/config.js';
 import { configureLogging, logger } from '../src/log.js';
 import { runAdmin, USAGE, defaultHashToken } from '../src/anticheat/admin.js';
@@ -38,6 +40,12 @@ async function main(argv) {
         throw e;
     }
     configureLogging({ level: 'warn', format: 'pretty', ipMode: config.logIp, secret: config.serverSecret, out: process.stderr, base: { proc: 'admin' } });
+    // Every command works on the server's existing database: opening a missing file would create
+    // an empty one (a wrong DB_PATH, or a relative DATA_DIR run from another directory).
+    if (path.basename(config.dbPath) !== ':memory:' && !fs.existsSync(config.dbPath)) {
+        process.stderr.write(`error: no Scacelith database at ${config.dbPath}; check DB_PATH and DATA_DIR (a relative DATA_DIR is resolved from the current directory)\n`);
+        return 1;
+    }
     const { openStore } = await import('../src/store/index.js');
     let applyGame;
     try { ({ applyGame } = await import('../src/match/elo.js')); } catch { applyGame = undefined; }

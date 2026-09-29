@@ -9,6 +9,8 @@ import { runAdmin, parseArgs, COMMANDS } from '../../src/anticheat/admin.js';
 import { createFakeStore } from '../../src/anticheat/testing/fake-store.js';
 import { openStore, migrate } from '../../src/store/index.js';
 import { DatabaseSync } from 'node:sqlite';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const NOW = 1_800_000_000_000;
 
@@ -196,6 +198,52 @@ test('bench-accounts: refused without the test-server flag; creates verified acc
     // A real account with a matching name is never taken over.
     store._.addUser('bench0004');
     assert.equal((await run(store, ['bench-accounts', '--count', '4', '--out', out, '--i-know-this-is-a-test-server'])).code, 1);
+});
+
+test('backup refuses a source that is not a Scacelith database, and creates nothing', async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-backup-src-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const store = createFakeStore();
+    const target = path.join(dir, 'copy.db');
+    const backup = (dbPath) => run(store, ['backup', target, '--verify'], { config: testConfig({ DB_PATH: dbPath }) });
+    // A DB_PATH that does not exist (a wrong DATA_DIR, or a relative one run from another
+    // directory): no empty database created there, no empty backup written.
+    const missing = path.join(dir, 'data', 'scacelith.db');
+    const r1 = await backup(missing);
+    assert.equal(r1.code, 1);
+    assert.match(r1.err, /no Scacelith database at .*scacelith\.db \(no such file\)/);
+    assert.equal(fs.existsSync(path.join(dir, 'data')), false);
+    assert.equal(fs.existsSync(target), false);
+    // An SQLite database without the server's schema.
+    const other = path.join(dir, 'other.db');
+    const db = new DatabaseSync(other);
+    db.exec('CREATE TABLE notes (x TEXT)');
+    db.close();
+    const r2 = await backup(other);
+    assert.equal(r2.code, 1);
+    assert.match(r2.err, /no Scacelith database at .*other\.db \(no schema_migrations\)/);
+    assert.equal(fs.existsSync(target), false);
+    // A file that is not a database at all.
+    const text = path.join(dir, 'notes.txt');
+    fs.writeFileSync(text, 'not a database\n'.repeat(500));
+    const r3 = await backup(text);
+    assert.equal(r3.code, 1);
+    assert.match(r3.err, /no Scacelith database at .*notes\.txt/);
+    assert.equal(fs.existsSync(target), false);
+    assert.equal(fs.readFileSync(text, 'utf8'), 'not a database\n'.repeat(500), 'the source is left alone');
+});
+
+test('bin/admin.js refuses to run on a missing database instead of creating an empty one', (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-admin-cwd-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const bin = fileURLToPath(new URL('../../bin/admin.js', import.meta.url));
+    const env = { PATH: process.env.PATH, SERVER_SECRET: Buffer.alloc(48, 9).toString('base64'), TLS_MODE: 'proxy' };
+    for (const argv of [['stats'], ['backup', path.join(dir, 'copy.db'), '--verify']]) {
+        const r = spawnSync(process.execPath, [bin, ...argv], { cwd: dir, env, encoding: 'utf8', timeout: 30000 });
+        assert.equal(r.status, 1, r.stderr);
+        assert.match(r.stderr, /no Scacelith database at .*data\/scacelith\.db/);
+    }
+    assert.deepEqual(fs.readdirSync(dir), [], 'no data directory, no database, no backup');
 });
 
 test('backup: consistent copy with VACUUM INTO, mode 600, never overwrites', async (t) => {
