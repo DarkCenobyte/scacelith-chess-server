@@ -142,7 +142,9 @@ key('POW_LOGIN_TRIGGER_PER_MIN', { section: 'limits', type: 'int', default: 30, 
 key('PASSWORD_HASH_CONCURRENCY', { section: 'limits', type: 'int', default: 1, min: 1, max: 64,
     desc: 'Password hashes and verifications (login, registration, password change and reset, account changes that ask for the password) that one worker process runs at once. Each costs about 0.5 s of CPU and 64-128 MiB in the libuv thread pool; 1 leaves the rest of the core to the games of the worker. Keep it below UV_THREADPOOL_SIZE (4 by default) so that the journal and DNS keep free threads: the server warns at start (and check-config) when it is not.' });
 key('PASSWORD_HASH_QUEUE_MAX', { section: 'limits', type: 'int', default: 32, min: 0,
-    desc: 'Password hashes that may wait for a free slot in one worker process; one more is refused at once with 503 server_busy and a Retry-After of 5 to 15 s (0: no waiting at all). One client (an IPv4 address, or an IPv6 /48) may have at most 2 of them waiting; its next one is refused with 429 rate_limited.' });
+    desc: 'Password hashes that may wait for a free slot in one worker process; one more is refused at once with 503 server_busy and a Retry-After of 5 to 15 s (0: no waiting at all). Once half of them wait, one client (an IPv4 address, or an IPv6 /48) may have at most PASSWORD_HASH_WAITERS_PER_SOURCE of them waiting; its next one is refused with 429 rate_limited.' });
+key('PASSWORD_HASH_WAITERS_PER_SOURCE', { section: 'limits', type: 'int', default: 2, min: 1,
+    desc: 'Password hashes one client (an IPv4 address, or an IPv6 /48) may have waiting in one worker process once PASSWORD_HASH_QUEUE_MAX is at least half full; its next request is then refused with 429 rate_limited and a Retry-After of 5 to 15 s, and that refused attempt does not count against AUTH_RATE_PER_IP. While less than half of the queue waits, one client may queue more, so that players who log in together behind one address (a school or a company network) are served when the server is not busy, and one client never holds more than half of the queue. Raise it for such a site if its players log in while the server is busy, together with MAX_PENDING_HANDSHAKES_PER_IP and AUTH_RATE_PER_IP.' });
 key('PASSWORD_HASH_QUEUE_TIMEOUT_MS', { section: 'limits', type: 'int', default: 10000, min: 100, max: 13000,
     desc: 'Longest wait for a password hash slot, for all the hashes of one request together (a password change hashes twice); the request is then refused with 503 server_busy. At most 13000: the game gives up after 15 s, and the hash itself takes a second or two, so that the player sees the "busy" answer rather than a timeout.' });
 
@@ -156,7 +158,7 @@ key('RECONNECT_GRACE_MAX_MS', { section: 'games', type: 'int', default: 60000, m
 key('RECOVERY_GRACE_MS', { section: 'games', type: 'int', default: 90000, min: 15000, max: 3600000,
     desc: 'Time both players of a game restored from the journal after a restart or a crash have to come back (or the normal grace when it is longer): the server, not the players, broke the connection, and every client reconnects at once. The clock of the side to move stays stopped until that player is back, for RECOVERY_CLOCK_HOLD_MS at most.' });
 key('RECOVERY_CLOCK_HOLD_MS', { section: 'games', type: 'int', default: 20000, min: 0, max: 3599999,
-    desc: 'After a restart or a crash, the clock (or the first-move timer) of the side to move of a restored game does not run until that player is back, and runs again after this long even if they are still away. It must be lower than RECOVERY_GRACE_MS. It bounds the free thinking time a player could get by staying away on purpose; 0 restarts the clock at the recovery.' });
+    desc: 'After a restart or a crash, the clock (or the first-move timer) of the side to move of a restored game does not run until that player is back, and runs again after this long even if they are still away. When it is not set, it is 20000, or RECOVERY_GRACE_MS - 1 when RECOVERY_GRACE_MS is 20000 or less; a value you set must be lower than RECOVERY_GRACE_MS. It bounds the free thinking time a player could get by staying away on purpose; 0 restarts the clock at the recovery.' });
 key('LAG_COMP_MAX_MS', { section: 'games', type: 'int', default: 1000, min: 0, max: 5000, desc: 'Largest network lag given back on one move.' });
 key('LAG_QUOTA_INITIAL_MS', { section: 'games', type: 'int', default: 2000, min: 0, desc: 'Lag compensation budget of each player at the start of a game.' });
 key('LAG_QUOTA_GAIN_MS', { section: 'games', type: 'int', default: 100, min: 0, desc: 'Lag compensation budget regained at every move.' });
@@ -357,7 +359,14 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     if (cfg.maxPendingHandshakesPerIp != null && cfg.maxPendingHandshakesPerIp >= cfg.maxPendingHandshakes) {
         errors.push('MAX_PENDING_HANDSHAKES_PER_IP must be lower than MAX_PENDING_HANDSHAKES (one address group could otherwise hold every handshake slot).');
     }
-    if (cfg.recoveryClockHoldMs >= cfg.recoveryGraceMs) errors.push('RECOVERY_CLOCK_HOLD_MS must be lower than RECOVERY_GRACE_MS.');
+    // The hold must end before the grace. Only a value the operator set is refused; the default
+    // follows a short RECOVERY_GRACE_MS down.
+    const holdRaw = get('RECOVERY_CLOCK_HOLD_MS');
+    if (holdRaw !== undefined && holdRaw !== '') {
+        if (cfg.recoveryClockHoldMs >= cfg.recoveryGraceMs) errors.push('RECOVERY_CLOCK_HOLD_MS must be lower than RECOVERY_GRACE_MS.');
+    } else if (Number.isInteger(cfg.recoveryGraceMs)) {
+        cfg.recoveryClockHoldMs = Math.min(cfg.recoveryClockHoldMs, cfg.recoveryGraceMs - 1);
+    }
     if (!cfg.googleRedirectUri) {
         const port = cfg.publicApiPort === 443 ? '' : `:${cfg.publicApiPort}`;
         cfg.googleRedirectUri = `https://${cfg.serverPublicHost}${port}/auth/sso/google/callback`;
@@ -376,6 +385,21 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
 }
 
 /**
+ * The size of the libuv thread pool for a value of UV_THREADPOOL_SIZE, read as libuv reads it:
+ * unset is 4; otherwise atoi() (leading digits, anything else is 0), 0 becomes 1 thread, and a
+ * negative value (unsigned in libuv) or one above 1024 becomes 1024.
+ * @param {string|undefined} raw
+ * @returns {number}
+ */
+export function threadPoolSize(raw) {
+    if (raw === undefined || raw === null) return 4;
+    const n = parseInt(String(raw), 10);
+    if (!Number.isFinite(n) || n === 0) return 1;
+    if (n < 0 || n > 1024) return 1024;
+    return n;
+}
+
+/**
  * Settings that are valid but work against the design, as sentences for the operator (logged once
  * at start by the primary, and printed by check-config). `env` is the real process environment:
  * UV_THREADPOOL_SIZE only counts there, not in the .env file.
@@ -385,10 +409,11 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
  */
 export function configWarnings(cfg, env = process.env) {
     const out = [];
-    const pool = Number(env.UV_THREADPOOL_SIZE) || 4;
+    const pool = threadPoolSize(env.UV_THREADPOOL_SIZE);
     if (cfg.passwordHashConcurrency >= pool) {
         out.push(`PASSWORD_HASH_CONCURRENCY (${cfg.passwordHashConcurrency}) is not below the size of the libuv thread pool `
-            + `(${pool} threads, from UV_THREADPOOL_SIZE or the default 4): password hashes can then take every thread, `
+            + `(${pool === 1 ? '1 thread' : `${pool} threads`}, from UV_THREADPOOL_SIZE or the default 4; libuv reads an empty, 0 or `
+            + 'unreadable value as 1 thread): password hashes can then take every thread, '
             + 'and the journal\'s writes and the DNS lookups wait behind them. Lower it, or raise UV_THREADPOOL_SIZE in the process environment.');
     }
     return out;

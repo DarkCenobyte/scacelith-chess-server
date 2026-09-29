@@ -219,8 +219,9 @@ test('maxWaitMs 0: runs only when a slot is free at once, else refused as no_wai
     await running;
 });
 
-test('perSourceMax: one source has at most that many tasks waiting; others still queue; FIFO is kept', async () => {
-    const lim = createHashLimiter({ concurrency: 1, queueMax: 10, queueTimeoutMs: 5000, perSourceMax: 2 });
+test('perSourceMax: under contention one source has at most that many tasks waiting; others still queue; FIFO is kept', async () => {
+    // queueMax 6: the cap applies from 3 waiting tasks on (half the queue).
+    const lim = createHashLimiter({ concurrency: 1, queueMax: 6, queueTimeoutMs: 5000, perSourceMax: 2 });
     const order = [];
     const h = held();
     const s0 = rejected('source_limit'), f0 = rejected('queue_full');
@@ -259,6 +260,61 @@ test('perSourceMax: one source has at most that many tasks waiting; others still
     assert.throws(() => createHashLimiter({ perSourceMax: 1.5 }), RangeError);
 });
 
+test('perSourceMax applies only once the queue is half full: one source may use an idle queue, never more than half of it', async () => {
+    const lim = createHashLimiter({ concurrency: 1, queueMax: 8, queueTimeoutMs: 5000, perSourceMax: 2 });
+    assert.equal(lim.perSourceMax, 2);
+    const s0 = rejected('source_limit');
+    const h = held();
+    const running = lim.run(() => h.done, { source: 'A' });
+    await tick();
+    // An idle queue: one source (a classroom behind one address) queues 4 tasks, beyond its cap of 2.
+    const mine = [1, 2, 3, 4].map((i) => lim.run(async () => `a${i}`, { source: 'A' }));
+    assert.deepEqual([lim.waitingFrom('A'), lim.stats().waiting], [4, 4]);
+    assert.equal(rejected('source_limit'), s0);
+    // Half full (4 of 8): the source is at its cap and refused, a new source is accepted.
+    await assert.rejects(lim.run(async () => 'a5', { source: 'A' }), (err) => err instanceof PasswordBusyError && err.reason === 'source_limit');
+    assert.equal(rejected('source_limit'), s0 + 1);
+    const b1 = lim.run(async () => 'b1', { source: 'B' });
+    const b2 = lim.run(async () => 'b2', { source: 'B' });
+    await assert.rejects(lim.run(async () => 'b3', { source: 'B' }), { reason: 'source_limit' });
+    assert.deepEqual([lim.waitingFrom('A'), lim.waitingFrom('B'), lim.stats().waiting], [4, 2, 6]);
+    h.release();
+    assert.deepEqual(await Promise.all([...mine, b1, b2]), ['a1', 'a2', 'a3', 'a4', 'b1', 'b2']);
+    await running;
+
+    // At exactly half full, a source with 2 waiting is refused while a new source is accepted.
+    const h2 = held();
+    const r2 = lim.run(() => h2.done);
+    await tick();
+    const fill = [lim.run(async () => {}, { source: 'X' }), lim.run(async () => {}, { source: 'Y' }),
+        lim.run(async () => {}, { source: 'C' }), lim.run(async () => {}, { source: 'C' })];
+    assert.equal(lim.stats().waiting, 4);
+    await assert.rejects(lim.run(async () => {}, { source: 'C' }), { reason: 'source_limit' });
+    const d = lim.run(async () => 'd', { source: 'D' });
+    assert.equal(lim.stats().waiting, 5);
+    // Just under half full (3 of 8), the same source would still have been accepted.
+    const small = createHashLimiter({ concurrency: 1, queueMax: 8, queueTimeoutMs: 5000, perSourceMax: 2 });
+    const h3 = held();
+    const r3 = small.run(() => h3.done);
+    await tick();
+    const under = [small.run(async () => {}, { source: 'X' }), small.run(async () => {}, { source: 'C' }), small.run(async () => {}, { source: 'C' })];
+    const third = small.run(async () => 'third', { source: 'C' });
+    assert.equal(small.waitingFrom('C'), 3);
+    h2.release(); h3.release();
+    await Promise.all([r2, ...fill, r3, ...under]);
+    assert.equal(await d, 'd');
+    assert.equal(await third, 'third');
+    // A queue of 0 or 1 is always contended: the cap never lets a task through that the queue refuses.
+    const one = createHashLimiter({ concurrency: 1, queueMax: 1, queueTimeoutMs: 5000, perSourceMax: 1 });
+    const h4 = held();
+    const r4 = one.run(() => h4.done);
+    const w4 = one.run(async () => {}, { source: 'E' });
+    await assert.rejects(one.run(async () => {}, { source: 'E' }), { reason: 'source_limit' });
+    await assert.rejects(one.run(async () => {}, { source: 'F' }), { reason: 'queue_full' });
+    h4.release();
+    await Promise.all([r4, w4]);
+});
+
 test('createCheckFloor: the slowest check of the current or previous period, capped', () => {
     let t = 1000;
     const f = createCheckFloor({ capMs: 500, periodMs: 100, clock: () => t });
@@ -274,6 +330,57 @@ test('createCheckFloor: the slowest check of the current or previous period, cap
     assert.equal(f.floorMs(), 0);
     f.record(9000);
     assert.equal(f.floorMs(), 500, 'capped');
+});
+
+test('createCheckFloor: the warm-up baseline does not decay', () => {
+    let t = 1000;
+    const f = createCheckFloor({ capMs: 500, periodMs: 100, clock: () => t });
+    assert.equal(f.baselineMs(), 0);
+    f.setBaseline(60);
+    assert.equal(f.floorMs(), 60, 'the floor of a fresh worker, before any check');
+    f.record(20);
+    assert.equal(f.floorMs(), 60, 'a faster check does not lower it');
+    f.record(90);
+    assert.equal(f.floorMs(), 90, 'a slower recent check raises it');
+    t += 100;                   // one period roll: the slower check still counts
+    assert.equal(f.floorMs(), 90);
+    t += 100;                   // two period rolls: the recent checks are forgotten, the baseline stays
+    assert.equal(f.floorMs(), 60);
+    t += 10 * 100;              // a long quiet time
+    assert.equal(f.floorMs(), 60);
+    f.setBaseline(40);          // a lower measure does not lower it
+    f.setBaseline(Number.NaN);
+    f.setBaseline(undefined);
+    assert.deepEqual([f.baselineMs(), f.floorMs()], [60, 60]);
+    f.setBaseline(9000);
+    assert.equal(f.floorMs(), 500, 'capped');
+});
+
+test('limitHasher.warmUp sets the floor baseline from what the hasher warm-up measured, in a slot', async () => {
+    let running = 0;
+    const stub = {
+        algorithm: 'stub', parse: () => null,
+        hash: async (pw) => `h:${pw}`,
+        verify: async () => ({ ok: false, needsRehash: false }),
+        verifyDummy: async () => false,
+        warmUp: async () => { running++; await sleep(5); running--; return 42; },
+    };
+    const lim = createHashLimiter({ concurrency: 1, queueMax: 10, queueTimeoutMs: 5000 });
+    const capped = limitHasher(stub, lim, { floor: createCheckFloor({ capMs: 2000 }) });
+    const h = held();
+    const busy = lim.run(() => h.done);
+    const warm = capped.warmUp();
+    await tick();
+    assert.deepEqual([running, lim.stats().waiting], [0, 1], 'the warm-up waits for a slot like any hash');
+    h.release();
+    assert.equal(await warm, undefined);
+    await busy;
+    assert.equal(capped.floor.baselineMs(), 42);
+    assert.equal(capped.floor.floorMs(), 42);
+    // The first failed check of the worker is padded to it.
+    const t0 = performance.now();
+    assert.deepEqual(await capped.checkPassword(null, 'x'), { ok: false, needsRehash: false });
+    assert.ok(performance.now() - t0 >= 38, `first failure took ${(performance.now() - t0).toFixed(0)} ms, baseline 42 ms`);
 });
 
 test('limitHasher.checkPassword: a failure is padded to the floor after the slot is released', async () => {

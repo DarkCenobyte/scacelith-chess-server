@@ -68,9 +68,25 @@ test('recoveryHoldFor: RECOVERY_CLOCK_HOLD_MS, lower than RECOVERY_GRACE_MS', ()
     assert.equal(recoveryHoldFor(180000, {}), 20000);                 // default without a configuration
     assert.equal(recoveryHoldFor(180000, testConfig({ RECOVERY_CLOCK_HOLD_MS: '0' })), 0);
     assert.equal(recoveryHoldFor(180000, { recoveryGraceMs: 30000, recoveryClockHoldMs: 50000 }), 30000, 'never beyond the grace');
-    assert.throws(() => testConfig({ RECOVERY_GRACE_MS: '20000' }), /RECOVERY_CLOCK_HOLD_MS must be lower than RECOVERY_GRACE_MS/);
     assert.throws(() => testConfig({ RECOVERY_CLOCK_HOLD_MS: '-1' }), ConfigError);
     assert.equal(testConfig({ RECOVERY_GRACE_MS: '20000', RECOVERY_CLOCK_HOLD_MS: '19999' }).recoveryClockHoldMs, 19999);
+});
+
+test('RECOVERY_CLOCK_HOLD_MS: the default follows a short RECOVERY_GRACE_MS down; only a value set at or above the grace is refused', () => {
+    // RECOVERY_GRACE_MS alone, anywhere in its documented range, loads: the default hold of 20 s
+    // becomes the grace minus 1 ms when the grace is 20 s or less.
+    for (const [grace, hold] of [[15000, 14999], [19999, 19998], [20000, 19999], [20001, 20000], [3600000, 20000]]) {
+        const cfg = testConfig({ RECOVERY_GRACE_MS: String(grace) });
+        assert.equal(cfg.recoveryClockHoldMs, hold, `RECOVERY_GRACE_MS=${grace}`);
+        assert.ok(recoveryHoldFor(180000, cfg) < recoveryGraceFor(180000, cfg));
+    }
+    // An empty value counts as not set.
+    assert.equal(testConfig({ RECOVERY_GRACE_MS: '15000', RECOVERY_CLOCK_HOLD_MS: '' }).recoveryClockHoldMs, 14999);
+    // A value the operator set is kept as it is, and refused at or above the grace.
+    assert.throws(() => testConfig({ RECOVERY_GRACE_MS: '15000', RECOVERY_CLOCK_HOLD_MS: '20000' }), /RECOVERY_CLOCK_HOLD_MS must be lower than RECOVERY_GRACE_MS/);
+    assert.throws(() => testConfig({ RECOVERY_GRACE_MS: '20000', RECOVERY_CLOCK_HOLD_MS: '20000' }), /RECOVERY_CLOCK_HOLD_MS must be lower than RECOVERY_GRACE_MS/);
+    assert.equal(testConfig({ RECOVERY_GRACE_MS: '15000', RECOVERY_CLOCK_HOLD_MS: '5000' }).recoveryClockHoldMs, 5000);
+    assert.equal(testConfig({ RECOVERY_GRACE_MS: '90000', RECOVERY_CLOCK_HOLD_MS: '60000' }).recoveryClockHoldMs, 60000);
 });
 
 test('a restart after a shutdown: the disconnections of the drain do not shorten the recovery grace', () => {

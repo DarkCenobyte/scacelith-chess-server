@@ -16,13 +16,15 @@
 // accounts included) through this service's hash limiter, one per worker process
 // (PASSWORD_HASH_CONCURRENCY at once, PASSWORD_HASH_QUEUE_MAX waiting, security/password.js).
 // Each request gets one budget (svc.hashBudget): all its hashes together wait at most
-// PASSWORD_HASH_QUEUE_TIMEOUT_MS, and one client source (an IPv4 address or an IPv6 /48) may have
-// at most HASH_WAITERS_PER_SOURCE hashes waiting. A refused hash fails the request before the
-// account changed, with 503 server_busy (queue full or wait expired) or 429 rate_limited (too
-// many waiting from that source), each with a random Retry-After of 5 to 15 s: no failed login is
-// counted and a reset link stays valid (a proof of work already given is spent, as for any
-// answer). A new password hash is only written while the stored one is still the hash the
-// request checked (svc.setPasswordHashIf, svc.stillCurrent), so a reset always wins a race.
+// PASSWORD_HASH_QUEUE_TIMEOUT_MS, and once the queue is half full, one client source (an IPv4
+// address or an IPv6 /48) may have at most PASSWORD_HASH_WAITERS_PER_SOURCE hashes waiting. A
+// refused hash fails the request before the account changed, with 503 server_busy (queue full or
+// wait expired) or 429 rate_limited (too many waiting from that source), each with a random
+// Retry-After of 5 to 15 s: no failed login is counted and a reset link stays valid (a proof of
+// work already given is spent, as for any answer). The 429 of a source also gives the request's
+// auth rate tokens back (errors.js hashRateLimited, http/server.js). A new password hash is only
+// written while the stored one is still the hash the request checked (svc.setPasswordHashIf,
+// svc.stillCurrent), so a reset always wins a race.
 
 import { createAccounts } from './accounts.js';
 import { AuthError, hashRateLimited, serverBusy } from './errors.js';
@@ -41,9 +43,6 @@ import { createSecretBox } from '../security/totp.js';
 import { metrics } from '../metrics.js';
 
 const powTotal = metrics.counter('scacelith_auth_pow_total', 'Proof-of-work answers', ['endpoint', 'result']);
-
-/** Password hashes one client source (an IPv4 address or an IPv6 /48) may have waiting in a worker's queue. */
-export const HASH_WAITERS_PER_SOURCE = 2;
 
 /**
  * The public base URL of the server's pages (e-mail links).
@@ -89,7 +88,7 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
 
     const hashLimiter = createHashLimiter({
         concurrency: config.passwordHashConcurrency, queueMax: config.passwordHashQueueMax, queueTimeoutMs: config.passwordHashQueueTimeoutMs,
-        perSourceMax: HASH_WAITERS_PER_SOURCE,
+        perSourceMax: config.passwordHashWaitersPerSource,
     });
     let busyWarnAt = 0;
     function hashBusy(err) {

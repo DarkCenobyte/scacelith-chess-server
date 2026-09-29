@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { BUSY_RETRY_AFTER_SEC, serverBusy } from '../../src/auth/errors.js';
-import { configWarnings, testConfig } from '../../src/config.js';
+import { configWarnings, testConfig, threadPoolSize } from '../../src/config.js';
 import { createPasswordHasher } from '../../src/security/password.js';
 import { metrics } from '../../src/metrics.js';
 import { capturedLogs, linkIn, startTestServer } from './helpers/auth-fakes.js';
@@ -357,12 +357,14 @@ test('a concurrent login that upgraded the hash does not make another login of t
     assert.equal(liveSessions(s, id), 1);
 });
 
-test('one client source has at most 2 hashes waiting; the next one gets 429 rate_limited', async (t) => {
+test('once the queue is half full, one client source has at most 2 hashes waiting; the next one gets 429 rate_limited', async (t) => {
     const k = keyedHasher();
-    const s = await startTestServer({ hasher: k.hasher });
+    // A queue of 6: the per-source cap applies from 3 waiting hashes on.
+    const s = await startTestServer({ hasher: k.hasher, env: { PASSWORD_HASH_QUEUE_MAX: '6' } });
     t.after(async () => { k.releaseAll(); await s.close(); });
     await s.createUser({ username: 'alice', password: PW });
     const limiter = await idleLimiter(s);
+    assert.equal(limiter.perSourceMax, 2, 'PASSWORD_HASH_WAITERS_PER_SOURCE defaults to 2');
     const token = await resetToken(s, 'alice@example.com');
     const src0 = rejected('source_limit');
     k.hold('holder pw');
@@ -371,9 +373,12 @@ test('one client source has at most 2 hashes waiting; the next one gets 429 rate
 
     const queued = [];
     const send = (ip, login = 'nobody') => s.request('POST', LOGIN, { body: { login, password: 'not the password' }, ip });
-    // One IPv4 address: 2 waiting, the third refused.
+    // Another address of the same /24 is another source.
+    queued.push(send('198.51.100.8'));
+    await waitFor(() => limiter.stats().waiting === 1, '1 waiter');
+    // One IPv4 address: 2 waiting; the queue is then half full, and its third is refused.
     queued.push(send('198.51.100.7'), send('198.51.100.7'));
-    await waitFor(() => limiter.stats().waiting === 2, '2 waiters');
+    await waitFor(() => limiter.stats().waiting === 3, '3 waiters');
     const r3 = await send('198.51.100.7');
     assert.equal(r3.status, 429, r3.text);
     assert.equal(r3.json.error, 'rate_limited');
@@ -384,8 +389,6 @@ test('one client source has at most 2 hashes waiting; the next one gets 429 rate
     assert.equal(page.status, 429);
     assert.match(page.headers['retry-after'], /^(?:[5-9]|1[0-5])$/);
     assert.match(page.text, /<input type="hidden" name="token" value="[A-Za-z0-9_-]{43}">/, 'the form is shown again');
-    // Another address of the same /24 is another source.
-    queued.push(send('198.51.100.8'));
     // IPv6: the /64s of one /48 are one source.
     queued.push(send('2001:db8:1:1::1'), send('2001:db8:1:2::1'));
     await waitFor(() => limiter.stats().waiting === 5, '5 waiters');
@@ -425,6 +428,110 @@ test('the auth rate limit also applies to each IPv6 /48 as a whole (AUTH_RATE_PE
     // The default is 5 x AUTH_RATE_PER_IP.
     assert.equal(testConfig({ AUTH_RATE_PER_IP: '7' }).authRatePerPrefix, 35);
     assert.equal(testConfig({ AUTH_RATE_PER_IP: '7', AUTH_RATE_PER_PREFIX: '9' }).authRatePerPrefix, 9);
+});
+
+test('an idle worker: 10 simultaneous logins from one IPv4 address (a classroom) all get in', async (t) => {
+    const g = gatedHasher();
+    const s = await startTestServer({ hasher: g.hasher, env: { AUTH_RATE_PER_IP: '20' } });
+    t.after(async () => { g.open(); await s.close(); });
+    for (let i = 0; i < 10; i++) await s.createUser({ username: `pupil${i}`, password: PW });
+    const limiter = await idleLimiter(s);
+    const src0 = rejected('source_limit');
+    g.close();
+    const logins = Array.from({ length: 10 }, (_, i) => s.request('POST', LOGIN, { body: { login: `pupil${i}`, password: PW }, ip: '198.51.100.7' }));
+    // One check runs, the 9 others wait (beyond the per-source cap of 2: the queue of 32 is far from half full).
+    await waitFor(() => limiter.stats().active === 1 && limiter.stats().waiting === 9, '1 running and 9 waiting');
+    assert.equal(limiter.waitingFrom('198.51.100.7'), 9);
+    g.open();
+    const all = await Promise.all(logins);
+    assert.deepEqual(all.map((r) => r.status), Array(10).fill(200), all.map((r) => r.text).join('\n'));
+    assert.equal(rejected('source_limit'), src0);
+});
+
+test('a request refused for its source gives its auth rate tokens back (local and shared buckets, IPv6 /48 too)', async (t) => {
+    const k = keyedHasher();
+    // A queue of 2 (contended from 1 waiting on), 1 waiter per source, 3 attempts per 10 minutes.
+    const s = await startTestServer({
+        hasher: k.hasher,
+        env: { AUTH_RATE_PER_IP: '3', AUTH_RATE_PER_PREFIX: '3', PASSWORD_HASH_QUEUE_MAX: '2', PASSWORD_HASH_WAITERS_PER_SOURCE: '1' },
+    });
+    t.after(async () => { k.releaseAll(); await s.close(); });
+    const limiter = await idleLimiter(s);
+    assert.equal(limiter.perSourceMax, 1);
+    k.hold('holder pw');
+    const holder = s.request('POST', LOGIN, { body: { login: 'ghost', password: 'holder pw' }, ip: '192.0.2.1' });
+    await waitFor(() => limiter.stats().active === 1 && k.blocked === 1, 'the holder to take the slot');
+    let n = 0;          // a new login each time, so that no account's failure delay starts
+    const send = (ip) => s.request('POST', LOGIN, { body: { login: `nobody${n++}`, password: 'not the password' }, ip });
+    const isSourceLimit = (r) => r.status === 429 && r.json.error === 'rate_limited' && r.json.retryAfter >= 5 && r.json.retryAfter <= 15;
+
+    // IPv4: one login waits (1 of the 3 tokens); 4 more are refused for the source, and each gives
+    // its token back, so none of them hits the rate limit (its Retry-After would be 200 s).
+    const A = '198.51.100.7';
+    const waiterA = send(A);
+    await waitFor(() => limiter.stats().waiting === 1, 'the waiter of A');
+    for (let i = 0; i < 4; i++) {
+        const r = await send(A);
+        assert.ok(isSourceLimit(r), `refusal ${i}: ${r.status} ${r.text}`);
+    }
+    // IPv6: the /64s of one /48 are one source, and the /48 bucket is refunded as well.
+    const waiterX = send('2001:db8:9:1::1');
+    await waitFor(() => limiter.stats().waiting === 2, 'the waiter of the /48');
+    for (let i = 0; i < 4; i++) {
+        const r = await send('2001:db8:9:2::1');
+        assert.ok(isSourceLimit(r), `/48 refusal ${i}: ${r.status} ${r.text}`);
+    }
+    const refunds = s.primary.calls.filter((c) => c.type === 'ratelimit.refund');
+    assert.equal(refunds.length, 4 + 8, 'one shared refund per token taken: the address, or the /64 and the /48');
+    assert.ok(refunds.every((c) => c.payload.windowMs === 600000 && c.payload.cost === 1 && c.payload.ageMs >= 0));
+    assert.deepEqual([...new Set(refunds.map((c) => c.payload.key))].sort(),
+        ['auth/48:2001:db8:9::/48', 'auth:198.51.100.7', 'auth:2001:db8:9:2::/64']);
+    // A request refused by the queue itself (queue full) keeps its token: it is no source refusal.
+    const full = await send('203.0.113.50');
+    assert.equal(full.status, 503);
+    assert.equal(s.primary.calls.filter((c) => c.type === 'ratelimit.refund').length, 12);
+
+    k.release('holder pw');
+    assert.equal((await holder).status, 401);
+    assert.deepEqual([(await waiterA).status, (await waiterX).status], [401, 401]);
+    // A still has its 2 other attempts, the /48 too; then the limit of 3 applies (local and shared).
+    assert.deepEqual([(await send(A)).status, (await send(A)).status], [401, 401]);
+    const over = await send(A);
+    assert.equal(over.status, 429);
+    assert.ok(over.json.retryAfter > 15, `the rate limit's own Retry-After: ${over.json.retryAfter}`);
+    assert.deepEqual([(await send('2001:db8:9:3::1')).status, (await send('2001:db8:9:4::1')).status], [401, 401]);
+    const over48 = await send('2001:db8:9:5::1');
+    assert.equal(over48.status, 429);
+    assert.ok(over48.json.retryAfter > 15, `the /48 limit's own Retry-After: ${over48.json.retryAfter}`);
+});
+
+test('the first failed login of a fresh worker is padded to the warm-up baseline: an unknown account takes as long as a slow stored hash', async (t) => {
+    // The dummy uses the preferred algorithm (fast here), a stored hash an older, slower one; the
+    // warm-up reports the slowest verification it timed (the real hasher times the legacy scrypt).
+    const SLOW = 150, FAST = 20;
+    const fake = {
+        algorithm: 'fast', parse: () => null,
+        hash: async (pw) => { await sleep(FAST); return `fast:${pw}`; },
+        verify: async (stored, pw) => { await sleep(stored.startsWith('slow:') ? SLOW : FAST); return { ok: stored.slice(5) === pw, needsRehash: false }; },
+        verifyDummy: async () => { await sleep(FAST); return false; },
+        warmUp: async () => { await sleep(SLOW); return SLOW; },
+    };
+    const s = await startTestServer({ hasher: fake });
+    t.after(s.close);
+    s.store.users.create({ username: 'dormant', email: 'dormant@example.com', passwordHash: 'slow:the right one', emailVerified: true });
+    const hasher = s.auth._svc.hasher;
+    await waitFor(() => hasher.floor.baselineMs() > 0 && hasher.limiter.stats().active === 0, 'the warm-up');
+    const time = async (login) => {
+        const t0 = performance.now();
+        const r = await s.request('POST', LOGIN, { body: { login, password: 'a wrong one' } });
+        assert.equal(r.status, 401);
+        return performance.now() - t0;
+    };
+    // No earlier check, no medians: the very first failure of the worker, then the slow one.
+    const unknown = await time('ghost@example.com');
+    const known = await time('dormant@example.com');
+    assert.ok(unknown >= known - 30, `first failure: unknown account ${unknown.toFixed(0)} ms, scrypt-like stored hash ${known.toFixed(0)} ms`);
+    assert.ok(unknown >= SLOW - 5, `unknown ${unknown.toFixed(0)} ms`);
 });
 
 test('a failed login takes as long for an unknown account as for a stored hash of a slower algorithm', async (t) => {
@@ -468,7 +575,33 @@ test('config: PASSWORD_HASH_QUEUE_TIMEOUT_MS at most 13000; a warning when the h
     assert.match(w[0], /PASSWORD_HASH_CONCURRENCY \(4\) is not below the size of the libuv thread pool \(4 threads/);
     assert.deepEqual(configWarnings(testConfig({ PASSWORD_HASH_CONCURRENCY: '4' }), { UV_THREADPOOL_SIZE: '8' }), []);
     assert.equal(configWarnings(testConfig({ PASSWORD_HASH_CONCURRENCY: '2' }), { UV_THREADPOOL_SIZE: '2' }).length, 1);
-    assert.equal(configWarnings(testConfig({ PASSWORD_HASH_CONCURRENCY: '4' }), { UV_THREADPOOL_SIZE: 'lots' }).length, 1, 'an unreadable value counts as the default 4');
+    // libuv reads the value with atoi(): an unreadable value is 0, which gives 1 thread.
+    assert.equal(configWarnings(testConfig({ PASSWORD_HASH_CONCURRENCY: '4' }), { UV_THREADPOOL_SIZE: 'lots' }).length, 1, 'an unreadable value gives libuv 1 thread');
+});
+
+test('config: UV_THREADPOOL_SIZE is read as libuv reads it', () => {
+    assert.deepEqual(['', '0', 'abc', ' ', '0x10'].map(threadPoolSize), [1, 1, 1, 1, 1], 'empty, 0 or not a number: 1 thread');
+    assert.equal(threadPoolSize(undefined), 4, 'unset: 4 threads');
+    assert.deepEqual(['8', ' 8', '8 threads', '+3', '1024'].map(threadPoolSize), [8, 8, 8, 3, 1024], 'leading digits, as atoi() reads them');
+    assert.deepEqual(['2000', '-1', '-7'].map(threadPoolSize), [1024, 1024, 1024], 'above 1024, or negative (unsigned in libuv): 1024');
+    const cfg = testConfig();          // PASSWORD_HASH_CONCURRENCY=1
+    for (const v of ['', '0', 'abc']) {
+        const w = configWarnings(cfg, { UV_THREADPOOL_SIZE: v });
+        assert.equal(w.length, 1, `UV_THREADPOOL_SIZE="${v}"`);
+        assert.match(w[0], /PASSWORD_HASH_CONCURRENCY \(1\) is not below the size of the libuv thread pool \(1 thread,/);
+    }
+    for (const env of [{}, { UV_THREADPOOL_SIZE: '8' }, { UV_THREADPOOL_SIZE: '-1' }, { UV_THREADPOOL_SIZE: '2' }]) {
+        assert.deepEqual(configWarnings(cfg, env), [], JSON.stringify(env));
+    }
+});
+
+test('config: PASSWORD_HASH_WAITERS_PER_SOURCE (default 2, at least 1) reaches the hash limiter', async (t) => {
+    assert.equal(testConfig().passwordHashWaitersPerSource, 2);
+    assert.equal(testConfig({ PASSWORD_HASH_WAITERS_PER_SOURCE: '1' }).passwordHashWaitersPerSource, 1);
+    assert.throws(() => testConfig({ PASSWORD_HASH_WAITERS_PER_SOURCE: '0' }), /PASSWORD_HASH_WAITERS_PER_SOURCE: at least 1/);
+    const s = await startTestServer({ env: { PASSWORD_HASH_WAITERS_PER_SOURCE: '6' } });
+    t.after(s.close);
+    assert.equal(s.auth._svc.hasher.limiter.perSourceMax, 6);
 });
 
 test('check-config prints the thread-pool warning on stderr', () => {
@@ -482,6 +615,16 @@ test('check-config prints the thread-pool warning on stderr', () => {
     assert.equal(r.status, 0, r.stderr);
     assert.equal(JSON.parse(r.stdout).passwordHashConcurrency, 4, 'stdout stays the JSON configuration');
     assert.match(r.stderr, /^warning: PASSWORD_HASH_CONCURRENCY \(4\) is not below the size of the libuv thread pool/m);
+    // An empty UV_THREADPOOL_SIZE (a bare line in a systemd EnvironmentFile) gives libuv 1 thread.
+    const empty = spawnSync(process.execPath, [fileURLToPath(new URL('../../bin/scacelith-server.js', import.meta.url)), 'check-config'], {
+        cwd: os.tmpdir(), encoding: 'utf8',
+        env: {
+            PATH: process.env.PATH, SCACELITH_ENV_FILE: '', SERVER_SECRET: Buffer.alloc(48, 7).toString('base64'),
+            TLS_MODE: 'off', ALLOW_INSECURE_DEV: '1', UV_THREADPOOL_SIZE: '',
+        },
+    });
+    assert.equal(empty.status, 0, empty.stderr);
+    assert.match(empty.stderr, /^warning: PASSWORD_HASH_CONCURRENCY \(1\) is not below the size of the libuv thread pool \(1 thread,/m);
 });
 
 test('serverBusy: 503 with a Retry-After spread over 5 to 15 s', () => {

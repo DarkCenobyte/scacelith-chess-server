@@ -41,11 +41,15 @@ export function serverBusy(retryAfterSec = BUSY_RETRY_AFTER_SEC.min + Math.floor
 /**
  * 429 rate_limited, the same answer as the HTTP rate limits: this client (an IPv4 address or an
  * IPv6 /48) already has as many password hashes waiting in the worker's queue as it may
- * (security/password.js). The delay is random, as for serverBusy().
+ * (security/password.js). The delay is random, as for serverBusy(). `refundRate` (never sent)
+ * tells the HTTP layer to give back the rate-limit tokens the request took (http/server.js):
+ * nothing was hashed, and the refused player of a busy school network keeps its attempts.
  * @param {number} [retryAfterSec]
  */
 export function hashRateLimited(retryAfterSec = BUSY_RETRY_AFTER_SEC.min + Math.floor(Math.random() * (BUSY_RETRY_AFTER_SEC.max - BUSY_RETRY_AFTER_SEC.min + 1))) {
-    return new AuthError(429, 'rate_limited', 'Too many requests; try again later.', { retryAfter: retryAfterSec });
+    const err = new AuthError(429, 'rate_limited', 'Too many requests; try again later.', { retryAfter: retryAfterSec });
+    err.refundRate = true;
+    return err;
 }
 
 /** The single answer of every failed password login (unknown account, wrong password, no password). */

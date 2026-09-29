@@ -8,7 +8,8 @@
 // token bucket (HTTP_RATE_PER_IP / min) -> route match (404, 405 + Allow, OPTIONS -> 204 + Allow,
 // HEAD = GET without body) -> authentication (Authorization: Bearer sct_...) -> route rate limits
 // (local token bucket, then the primary's `ratelimit.take` for `shared` limits; the password
-// endpoints also limit each IPv6 /48 as a whole, see checkRates) -> body (JSON only
+// endpoints also limit each IPv6 /48 as a whole, see checkRates; a request refused because its
+// client already has too many password hashes waiting gets these tokens back) -> body (JSON only
 // for the API, form-urlencoded for HTML pages, HTTP_BODY_LIMIT enforced while streaming: 413;
 // Content-Type checked: 415; body read timeout: 408) -> strict schema validation (400) -> handler
 // (timeout: 503) -> JSON or HTML answer.
@@ -202,12 +203,19 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
         return v;
     }
 
-    /** Takes one token of `key` (local bucket, then the primary's shared window for `shared` rates). */
+    /**
+     * Takes one token of `key` (local bucket, then the primary's shared window for `shared` rates).
+     * @returns {{ key: string, limit: number, windowMs: number, sharedAt: number|null }} what was
+     *   taken (sharedAt: when the primary was asked, on the handler's clock, Date.now like the
+     *   primary's; null when the primary did not count it)
+     */
     async function take(rate, key, limit, label) {
         const local = limiter.take(key, limit, rate.windowMs, 1);
         if (!local.allowed) throw rateLimited(local.retryAfterMs, label);
+        const taken = { key, limit, windowMs: rate.windowMs, sharedAt: null };
         if (rate.shared && primary) {
             let r = null;
+            const askedAt = now();
             try {
                 r = await primary.request('ratelimit.take', { key, limit, windowMs: rate.windowMs, cost: 1 });
             } catch (err) {
@@ -216,6 +224,25 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
                 if (t - primaryWarnAt > 60000) { primaryWarnAt = t; log.warn('shared rate limit unavailable', { err: { message: err.message } }); }
             }
             if (r && r.allowed === false) throw rateLimited(r.retryAfterMs || 1000, label);
+            if (r && r.allowed) taken.sharedAt = askedAt;
+        }
+        return taken;
+    }
+
+    /**
+     * Gives back the tokens a request took (checkRates), when it ended with an answer that did
+     * none of the work the limits protect: `refundRate` on the error or the handler's result (a
+     * 429 of the password hash queue for a client with too many hashes waiting, auth/errors.js).
+     * A shared window that cannot be reached keeps its count (it fails open anyway).
+     */
+    function giveBack(taken) {
+        for (const t of taken) {
+            limiter.give(t.key, t.limit, t.windowMs, 1);
+            if (t.sharedAt === null || !primary) continue;
+            const ageMs = Math.max(0, now() - t.sharedAt);
+            Promise.resolve()
+                .then(() => primary.request('ratelimit.refund', { key: t.key, windowMs: t.windowMs, cost: 1, ageMs }))
+                .catch(() => { /* the shared window keeps this token */ });
         }
     }
 
@@ -223,15 +250,17 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
     // the user or of the client's ipKey() (an IPv4 address or an IPv6 /64). With `prefixLimit`, a
     // client on IPv6 also takes from the bucket of its /48 (prefixKey()), which bounds the 65536
     // /64 networks of one site together: without it, one /48 or /56 would multiply the limit by
-    // the number of its /64s.
+    // the number of its /64s. Returns what was taken (giveBack).
     async function checkRates(rates, ctx) {
+        const taken = [];
         for (const rate of rates) {
             const byUser = rate.by === 'user' && ctx.user;
-            await take(rate, `${rate.key}:${byUser ? `u${ctx.user.userId}` : ipKey(ctx.ip)}`, rate.limit, rate.key);
+            taken.push(await take(rate, `${rate.key}:${byUser ? `u${ctx.user.userId}` : ipKey(ctx.ip)}`, rate.limit, rate.key));
             if (rate.prefixLimit && !byUser && ctx.ip.includes(':')) {
-                await take(rate, `${rate.key}/48:${prefixKey(ctx.ip)}`, rate.prefixLimit, `${rate.key}/48`);
+                taken.push(await take(rate, `${rate.key}/48:${prefixKey(ctx.ip)}`, rate.prefixLimit, `${rate.key}/48`));
             }
         }
+        return taken;
     }
 
     function routeLabel(route) {
@@ -260,6 +289,7 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
         let page = false;
         setBaseHeaders(res);
         const ip = normalizeIp(req.clientIp ?? req.socket?.remoteAddress ?? '');
+        let taken = null;
         try {
             const method = String(req.method || '').toUpperCase();
             const rawUrl = String(req.url || '');
@@ -305,7 +335,7 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
                 config, store, log, primary, auth, anticheat, now: now(), route: route.path,
             };
             const rates = route.opts.rate ? (Array.isArray(route.opts.rate) ? route.opts.rate : [route.opts.rate]) : [];
-            if (rates.length) await checkRates(rates, ctx);
+            if (rates.length) taken = await checkRates(rates, ctx);
 
             if (route.opts.query) {
                 const v = validate(route.opts.query, ctx.query);
@@ -333,12 +363,14 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
             }
 
             const out = await runHandler(route, ctx);
+            if (taken && out && out.refundRate) giveBack(taken);
             if (out === undefined || out === null) { send(req, res, 204); return; }
             const status = out.status || 200;
             if (out.html !== undefined) send(req, res, status, { html: out.html, headers: out.headers });
             else send(req, res, status, { body: out.body, headers: out.headers });
         } catch (err) {
             if (!(err && err.expose)) log.error('request failed', { route: label, err });
+            if (taken && err && err.refundRate) giveBack(taken);
             sendError(req, res, err, page);
         } finally {
             const code = res.statusCode;

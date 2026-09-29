@@ -86,6 +86,29 @@ test('unknown accounts cost the same work (dummy hash)', async () => {
     assert.equal(await h.verifyDummy('x'), false);
 });
 
+test('warmUp measures the slowest verification: the preferred algorithm, and the legacy scrypt hashes when argon2id is preferred', async () => {
+    const time = async (f) => { const t = performance.now(); await f(); return performance.now() - t; };
+    const med = (a) => [...a].sort((x, y) => x - y)[2];
+    // argon2id preferred (an instant stand-in): the warm-up also times a scrypt verification with
+    // the configured scrypt parameters, the slowest hash the database can still hold.
+    const a = createPasswordHasher({ scrypt: { logN: 14 }, argon2: fakeArgon2(), argon2Params: { memory: 1024, passes: 1, parallelism: 1 } });
+    const legacy = await createPasswordHasher({ scrypt: { logN: 14 }, argon2: false }).hash('a legacy passphrase');
+    const scryptMs = [];
+    for (let i = 0; i < 5; i++) scryptMs.push(await time(() => a.verify(legacy, 'a wrong passphrase')));
+    const dummyMs = [];
+    for (let i = 0; i < 5; i++) dummyMs.push(await time(() => a.verifyDummy('a wrong passphrase')));
+    const warm = await a.warmUp();
+    assert.ok(Number.isFinite(warm) && warm >= 0.5 * med(scryptMs),
+        `warm-up measured ${warm.toFixed(1)} ms; a scrypt check takes ${med(scryptMs).toFixed(1)} ms, the argon2 dummy ${med(dummyMs).toFixed(1)} ms`);
+    // scrypt preferred: the dummy hash is the slowest kind; a second warm-up times a dummy check.
+    const s = createPasswordHasher({ scrypt: { logN: 14 }, argon2: false });
+    const first = await s.warmUp();
+    const again = await s.warmUp();
+    const own = [];
+    for (let i = 0; i < 5; i++) own.push(await time(() => s.verifyDummy('x')));
+    for (const w of [first, again]) assert.ok(w >= 0.5 * med(own), `warm-up ${w.toFixed(1)} ms, dummy check ${med(own).toFixed(1)} ms`);
+});
+
 test('an argon2id hash on a runtime without argon2 fails after the dummy work, not at once', async () => {
     const h = createPasswordHasher({ scrypt: { logN: 13 }, argon2: false });
     await h.warmUp();
