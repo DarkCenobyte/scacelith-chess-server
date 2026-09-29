@@ -138,9 +138,9 @@ event-loop lag. The rows marked 2.1 GHz ran on the slower host (see above).
 - **Connection rate: CPU-bound.** During every ramp the machine was 90-99 % busy: the server used
   1.3-2.2 cores and the load generator 1.0-2.0 cores. A full TLS 1.3 handshake costs the server
   about 1.1-1.3 ms of CPU (2.2-2.5 ms per connection with TLS against 1.2 ms without), and about
-  as much on the client side. The primary (control plane) used 0.1-0.35 core during the ramps (presence
-  registration, and with `LISTEN_REUSE_PORT=false` the accept and hand-off of every connection:
-  0.18 core without SO_REUSEPORT against 0.11 core with it, at a similar rate).
+  as much on the client side. The primary (control plane) used 0.1-0.35 core during the ramps
+  (presence registration, and with `LISTEN_REUSE_PORT=false` the accept and hand-off of every
+  connection: 0.18 core without SO_REUSEPORT against 0.11 core with it, at a similar rate).
 - **Memory: 54-62 KB of server RSS per idle connection**, of which 6-8 KB is V8 heap; without TLS
   it is 18 KB, so the TLS state (OpenSSL objects and buffers) is about 40 KB per connection. The
   client side costs about the same (7 load processes held 5.8 GB for 100,000 connections), so
@@ -172,7 +172,7 @@ is the host's own time for one move. No move was rejected and no connection drop
 the only errors were a few `AlreadyInGame` answers to a ChallengeAccept sent in the few
 milliseconds between a game's end and its commit (the load generator retries).
 
-- **Up to 10,000 paced games the server keeps up with room to spare**: 9,500 moves/s with 2 server
+- **10,000 paced games started together**: the server keeps up, 9,500 moves/s with 2 server
   cores, a median round trip of 2-4 ms and a p99 of 15-60 ms in steady state. The long tail of
   that run (p99 729 ms over the whole window) comes from two events visible in its timeline: a
   stall of the whole VM (every process, the load generator's sampling included, stopped for about
@@ -183,7 +183,7 @@ milliseconds between a game's end and its commit (the load generator retries).
   the primary, snapshots) every second, like a busy real server. The same 10,000 games then used
   2.14 server cores for 9,200 moves/s and filled the machine (95 % with the load generator and
   0.5 core of other processes): round trip p50 23 ms, p99 244 ms, max 478 ms, without the long
-  outliers of the synchronized run. From the difference, a game costs about 3 ms of server CPU
+  outliers of the synchronized run. From the difference, a game costs roughly 3 ms of server CPU
   from challenge to commit, besides its moves.
 - **20,000 paced games saturate the machine**: 15,500 of the 20,000 intended moves per second, the
   4 cores 100 % busy (server 2.3, load generator 1.6), round trip p50 200 ms, p99 880 ms. The
@@ -200,8 +200,9 @@ milliseconds between a game's end and its commit (the load generator retries).
   `src/chess`, 3 % GC. The longest event-loop stalls were a 71 ms `writev` and 40-50 ms GC pauses.
 - **Relays**: a game is hosted by the shard of the player who created the challenge (or waited
   longer in the queue), and the opponent's connection is on another shard 3 times out of 4 with 4
-  workers, so 35-47 % of the moves crossed the shard bus; 67 % in the saturated 20k run, where
-  the overloaded shards made the primary place new games on a third shard (see the notes below).
+  workers, so 35-51 % of the moves crossed the shard bus; 64-67 % in the staggered and 20k runs,
+  where the overloaded shards made the primary place new games on a third shard (see the notes
+  below).
 - **Latency outliers** besides CPU saturation: finished-game commits run synchronously on the
   shard's event loop (`synchronous=FULL`, and a wait on the database write lock held by another
   process, up to `busy_timeout` 5 s), with a p99 of 24-45 ms in most runs and 180-214 ms in two of
@@ -258,8 +259,9 @@ resources to watch: the primary (presence, challenges, matchmaking) and the sing
   reports overload (`SHARD_OVERLOAD_LAG_MS`, event-loop p99 above 50 ms); then the primary picks
   the shard with the fewest games in the last `shard.load` report (sent every 2 s), and every game
   created before the next report goes to that same shard. In the burst 1000 run one shard hosted
-  433 games against 159-199 for the others; with `--via queue` 3,414 against 1,831-2,470. Those
-  games have no local player, which raises the relays (67 % of the moves in the 20k run).
+  433 games against 159-199 for the others; in the staggered run 3,447 against 1,935-2,270; with
+  `--via queue` 3,414 against 1,831-2,470. Those games usually have no local player, which raises
+  the relays (64-67 % of the moves in the staggered and 20k runs).
 - **Commits on the event loop.** A shard commits its finished games with a synchronous SQLite
   transaction (`synchronous=FULL`) that may also wait for the write lock of another process; the
   shard's players wait meanwhile (commit p99 up to 214 ms).
@@ -269,8 +271,8 @@ resources to watch: the primary (presence, challenges, matchmaking) and the sing
 ## Going further
 
 - **Give the server the whole machine**: run the load generator on other machines with `--url`,
-  `--tokens` (one slice of the accounts per machine) and `--metrics`. On the same machine about
-  40 % of the CPU went to the clients.
+  `--tokens` (one slice of the accounts per machine) and `--metrics`. On the same machine 25-50 %
+  of the CPU went to the clients in the saturated runs.
 - **More workers**: `WORKERS` = the number of cores, with `LimitNOFILE` (systemd) or `ulimit -n`
   above the connections per worker (this container's 20,000 forced 7 workers on 4 cores for
   100,000 connections). `MAX_CONNECTIONS` is 200,000 by default.
