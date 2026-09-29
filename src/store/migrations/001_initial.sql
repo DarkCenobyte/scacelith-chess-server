@@ -186,13 +186,10 @@ CREATE INDEX security_events_at ON security_events (at);
 CREATE INDEX security_events_user ON security_events (user_id, at) WHERE user_id IS NOT NULL;
 CREATE INDEX security_events_ip ON security_events (at) WHERE ip IS NOT NULL;
 
--- Engine analysis queue of finished rated games (consumed by the analysis process). Jobs are
--- taken by priority, then oldest first: 0 ordinary, 1 suspicion signal, 2 player report,
--- 3 moderator request. Ordinary games that find the queue full are not inserted at all.
+-- Engine analysis queue of finished rated games (consumed by the analysis process).
 CREATE TABLE analysis_jobs (
     game_id     INTEGER PRIMARY KEY REFERENCES games (id) ON DELETE CASCADE,
     status      TEXT    NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'done', 'failed')),
-    priority    INTEGER NOT NULL DEFAULT 0,
     attempts    INTEGER NOT NULL DEFAULT 0,
     worker      TEXT,
     queued_at   INTEGER NOT NULL,
@@ -201,7 +198,7 @@ CREATE TABLE analysis_jobs (
     error       TEXT,
     features    TEXT
 );
-CREATE INDEX analysis_jobs_queue ON analysis_jobs (status, priority DESC, queued_at);
+CREATE INDEX analysis_jobs_queue ON analysis_jobs (status, queued_at);
 
 CREATE TABLE player_integrity (
     user_id     INTEGER PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
