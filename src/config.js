@@ -111,12 +111,12 @@ key('GOOGLE_REDIRECT_URI', { section: 'sso', type: 'string', default: '',
 
 // ---- Abuse protection --------------------------------------------------------------------------------
 key('MAX_CONNECTIONS', { section: 'limits', type: 'int', default: 200000, min: 1,
-    desc: 'Simultaneous players, whole server. Newcomers beyond it are refused at Hello (ServerFull), but a player whose game is in progress is still admitted, so that a full server does not make them lose it by abandonment. WebSocket upgrades may go max(16, 2 %) beyond it, so that such a player can reach Hello.' });
+    desc: 'Simultaneous players, whole server. A newcomer beyond it still completes the TLS handshake and the WebSocket upgrade, then is refused at Hello (ServerFull, counted in scacelith_ws_hello_total{result="server_full"}, the metric that shows a full server), and the game waits 60 to 120 s before it tries again. A player whose game is in progress is still admitted, so that a full server does not make them lose it by abandonment. For such a player to reach Hello, WebSocket upgrades may go max(16, 2 %) beyond it; beyond that reserve an upgrade gets HTTP 503, and with TLS_MODE=native the TLS gate starts shedding (see MAX_PENDING_HANDSHAKES).' });
 key('MAX_CONNECTIONS_PER_IP', { section: 'limits', type: 'int', default: 16, min: 1, desc: 'Simultaneous WebSocket connections from one IP address (IPv6: per /64).' });
 key('MAX_PENDING_HANDSHAKES', { section: 'limits', type: 'int', default: 128, min: 2, max: 100000,
-    desc: 'TLS handshakes in progress per worker (TLS_MODE=native). A new connection takes a slot once the first record of its ClientHello has arrived; it has 3 s for that and holds no slot meanwhile. A connection beyond this cap, or beyond MAX_PENDING_HANDSHAKES_PER_IP for its address group, is closed before any TLS work and the client retries later, so a reconnection storm is served in turn instead of every handshake slowing down together. While the server is full, a worker also lets at most half this number of new TLS connections per second through.' });
+    desc: 'TLS handshakes in progress per worker (TLS_MODE=native). A new connection takes a slot once the first record of its ClientHello has arrived; it has 3 s for that and holds no slot meanwhile. A connection beyond this cap, or beyond MAX_PENDING_HANDSHAKES_PER_IP for its address group, is closed before any TLS work and the client retries later, so a reconnection storm is served in turn instead of every handshake slowing down together. A worker also sheds load, letting at most half this number of new TLS connections per second through, for up to 5 s after the primary refused a WebSocket upgrade because MAX_CONNECTIONS and its reserve are in use, or while the worker holds 1.2 times its share of MAX_CONNECTIONS. It does not shed at MAX_CONNECTIONS itself, so that a player coming back to a game in progress does not compete with newcomers for that rate: each newcomer then completes the handshake and gets ServerFull at Hello.' });
 key('MAX_PENDING_HANDSHAKES_PER_IP', { section: 'limits', type: 'int', min: 1, max: 99999,
-    desc: 'TLS handshakes in progress per worker for one address group: an IPv4 address or an IPv6 /48 (TLS_MODE=native). Empty (the default) = MAX_PENDING_HANDSHAKES / 32 with a floor of 2, but always below MAX_PENDING_HANDSHAKES (4 by default). A value you set must be lower than MAX_PENDING_HANDSHAKES, so that a few hosts cannot hold every handshake slot. A worker also keeps at most 4 times this number of connections of one group waiting for their ClientHello (and 16 times MAX_PENDING_HANDSHAKES in total). Raise it when many players share one public address (a school or company network); a handshake takes a fraction of a second, so a small value still serves many players.' });
+    desc: 'TLS handshakes in progress per worker for one address group: an IPv4 address or an IPv6 /48 (TLS_MODE=native). Empty (the default) = MAX_PENDING_HANDSHAKES / 32 with a floor of 2, but always below MAX_PENDING_HANDSHAKES (4 by default; check-config prints the value in use). A value you set must be lower than MAX_PENDING_HANDSHAKES, so that a few hosts cannot hold every handshake slot. A worker also keeps at most 4 times this number of connections of one group waiting for their ClientHello (and 16 times MAX_PENDING_HANDSHAKES in total). Raise it when many players share one public address (a school or company network); a handshake takes a fraction of a second, so a small value still serves many players.' });
 key('WS_MAX_MESSAGE_BYTES', { section: 'limits', type: 'int', default: 512, min: 128, max: 65536, desc: 'Largest message a client may send.' });
 key('WS_MSG_RATE', { section: 'limits', type: 'int', default: 20, min: 1, desc: 'Messages per second a client may send (sustained).' });
 key('WS_MSG_BURST', { section: 'limits', type: 'int', default: 40, min: 1, desc: 'Message burst a client may send.' });
@@ -124,7 +124,7 @@ key('WS_SEND_BUFFER_LIMIT', { section: 'limits', type: 'int', default: 262144, m
     desc: 'Bytes queued for a client that does not read; beyond it the connection is closed (the client reconnects and resynchronises).' });
 key('WS_HELLO_TIMEOUT_MS', { section: 'limits', type: 'int', default: 10000, min: 1000, max: 600000, desc: 'Time a new connection has to authenticate.' });
 key('HEARTBEAT_INTERVAL_MS', { section: 'limits', type: 'int', default: 10000, min: 1000,
-    desc: 'Server ping interval: each connection gets a ping every half interval to one interval (it also measures each player\'s latency). The game client considers the connection dead after twice this (10 s at least) with nothing received.' });
+    desc: 'Server ping interval: each connection gets a ping every half interval to one interval (it also measures each player\'s latency). The game client sends a Ping of its own after 1.5 times this with nothing received (at least 7.5 s, at most 90 s), and considers the connection dead after twice this (at least 10 s, at most 120 s).' });
 key('HEARTBEAT_TIMEOUT_MS', { section: 'limits', type: 'int', default: 30000, min: 3000, desc: 'A connection silent for this long is considered dead.' });
 key('CLIENT_PING_INTERVAL_MS', { section: 'limits', type: 'int', default: 10000, min: 1000, max: 60000,
     desc: 'Interval of the game client\'s own Ping, announced in Welcome (the client measures its round trip for the ping indicator and its estimate of the server clock with it). Lower is a more reactive ping indicator but costs more server CPU for every connected player: at 2000 these pings alone take a third or more of the server CPU of a player in a 3+2 game. After each connection the client sends a few quick pings anyway.' });
@@ -217,6 +217,16 @@ key('RETENTION_INTERVAL_MS', { section: 'observability', type: 'int', default: 3
 // ---------------------------------------------------------------------------------------------------------
 
 export const CONFIG_KEYS = Object.freeze(KEYS.map((k) => Object.freeze(k)));
+
+/**
+ * Default MAX_PENDING_HANDSHAKES_PER_IP: MAX_PENDING_HANDSHAKES / 32 with a floor of 2, but below
+ * the total when the total is at least 2 (4 for the default 128, 1 for a total of 2). loadConfig
+ * stores the result, so check-config prints the value the TLS gate uses (net/listeners.js).
+ * @param {number} maxPending MAX_PENDING_HANDSHAKES
+ */
+export function defaultPendingPerGroup(maxPending) {
+    return Math.max(1, Math.min(maxPending - 1, Math.max(2, Math.floor(maxPending / 32))));
+}
 
 export class ConfigError extends Error {}
 
@@ -356,6 +366,10 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     if (cfg.analysisDepthFast >= cfg.analysisDepthDeep) errors.push('ANALYSIS_DEPTH_FAST must be lower than ANALYSIS_DEPTH_DEEP.');
     if (cfg.maxPendingHandshakesPerIp != null && cfg.maxPendingHandshakesPerIp >= cfg.maxPendingHandshakes) {
         errors.push('MAX_PENDING_HANDSHAKES_PER_IP must be lower than MAX_PENDING_HANDSHAKES (one address group could otherwise hold every handshake slot).');
+    }
+    // Empty: the effective default, so that check-config shows it and the TLS gate uses the same value.
+    if (cfg.maxPendingHandshakesPerIp == null && Number.isInteger(cfg.maxPendingHandshakes)) {
+        cfg.maxPendingHandshakesPerIp = defaultPendingPerGroup(cfg.maxPendingHandshakes);
     }
     if (cfg.recoveryClockHoldMs >= cfg.recoveryGraceMs) errors.push('RECOVERY_CLOCK_HOLD_MS must be lower than RECOVERY_GRACE_MS.');
     if (!cfg.googleRedirectUri) {

@@ -46,6 +46,8 @@
 //     isFull(), the server-full signal with which the listeners shed new connections before the
 //     TLS handshake (net/listeners.js); that is only an estimate. This check (MAX_CONNECTIONS plus
 //     a small reserve, cluster/presence.js) and the MAX_CONNECTIONS check at Hello stay exact.
+//     A ServerFull at Hello does not feed isFull (see there): a server at MAX_CONNECTIONS itself
+//     does not shed.
 //   - ServerFull closes with 4006 (4000 + ErrorCode.ServerFull; CloseCode has no entry for it).
 //
 // Complexity per message: O(1) (one decode, one Map lookup, one token bucket update).
@@ -206,8 +208,8 @@ export class Router {
         this._relayed = r.counter('scacelith_ws_relayed_total', 'Game messages relayed to another shard');
 
         // Server-full signal for the admission before TLS (isFull): the last answers of the
-        // primary's global check (MAX_CONNECTIONS plus its reserve), and this worker's share of
-        // MAX_CONNECTIONS with 20 % of slack.
+        // primary's global check (MAX_CONNECTIONS plus its reserve, not MAX_CONNECTIONS alone), and
+        // this worker's share of MAX_CONNECTIONS with 20 % of slack.
         this.localCap = Math.ceil((config.maxConnections || 200000) * 1.2 / Math.max(1, config.workers || 1));
         this._fullAt = -Infinity;
         this._admitAt = -Infinity;
@@ -251,6 +253,17 @@ export class Router {
      * so a freed slot is found), or while this worker holds 1.2 times its share of
      * MAX_CONNECTIONS. O(1). The times are monotonic (performance.now), so a step of the wall
      * clock neither prolongs nor shortens the state.
+     *
+     * A ServerFull answer at Hello (a newcomer on a server at MAX_CONNECTIONS) deliberately does
+     * not start the state, and an upgrade admitted inside the reserve ends it like any other
+     * admitted upgrade. Shedding there would make
+     * a player coming back to a game in progress compete with the newcomers for the
+     * MAX_PENDING_HANDSHAKES / 2 connections let through per second, and the official game already
+     * waits 60 to 120 s after a ServerFull. So a server at MAX_CONNECTIONS does not shed: each
+     * newcomer costs a handshake, an upgrade and a Hello (scacelith_ws_hello_total{result=
+     * "server_full"} counts them), and shedding starts only once the connections counted at the
+     * upgrade reach MAX_CONNECTIONS plus the reserve (max(16, 2 %)), or this worker holds 1.2
+     * times its share (test/integration/admission.test.js).
      * @param {number} [now] performance.now()
      */
     isFull(now = performance.now()) {

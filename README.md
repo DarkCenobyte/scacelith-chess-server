@@ -213,19 +213,31 @@ it waits; a connection that stays silent is closed. Each worker then performs at
 closed at once, before any TLS work, and the game retries after a random delay. The CPU then
 completes the handshakes in turn instead of starting all of them together and finishing none before
 the clients give up. Raise `MAX_PENDING_HANDSHAKES_PER_IP` when many players share one address group
-(a school or a company network). When the server is full (`MAX_CONNECTIONS`), a worker also lets
-only `MAX_PENDING_HANDSHAKES / 2` new TLS connections per second through, and the other attempts
-cost no TLS work. The game learns that the server is full only from the connections let through: the
-HTTP 503 answer to its WebSocket upgrade, or a `ServerFull` answer when it logs in (`GET
-/api/v1/info` does not say it). A player whose game is in progress is still let in, so that the game
-can go on. On the default shared port new API connections are let through at that same rate, so the
-API keeps working, more slowly; setting `WS_PORT` to another port keeps the API outside the limit,
-the better layout for a server that expects to be full. These limits stop a few hosts from blocking
-everyone, not a distributed attack: see the connection storms part of section 5.8 in
-[docs/DESIGN.md](docs/DESIGN.md). Games that were running when the server stopped come back from the
-journal, and both players then have `RECOVERY_GRACE_MS` (90 s) to reconnect instead of the normal
-grace. The clock of the side to move stays stopped until that player is back, for
-`RECOVERY_CLOCK_HOLD_MS` (20 s) at most, so a slow reconnection does not cost them time.
+(a school or a company network). These limits stop a few hosts from blocking everyone, not a
+distributed attack: see the connection storms part of section 5.8 in [docs/DESIGN.md](docs/DESIGN.md).
+Games that were running when the server stopped come back from the journal, and both players then
+have `RECOVERY_GRACE_MS` (90 s) to reconnect instead of the normal grace. The clock of the side to
+move stays stopped until that player is back, for `RECOVERY_CLOCK_HOLD_MS` (20 s) at most, so a slow
+reconnection does not cost them time.
+
+`MAX_CONNECTIONS` (200,000) counts the signed-in players of the whole server. Beyond it, a newcomer
+still completes the TLS handshake and the WebSocket upgrade, then is refused when it logs in
+(`ServerFull`), and the game waits 60 to 120 s before it tries again. A player whose game is in
+progress is still let in, so that the game can go on. So that such a player can reach the login, the
+WebSocket upgrades may go a reserve of max(16, 2 %) connections beyond `MAX_CONNECTIONS`, and the
+server does not shed load at `MAX_CONNECTIONS` itself, which would make them compete with the
+newcomers to get through: each attempt of a newcomer then costs a TLS handshake, the upgrade and the
+login check. Watch `scacelith_ws_hello_total{result="server_full"}` on the metrics endpoint: it
+counts the newcomers refused at login, and it is the sign that the server is full. A worker sheds
+load only for up to 5 s after the upgrade itself was refused (HTTP 503, once the reserve is in use
+as well), or while it holds 1.2 times its share of `MAX_CONNECTIONS`: with native TLS it then lets
+only `MAX_PENDING_HANDSHAKES / 2` new TLS connections per second through and closes the other
+attempts before any TLS work (`scacelith_tls_refused_total{reason="server_full"}`). The game learns
+that the server is full only from the connections let through: the HTTP 503 answer to its WebSocket
+upgrade, or the `ServerFull` answer when it logs in (`GET /api/v1/info` does not say it). While a
+worker sheds on the default shared port, new API connections are let through at that same rate, so
+the API keeps working, more slowly; setting `WS_PORT` to another port keeps the API outside the
+limit, the better layout for a server that expects to be full.
 
 ## Accounts, e-mail and Google sign-in
 

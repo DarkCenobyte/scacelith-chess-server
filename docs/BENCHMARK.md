@@ -361,8 +361,13 @@ restart and settings figures that go with it.
 - **`MAX_PENDING_HANDSHAKES`** (128 per worker): enough to keep a core busy with handshakes (at
   1-3.5 ms each, 128 in flight are 0.1-0.5 s of work) while every started handshake finishes long
   before a client's deadline. A higher value only helps when the clients are far away (each
-  handshake then waits for round trips, not for the CPU). While the server is full it also sets
-  the rate of new TLS connections let through (half of it per second and per worker).
+  handshake then waits for round trips, not for the CPU). While a worker sheds load it also sets
+  the rate of new TLS connections let through (half of it per second and per worker). A worker
+  sheds for up to 5 s after an upgrade was refused because the server is full (`MAX_CONNECTIONS`
+  plus a reserve of max(16, 2 %) connections, kept for players with a game in progress), or while
+  it holds 1.2 times its share of `MAX_CONNECTIONS`; at `MAX_CONNECTIONS` itself it does not, and
+  each newcomer completes the handshake and the upgrade before its `ServerFull` at login
+  (`scacelith_ws_hello_total{result="server_full"}`).
   `MAX_PENDING_HANDSHAKES_PER_IP` (4 per worker for one IPv4 address or IPv6 /48) only matters
   when many players share one address: raise it for a school or a company network, keeping it
   well below `MAX_PENDING_HANDSHAKES` (DESIGN.md 5.8).
