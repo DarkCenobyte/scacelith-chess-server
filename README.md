@@ -214,7 +214,9 @@ clients give up. When the server is full (`MAX_CONNECTIONS`), a worker also lets
 "server full" answer, while the other attempts cost no TLS work. On the default shared port the
 API shares that rate; setting `WS_PORT` to another port keeps the API outside it. Games that were
 running when the server stopped come back from the journal, and both players then have
-`RECOVERY_GRACE_MS` (90 s) to reconnect instead of the normal grace.
+`RECOVERY_GRACE_MS` (90 s) to reconnect instead of the normal grace. The clock of the side to
+move stays stopped until that player is back, for `RECOVERY_CLOCK_HOLD_MS` (20 s) at most, so a
+slow reconnection does not cost them time.
 
 ## Accounts, e-mail and Google sign-in
 

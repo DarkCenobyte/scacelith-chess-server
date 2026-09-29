@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createAnticheat } from '../../src/anticheat/index.js';
 import { GameHost } from '../../src/game/host.js';
 import { GameRoom, JournalKind, REMATCH_WINDOW_MS } from '../../src/game/room.js';
 import { FakeChessGame, fakeMove, MemoryJournal, FakeStore, FakeAnticheat, FakePrimary, FakeEndpoint, silentLog } from '../../src/game/testing.js';
@@ -353,12 +354,15 @@ test('recovery after a crash: running games restored, ended-but-uncommitted game
     b.host.pollCommits(b.clock.t + 50);
     assert.deepEqual(b.store.batches[0], [expectedRecord]);
     assert.ok(journal.done.has(done));
-    // A player comes back: snapshot with Black's journaled clock, restarted at recovery.
+    // Black, the side to move, comes back 2 s later: its clock was held until then (nothing
+    // charged) and starts at the reconnection, from its journaled value.
+    assert.equal(room.nextDeadline(), b.clock.t + 20000, 'the clock hold (RECOVERY_CLOCK_HOLD_MS) ends first');
     const eb = new FakeEndpoint(5);
     b.clock.t += 2000;
     b.host.attach(running, 2, eb);
     const s = last(eb);
-    assert.deepEqual([s.type, s.running, s.blackMs, s.blackConnected, s.whiteConnected], [MSG.GameSnapshot, B, blackMs - 2000, true, false]);
+    assert.deepEqual([s.type, s.running, s.blackMs, s.blackConnected, s.whiteConnected], [MSG.GameSnapshot, B, blackMs, true, false]);
+    assert.equal(room.snapshot(B, b.clock.t + 1500).blackMs, blackMs - 1500);
     // White never comes back: abandonment after the recovery grace (RECOVERY_GRACE_MS, 90 s),
     // not the normal 18 s of a 3+2 game.
     assert.equal(s.graceMs, 90000 - 2000);
@@ -420,6 +424,38 @@ test('asynchronous store (writer thread): one bad record does not block the batc
     assert.ok(journal.done.has(ids[0]) && journal.done.has(ids[2]));
     assert.equal(journal.done.has(ids[1]), false, 'the bad game stays in the journal');
     assert.equal(host.stats().pendingCommits, 1);
+});
+
+test('the anti-cheat\'s buffered anomalies are written before the finished game goes to the database (end-of-game signal)', () => {
+    const order = [];
+    const acStore = { anomalies: { insertBatch(rows) { for (const r of rows) order.push(`anomaly ${r.kind} ${r.gameId}`); } } };
+    const anticheat = createAnticheat({ config: CFG, store: acStore, log: silentLog, flushMs: 60000 });
+    const store = new FakeStore();
+    const finishBatch = store.games.finishBatch;
+    store.games.finishBatch = (records) => { for (const r of records) order.push(`commit ${r.id}`); return finishBatch(records); };
+    const { host, clock } = mkHost({ store, anticheat });
+    try {
+        const id = newGame(host);
+        play(host, id, clock); play(host, id, clock);
+        // White's last move claims more thinking time than it had (suspicious: buffered up to a
+        // second), then White resigns.
+        clock.t += 1000;
+        const room = host.room(id);
+        host.onClientMessage(id, 1, moveMsg(room, { thinkMs: 5000 }), null);
+        assert.equal(room.ply, 3);
+        assert.equal(anticheat.pendingCount, 1);
+        host.onClientMessage(id, 1, { type: MSG.Resign, seq: 2, game: id }, null);
+        host.pollCommits(clock.t + 50);
+        assert.deepEqual(order, [`anomaly clock_implausible ${id}`, `commit ${id}`]);
+        assert.equal(anticheat.pendingCount, 0);
+        // Nothing buffered: no extra write before the next commit.
+        const id2 = newGame(host, 3, 4);
+        host.onClientMessage(id2, 3, { type: MSG.Abort, seq: 2, game: id2 }, null);
+        host.pollCommits(clock.t + 200);
+        assert.deepEqual(order.slice(2), [`commit ${id2}`]);
+    } finally {
+        anticheat.close();
+    }
 });
 
 test('abort is forwarded as conduct.record; forfeitUser; shutdown flushes commits and the journal', async () => {

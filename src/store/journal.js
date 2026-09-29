@@ -47,7 +47,20 @@
 // fdatasync and live only in the page cache. A segment holding a 'committed' record is unlinked
 // only once the unlinks before it are durable (a directory fsync in between), so an older segment
 // of a committed game can never survive a power loss without that record. That extra directory
-// fsync is rare (about once per rotation).
+// fsync is rare (about once per rotation). With fsync off, a batch holding a snapshot is still
+// fdatasynced before its bookkeeping runs, with a directory fsync first when its segment was
+// created since the last one, and open() makes the segments holding a snapshot durable before it
+// deletes anything: a snapshot deletes older records of a running game, so a power loss must not
+// be able to keep the deletions and lose the snapshot. fsync off then risks only the last
+// records written (and a committed game coming back, which the database commit ignores), as it
+// did before compaction existed. That costs one fdatasync per batch holding snapshots, at most
+// one per game and rotation.
+//
+// Write failures: after a failed write, the next batch goes to a new segment; the batch's
+// 'committed' records are appended again (the host has forgotten those games, and without the
+// record their segments would stay until the next restart), and its snapshots are queued again.
+// failedWrites counts them, and hasUnwritten() tells whether a flush is still needed before the
+// records appended so far are on disk.
 //
 // Recovery reads the segments in order and stops reading a segment at the first record whose
 // length is impossible, which is truncated (torn write) or whose CRC does not match; the records
@@ -159,6 +172,16 @@ export function parseSegment(buf, onRecord) {
 
 function segmentName(seq) { return `segment-${String(seq).padStart(10, '0')}.log`; }
 
+async function syncFile(file) {
+    let fh;
+    try {
+        fh = await fsp.open(file, 'r');
+        await fh.datasync();
+    } catch { /* best effort (a read-only handle cannot be synced on Windows) */ } finally {
+        if (fh) await fh.close().catch(() => {});
+    }
+}
+
 async function fsyncDir(dir) {
     if (process.platform === 'win32') return;      // directories cannot be opened for fsync there
     let fh;
@@ -207,8 +230,10 @@ class Journal {
         this.games = new Map();         // gameId -> { segs: Set<seq>, first, committed, commitSeg }
         this.diskBytes = 0;
         this.snapshots = 0;
+        this.failedWrites = 0;          // batches whose write (or fsync) failed
         this.unlinks = 0;               // segments deleted so far
         this.syncedUnlinks = 0;         // ... of which a directory fsync made the deletion durable
+        this.syncedSeq = 0;             // highest segment whose directory entry a directory fsync made durable
         this.recovered = new Map();
         this.recoverInfo = { segments: 0, records: 0, games: 0, snapshots: 0, problems: [] };
         this.onTimer = () => {
@@ -223,6 +248,7 @@ class Journal {
             .map((m) => parseInt(m[1], 10)).sort((a, b) => a - b);
         const perGame = new Map();
         const committed = new Set();
+        const snapshotFiles = new Set();     // segments holding a snapshot (synced below with fsync off)
         for (const seq of seqs) {
             this.seq = Math.max(this.seq, seq);
             const file = path.join(this.dir, segmentName(seq));
@@ -240,6 +266,7 @@ class Journal {
                 if (kind === JournalKind.Snapshot) {
                     this.recoverInfo.snapshots++;
                     this.markSnapshot(gameId, seq);
+                    snapshotFiles.add(file);
                 } else if (kind === JournalKind.Committed) {
                     committed.add(gameId);
                     this.markCommitted(gameId, seq);
@@ -255,8 +282,14 @@ class Journal {
         this.recoverInfo.segments = seqs.length;
         this.recoverInfo.games = this.recovered.size;
         // What was read is durable (readSegment), and so are the directory's entries (a previous
-        // process's deletions included) before anything is deleted on their strength.
+        // process's deletions included) before anything is deleted on their strength. With fsync
+        // off, the segments holding a snapshot are made durable all the same, since a snapshot
+        // read here lets its game's older segments be deleted (like writeBatch does).
         if (this.fsync && seqs.length) await this.syncDir();
+        else if (snapshotFiles.size) {
+            for (const file of snapshotFiles) await syncFile(file);
+            await this.syncDir();
+        }
         await this.gc([...this.segs.keys()]);
         this.enqueueStale();
         this.updateGauges();
@@ -332,6 +365,13 @@ class Journal {
         if (this.writing) return new Promise((resolve, reject) => this.inflight.push({ resolve, reject }));
         return Promise.resolve();
     }
+
+    /**
+     * Whether records appended so far are not written yet (buffered, or in the batch being
+     * written): a flush() is needed before relying on them being on disk.
+     * @returns {boolean}
+     */
+    hasUnwritten() { return this.len > 0 || this.writing; }
 
     /** Marks a game as committed to the database: its records may be forgotten. */
     committed(gameId) {
@@ -415,12 +455,20 @@ class Journal {
         this.inflight = waiters;
         this.writing = true;
         const t0 = performance.now();
-        this.writeBatch(buf, len).then((seg) => this.written(seg, buf, len, games, commits, snaps, t0), (err) => {
+        this.writeBatch(buf, len, snaps.length > 0).then((seg) => this.written(seg, buf, len, games, commits, snaps, t0), (err) => {
             mErrors.inc();
+            this.failedWrites++;
             this.forceRotate = true;        // later records must not follow a possibly torn write
             for (const g of snaps) {        // not known to be durable: the games keep their segments
                 this.snapsPending.delete(g);
                 this.compactQueue.add(g);
+            }
+            // The 'committed' records are appended again: the host has forgotten these games, and
+            // without the record the journal would keep their segments until the next restart.
+            if (!this.closing && !this.closed) {
+                for (const g of commits) {
+                    try { this.append(JournalKind.Committed, g, EMPTY, Date.now()); } catch { /* closed meanwhile */ }
+                }
             }
             this.log.error('journal write failed', { err, bytes: len });
             this.finishWrite(err);
@@ -465,7 +513,10 @@ class Journal {
         }
     }
 
-    async writeBatch(buf, len) {
+    // Writes one batch (and fdatasyncs it when fsync is on). A batch holding a snapshot is made
+    // durable even with fsync off, its segment's directory entry included, because the snapshot
+    // releases older segments (see the header of this file).
+    async writeBatch(buf, len, hasSnapshot = false) {
         if (!this.fh || this.forceRotate || this.segSize >= this.segmentBytes) await this.rotate();
         const seg = this.segs.get(this.seq);
         let off = 0;
@@ -476,7 +527,8 @@ class Journal {
             this.diskBytes += bytesWritten;
         }
         this.segSize += len;
-        if (this.fsync) await this.fh.datasync();
+        if (this.fsync || hasSnapshot) await this.fh.datasync();
+        if (hasSnapshot && seg.seq > this.syncedSeq) await this.syncDir();
         return seg;
     }
 
@@ -493,7 +545,10 @@ class Journal {
         const seq = this.seq + 1;
         const file = path.join(this.dir, segmentName(seq));
         this.fh = await fsp.open(file, 'a');
-        if (this.fsync) await this.syncDir();
+        if (this.fsync) {
+            await this.syncDir();
+            this.syncedSeq = seq;           // the new segment's directory entry is durable
+        }
         this.seq = seq;
         this.segSize = 0;
         this.segs.set(seq, { seq, file, games: new Set(), pins: 0, active: true, bytes: 0 });
@@ -631,9 +686,10 @@ class Journal {
 
     // Directory fsync: the segments created and deleted so far are durable.
     async syncDir() {
-        const n = this.unlinks;
+        const n = this.unlinks, seq = this.seq;
         await fsyncDir(this.dir);
         if (n > this.syncedUnlinks) this.syncedUnlinks = n;
+        if (seq > this.syncedSeq) this.syncedSeq = seq;
     }
 }
 

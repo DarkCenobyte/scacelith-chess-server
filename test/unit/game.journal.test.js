@@ -143,12 +143,13 @@ test('journalState() is a compact journal that rebuilds the same room', () => {
     assert.equal(ended.gseq, room.gseq);
 });
 
-test('recover(): both players disconnected with the recovery grace, downtime not charged', () => {
+test('recover(): both players disconnected with the recovery grace, downtime not charged, the clock held', () => {
     const { room, log, t } = busyGame();
     // The side to move is Black; its clock value at the last journaled move:
     assert.equal(room.sideToMove, B);
     const blackMs = room.clock.ms[B];
     const restartAt = t + 3_600_000;                 // the server was down for an hour
+    const HOLD = 20000;                              // RECOVERY_CLOCK_HOLD_MS
     const copy = GameRoom.fromJournal(log, opts());
     const out = copy.recover(restartAt);
     assert.equal(out.ended, false);
@@ -156,20 +157,33 @@ test('recover(): both players disconnected with the recovery grace, downtime not
     assert.equal(copy.gseq, room.gseq + RECOVERY_GSEQ_JUMP);
     assert.deepEqual(copy.connected, [false, false]);
     assert.ok(copy.flags & RecordFlag.Recovered);
+    // Black is away: its clock does not run during the hold, and snapshots show it stopped.
     const s = copy.snapshot(W, restartAt + 1000);
-    assert.equal(s.blackMs, blackMs - 1000);
+    assert.deepEqual([s.blackMs, s.running], [blackMs, 2]);
     assert.equal(s.whiteConnected, false);
     assert.equal(s.blackConnected, false);
     assert.equal(s.graceMs, 90000 - 1000);           // RECOVERY_GRACE_MS (the normal 5+3 grace is 30 s)
     assert.equal(out.journal[0].payload.readUInt32LE(8), 90000, 'the recovery record keeps the grace');
-    // Nobody comes back: aborted (both disconnected together), unrated.
-    assert.equal(copy.nextDeadline(), restartAt + 90000);
-    // The recovery record replays too (before the tick below ends the game).
+    assert.equal(out.journal[0].payload.readUInt32LE(12), HOLD, 'and the hold');
+    assert.equal(copy.nextDeadline(), restartAt + HOLD, 'the end of the hold');
+    // The recovery record replays too (before the ticks below end the hold and the game).
     const again = GameRoom.fromJournal([...log, ...out.journal], opts());
     assert.deepEqual(again.connected, [false, false]);
-    assert.equal(again.clock.turnStart, restartAt);
+    assert.equal(again.clock.turnStart, restartAt + HOLD);
+    assert.equal(again.clockHeld, true);
     assert.equal(again.gseq, room.gseq + RECOVERY_GSEQ_JUMP);
-    assert.equal(again.nextDeadline(), restartAt + 90000);
+    assert.equal(again.nextDeadline(), restartAt + HOLD);
+    // Nobody comes back: Black's clock runs once the hold is over (a journaled checkpoint)...
+    const released = copy.tick(restartAt + HOLD);
+    assert.equal(released.clockStarted, B);
+    assert.deepEqual(released.journal.map((r) => [r.kind, r.payload[0]]), [[JournalKind.Event, 7]]);
+    assert.equal(copy.clockHeld, false);
+    const s2 = copy.snapshot(W, restartAt + HOLD + 1000);
+    assert.deepEqual([s2.blackMs, s2.running], [blackMs - 1000, B]);
+    const replayed = GameRoom.fromJournal([...log, ...out.journal, ...released.journal], opts());
+    assert.deepEqual(state(replayed, restartAt + HOLD + 1000), state(copy, restartAt + HOLD + 1000));
+    // ... then both are aborted (disconnected together) when the recovery grace ends, unrated.
+    assert.equal(copy.nextDeadline(), restartAt + 90000);
     copy.tick(restartAt + 90000 - 1);
     assert.equal(copy.isOver, false);
     copy.tick(restartAt + 90000);

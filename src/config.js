@@ -64,7 +64,7 @@ key('DB_PATH', { section: 'storage', type: 'path', default: '', desc: 'SQLite da
 key('JOURNAL_DIR', { section: 'storage', type: 'path', default: '', desc: 'Append-only journal of the games in progress, replayed after a crash (default: DATA_DIR/journal).' });
 key('JOURNAL_FLUSH_MS', { section: 'storage', type: 'int', default: 50, min: 5, max: 1000,
     desc: 'Longest time a game event waits in memory before being written to the journal (group commit).' });
-key('JOURNAL_FSYNC', { section: 'storage', type: 'bool', default: true, desc: 'fsync the journal at every flush (survives power loss, not only process crashes).' });
+key('JOURNAL_FSYNC', { section: 'storage', type: 'bool', default: true, desc: 'fsync the journal at every flush (survives power loss, not only process crashes). With false, a flush that holds a compaction snapshot is still fsynced (with the directory when its segment is new), because the segments that snapshot replaces are deleted: a power loss then loses only the last records written, never whole games.' });
 key('JOURNAL_COMPACT_SEGMENTS', { section: 'storage', type: 'int', default: 4, min: 1, max: 1000,
     desc: 'Journal compaction: once a shard\'s journal has moved this many 16 MB segments past the oldest record a game still needs (its first record, or its latest snapshot), the game, running or waiting for its database commit, is written again as one snapshot record and the older segments can be deleted. A shard\'s journal then stays around (this + 1) x 16 MB however long the games last. Lower values write more snapshots; higher ones keep more on disk and lengthen the replay after a restart.' });
 key('DB_COMMIT_MS', { section: 'storage', type: 'int', default: 50, min: 1, max: 2000,
@@ -148,7 +148,9 @@ key('FIRST_MOVE_TIMEOUT_MS', { section: 'games', type: 'int', default: 30000, mi
 key('RECONNECT_GRACE_MIN_MS', { section: 'games', type: 'int', default: 15000, min: 5000, desc: 'Shortest time a disconnected player has to come back.' });
 key('RECONNECT_GRACE_MAX_MS', { section: 'games', type: 'int', default: 60000, min: 5000, desc: 'Longest time a disconnected player has to come back (the grace is 10% of the base time within these bounds).' });
 key('RECOVERY_GRACE_MS', { section: 'games', type: 'int', default: 90000, min: 15000, max: 3600000,
-    desc: 'Time both players of a game restored from the journal after a restart or a crash have to come back (or the normal grace when it is longer): the server, not the players, broke the connection, and every client reconnects at once. The running clock still restarts at the recovery.' });
+    desc: 'Time both players of a game restored from the journal after a restart or a crash have to come back (or the normal grace when it is longer): the server, not the players, broke the connection, and every client reconnects at once. The clock of the side to move stays stopped until that player is back, for RECOVERY_CLOCK_HOLD_MS at most.' });
+key('RECOVERY_CLOCK_HOLD_MS', { section: 'games', type: 'int', default: 20000, min: 0, max: 3599999,
+    desc: 'After a restart or a crash, the clock (or the first-move timer) of the side to move of a restored game does not run until that player is back, and runs again after this long even if they are still away. It must be lower than RECOVERY_GRACE_MS. It bounds the free thinking time a player could get by staying away on purpose; 0 restarts the clock at the recovery.' });
 key('LAG_COMP_MAX_MS', { section: 'games', type: 'int', default: 1000, min: 0, max: 5000, desc: 'Largest network lag given back on one move.' });
 key('LAG_QUOTA_INITIAL_MS', { section: 'games', type: 'int', default: 2000, min: 0, desc: 'Lag compensation budget of each player at the start of a game.' });
 key('LAG_QUOTA_GAIN_MS', { section: 'games', type: 'int', default: 100, min: 0, desc: 'Lag compensation budget regained at every move.' });
@@ -345,6 +347,7 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     if (cfg.ssoGoogleEnabled && (!cfg.googleClientId || !cfg.googleClientSecret)) errors.push('SSO_GOOGLE_ENABLED needs GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.');
     if (cfg.mailTransport === 'smtp' && !cfg.smtpHost) errors.push('MAIL_TRANSPORT=smtp needs SMTP_HOST.');
     if (cfg.analysisDepthFast >= cfg.analysisDepthDeep) errors.push('ANALYSIS_DEPTH_FAST must be lower than ANALYSIS_DEPTH_DEEP.');
+    if (cfg.recoveryClockHoldMs >= cfg.recoveryGraceMs) errors.push('RECOVERY_CLOCK_HOLD_MS must be lower than RECOVERY_GRACE_MS.');
     if (!cfg.googleRedirectUri) {
         const port = cfg.publicApiPort === 443 ? '' : `:${cfg.publicApiPort}`;
         cfg.googleRedirectUri = `https://${cfg.serverPublicHost}${port}/auth/sso/google/callback`;

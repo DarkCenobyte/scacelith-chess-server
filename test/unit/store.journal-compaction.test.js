@@ -349,6 +349,84 @@ test('compaction candidates: a few per batch, never a committed game or one with
     fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('a failed write holding committed records appends them again: the games\' segments are still deleted', async () => {
+    const dir = tmpDir();
+    const open = (d = dir) => openJournal({ dir: d, log: quiet, flushMs: 1000, fsync: false, segmentBytes: 1, compactSegments: 2 });
+    const j = await open();
+    j.append(Created, 1, 'c1', 1);
+    await j.flush();                                   // 1
+    j.append(Move, 1, 'm1', 2);
+    j.append(Ended, 1, '', 3);
+    await j.flush();                                   // 2
+    j.committed(1);                                    // the database has game 1: the host forgets it
+    j.writeBatch = async () => { delete j.writeBatch; throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }); };
+    const failures = j.failedWrites;
+    await assert.rejects(j.flush(), /ENOSPC/);
+    assert.equal(j.failedWrites, failures + 1);
+    assert.equal(j.hasUnwritten(), true, 'the committed record waits for the next write');
+    assert.deepEqual(segments(dir), [segName(1), segName(2)]);
+    await j.flush();                                   // 3 (a new segment after the failure)
+    assert.deepEqual(segments(dir), [segName(3)], 'game 1\'s segments are deleted');
+    assert.equal(j.games.get(1).committed, true);
+    assert.equal(j.stats().diskBytes, bytesOnDisk(dir));
+    // A restart does not bring game 1 back.
+    const copy = tmpDir('jc-copy');
+    fs.cpSync(path.join(dir, 'shard-0'), path.join(copy, 'shard-0'), { recursive: true });
+    const c = await open(copy);
+    assert.deepEqual([...c.recover().keys()], []);
+    await c.close();
+    fs.rmSync(copy, { recursive: true, force: true });
+    await j.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('fsync off: a batch holding a snapshot is fdatasynced before it releases anything, after a directory fsync when its segment is new', async () => {
+    const dir = tmpDir();
+    const j = await openJournal({ dir, log: quiet, flushMs: 1000, fsync: false, segmentBytes: 400, compactSegments: 1 });
+    const fh = await fsp.open(path.join(dir, 'shard-0'), 'r');
+    const FH = Object.getPrototypeOf(fh);
+    await fh.close();
+    const events = [];
+    const { datasync } = FH, unlink = fs.unlinkSync;
+    FH.datasync = function (...a) { events.push('datasync'); return datasync.apply(this, a); };
+    j.syncDir = function () { events.push('syncDir'); return Object.getPrototypeOf(j).syncDir.call(this); };
+    fs.unlinkSync = (p, ...rest) => { events.push(`unlink ${path.basename(p)}`); return unlink(p, ...rest); };
+    const pad = 'x'.repeat(300);
+    try {
+        j.append(Created, 1, 'c1', 1);
+        await j.flush();                               // segment 1 (created without a directory fsync)
+        j.append(Move, 1, 'm1', 2);
+        await j.flush();
+        assert.deepEqual(events, [], 'batches without a snapshot are not synced');
+        j.append(Snapshot, 1, 's1', 3);
+        await j.flush();                               // still segment 1: created since the last directory fsync
+        assert.deepEqual(events, ['datasync', 'syncDir']);
+        events.length = 0;
+        j.append(Snapshot, 1, 's2', 4);
+        await j.flush();                               // segment 1 again: its entry is durable now
+        assert.deepEqual(events, ['datasync']);
+        events.length = 0;
+        j.append(Move, 1, pad, 5);
+        await j.flush();                               // segment 1 is full after this one
+        j.append(Move, 1, 'm3', 6);
+        await j.flush();                               // segment 2
+        assert.deepEqual(events, []);
+        j.append(Snapshot, 1, 's3', 7);
+        await j.flush();                               // segment 2: new, its snapshot releases segment 1
+        assert.deepEqual(events, ['datasync', 'syncDir', `unlink ${segName(1)}`]);
+        assert.deepEqual(segments(dir), [segName(2)]);
+    } finally {
+        FH.datasync = datasync;
+        fs.unlinkSync = unlink;
+        delete j.syncDir;
+    }
+    await j.close();
+    const c = await openJournal({ dir, log: quiet, fsync: false });
+    assert.deepEqual(c.recover().get(1).map((r) => r.payload.toString()), ['s3']);
+    await c.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('a game that ends and is committed while its snapshot is written is never brought back, whatever the order of the records', async () => {
     for (const order of ['snapshot, then commit in the next batch', 'commit, then snapshot in the same batch']) {
         const dir = tmpDir();
@@ -431,7 +509,7 @@ test('fsync on: a segment holding a committed record is deleted last, after a di
     }
 });
 
-test('fsync on: open() makes the segments it read and the directory durable before it deletes anything on their strength', async () => {
+test('open() makes the segments it read (fsync on) or those holding a snapshot (fsync off) and the directory durable before it deletes anything on their strength', async () => {
     const dir = tmpDir();
     const write = () => {
         writeSegment(dir, 1, [[Created, 1, 1, 'c1'], [Move, 1, 2, 'm1']]);
@@ -458,10 +536,11 @@ test('fsync on: open() makes the segments it read and the directory durable befo
             events.length = 0;
             const j = await openJournal({ dir, log: quiet, flushMs: 1000, fsync });
             // Game 1's snapshot (segment 2) releases segment 1; segment 3 (game 2 committed) outlives
-            // segment 2, which game 1 still needs.
+            // segment 2, which game 1 still needs. With fsync off, the segment holding the snapshot
+            // is made durable all the same before segment 1 goes.
             assert.deepEqual(events, fsync
                 ? ['datasync', 'datasync', 'datasync', 'syncDir', `unlink ${segName(1)}`]
-                : [`unlink ${segName(1)}`], `fsync ${fsync}`);
+                : ['datasync', 'syncDir', `unlink ${segName(1)}`], `fsync ${fsync}`);
             assert.deepEqual([...j.recover().keys()], [1]);
             assert.deepEqual(j.recover().get(1).map((r) => [r.kind, r.payload.toString()]), [[Snapshot, 's1']]);
             assert.deepEqual(segments(dir), [segName(2), segName(3)]);
@@ -636,7 +715,7 @@ test('long games over many segments: the journal stays bounded while they run, a
             if (step === 300) long.push(newGame(10_800_000, 180_000));           // a younger long game
             if (step === 600) { send(long[2], host.room(long[2]).ply & 1, { type: MSG.Resign }); long.splice(2, 1); }
             host.runTimers(clock.t);
-            host.pollCommits(clock.t);
+            await host.pollCommits(clock.t);          // after a journal flush (the games' ended records)
 
             if (journal.stats().compactQueue > 0 && step % 2 === 0) {
                 await deepProbe(step);
@@ -682,7 +761,7 @@ test('long games over many segments: the journal stays bounded while they run, a
         assert.equal(host2.recover(), expected.size);
         for (const [id, n] of plies) assert.equal(host2.room(id).ply, n);
         clock.t += 1000;
-        host2.pollCommits(clock.t);
+        await host2.pollCommits(clock.t);
         assert.ok(store2.committedIds.includes(stuck), 'the stuck game is committed after the restart');
         await j2.close();
     } finally {
@@ -921,7 +1000,7 @@ test('restart loop: the journal is reopened in place again and again (clean stop
                 }
                 while (short.size < 3) short.set(g.newGame(180_000, 2000), 4 + (step % 9));
                 host.runTimers(clock.t);
-                host.pollCommits(clock.t);
+                await host.pollCommits(clock.t);
                 host.compactJournal(clock.t);
                 await journal.flush();
                 maxSegs = Math.max(maxSegs, segments(dir).length);

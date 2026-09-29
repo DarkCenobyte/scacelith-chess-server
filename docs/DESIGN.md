@@ -100,8 +100,12 @@ animates the other robot playing it. A's client treats its own `MoveMade` as the
 **End of game.** The room decides the result (mate, flag, resignation, agreement, claim,
 abandonment, abort...), the host sends `GameEnd` to both, journals it, and queues the game for
 the database. Every `DB_COMMIT_MS` the host commits the queued games in one transaction
-(`store.games.finishBatch`): game record + both ratings (read and written inside the
-transaction) + analysis job (queue policy: section 6.5). The transaction runs on the shard's
+(`store.games.finishBatch`). It first waits until the journal has written every record it holds
+(so the database never has a finished game whose `ended` record a crash could still lose, which
+would bring the game back running after the restart), and writes the anomalies the anti-cheat
+still buffers (so the analysis-job policy sees them). The transaction holds the game record +
+both ratings (read and written inside the transaction) + analysis job (queue policy: section
+6.5). The transaction runs on the shard's
 store writer thread (`src/store/writer.js`, its own SQLite connection), so the event loop never
 waits for the disk or another process's write lock. After the commit it sends `RatingUpdate` and tells the primary
 `game.ended`.
@@ -234,8 +238,10 @@ room.record() -> finished game record for store.games.finishBatch (section 5.5)
 room.journalState() / GameRoom.fromJournal(records)   // see 5.6
 ```
 `Outcome = { broadcast: [Buffer], toWhite: [Buffer], toBlack: [Buffer], reply: [Buffer] (to the
-sender), anomaly: null | { color, kind, detail, posMatched }, ended: bool, journal: [records] }`.
-Buffers are already encoded with the codec; the host sends them as they are.
+sender), anomaly: null | { color, kind, detail, posMatched }, ended: bool, journal: [records],
+clockStarted: colour | 2 }`. Buffers are already encoded with the codec; the host sends them as
+they are. `clockStarted` names a clock held since a recovery that has just started (6.4): the host
+then sends the other player a new `GameSnapshot`, unless the outcome holds a move or the end.
 
 `GameHost` (one per shard):
 ```js
@@ -343,6 +349,7 @@ sees a committed game without its `committed` record. A torn last record is igno
 const j = await openJournal({ dir, shard, flushMs, fsync, compactSegments })
 j.append(kind, gameId, payloadBuffer, at)   // kinds: 1 created (JSON spec), 2 move, 3 event, 4 ended, 5 committed, 6 snapshot
 j.flush() -> Promise ; j.committed(gameId)  // marks it safe to forget
+j.hasUnwritten() -> bool ; j.failedWrites    // records not on disk yet ; count of failed writes
 j.compactionCandidates(max) -> [gameId]      // games to snapshot now (at most max, 8 per flush)
 j.recover() -> Map<gameId, [{ kind, at, payload }]>  // games not committed, in order, from their latest snapshot
 j.stats() ; j.close()
@@ -384,11 +391,22 @@ written by a process that died before its fsync); and a segment holding a `commi
 deleted only after a directory fsync has made the deletion of that game's older segments durable
 (about once per rotation). The metrics `scacelith_journal_snapshots_total`,
 `scacelith_journal_segments` and `scacelith_journal_disk_bytes` (per shard) show the compaction at
-work. With `JOURNAL_FSYNC=false`, which gives no power-loss guarantee anyway, a power loss shortly
-after a compaction can lose a snapshot whose older segments are already deleted, and with it the
-game; a process crash cannot (the written data is in the page cache). Server versions older than
-the compaction do not know the `snapshot` record: rolled back to one, a shard cannot rebuild the
-games compacted so far and drops or aborts them.
+work. With `JOURNAL_FSYNC=false`, which gives no power-loss guarantee for the last records, a
+batch holding a snapshot is still fdatasynced before its bookkeeping deletes anything (after a
+directory fsync when its segment was created since the last one), and at start-up the journal
+fsyncs the segments holding a snapshot and their directory before it deletes anything: otherwise
+a power loss shortly after a compaction could keep the deletions and lose the snapshot, and with
+it the whole game. That costs one fdatasync per batch holding snapshots, at most one per game
+and rotation. Server versions older than the compaction do not know the `snapshot` record: rolled
+back to one, a shard cannot rebuild the games compacted so far and drops or aborts them.
+
+Write failures: after a failed write (a full disk, for example), the next batch goes to a new
+segment. The `committed` records of the failed batch are appended again (without them the
+segments of those games would stay until the next restart), and its snapshots are queued again.
+`j.failedWrites` counts the failures. The host commits a finished game to the database only once
+`j.hasUnwritten()` is false or a flush has written what it held without a new failure, and after
+a failure it journals every game waiting for its commit again (one snapshot each), since the
+failed write may have held their `ended` records (section 3, "End of game").
 
 ### 5.7 Primary control plane: IPC catalog
 
@@ -538,7 +556,10 @@ change happens on POST (link scanners must not consume tokens).
 * The flag timer fires at `turnStart + remaining + min(quota, rttEma + 50, LAG_COMP_MAX_MS)`, the
   latest moment a move could still arrive in time.
 * `thinkMs > elapsed + 100` is physically impossible for an honest client: anomaly
-  `clock_implausible` (suspicious, never certain: clock drift and suspended VMs exist).
+  `clock_implausible` (suspicious, never certain: clock drift and suspended VMs exist). The
+  client counts its thinking time from the opponent's `MoveMade`, so after a server restart
+  (6.4), which moves `turnStart` later, only a `thinkMs` longer than the time since the previous
+  move (plus 100 ms) is reported.
 * `rttEma` is the server's own measurement (its Ping / the client's Pong), exponential moving
   average, capped at 2000 ms. A client that delays its Pongs only inflates a value that is
   itself capped by the quota.
@@ -590,8 +611,7 @@ rules before sending, so steps 6 and 7 only happen with a modified client.
   15 min, then 1 h, then 6 h (level decays after 24 h without incident). Direct challenges stay
   possible.
 * Server restart: games are replayed from the journal (section 7) with both players marked
-  disconnected; the downtime is not charged to anyone (the running clock restarts from its
-  journaled value at recovery). Both players get the recovery grace, `RECOVERY_GRACE_MS` (90 s,
+  disconnected; the downtime is not charged to anyone. Both players get the recovery grace, `RECOVERY_GRACE_MS` (90 s,
   or the normal grace when that is longer), instead of the normal grace: the server broke the
   connections, and every client reconnects at the same moment (after a `ServerShutdown` notice
   the clients spread their first attempt over several seconds). The grace starts at the replay,
@@ -599,9 +619,19 @@ rules before sending, so steps 6 and 7 only happen with a modified client.
   journaled by the drain before a graceful stop are superseded by the recovery, so they do not
   shorten it. A player who comes back and then loses the connection again gets the normal grace;
   the deadlines above use each player's own grace (with equal graces they are the rules above).
-  The running clock and the first-move timer are unchanged: a side to move with less time left
-  than its reconnection delay can still lose on time (or be aborted `NoShow` before the second
-  ply). Games that cannot be rebuilt end as `ServerAborted` (unrated) and are committed as such.
+  The clock of the side to move (or its first-move timer before the second ply) keeps its
+  journaled value and stays stopped until that player is back: it starts at the reconnection, or
+  `RECOVERY_CLOCK_HOLD_MS` (20 s, lower than the recovery grace) after the replay when the player
+  is still away, so that staying away on purpose gives little free thinking time. Until then the
+  snapshots show no running clock; when the clock starts without its player, the opponent gets a
+  new `GameSnapshot`. Both the hold and its end are journaled (the `recovered` record carries the
+  hold, and a checkpoint marks its end), so a later replay rebuilds the same clocks. Once the
+  clock runs, a side to move with less time left than its reconnection delay can still lose on
+  time. A restored game aborted `NoShow` because its side to move never came back before the
+  end of the first-move timer records no `noshow` conduct incident (the server broke the
+  connection); it is still aborted, unrated. A player who came back and then does not move gets
+  the incident as usual. Games that cannot be rebuilt end as `ServerAborted` (unrated) and are
+  committed as such.
 
 ### 6.5 Anomalies, certain cheats, suspicion
 
@@ -667,7 +697,7 @@ is analysed and when: it changes no level and no sanction, and statistics never 
 | Accounts, e-mail, password hashes, MFA secrets (encrypted), recovery-code hashes, SSO links | SQLite | immediately (transaction) | kept |
 | Sessions | SQLite (+ 30 s cache per shard) | login/logout immediately; `lastSeen` at most every 5 min | kept (revocations immediate: cache invalidation broadcast) |
 | Ratings, finished games, analysis queue | SQLite | batched every `DB_COMMIT_MS`, one transaction per batch | kept once committed; games ended but not committed are in the journal and committed at recovery |
-| Games in progress (moves, clocks, offers) | memory of the host shard + journal | journal flushed every `JOURNAL_FLUSH_MS` | replayed; at most `JOURNAL_FLUSH_MS` of moves lost (clients resend: stale ply / resync); both players get `RECOVERY_GRACE_MS` to come back (6.4) |
+| Games in progress (moves, clocks, offers) | memory of the host shard + journal | journal flushed every `JOURNAL_FLUSH_MS` | replayed; at most `JOURNAL_FLUSH_MS` of moves lost (clients resend: stale ply / resync); both players get `RECOVERY_GRACE_MS` to come back, and the clock of the side to move waits for its player (`RECOVERY_CLOCK_HOLD_MS` at most, 6.4) |
 | Sanctions, anomalies (certain), integrity levels, reports | SQLite | sanctions immediately; anomalies batched (1 s) | kept (a batch in flight may be lost for `info` anomalies) |
 | Presence, queues, challenges, private codes, rate-limit counters | primary memory | - | lost: clients reconnect and re-queue |
 | Security events (failed logins...) | SQLite | batched (1 s) | kept, purged after `RETENTION_SECURITY_DAYS` |
