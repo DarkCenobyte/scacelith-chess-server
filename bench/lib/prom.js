@@ -164,6 +164,9 @@ export function snapshot(text) {
             anomalies: byLabel(m, 'scacelith_ws_anomalies_total', 'kind'),
             slowConsumers: sum(m, 'scacelith_ws_slow_consumers_total'),
             handshakesRejected: sum(m, 'scacelith_ws_handshakes_rejected_total'),
+            storeBusy: sum(m, 'scacelith_store_busy_total'),
+            commitErrors: sum(m, 'scacelith_game_commit_errors_total'),
+            journalErrors: sum(m, 'scacelith_journal_errors_total'),
         },
         hist: {
             moveUs: histogram(m, 'scacelith_game_move_processing_us'),
@@ -172,6 +175,8 @@ export function snapshot(text) {
             handshakeMs: histogram(m, 'scacelith_ws_handshake_ms'),
             journalFlushMs: histogram(m, 'scacelith_journal_flush_ms'),
             commitMs: histogram(m, 'scacelith_game_commit_latency_ms'),
+            commitBatchMs: histogram(m, 'scacelith_store_commit_batch_ms'),
+            commitBatchSize: histogram(m, 'scacelith_game_commit_batch_size'),
         },
     };
 }

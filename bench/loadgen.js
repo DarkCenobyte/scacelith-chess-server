@@ -630,6 +630,9 @@ function serverPhase(prom, m0, m1, samples) {
         handshakeMs: prom.histSummary(prom.histDelta(a.hist.handshakeMs, b.hist.handshakeMs)),
         journalFlushMs: prom.histSummary(prom.histDelta(a.hist.journalFlushMs, b.hist.journalFlushMs)),
         commitMs: prom.histSummary(prom.histDelta(a.hist.commitMs, b.hist.commitMs)),
+        commitBatchMs: prom.histSummary(prom.histDelta(a.hist.commitBatchMs, b.hist.commitBatchMs)),
+        commitBatchSize: prom.histSummary(prom.histDelta(a.hist.commitBatchSize, b.hist.commitBatchSize)),
+        storeBusy: d('storeBusy'), commitErrors: d('commitErrors'), journalErrors: d('journalErrors'),
         dropped: b.totals.dropped, closes: b.totals.closes, hello: b.totals.hello, anomalies: b.totals.anomalies,
         shards,
     };
