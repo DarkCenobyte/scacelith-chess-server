@@ -4,6 +4,8 @@ import { Population, scorePlayer, updatePlayerIntegrity, updatePopulationFromGam
 import { priorFor, timeClass, PRIOR_GAMES } from '../../src/anticheat/priors.js';
 import { rng, syntheticHistory, syntheticSide, learnPopulation, gauss } from '../../src/anticheat/testing/synthetic.js';
 import { createFakeStore } from '../../src/anticheat/testing/fake-store.js';
+import { openStore, migrate } from '../../src/store/index.js';
+import { testConfig } from '../../src/config.js';
 
 const quiet = { debug() {}, info() {}, warn() {}, error() {}, security() {} };
 
@@ -38,7 +40,7 @@ test('population: priors blend with Welford data, winsorised, text/array formats
     const q = new Population(store).effective('accuracy', '5+0', 1500);   // re-read from the store
     assert.equal(q.n, 200);
     assert.ok(Math.abs(q.mean - (PRIOR_GAMES * p.mean + 200 * 90) / (PRIOR_GAMES + 200)) < 1e-6);
-    assert.ok(typeof store._.population.get('5+0|1500') === 'string', 'text columns: JSON');
+    assert.equal(store._.population.get('5+0|1500|accuracy').n, 200, 'one running statistic per metric');
     assert.equal(new Population(store).raw('5+0', 1500).t1Complex, undefined, 't1Complex needs enough complex positions');
     // An absurd value is clipped at 4 sd.
     const pop2 = new Population(null);
@@ -50,6 +52,28 @@ test('population: priors blend with Welford data, winsorised, text/array formats
     const e3 = pop3.effective('accuracy', '5+0', 1500);
     assert.equal(e3.n, 1000);
     assert.ok(e3.mean < 71 && e3.mean > 70);
+});
+
+test('population statistics reach the real store and survive a restart', () => {
+    const store = openStore(testConfig({ DB_PATH: ':memory:' }));
+    migrate(store);
+    try {
+        const pop = new Population(store);
+        const values = [80, 84, 76, 90, 70];
+        for (const accuracy of values) pop.update('3+2', 1500, { accuracy, acpl: 40, nComplex: 0 });
+        const saved = store.integrity.populationStats('3+2', 1500);
+        assert.deepEqual(Object.keys(saved).sort(), ['accuracy', 'acpl']);
+        assert.equal(saved.accuracy.n, values.length);
+        const m = values.reduce((a, x) => a + x, 0) / values.length;
+        assert.ok(Math.abs(saved.accuracy.mean - m) < 1e-9);
+        assert.ok(Math.abs(saved.accuracy.m2 - values.reduce((a, x) => a + (x - m) ** 2, 0)) < 1e-9);
+        // A new process (or the periodic cache reload) reads the same statistics back.
+        const again = new Population(store).raw('3+2', 1500);
+        assert.equal(again.accuracy.n, values.length);
+        assert.ok(Math.abs(again.accuracy.mean - pop.raw('3+2', 1500).accuracy.mean) < 1e-9);
+    } finally {
+        store.close();
+    }
 });
 
 test('no flag on small samples, however extreme', () => {

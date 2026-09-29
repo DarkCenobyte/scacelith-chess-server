@@ -7,6 +7,9 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
+import { performance } from 'node:perf_hooks';
+import { DatabaseSync } from 'node:sqlite';
 import { readIntegrity, writeIntegrity, writeStructured, parseMaybeJson, levelRank, LEVELS, HOUR_MS, DAY_MS } from './util.js';
 import { reviewPriority, recentReportWeight } from './reports.js';
 import { sideOf } from './scoring.js';
@@ -36,13 +39,17 @@ Reports and anomalies
   anomalies <name> [--limit N]
   stats
 
+Data
+  backup <file> [--verify]                    consistent copy of the database (VACUUM INTO), safe while
+                                              the server runs; the file must not exist; mode 600
+
 Test servers only
   bench-accounts --count N [--prefix bench] --out FILE [--format tokens|tsv] --i-know-this-is-a-test-server
 
 Common options: --json (machine-readable output), --by NAME (moderator name; default: OS user)
 `;
 
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'revoke-sessions', 'keep-reports', 'dismiss-reports', 'i-know-this-is-a-test-server']);
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'revoke-sessions', 'keep-reports', 'dismiss-reports', 'i-know-this-is-a-test-server', 'verify']);
 
 /**
  * Parses command-line arguments: positionals, --flag value, --flag=value, boolean flags.
@@ -426,6 +433,48 @@ function benchAccounts(ctx) {
     return { data: { count, created, reused, out }, text: `${count} bench accounts ready (${created} created, ${reused} reused); tokens written to ${out} (mode 600).\n` };
 }
 
+// ---- backup --------------------------------------------------------------------------------------------
+
+// VACUUM INTO writes a consistent snapshot in one pass. The sqlite3 shell's .backup copies 100
+// pages at a time and starts over whenever another connection writes, so on a busy server it may
+// never finish. The copy holds e-mail addresses and recent IPs: it is created with mode 600, and
+// should be encrypted before it leaves the host.
+function backupCmd(ctx) {
+    const target = ctx.args.positional[1];
+    if (!target) throw new AdminError('backup <file>: the new file to write');
+    const src = ctx.config?.dbPath;
+    if (!src || src === ':memory:' || path.basename(src) === ':memory:') throw new AdminError('no database file to back up (DB_PATH)');
+    const out = path.resolve(target);
+    try {
+        fs.writeFileSync(out, '', { flag: 'wx', mode: 0o600 });   // VACUUM INTO accepts an empty file
+    } catch (e) {
+        throw new AdminError(e.code === 'EEXIST' ? `${target} exists: choose a new file` : `cannot create ${target}: ${e.message}`);
+    }
+    const t0 = performance.now();
+    const db = new DatabaseSync(src);
+    try {
+        db.exec('PRAGMA busy_timeout = 5000');
+        db.prepare('VACUUM INTO ?').run(out);
+    } catch (e) {
+        try { fs.unlinkSync(out); } catch { /* already gone */ }
+        throw new AdminError(`backup failed: ${e.message}`);
+    } finally {
+        db.close();
+    }
+    const ms = Math.round(performance.now() - t0);
+    let verified = false;
+    if (ctx.args.flags.verify) {
+        const b = new DatabaseSync(out, { readOnly: true });
+        let check;
+        try { check = b.prepare('PRAGMA quick_check').all().map((r) => Object.values(r)[0]).join('; '); } finally { b.close(); }
+        if (check !== 'ok') throw new AdminError(`backup written to ${target} but quick_check failed: ${check}`);
+        verified = true;
+    }
+    const bytes = fs.statSync(out).size;
+    return { data: { file: out, bytes, ms, verified },
+        text: `Backup written to ${out} (${(bytes / 1048576).toFixed(1)} MB in ${ms} ms${verified ? ', quick_check ok' : ''}).\n` };
+}
+
 function safe(fn, fallback) {
     try { const v = fn(); return v === undefined ? fallback : v; } catch { return fallback; }
 }
@@ -447,6 +496,7 @@ export const COMMANDS = Object.freeze({
     'anomalies': anomaliesCmd,
     'stats': stats,
     'bench-accounts': benchAccounts,
+    'backup': backupCmd,
 });
 
 /**

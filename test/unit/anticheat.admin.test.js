@@ -7,6 +7,8 @@ import crypto from 'node:crypto';
 import { testConfig } from '../../src/config.js';
 import { runAdmin, parseArgs, COMMANDS } from '../../src/anticheat/admin.js';
 import { createFakeStore } from '../../src/anticheat/testing/fake-store.js';
+import { openStore, migrate } from '../../src/store/index.js';
+import { DatabaseSync } from 'node:sqlite';
 
 const NOW = 1_800_000_000_000;
 
@@ -194,4 +196,28 @@ test('bench-accounts: refused without the test-server flag; creates verified acc
     // A real account with a matching name is never taken over.
     store._.addUser('bench0004');
     assert.equal((await run(store, ['bench-accounts', '--count', '4', '--out', out, '--i-know-this-is-a-test-server'])).code, 1);
+});
+
+test('backup: consistent copy with VACUUM INTO, mode 600, never overwrites', async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-backup-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const config = testConfig({ DB_PATH: path.join(dir, 'scacelith.db') });
+    const store = openStore(config);
+    migrate(store);
+    const id = store.users.create({ username: 'Ann', email: 'ann@example.org' });
+    const target = path.join(dir, 'copy.db');
+    try {
+        const r = await run(store, ['backup', target, '--verify', '--json'], { config });
+        assert.equal(r.code, 0, r.err);
+        assert.equal(r.json.verified, true);
+        assert.equal(fs.statSync(target).mode & 0o777, 0o600);
+        const b = new DatabaseSync(target, { readOnly: true });
+        try { assert.equal(b.prepare('SELECT username FROM users WHERE id = ?').get(id).username, 'Ann'); } finally { b.close(); }
+        const again = await run(store, ['backup', target], { config });
+        assert.equal(again.code, 1);
+        assert.match(again.err, /exists/);
+        assert.equal((await run(store, ['backup'], { config })).code, 1, 'a target file is required');
+    } finally {
+        store.close();
+    }
 });

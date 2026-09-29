@@ -213,13 +213,19 @@ Nothing secret is ever committed: `.env`, keys and certificates are in `.gitigno
 
 Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes and, unless
 `MFA_ENCRYPTION_KEY` is set, every enabled authenticator app (players would need an admin
-`user reset-mfa`). Keep it stable and back it up with the database.
+`user reset-mfa`). Keep it stable and back it up, apart from the database copies.
 
 ## Data, backups and upgrades
 
 - `DATA_DIR` (default `./data`) holds the SQLite database (`scacelith.db`, WAL mode) and the
-  game journal (`journal/`). Back up with `sqlite3 data/scacelith.db ".backup backup.db"` (safe
-  while running) and keep the secrets with it.
+  game journal (`journal/`). Back up with `node bin/admin.js backup /path/to/new-file.db --verify`
+  (run it as the service user, with the same `.env`). It uses `VACUUM INTO`, which writes a
+  consistent snapshot in one pass while the server runs; do not use the `sqlite3` shell's
+  `.backup`, which copies 100 pages at a time, starts over whenever the server writes, and may
+  never finish on a busy server. The copy is created with mode 600 and holds e-mail addresses and
+  recent IPs: encrypt it and move it off the host. Keep `SERVER_SECRET` and `MFA_ENCRYPTION_KEY`
+  backed up too, but separately from the database copies (together they decrypt the players'
+  TOTP secrets).
 - Upgrading: stop the server, update the code, `node bin/scacelith-server.js migrate` (or just
   `start`, which migrates first). Migrations are checksummed: the server refuses to start if an
   applied migration was modified or is unknown to its version (a downgrade).

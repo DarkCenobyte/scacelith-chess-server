@@ -8,10 +8,11 @@
 //   startAnalysisProcess(config) -> handle { enabled, pid, restarts, stop() }   (primary only)
 //
 // Deviations from / precisions on docs/DESIGN.md (the contracts left these open):
-//   * store.integrity.populationStats(key) / updatePopulation(key, stats): key is the string
-//     '<category>|<ratingBucket>' (DESIGN only says "ratingBucket"; statistics must also be per
-//     time control), stats is { v: 1, metrics: { <metric>: { n, mean, m2 } } } written whole by
-//     the analysis process (its only writer); scoring.js also accepts rows [{ metric, n, mean, m2 }].
+//   * store.integrity.populationStats(prefix) / updatePopulation(observations, now): statistics are
+//     kept per '<category>|<ratingBucket>|<metric>' (DESIGN only says "ratingBucket"; they must
+//     also be per time control). populationStats('<category>|<ratingBucket>') returns
+//     { <metric>: { n, mean, m2 } }; the analysis process (the only writer) sends one
+//     { key, value } observation per metric and game, which the store merges (Welford).
 //   * store.analysis.forUser(userId, limit) must return that player's completed analyses, newest
 //     first, each row carrying the `features` object given to complete() (or being it).
 //   * store.reports.forReporter(reporterId) (not in DESIGN) is used when present to weigh a

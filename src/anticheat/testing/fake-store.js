@@ -2,7 +2,7 @@
 // For unit tests and local experiments only; the real store is src/store/index.js.
 //
 // With { textColumns: true } it behaves like a store that binds free-form values straight to
-// SQLite: passing an object for detail / evidence / features / population stats throws a
+// SQLite: passing an object for detail / evidence / features throws a
 // TypeError, as node:sqlite does.
 
 import { LEVELS } from '../util.js';
@@ -110,8 +110,22 @@ export function createFakeStore({ textColumns = false } = {}) {
                 const min = LEVELS.indexOf(minLevel);
                 return [...integrity.values()].filter((r) => LEVELS.indexOf(r.level) >= min && r.level !== 'none').slice(0, limit);
             },
-            populationStats(key) { return population.get(key) ?? null; },
-            updatePopulation(key, stats) { bind(stats); population.set(key, stats); },
+            // Same contract as the real store: running statistics per '<prefix>|<metric>', read
+            // back per prefix, observations merged (Welford).
+            populationStats(prefix) {
+                const out = {};
+                for (const [k, v] of population) if (k.startsWith(prefix + '|')) out[k.slice(prefix.length + 1)] = { ...v };
+                return out;
+            },
+            updatePopulation(observations) {
+                for (const o of Array.isArray(observations) ? observations : [observations]) {
+                    const x = +o.value;
+                    if (!Number.isFinite(x)) continue;
+                    const cur = population.get(o.key) || { n: 0, mean: 0, m2: 0 };
+                    const n = cur.n + 1, d = x - cur.mean, mean = cur.mean + d / n;
+                    population.set(o.key, { n, mean, m2: cur.m2 + d * (x - mean) });
+                }
+            },
         },
         reports: {
             create(r) { const id = seq++; reports.push({ id, outcome: null, resolvedBy: null, resolvedAt: null, ...r }); return id; },

@@ -47,7 +47,7 @@ test('processJob: features stored, both players scored, population updated', asy
     assert.equal(store._.jobs.get(11).status, 'done');
     assert.equal(store.integrity.get(w).level, 'none');
     assert.equal(store.integrity.get(b).evidence.statistics.games, 1);
-    assert.ok(store._.population.get('5+0|1500').metrics.accuracy.n === 2);
+    assert.equal(store._.population.get('5+0|1500|accuracy').n, 2);
     assert.equal(worker.stats.analysed, 1);
 });
 

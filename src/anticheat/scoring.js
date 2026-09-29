@@ -40,7 +40,7 @@
 
 import { priorFor, timeClass, timeClassOfCategory, PRIOR_GAMES, PRIOR_METRICS } from './priors.js';
 import { welfordAdd, clamp, mean } from './analysis/stats.js';
-import { parseMaybeJson, levelRank, readIntegrity, writeIntegrity, writeStructured } from './util.js';
+import { parseMaybeJson, levelRank, readIntegrity, writeIntegrity } from './util.js';
 
 /** 100-point rating bucket (lower bound), clamped to 500..2900. */
 export function bucketOfRating(rating) {
@@ -97,10 +97,10 @@ function normaliseStats(raw) {
 /**
  * Population statistics per (category, rating bucket), blended with the priors.
  *
- * Store contract used (DESIGN 5.5 names the methods only): populationStats(key) returns what
- * updatePopulation(key, stats) stored, where key = '<category>|<bucket>' and stats =
- * { v: 1, metrics: { <metric>: { n, mean, m2 } } }. Arrays of { metric, n, mean, m2 } rows and
- * JSON text are accepted too.
+ * Store contract used: populationStats('<category>|<bucket>') returns { <metric>: { n, mean, m2 } }
+ * (arrays of { metric, n, mean, m2 } rows and JSON text are accepted too), and
+ * updatePopulation([{ key: '<category>|<bucket>|<metric>', value }], now) merges one observation
+ * per metric into the stored running statistics (Welford, one transaction).
  */
 export class Population {
     /**
@@ -152,22 +152,24 @@ export class Population {
      * current effective distribution) and writes it back.
      */
     update(category, bucket, side, tc) {
+        const key = Population.key(category, bucket);
         const stats = { ...this.raw(category, bucket) };
-        let changed = false;
+        const observations = [];
         for (const m of PRIOR_METRICS) {
             const x = side[m];
             if (x === null || x === undefined || !Number.isFinite(+x)) continue;
             if (m === 't1Complex' && (side.nComplex || 0) < MODEL.minComplexPerGame) continue;
             const eff = this.effective(m, category, bucket, tc);
             const w = MODEL.population.winsorZ * eff.sd;
-            stats[m] = welfordAdd(stats[m], clamp(+x, eff.mean - w, eff.mean + w));
-            changed = true;
+            const value = clamp(+x, eff.mean - w, eff.mean + w);
+            stats[m] = welfordAdd(stats[m], value);
+            observations.push({ key: `${key}|${m}`, value });
         }
-        if (!changed) return false;
-        this.cache.set(Population.key(category, bucket), { at: this.now(), stats });
-        if (this.store?.integrity?.updatePopulation) {
-            writeStructured((s) => this.store.integrity.updatePopulation(Population.key(category, bucket), s), { v: 1, metrics: stats });
-        }
+        if (!observations.length) return false;
+        this.cache.set(key, { at: this.now(), stats });
+        // The store merges the observations into what it holds (it is the source of truth when
+        // the cache is reloaded or the process restarts).
+        this.store?.integrity?.updatePopulation?.(observations, this.now());
         return true;
     }
 }
