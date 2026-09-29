@@ -58,9 +58,14 @@
 //
 // Write failures: after a failed write, the next batch goes to a new segment; the batch's
 // 'committed' records are appended again (the host has forgotten those games, and without the
-// record their segments would stay until the next restart), and its snapshots are queued again.
-// failedWrites counts them, and hasUnwritten() tells whether a flush is still needed before the
-// records appended so far are on disk.
+// record their segments would stay until the next restart). Every other game of the batch lost
+// records (its 'created' record, moves, events, its 'ended' record or a snapshot), and its later
+// records would replay after a gap: it goes to the heal queue, which compactionCandidates() serves
+// before the compaction queue, whatever the game's age and even when the journal does not track
+// it yet (its first record was the lost one), still at most compactPerFlush snapshots per batch.
+// The host appends a snapshot of each such game it still hosts and has not committed, which
+// supersedes the lost records. failedWrites counts the failures, and hasUnwritten() tells whether
+// a flush is still needed before the records appended so far are on disk.
 //
 // Recovery reads the segments in order and stops reading a segment at the first record whose
 // length is impossible, which is truncated (torn write) or whose CRC does not match; the records
@@ -214,6 +219,7 @@ class Journal {
         this.batchSnaps = [];           // games with a snapshot in the current buffer
         this.snapsPending = new Set();  // games with a snapshot appended and not written yet
         this.compactQueue = new Set();  // games to snapshot, in queue order
+        this.healQueue = new Set();     // games whose records a failed write lost: snapshotted first
         this.waiters = [];              // flush() calls covering the current buffer
         this.inflight = null;           // waiters of the batch being written
         this.writing = false;
@@ -379,27 +385,36 @@ class Journal {
     }
 
     /**
-     * Games whose snapshot the journal wants now (compaction, see the header of this file): at
-     * most `max`, and at most compactPerFlush snapshots per batch counting those already appended
-     * to it. O(1) when nothing is due. The caller appends a snapshot record (JournalKind.Snapshot)
-     * for each game it still hosts, from a state that includes every record it appended for that
-     * game; a game it skips is queued again at a later rotation.
+     * Games whose snapshot the journal wants now (see the header of this file): first the games
+     * whose records a failed write lost (heal queue), then those the compaction queued. At most
+     * `max`, and at most compactPerFlush snapshots per batch counting those already appended to
+     * it. O(1) when nothing is due. The caller appends a snapshot record (JournalKind.Snapshot)
+     * for each game it still hosts and has not committed, from a state that includes every record
+     * it appended for that game; a game it skips is queued again at a later rotation (a stale
+     * one) or not at all (it no longer needs one).
      * @param {number} [max=Infinity]
      * @returns {readonly number[]} game ids
      */
     compactionCandidates(max = Infinity) {
-        if (this.compactQueue.size === 0 || this.closing || this.closed) return NO_GAMES;
+        if ((this.compactQueue.size === 0 && this.healQueue.size === 0) || this.closing || this.closed) return NO_GAMES;
         const room = Math.min(max, this.compactPerFlush - this.batchSnaps.length);
         if (!(room >= 1)) return NO_GAMES;
-        const limit = this.seq - this.compactSegments;
         const out = [];
-        for (const gameId of this.compactQueue) {
+        // A game of a failed write: whatever its age, and possibly not tracked yet (its first
+        // record was lost); a snapshot already pending supersedes the lost records too.
+        for (const gameId of this.healQueue) {
+            if (out.length >= room) return out;
+            this.healQueue.delete(gameId);
             this.compactQueue.delete(gameId);
             const g = this.games.get(gameId);
-            if (g && !g.committed && g.first <= limit && !this.snapsPending.has(gameId)) {
-                out.push(gameId);
-                if (out.length >= room) break;
-            }
+            if ((!g || !g.committed) && !this.snapsPending.has(gameId)) out.push(gameId);
+        }
+        const limit = this.seq - this.compactSegments;
+        for (const gameId of this.compactQueue) {
+            if (out.length >= room) break;
+            this.compactQueue.delete(gameId);
+            const g = this.games.get(gameId);
+            if (g && !g.committed && g.first <= limit && !this.snapsPending.has(gameId)) out.push(gameId);
         }
         return out;
     }
@@ -418,7 +433,7 @@ class Journal {
         return {
             segments: this.segs.size, seq: this.seq, segmentBytes: this.segSize, pendingBytes: this.len,
             diskBytes: this.diskBytes, snapshots: this.snapshots, compactQueue: this.compactQueue.size,
-            trackedGames: this.games.size, writing: this.writing, recovery: this.recoverInfo,
+            healQueue: this.healQueue.size, trackedGames: this.games.size, writing: this.writing, recovery: this.recoverInfo,
         };
     }
 
@@ -459,16 +474,20 @@ class Journal {
             mErrors.inc();
             this.failedWrites++;
             this.forceRotate = true;        // later records must not follow a possibly torn write
-            for (const g of snaps) {        // not known to be durable: the games keep their segments
-                this.snapsPending.delete(g);
-                this.compactQueue.add(g);
-            }
+            // Not known to be durable: the games keep their segments.
+            for (const g of snaps) this.snapsPending.delete(g);
             // The 'committed' records are appended again: the host has forgotten these games, and
             // without the record the journal would keep their segments until the next restart.
             if (!this.closing && !this.closed) {
                 for (const g of commits) {
                     try { this.append(JournalKind.Committed, g, EMPTY, Date.now()); } catch { /* closed meanwhile */ }
                 }
+            }
+            // The other games lost records (their snapshots included): a new snapshot heals them.
+            const done = commits.length ? new Set(commits) : null;
+            for (const g of games) {
+                const tracked = this.games.get(g);
+                if (!(done && done.has(g)) && !(tracked && tracked.committed)) this.healQueue.add(g);
             }
             this.log.error('journal write failed', { err, bytes: len });
             this.finishWrite(err);

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { GameHost } from '../../src/game/host.js';
+import { GameHost, JOURNAL_GATE_TRIES } from '../../src/game/host.js';
 import { GameRoom, JournalKind } from '../../src/game/room.js';
 import { FakeAnticheat, FakePrimary, FakeEndpoint, FakeChessGame, FakeStore, fakeMove, silentLog } from '../../src/game/testing.js';
 import { ChessGame, parseSquare } from '../../src/chess/index.js';
@@ -118,7 +118,7 @@ test('real store + journal + rules: a rated game is committed with ratings, an o
 
 // A host on a real journal whose store copies the journal directory when finishBatch is called:
 // what a crash right after the database commit would find.
-async function commitRig(dir) {
+async function commitRig(dir, { log = silentLog } = {}) {
     const config = testConfig();
     const journal = await openJournal({ dir: path.join(dir, 'journal'), shard: 0, flushMs: 1000, fsync: false, log: silentLog });
     const store = new FakeStore();
@@ -132,9 +132,11 @@ async function commitRig(dir) {
     };
     const clock = { t: T0 };
     const createChessGame = () => new FakeChessGame();
+    const primary = new FakePrimary();
+    const registry = new Registry();
     const host = new GameHost({
-        shard: 0, config, store, journal, anticheat: new FakeAnticheat(), primary: new FakePrimary(), log: silentLog,
-        createChessGame, now: () => clock.t, metrics: new Registry(), autoStart: false,
+        shard: 0, config, store, journal, anticheat: new FakeAnticheat(), primary, log,
+        createChessGame, now: () => clock.t, metrics: registry, autoStart: false,
     });
     const pl = (id) => ({ userId: id, name: `user${id}`, rating: 1500, provisional: false });
     const newGame = (w) => host.createGame({ white: pl(w), black: pl(w + 1), rated: true, baseMs: 180000, incMs: 2000 });
@@ -159,7 +161,7 @@ async function commitRig(dir) {
             await j.close();
         }
     };
-    return { journal, store, copies, clock, host, newGame, play, resign, running };
+    return { journal, store, copies, clock, host, primary, registry, newGame, play, resign, running };
 }
 
 // Closes the rig's journal, even when a failed assertion left a write pending.
@@ -287,5 +289,196 @@ test('a journal write that fails before the commit: the games are journaled agai
     } finally {
         await closeRig(r);
         fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+// ---- a journal that fails: the limits of the commit gate --------------------------------------
+
+const eio = () => Object.assign(new Error('EIO: i/o error, write'), { code: 'EIO' });
+
+function metricValue(registry, name) {
+    const m = registry.metrics.get(name);
+    if (!m) return undefined;
+    for (const c of m.children.values()) return c.value;
+    return 0;
+}
+
+// A logger that keeps what it is given (level, message, fields).
+function recordingLog() {
+    const events = [];
+    const log = {
+        debug() {}, security() {}, debugEnabled: false,
+        info(msg, f) { events.push(['info', msg, f]); },
+        warn(msg, f) { events.push(['warn', msg, f]); },
+        error(msg, f) { events.push(['error', msg, f]); },
+        child() { return log; },
+    };
+    return { log, events, count: (level, re) => events.filter(([l, m]) => l === level && re.test(m)).length };
+}
+
+// The games a restart from a copy of the journal (taken now) would take back, finished or not.
+async function recoveredIds(dir, tag) {
+    const to = path.join(dir, `copy-${tag}`);
+    fs.cpSync(path.join(dir, 'journal'), to, { recursive: true });
+    const j = await openJournal({ dir: to, shard: 0, flushMs: 1000, fsync: false, log: silentLog });
+    try { return [...j.recover().keys()]; } finally { await j.close(); }
+}
+
+test('a failed flush journals again only the games of the batch; the other games waiting for their commit get their snapshot before their own', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-gp-'));
+    let r;
+    try {
+        r = await commitRig(dir);
+        r.host.commitBatchMax = 1;
+        const ids = [r.newGame(1), r.newGame(3), r.newGame(5)];
+        for (const id of ids) r.play(id, 6);
+        await r.journal.flush();
+        for (const id of ids) r.resign(id);            // three ended records in the buffer
+        const snaps = [];
+        const append = r.journal.append;
+        r.journal.append = function (kind, gameId, ...rest) {
+            if (kind === JournalKind.Snapshot) snaps.push(gameId);
+            return append.call(this, kind, gameId, ...rest);
+        };
+        // The write holding the three ended records fails.
+        r.journal.writeBatch = async () => { delete r.journal.writeBatch; throw eio(); };
+        r.clock.t += 100;
+        assert.equal(await r.host.pollCommits(r.clock.t), false);
+        assert.deepEqual(snaps, [ids[0]], 'only the batch is journaled again at once');
+        for (let i = 0; i < ids.length; i++) {
+            r.clock.t += Math.max(100, r.host.backoffMs);
+            assert.equal(await r.host.pollCommits(r.clock.t), true);
+        }
+        assert.deepEqual(r.store.committedIds, ids);
+        assert.deepEqual(snaps, ids, 'each game is journaled again right before its own commit');
+        // A crash right after each database commit: no committed game comes back running.
+        const inDb = new Set();
+        for (const c of r.copies) {
+            for (const id of c.ids) inDb.add(id);
+            assert.deepEqual((await r.running(c.dir)).filter((id) => inDb.has(id)), [], `crash after committing ${c.ids}`);
+        }
+    } finally {
+        await closeRig(r);
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('a journal whose writes keep failing: after a few failed flushes finished games are committed without it (game.ended, RatingUpdate), until a flush writes again', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-gp-'));
+    const rec = recordingLog();
+    const unjournaled = /without waiting for the journal/;
+    let r;
+    try {
+        r = await commitRig(dir, { log: rec.log });
+        const a = r.newGame(1);
+        const ew = new FakeEndpoint(1), eb = new FakeEndpoint(2);
+        r.host.attach(a, 1, ew);
+        r.host.attach(a, 2, eb);
+        r.play(a, 6);
+        await r.journal.flush();
+        // From now on every journal write fails (a full disk, a read-only volume, EMFILE...).
+        r.journal.writeBatch = async () => { throw eio(); };
+        r.resign(a);
+        for (let i = 1; i < JOURNAL_GATE_TRIES; i++) {
+            r.clock.t += Math.max(100, r.host.backoffMs);
+            assert.equal(await r.host.pollCommits(r.clock.t), false, `attempt ${i} waits for the journal`);
+        }
+        assert.deepEqual([r.store.committedIds, r.primary.of('game.ended').length], [[], 0]);
+        r.clock.t += r.host.backoffMs;
+        assert.equal(await r.host.pollCommits(r.clock.t), true, 'the last attempt commits without the journal');
+        assert.deepEqual(r.store.committedIds, [a]);
+        assert.deepEqual(r.primary.of('game.ended').map((e) => [e.gameId, e.rated]), [[a, true]]);
+        for (const ep of [ew, eb]) assert.ok(ep.msgs().some((m) => m.type === MSG.RatingUpdate && m.game === a), 'a RatingUpdate for each player');
+        assert.equal(metricValue(r.registry, 'scacelith_game_commit_unjournaled_total'), 1);
+
+        // While it lasts, a commit does not wait for the journal; one error for the episode.
+        const b = r.newGame(3);
+        r.play(b, 2);
+        r.resign(b);
+        r.clock.t += 100;
+        assert.equal(r.host.pollCommits(r.clock.t), true, 'committed at once');
+        assert.deepEqual(r.store.committedIds, [a, b]);
+        assert.equal(metricValue(r.registry, 'scacelith_game_commit_unjournaled_total'), 2);
+        assert.equal(rec.count('error', unjournaled), 1);
+        await r.host.journalProbe;                        // its flush failed too
+        assert.equal(r.host.unjournaled, true);
+
+        // The journal writes again: the flush started by the next commit ends the episode, and
+        // later commits wait for the journal again.
+        delete r.journal.writeBatch;
+        const c = r.newGame(5);
+        r.play(c, 2);
+        r.resign(c);
+        r.clock.t += 100;
+        assert.equal(r.host.pollCommits(r.clock.t), true);
+        await r.host.journalProbe;
+        assert.equal(r.host.unjournaled, false);
+        assert.equal(rec.count('info', /journal writes succeed again/), 1);
+        const d = r.newGame(7);
+        r.play(d, 2);
+        r.resign(d);
+        r.clock.t += 100;
+        const p = r.host.pollCommits(r.clock.t);
+        assert.equal(typeof p.then, 'function', 'the commit waits for the journal again');
+        assert.equal(await p, true);
+        assert.deepEqual(r.store.committedIds, [a, b, c, d]);
+        assert.equal(metricValue(r.registry, 'scacelith_game_commit_unjournaled_total'), 3);
+        assert.equal(rec.count('error', unjournaled), 1);
+        // Their `committed` records reached the journal: a restart takes none of them back.
+        await r.journal.flush();
+        assert.deepEqual(await recoveredIds(dir, 'end'), []);
+
+        // A new episode is logged again.
+        const e = r.newGame(9);
+        r.play(e, 2);
+        r.resign(e);
+        r.journal.writeBatch = async () => { throw eio(); };
+        for (let i = 0; i < JOURNAL_GATE_TRIES; i++) {
+            r.clock.t += Math.max(100, r.host.backoffMs);
+            await r.host.pollCommits(r.clock.t);
+        }
+        assert.deepEqual(r.store.committedIds, [a, b, c, d, e]);
+        assert.equal(rec.count('error', unjournaled), 2);
+    } finally {
+        await closeRig(r);
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('shutdown with a journal whose writes fail: the finished games are committed without it, and the failed final flush is logged', async () => {
+    for (const variant of ['idle', 'commit in flight, asynchronous store']) {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-gp-'));
+        const rec = recordingLog();
+        let r;
+        try {
+            r = await commitRig(dir, { log: rec.log });
+            r.store.async = variant !== 'idle';
+            const a = r.newGame(1), b = r.newGame(3);
+            const ew = new FakeEndpoint(1);
+            r.host.attach(a, 1, ew);
+            r.play(a, 6);
+            r.play(b, 2);
+            await r.journal.flush();
+            r.journal.writeBatch = async () => { throw eio(); };
+            r.resign(a);
+            let inFlight = null;
+            if (variant !== 'idle') {
+                r.clock.t += 100;
+                inFlight = r.host.pollCommits(r.clock.t);
+                assert.equal(typeof inFlight.then, 'function');
+            }
+            await r.host.shutdown();                      // does not throw
+            if (inFlight) assert.equal(await inFlight, true, variant);
+            assert.deepEqual(r.store.committedIds, [a], variant);
+            assert.deepEqual(r.primary.of('game.ended').map((e) => e.gameId), [a], variant);
+            assert.ok(ew.msgs().some((m) => m.type === MSG.RatingUpdate), variant);
+            assert.equal(metricValue(r.registry, 'scacelith_game_commit_unjournaled_total'), 1, variant);
+            assert.equal(rec.count('error', /journal flush failed at shutdown/), 1, variant);
+            assert.equal(r.host.pending.size, 0, variant);
+            assert.equal(r.host.room(b).isOver, false, 'a running game is left to the journal');
+        } finally {
+            await closeRig(r);
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
     }
 });

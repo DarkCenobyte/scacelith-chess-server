@@ -106,13 +106,35 @@ abandonment, abort...), the host sends `GameEnd` to both, journals it, and queue
 the database. Every `DB_COMMIT_MS` the host commits the queued games in one transaction
 (`store.games.finishBatch`). It first waits until the journal has written every record it holds
 (so the database never has a finished game whose `ended` record a crash could still lose, which
-would bring the game back running after the restart), and writes the anomalies the anti-cheat
-still buffers (so the analysis-job policy sees them). The transaction holds the game record +
-both ratings (read and written inside the transaction) + analysis job (queue policy: section
-6.5). The transaction runs on the shard's
-store writer thread (`src/store/writer.js`, its own SQLite connection), so the event loop never
-waits for the disk or another process's write lock. After the commit it sends `RatingUpdate` and tells the primary
-`game.ended`.
+would bring the game back running after the restart). When the anti-cheat still buffers an
+anomaly that is not `info`, it writes the buffer first, so that the analysis-job policy sees it
+(section 6.5); `info` anomalies wait for the anti-cheat's own 1 s timer. That anomaly write is a
+synchronous insert on the main thread's SQLite connection: it waits for the disk
+(`synchronous=FULL`) and, when another process holds the database's write lock, for that lock,
+up to `busy_timeout` (5 s). The transaction holds the game record + both ratings (read and
+written inside the transaction) + analysis job (queue policy: section 6.5). It runs on the
+shard's store writer thread (`src/store/writer.js`, its own SQLite connection), so the event
+loop never waits for the transaction, its disk writes or the write lock it takes. After the
+commit it sends `RatingUpdate` and tells the primary `game.ended`.
+
+When the journal's writes keep failing (a full disk, a read-only or failing `JOURNAL_DIR`
+volume, too many open files), waiting for the journal would keep every finished game out of the
+database: no rating change, both players still "in game" for the primary (every queue join or
+challenge refused with `AlreadyInGame`), and the results lost at the next stop. So the wait is
+bounded. A failed journal flush makes the host journal the batch's games again (one snapshot
+each) and retry after its backoff; at the third failed flush in a row (about 0.3 s after the
+first one with the default `DB_COMMIT_MS`), and at the first one during a shutdown, the batch is
+committed without waiting for the journal. Its snapshots and `committed` records are still
+appended, in case the journal comes back. The host logs one error for the whole episode and
+counts the games committed this way in `scacelith_game_commit_unjournaled_total`. Each such
+commit starts a journal flush (one at a time), and the first one that writes without a failure
+ends the episode (logged at info level): commits wait for the journal again. The database is
+then the only durable copy of these results, and `finishBatch` ignores a game id it already
+has, so no later replay can apply a rating twice. One risk remains, the one the wait avoids:
+after a crash, or a restart before the journal has written the game's snapshot or `committed`
+record, a game whose `ended` record was lost with a failed write comes back running. Its players
+get it back as their game in progress, and whatever result it ends with, the database keeps the
+first one.
 
 **Reconnection.** A lost connection keeps the game running (the player's clock too). The
 opponent gets `GameEvent{PlayerDisconnected, arg = grace ms}`. A new connection (any shard)
@@ -360,7 +382,7 @@ const j = await openJournal({ dir, shard, flushMs, fsync, compactSegments })
 j.append(kind, gameId, payloadBuffer, at)   // kinds: 1 created (JSON spec), 2 move, 3 event, 4 ended, 5 committed, 6 snapshot
 j.flush() -> Promise ; j.committed(gameId)  // marks it safe to forget
 j.hasUnwritten() -> bool ; j.failedWrites    // records not on disk yet ; count of failed writes
-j.compactionCandidates(max) -> [gameId]      // games to snapshot now (at most max, 8 per flush)
+j.compactionCandidates(max) -> [gameId]      // games to snapshot now, a failed write's first (at most max, 8 per flush)
 j.recover() -> Map<gameId, [{ kind, at, payload }]>  // games not committed, in order, from their latest snapshot
 j.stats() ; j.close()
 ```
@@ -411,12 +433,25 @@ and rotation. Server versions older than the compaction do not know the `snapsho
 back to one, a shard cannot rebuild the games compacted so far and drops or aborts them.
 
 Write failures: after a failed write (a full disk, for example), the next batch goes to a new
-segment. The `committed` records of the failed batch are appended again (without them the
-segments of those games would stay until the next restart), and its snapshots are queued again.
-`j.failedWrites` counts the failures. The host commits a finished game to the database only once
-`j.hasUnwritten()` is false or a flush has written what it held without a new failure, and after
-a failure it journals every game waiting for its commit again (one snapshot each), since the
-failed write may have held their `ended` records (section 3, "End of game").
+segment. The `committed` records of the failed batch are appended again (without them the segments
+of those games would stay until the next restart). Every other game of the failed batch lost
+records: its `created` record, moves, events, its `ended` record or a snapshot. Its later records
+would replay after a gap, and a restart would then restore it at an old ply and abort it
+(`ServerAborted`), or drop it when its `created` record was the lost one. So these games go to a
+heal queue, which `compactionCandidates` serves before the compaction queue: whatever their age,
+even a game the journal does not track yet, never one whose `committed` record it has, and still at
+most 8 snapshots per flushed batch, so a large failed batch heals over a few flushes. The host
+appends a snapshot of each of them it still hosts and has not committed, running or waiting for its
+commit, and that snapshot supersedes the lost records. A crash before the snapshot is written still
+loses them. `j.failedWrites` counts the failures. The host commits a finished game to the database
+only once `j.hasUnwritten()` is false or a flush has written what it held without a new failure.
+After a failure it marks every game waiting for its commit and journals each one again (one
+snapshot) right before its own commit, since the failed write may have held its `ended` record; the
+synchronous work of one commit attempt is thus bounded by its batch (500 games at most). When the
+flushes keep failing, the third failed one in a row (the first one during a shutdown) lets the
+batch go to the database without the journal, until a flush writes again (section 3, "End of
+game"). `host.shutdown()` logs a failed final flush instead of throwing, and the shard's stop goes
+on.
 
 ### 5.7 Primary control plane: IPC catalog
 
