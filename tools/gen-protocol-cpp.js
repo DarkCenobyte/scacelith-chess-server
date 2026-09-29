@@ -254,6 +254,11 @@ function genHeader(hash) {
     for (const [k, v] of Object.entries(schema.MoveFlag)) L.push(`constexpr uint8_t ${k} = ${v};`);
     L.push('}  // namespace MoveFlag');
     L.push('');
+    L.push('// Gesture flags (Gesture.flags, bit set).');
+    L.push('namespace GestureFlag {');
+    for (const [k, v] of Object.entries(schema.GestureFlag)) L.push(`constexpr uint8_t ${k} = ${v};`);
+    L.push('}  // namespace GestureFlag');
+    L.push('');
     L.push('// WebSocket close codes used by the server (4000 + ErrorCode where one applies).');
     L.push('namespace CloseCode {');
     for (const [k, v] of Object.entries(schema.CloseCode)) L.push(`constexpr uint16_t ${k} = ${v};`);

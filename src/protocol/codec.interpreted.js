@@ -174,6 +174,7 @@ export function createCodec(s) {
         SCHEMA_HASH: computeSchemaHash(s),
         enums: s.enums,
         MoveFlag: s.MoveFlag,
+        GestureFlag: s.GestureFlag,
         CloseCode: s.CloseCode,
         ProtocolError,
         MSG,
@@ -192,6 +193,7 @@ export const WS_SUBPROTOCOL = codec.WS_SUBPROTOCOL;
 export const SCHEMA_HASH = codec.SCHEMA_HASH;
 export const enums = codec.enums;
 export const MoveFlag = codec.MoveFlag;
+export const GestureFlag = codec.GestureFlag;
 export const CloseCode = codec.CloseCode;
 export const MSG = codec.MSG;
 export const encode = codec.encode;

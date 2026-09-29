@@ -78,11 +78,11 @@ const snapshot = {
     game: 9007199254740991, gseq: 17, category: '3+2', baseMs: 180000, incMs: 2000, rated: true,
     white: alice, black: bob, you: 1, moves, running: 0, whiteMs: 170000, blackMs: 165432,
     serverTime: 1727000000123.25, drawOffer: 2, status: 0, reason: 0, whiteConnected: true,
-    blackConnected: false, graceMs: 30000, firstMoveMs: 0, startedAt: 1727000000000, rematch: 2,
+    blackConnected: false, graceMs: 30000, firstMoveMs: 0, startedAt: 1727000000000, rematch: 2, autoPress: true,
 };
 
 const samples = [
-    ['Hello', { seq: 1, proto: 1, schema: P.SCHEMA_HASH, client: 'Scacelith/0.1.0 win64', token: 'sct_' + 'A'.repeat(43) }],
+    ['Hello', { seq: 1, proto: 2, schema: P.SCHEMA_HASH, client: 'Scacelith/0.1.0 win64', token: 'sct_' + 'A'.repeat(43) }],
     ['Hello', { seq: 4294967295, proto: 65535, schema: 0, client: '', token: 'x'.repeat(160) }],
     ['C_Ping', { seq: 2, nonce: 0 }],
     ['C_Pong', { seq: 3, nonce: 4294967295 }],
@@ -105,8 +105,10 @@ const samples = [
     ['Abort', { seq: 20, game: 77 }],
     ['Resync', { seq: 21, game: 0 }],
     ['Rematch', { seq: 22, game: 77, accept: false }],
-    ['Welcome', { proto: 1, serverTime: 1727000000000.5, userId: 42, username: 'alice', serverName: 'Scacelith official ♔', heartbeatMs: 15000, clientPingMs: 10000, maxMsgPerSec: 20, activeGame: 0 }],
-    ['Welcome', { proto: 1, serverTime: -1.5e300, userId: 0, username: '', serverName: '', heartbeatMs: 0, clientPingMs: 60000, maxMsgPerSec: 0, activeGame: 281474976710657 }],
+    ['C_Gesture', { seq: 23, game: 77, ply: 12, touch: 6, aim: 21, placed: 0, flags: 1, yaw: -3142, pitch: 1571, lean: 0 }],
+    ['C_Gesture', { seq: 24, game: 9007199254740991, ply: 1199, touch: 64, aim: 64, placed: 0x7fff, flags: 7, yaw: 3142, pitch: -1571, lean: 100 }],
+    ['Welcome', { proto: 2, serverTime: 1727000000000.5, userId: 42, username: 'alice', serverName: 'Scacelith official ♔', heartbeatMs: 15000, clientPingMs: 10000, maxMsgPerSec: 20, activeGame: 0, gestureRate: 4, gestureBurst: 8 }],
+    ['Welcome', { proto: 2, serverTime: -1.5e300, userId: 0, username: '', serverName: '', heartbeatMs: 0, clientPingMs: 60000, maxMsgPerSec: 0, activeGame: 281474976710657, gestureRate: 0, gestureBurst: 0 }],
     ['Error', { ref: 5, code: 102, fatal: false, game: 77 }],
     ['Error', { ref: 0, code: 1, fatal: true, game: 0 }],
     ['Error', { ref: 1, code: 209, fatal: false, game: 0 }],
@@ -120,13 +122,15 @@ const samples = [
     ['ChallengeStatus', { id: 6, state: 0, target: '', code: 'K7Q2ZP', baseSec: 300, incSec: 3, rated: false }],
     ['ChallengeStatus', { id: 6, state: 5, target: 'bob', code: '', baseSec: 300, incSec: 3, rated: true }],
     ['GameSnapshot', snapshot],
-    ['GameSnapshot', { ...snapshot, game: 2, moves: [], running: 2, status: 3, reason: 26, you: 2, drawOffer: 0, rematch: 1, white: { ...alice, name: 'w' } }],
+    ['GameSnapshot', { ...snapshot, game: 2, moves: [], running: 2, status: 3, reason: 26, you: 2, drawOffer: 0, rematch: 1, white: { ...alice, name: 'w' }, autoPress: false }],
     ['MoveMade', { game: 77, gseq: 2, ply: 1, move: P.encodeMove(52, 36, 0), flags: 16, spentMs: 0, whiteMs: 180000, blackMs: 180000, serverTime: 1727000000500, drawOffer: false, firstMoveMs: 30000 }],
     ['MoveMade', { game: 77, gseq: 9, ply: 1199, move: 0xffff, flags: 255, spentMs: 4294967295, whiteMs: 0, blackMs: 4294967295, serverTime: 1e15, drawOffer: true, firstMoveMs: 0 }],
     ['MoveRejected', { game: 77, ply: 4, move: 796, code: 104 }],
     ['GameEvent', { game: 77, gseq: 10, kind: 3, color: 1, arg: 30000 }],
     ['GameEvent', { game: 77, gseq: 11, kind: 6, color: 2, arg: 0 }],
     ['GameEnd', { game: 77, gseq: 12, status: 1, reason: 1, whiteMs: 1000, blackMs: 0, serverTime: 1727000009999.75 }],
+    ['S_Gesture', { game: 77, ply: 3, touch: 52, aim: 36, placed: P.encodeMove(52, 36, 0), flags: 4, yaw: 700, pitch: -300, lean: 55 }],
+    ['S_Gesture', { game: 1, ply: 0, touch: 64, aim: 64, placed: 0, flags: 0, yaw: 0, pitch: 0, lean: 0 }],
     ['RatingUpdate', { game: 77, category: '3+2', white: { before: 1500, after: 1516, games: 1, provisional: true }, black: { before: 1600, after: 1584, games: 31, provisional: false } }],
 ];
 
@@ -162,7 +166,7 @@ const sample = (name, i = 0) => samples.filter(([n]) => n === name)[i][1];
 const mod = (name, patch, i = 0) => raw(name, { ...sample(name, i), ...patch });
 
 bad('empty', Buffer.alloc(0));
-for (const t of [0x00, 0x04, 0x0f, 0x28, 0x7f, 0x80 - 1, 0x86, 0xa6, 0xff]) bad(`unknown type 0x${t.toString(16)}`, Buffer.from([t, 0, 0, 0, 0]));
+for (const t of [0x00, 0x04, 0x0f, 0x29, 0x7f, 0x80 - 1, 0x86, 0xa7, 0xff]) bad(`unknown type 0x${t.toString(16)}`, Buffer.from([t, 0, 0, 0, 0]));
 for (const v of valid) {
     const buf = Buffer.from(v.hex, 'hex');
     bad(`${v.name}: truncated by one byte`, buf.subarray(0, buf.length - 1));

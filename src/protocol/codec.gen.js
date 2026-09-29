@@ -10,10 +10,10 @@
 // that a client refuses.
 /* eslint-disable */
 
-export const PROTOCOL_VERSION = 1;
-export const PROTOCOL_MIN = 1;
+export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_MIN = 2;
 export const WS_SUBPROTOCOL = 'scacelith.v1';
-export const SCHEMA_HASH = 0x7b5d5600;
+export const SCHEMA_HASH = 0x77977684;
 
 export const enums = Object.freeze({
     Color: Object.freeze({ White: 0, Black: 1, None: 2 }),
@@ -34,7 +34,7 @@ export const enums = Object.freeze({
     ChallengeState: Object.freeze({ Pending: 0, Accepted: 1, Declined: 2, Cancelled: 3, Expired: 4, Unavailable: 5 }),
     NoticeCode: Object.freeze({
         ServerShutdown: 1, Banned: 2, SessionRevoked: 3, MatchmakingCooldown: 4, ReplacedByNewConnection: 5,
-        Motd: 6,
+        Motd: 6, RatingRestored: 7,
     }),
     ErrorCode: Object.freeze({
         Malformed: 1, UnsupportedProtocol: 2, Unauthorized: 3, Banned: 4, RateLimited: 5, ServerFull: 6,
@@ -51,6 +51,7 @@ export const MoveFlag = Object.freeze({
     Capture: 1, EnPassant: 2, CastleKing: 4, CastleQueen: 8, DoublePush: 16, Promotion: 32, Check: 64,
     Mate: 128,
 });
+export const GestureFlag = Object.freeze({ Glance: 1, Promoting: 2, Side: 4 });
 export const CloseCode = Object.freeze({
     Normal: 1000, GoingAway: 1001, ProtocolError: 1002, Unsupported: 1003, Policy: 1008, TooBig: 1009,
     Internal: 1011, UnsupportedProtocol: 4002, Unauthorized: 4003, Banned: 4004, Replaced: 4007,
@@ -77,6 +78,7 @@ export const MSG = Object.freeze({
     Abort: 0x25,
     Resync: 0x26,
     Rematch: 0x27,
+    C_Gesture: 0x28,
     Welcome: 0x80,
     Error: 0x81,
     S_Ping: 0x82,
@@ -92,6 +94,7 @@ export const MSG = Object.freeze({
     GameEvent: 0xA3,
     GameEnd: 0xA4,
     RatingUpdate: 0xA5,
+    S_Gesture: 0xA6,
 });
 
 // ---- run-time helpers ----
@@ -201,6 +204,7 @@ DIR[0x24] = 1; NAMES[0x24] = 'DrawClaim';
 DIR[0x25] = 1; NAMES[0x25] = 'Abort';
 DIR[0x26] = 1; NAMES[0x26] = 'Resync';
 DIR[0x27] = 1; NAMES[0x27] = 'Rematch';
+DIR[0x28] = 1; NAMES[0x28] = 'C_Gesture';
 DIR[0x80] = 2; NAMES[0x80] = 'Welcome';
 DIR[0x81] = 2; NAMES[0x81] = 'Error';
 DIR[0x82] = 2; NAMES[0x82] = 'S_Ping';
@@ -216,6 +220,7 @@ DIR[0xA2] = 2; NAMES[0xA2] = 'MoveRejected';
 DIR[0xA3] = 2; NAMES[0xA3] = 'GameEvent';
 DIR[0xA4] = 2; NAMES[0xA4] = 'GameEnd';
 DIR[0xA5] = 2; NAMES[0xA5] = 'RatingUpdate';
+DIR[0xA6] = 2; NAMES[0xA6] = 'S_Gesture';
 
 /** True for client->server type bytes (0x01-0x7F). */
 export function isClientType(t) { return t >= 0x01 && t <= 0x7f; }
@@ -572,6 +577,57 @@ function e_Rematch(m) {
     return b;
 }
 
+// 0x28 C_Gesture (c2s)
+function e_C_Gesture(m) {
+    if (m === null || typeof m !== 'object') efail('message not an object');
+    const v1 = m.seq;
+    const v2 = m.game;
+    const v3 = m.ply;
+    const v4 = m.touch;
+    const v5 = m.aim;
+    const v6 = m.placed;
+    const v7 = m.flags;
+    const v8 = m.yaw;
+    const v9 = m.pitch;
+    const v10 = m.lean;
+    const b = Buffer.allocUnsafe(29);
+    b[0] = 0x28;
+    if ((v1 >>> 0) !== v1) efail('seq out of range');
+    b[1] = v1; b[2] = v1 >>> 8; b[3] = v1 >>> 16; b[4] = v1 >>> 24;
+    const g11 = v2 || 0;
+    if (!Number.isSafeInteger(g11) || g11 < 0) efail('game not an id53');
+    const lo12 = g11 >>> 0, hi13 = (g11 - lo12) / 4294967296;
+    b[5] = lo12; b[6] = lo12 >>> 8; b[7] = lo12 >>> 16; b[8] = lo12 >>> 24;
+    b[9] = hi13; b[10] = hi13 >>> 8; b[11] = hi13 >>> 16; b[12] = hi13 >>> 24;
+    if ((v3 & 65535) !== v3) efail('ply out of range');
+    if (v3 > 1199) efail('ply above max');
+    b[13] = v3; b[14] = v3 >>> 8;
+    if ((v4 & 255) !== v4) efail('touch out of range');
+    if (v4 > 64) efail('touch above max');
+    b[15] = v4;
+    if ((v5 & 255) !== v5) efail('aim out of range');
+    if (v5 > 64) efail('aim above max');
+    b[16] = v5;
+    if ((v6 & 65535) !== v6) efail('placed out of range');
+    if (v6 > 32767) efail('placed above max');
+    b[17] = v6; b[18] = v6 >>> 8;
+    if ((v7 & 255) !== v7) efail('flags out of range');
+    if (v7 > 7) efail('flags above max');
+    b[19] = v7;
+    if ((v8 | 0) !== v8) efail('yaw out of range');
+    if (v8 < -3142) efail('yaw below min');
+    if (v8 > 3142) efail('yaw above max');
+    b[20] = v8; b[21] = v8 >>> 8; b[22] = v8 >>> 16; b[23] = v8 >>> 24;
+    if ((v9 | 0) !== v9) efail('pitch out of range');
+    if (v9 < -1571) efail('pitch below min');
+    if (v9 > 1571) efail('pitch above max');
+    b[24] = v9; b[25] = v9 >>> 8; b[26] = v9 >>> 16; b[27] = v9 >>> 24;
+    if ((v10 & 255) !== v10) efail('lean out of range');
+    if (v10 > 100) efail('lean above max');
+    b[28] = v10;
+    return b;
+}
+
 // 0x80 Welcome (s2c)
 function e_Welcome(m) {
     if (m === null || typeof m !== 'object') efail('message not an object');
@@ -592,14 +648,16 @@ function e_Welcome(m) {
     const v9 = m.clientPingMs;
     const v10 = m.maxMsgPerSec;
     const v11 = m.activeGame;
-    const b = Buffer.allocUnsafe(35 + L5 + L7);
+    const v12 = m.gestureRate;
+    const v13 = m.gestureBurst;
+    const b = Buffer.allocUnsafe(39 + L5 + L7);
     b[0] = 0x80;
     let o = 0;
     if ((v1 & 65535) !== v1) efail('proto out of range');
     b[1] = v1; b[2] = v1 >>> 8;
-    const d12 = Number(v2) || 0;
-    if (d12 - d12 !== 0) efail('serverTime not finite');
-    wf64(b, 3, d12);
+    const d14 = Number(v2) || 0;
+    if (d14 - d14 !== 0) efail('serverTime not finite');
+    wf64(b, 3, d14);
     if ((v3 >>> 0) !== v3) efail('userId out of range');
     b[11] = v3; b[12] = v3 >>> 8; b[13] = v3 >>> 16; b[14] = v3 >>> 24;
     b[15] = L5;
@@ -614,11 +672,17 @@ function e_Welcome(m) {
     b[o + 4] = v9; b[o + 5] = v9 >>> 8; b[o + 6] = v9 >>> 16; b[o + 7] = v9 >>> 24;
     if ((v10 & 65535) !== v10) efail('maxMsgPerSec out of range');
     b[o + 8] = v10; b[o + 9] = v10 >>> 8;
-    const g13 = v11 || 0;
-    if (!Number.isSafeInteger(g13) || g13 < 0) efail('activeGame not an id53');
-    const lo14 = g13 >>> 0, hi15 = (g13 - lo14) / 4294967296;
-    b[o + 10] = lo14; b[o + 11] = lo14 >>> 8; b[o + 12] = lo14 >>> 16; b[o + 13] = lo14 >>> 24;
-    b[o + 14] = hi15; b[o + 15] = hi15 >>> 8; b[o + 16] = hi15 >>> 16; b[o + 17] = hi15 >>> 24;
+    const g15 = v11 || 0;
+    if (!Number.isSafeInteger(g15) || g15 < 0) efail('activeGame not an id53');
+    const lo16 = g15 >>> 0, hi17 = (g15 - lo16) / 4294967296;
+    b[o + 10] = lo16; b[o + 11] = lo16 >>> 8; b[o + 12] = lo16 >>> 16; b[o + 13] = lo16 >>> 24;
+    b[o + 14] = hi17; b[o + 15] = hi17 >>> 8; b[o + 16] = hi17 >>> 16; b[o + 17] = hi17 >>> 24;
+    if ((v12 & 65535) !== v12) efail('gestureRate out of range');
+    if (v12 > 60) efail('gestureRate above max');
+    b[o + 18] = v12; b[o + 19] = v12 >>> 8;
+    if ((v13 & 65535) !== v13) efail('gestureBurst out of range');
+    if (v13 > 120) efail('gestureBurst above max');
+    b[o + 20] = v13; b[o + 21] = v13 >>> 8;
     return b;
 }
 
@@ -692,7 +756,7 @@ function e_Notice(m) {
     const v2 = m.arg;
     const b = Buffer.allocUnsafe(10);
     b[0] = 0x85;
-    if ((v1 & 255) !== v1 || v1 < 1 || v1 > 6) efail('code not a NoticeCode');
+    if ((v1 & 255) !== v1 || v1 < 1 || v1 > 7) efail('code not a NoticeCode');
     b[1] = v1;
     const d3 = Number(v2) || 0;
     if (d3 - d3 !== 0) efail('arg not finite');
@@ -861,14 +925,15 @@ function e_GameSnapshot(m) {
     const v32 = m.firstMoveMs;
     const v33 = m.startedAt;
     const v34 = m.rematch;
-    const b = Buffer.allocUnsafe(81 + L4 + L11 + L17 + v21.length * 10);
+    const v35 = m.autoPress;
+    const b = Buffer.allocUnsafe(82 + L4 + L11 + L17 + v21.length * 10);
     b[0] = 0xA0;
     let o = 0;
-    const g35 = v1 || 0;
-    if (!Number.isSafeInteger(g35) || g35 < 0) efail('game not an id53');
-    const lo36 = g35 >>> 0, hi37 = (g35 - lo36) / 4294967296;
-    b[1] = lo36; b[2] = lo36 >>> 8; b[3] = lo36 >>> 16; b[4] = lo36 >>> 24;
-    b[5] = hi37; b[6] = hi37 >>> 8; b[7] = hi37 >>> 16; b[8] = hi37 >>> 24;
+    const g36 = v1 || 0;
+    if (!Number.isSafeInteger(g36) || g36 < 0) efail('game not an id53');
+    const lo37 = g36 >>> 0, hi38 = (g36 - lo37) / 4294967296;
+    b[1] = lo37; b[2] = lo37 >>> 8; b[3] = lo37 >>> 16; b[4] = lo37 >>> 24;
+    b[5] = hi38; b[6] = hi38 >>> 8; b[7] = hi38 >>> 16; b[8] = hi38 >>> 24;
     if ((v2 >>> 0) !== v2) efail('gseq out of range');
     b[9] = v2; b[10] = v2 >>> 8; b[11] = v2 >>> 16; b[12] = v2 >>> 24;
     b[13] = L4;
@@ -897,21 +962,21 @@ function e_GameSnapshot(m) {
     b[o + 2] = v19 ? 1 : 0;
     if ((v20 & 255) !== v20 || v20 > 2) efail('you not a Color');
     b[o + 3] = v20;
-    const c38 = v21.length;
-    b[o + 4] = c38; b[o + 5] = c38 >>> 8;
+    const c39 = v21.length;
+    b[o + 4] = c39; b[o + 5] = c39 >>> 8;
     o += 6;
-    for (let i39 = 0; i39 < c38; i39++) {
-        const s40 = v21[i39] ?? NO_OBJ;
-        const v41 = s40.move;
-        if ((v41 & 65535) !== v41) efail('moves.move out of range');
-        if (v41 > 32767) efail('moves.move above max');
-        b[o] = v41; b[o + 1] = v41 >>> 8;
-        const v42 = s40.spentMs;
-        if ((v42 >>> 0) !== v42) efail('moves.spentMs out of range');
-        b[o + 2] = v42; b[o + 3] = v42 >>> 8; b[o + 4] = v42 >>> 16; b[o + 5] = v42 >>> 24;
-        const v43 = s40.clockMs;
-        if ((v43 >>> 0) !== v43) efail('moves.clockMs out of range');
-        b[o + 6] = v43; b[o + 7] = v43 >>> 8; b[o + 8] = v43 >>> 16; b[o + 9] = v43 >>> 24;
+    for (let i40 = 0; i40 < c39; i40++) {
+        const s41 = v21[i40] ?? NO_OBJ;
+        const v42 = s41.move;
+        if ((v42 & 65535) !== v42) efail('moves.move out of range');
+        if (v42 > 32767) efail('moves.move above max');
+        b[o] = v42; b[o + 1] = v42 >>> 8;
+        const v43 = s41.spentMs;
+        if ((v43 >>> 0) !== v43) efail('moves.spentMs out of range');
+        b[o + 2] = v43; b[o + 3] = v43 >>> 8; b[o + 4] = v43 >>> 16; b[o + 5] = v43 >>> 24;
+        const v44 = s41.clockMs;
+        if ((v44 >>> 0) !== v44) efail('moves.clockMs out of range');
+        b[o + 6] = v44; b[o + 7] = v44 >>> 8; b[o + 8] = v44 >>> 16; b[o + 9] = v44 >>> 24;
         o += 10;
     }
     if ((v22 & 255) !== v22 || v22 > 2) efail('running not a Color');
@@ -920,9 +985,9 @@ function e_GameSnapshot(m) {
     b[o + 1] = v23; b[o + 2] = v23 >>> 8; b[o + 3] = v23 >>> 16; b[o + 4] = v23 >>> 24;
     if ((v24 >>> 0) !== v24) efail('blackMs out of range');
     b[o + 5] = v24; b[o + 6] = v24 >>> 8; b[o + 7] = v24 >>> 16; b[o + 8] = v24 >>> 24;
-    const d44 = Number(v25) || 0;
-    if (d44 - d44 !== 0) efail('serverTime not finite');
-    wf64(b, o + 9, d44);
+    const d45 = Number(v25) || 0;
+    if (d45 - d45 !== 0) efail('serverTime not finite');
+    wf64(b, o + 9, d45);
     if ((v26 & 255) !== v26 || v26 > 2) efail('drawOffer not a Color');
     b[o + 17] = v26;
     if ((v27 & 255) !== v27 || v27 > 4) efail('status not a GameStatus');
@@ -935,11 +1000,12 @@ function e_GameSnapshot(m) {
     b[o + 22] = v31; b[o + 23] = v31 >>> 8; b[o + 24] = v31 >>> 16; b[o + 25] = v31 >>> 24;
     if ((v32 >>> 0) !== v32) efail('firstMoveMs out of range');
     b[o + 26] = v32; b[o + 27] = v32 >>> 8; b[o + 28] = v32 >>> 16; b[o + 29] = v32 >>> 24;
-    const d45 = Number(v33) || 0;
-    if (d45 - d45 !== 0) efail('startedAt not finite');
-    wf64(b, o + 30, d45);
+    const d46 = Number(v33) || 0;
+    if (d46 - d46 !== 0) efail('startedAt not finite');
+    wf64(b, o + 30, d46);
     if ((v34 & 255) !== v34 || v34 > 2) efail('rematch not a Color');
     b[o + 38] = v34;
+    b[o + 39] = v35 ? 1 : 0;
     return b;
 }
 
@@ -1116,6 +1182,54 @@ function e_RatingUpdate(m) {
     return b;
 }
 
+// 0xA6 S_Gesture (s2c)
+function e_S_Gesture(m) {
+    if (m === null || typeof m !== 'object') efail('message not an object');
+    const v1 = m.game;
+    const v2 = m.ply;
+    const v3 = m.touch;
+    const v4 = m.aim;
+    const v5 = m.placed;
+    const v6 = m.flags;
+    const v7 = m.yaw;
+    const v8 = m.pitch;
+    const v9 = m.lean;
+    const b = Buffer.allocUnsafe(25);
+    b[0] = 0xA6;
+    const g10 = v1 || 0;
+    if (!Number.isSafeInteger(g10) || g10 < 0) efail('game not an id53');
+    const lo11 = g10 >>> 0, hi12 = (g10 - lo11) / 4294967296;
+    b[1] = lo11; b[2] = lo11 >>> 8; b[3] = lo11 >>> 16; b[4] = lo11 >>> 24;
+    b[5] = hi12; b[6] = hi12 >>> 8; b[7] = hi12 >>> 16; b[8] = hi12 >>> 24;
+    if ((v2 & 65535) !== v2) efail('ply out of range');
+    if (v2 > 1199) efail('ply above max');
+    b[9] = v2; b[10] = v2 >>> 8;
+    if ((v3 & 255) !== v3) efail('touch out of range');
+    if (v3 > 64) efail('touch above max');
+    b[11] = v3;
+    if ((v4 & 255) !== v4) efail('aim out of range');
+    if (v4 > 64) efail('aim above max');
+    b[12] = v4;
+    if ((v5 & 65535) !== v5) efail('placed out of range');
+    if (v5 > 32767) efail('placed above max');
+    b[13] = v5; b[14] = v5 >>> 8;
+    if ((v6 & 255) !== v6) efail('flags out of range');
+    if (v6 > 7) efail('flags above max');
+    b[15] = v6;
+    if ((v7 | 0) !== v7) efail('yaw out of range');
+    if (v7 < -3142) efail('yaw below min');
+    if (v7 > 3142) efail('yaw above max');
+    b[16] = v7; b[17] = v7 >>> 8; b[18] = v7 >>> 16; b[19] = v7 >>> 24;
+    if ((v8 | 0) !== v8) efail('pitch out of range');
+    if (v8 < -1571) efail('pitch below min');
+    if (v8 > 1571) efail('pitch above max');
+    b[20] = v8; b[21] = v8 >>> 8; b[22] = v8 >>> 16; b[23] = v8 >>> 24;
+    if ((v9 & 255) !== v9) efail('lean out of range');
+    if (v9 > 100) efail('lean above max');
+    b[24] = v9;
+    return b;
+}
+
 /** encode.<Name>(fields) -> Buffer of the exact size; throws ProtocolError when a value is invalid. */
 export const encode = Object.freeze({
     Hello: e_Hello,
@@ -1136,6 +1250,7 @@ export const encode = Object.freeze({
     Abort: e_Abort,
     Resync: e_Resync,
     Rematch: e_Rematch,
+    C_Gesture: e_C_Gesture,
     Welcome: e_Welcome,
     Error: e_Error,
     S_Ping: e_S_Ping,
@@ -1151,6 +1266,7 @@ export const encode = Object.freeze({
     GameEvent: e_GameEvent,
     GameEnd: e_GameEnd,
     RatingUpdate: e_RatingUpdate,
+    S_Gesture: e_S_Gesture,
 });
 
 // ---- decoders ----
@@ -1376,6 +1492,34 @@ function d_Rematch(b, n) {
     return { type: 0x27, seq: v1, game: v2, accept: v4 === 1 };
 }
 
+// 0x28 C_Gesture (c2s)
+function d_C_Gesture(b, n) {
+    if (n !== 29) fail(n < 29 ? 'truncated' : 'trailing bytes');
+    const v1 = (b[1] | b[2] << 8 | b[3] << 16 | b[4] << 24) >>> 0;
+    const h3 = (b[9] | b[10] << 8 | b[11] << 16 | b[12] << 24) >>> 0;
+    if (h3 >= 0x200000) fail('game above 2^53');
+    const v2 = h3 * 4294967296 + ((b[5] | b[6] << 8 | b[7] << 16 | b[8] << 24) >>> 0);
+    const v4 = b[13] | b[14] << 8;
+    if (v4 > 1199) fail('ply above max');
+    const v5 = b[15];
+    if (v5 > 64) fail('touch above max');
+    const v6 = b[16];
+    if (v6 > 64) fail('aim above max');
+    const v7 = b[17] | b[18] << 8;
+    if (v7 > 32767) fail('placed above max');
+    const v8 = b[19];
+    if (v8 > 7) fail('flags above max');
+    const v9 = b[20] | b[21] << 8 | b[22] << 16 | b[23] << 24;
+    if (v9 < -3142) fail('yaw below min');
+    if (v9 > 3142) fail('yaw above max');
+    const v10 = b[24] | b[25] << 8 | b[26] << 16 | b[27] << 24;
+    if (v10 < -1571) fail('pitch below min');
+    if (v10 > 1571) fail('pitch above max');
+    const v11 = b[28];
+    if (v11 > 100) fail('lean above max');
+    return { type: 0x28, seq: v1, game: v2, ply: v4, touch: v5, aim: v6, placed: v7, flags: v8, yaw: v9, pitch: v10, lean: v11 };
+}
+
 // 0x80 Welcome (s2c)
 function d_Welcome(b, n) {
     let o = 0;
@@ -1397,15 +1541,19 @@ function d_Welcome(b, n) {
     if (o + l6 > n) fail('truncated');
     const v7 = l6 === 0 ? '' : rstr(b, o, o + l6, 'serverName');
     o += l6;
-    if (o + 18 > n) fail('truncated');
+    if (o + 22 > n) fail('truncated');
     const v8 = (b[o] | b[o + 1] << 8 | b[o + 2] << 16 | b[o + 3] << 24) >>> 0;
     const v9 = (b[o + 4] | b[o + 5] << 8 | b[o + 6] << 16 | b[o + 7] << 24) >>> 0;
     const v10 = b[o + 8] | b[o + 9] << 8;
     const h12 = (b[o + 14] | b[o + 15] << 8 | b[o + 16] << 16 | b[o + 17] << 24) >>> 0;
     if (h12 >= 0x200000) fail('activeGame above 2^53');
     const v11 = h12 * 4294967296 + ((b[o + 10] | b[o + 11] << 8 | b[o + 12] << 16 | b[o + 13] << 24) >>> 0);
-    if (o + 18 !== n) fail('trailing bytes');
-    return { type: 0x80, proto: v1, serverTime: v2, userId: v3, username: v5, serverName: v7, heartbeatMs: v8, clientPingMs: v9, maxMsgPerSec: v10, activeGame: v11 };
+    const v13 = b[o + 18] | b[o + 19] << 8;
+    if (v13 > 60) fail('gestureRate above max');
+    const v14 = b[o + 20] | b[o + 21] << 8;
+    if (v14 > 120) fail('gestureBurst above max');
+    if (o + 22 !== n) fail('trailing bytes');
+    return { type: 0x80, proto: v1, serverTime: v2, userId: v3, username: v5, serverName: v7, heartbeatMs: v8, clientPingMs: v9, maxMsgPerSec: v10, activeGame: v11, gestureRate: v13, gestureBurst: v14 };
 }
 
 // 0x81 Error (s2c)
@@ -1451,7 +1599,7 @@ function d_Ack(b, n) {
 function d_Notice(b, n) {
     if (n !== 10) fail(n < 10 ? 'truncated' : 'trailing bytes');
     const v1 = b[1];
-    if (v1 < 1 || v1 > 6) fail('code not a NoticeCode');
+    if (v1 < 1 || v1 > 7) fail('code not a NoticeCode');
     const v2 = rf64(b, 2);
     if (v2 - v2 !== 0) fail('arg not finite');
     return { type: 0x85, code: v1, arg: v2 };
@@ -1590,7 +1738,7 @@ function d_GameSnapshot(b, n) {
         const v25 = (b[o + 6] | b[o + 7] << 8 | b[o + 8] << 16 | b[o + 9] << 24) >>> 0;
         a21.push({ move: v23, spentMs: v24, clockMs: v25 });
     }
-    if (o + 39 > n) fail('truncated');
+    if (o + 40 > n) fail('truncated');
     const v26 = b[o];
     if (v26 > 2) fail('running not a Color');
     const v27 = (b[o + 1] | b[o + 2] << 8 | b[o + 3] << 16 | b[o + 4] << 24) >>> 0;
@@ -1613,8 +1761,10 @@ function d_GameSnapshot(b, n) {
     if (v37 - v37 !== 0) fail('startedAt not finite');
     const v38 = b[o + 38];
     if (v38 > 2) fail('rematch not a Color');
-    if (o + 39 !== n) fail('trailing bytes');
-    return { type: 0xA0, game: v1, gseq: v3, category: v5, baseMs: v6, incMs: v7, rated: v8 === 1, white: { userId: v9, name: v11, rating: v12, provisional: v13 === 1 }, black: { userId: v14, name: v16, rating: v17, provisional: v18 === 1 }, you: v19, moves: a21, running: v26, whiteMs: v27, blackMs: v28, serverTime: v29, drawOffer: v30, status: v31, reason: v32, whiteConnected: v33 === 1, blackConnected: v34 === 1, graceMs: v35, firstMoveMs: v36, startedAt: v37, rematch: v38 };
+    const v39 = b[o + 39];
+    if (v39 > 1) fail('autoPress not a bool');
+    if (o + 40 !== n) fail('trailing bytes');
+    return { type: 0xA0, game: v1, gseq: v3, category: v5, baseMs: v6, incMs: v7, rated: v8 === 1, white: { userId: v9, name: v11, rating: v12, provisional: v13 === 1 }, black: { userId: v14, name: v16, rating: v17, provisional: v18 === 1 }, you: v19, moves: a21, running: v26, whiteMs: v27, blackMs: v28, serverTime: v29, drawOffer: v30, status: v31, reason: v32, whiteConnected: v33 === 1, blackConnected: v34 === 1, graceMs: v35, firstMoveMs: v36, startedAt: v37, rematch: v38, autoPress: v39 === 1 };
 }
 
 // 0xA1 MoveMade (s2c)
@@ -1712,6 +1862,33 @@ function d_RatingUpdate(b, n) {
     return { type: 0xA5, game: v1, category: v4, white: { before: v5, after: v6, games: v7, provisional: v8 === 1 }, black: { before: v9, after: v10, games: v11, provisional: v12 === 1 } };
 }
 
+// 0xA6 S_Gesture (s2c)
+function d_S_Gesture(b, n) {
+    if (n !== 25) fail(n < 25 ? 'truncated' : 'trailing bytes');
+    const h2 = (b[5] | b[6] << 8 | b[7] << 16 | b[8] << 24) >>> 0;
+    if (h2 >= 0x200000) fail('game above 2^53');
+    const v1 = h2 * 4294967296 + ((b[1] | b[2] << 8 | b[3] << 16 | b[4] << 24) >>> 0);
+    const v3 = b[9] | b[10] << 8;
+    if (v3 > 1199) fail('ply above max');
+    const v4 = b[11];
+    if (v4 > 64) fail('touch above max');
+    const v5 = b[12];
+    if (v5 > 64) fail('aim above max');
+    const v6 = b[13] | b[14] << 8;
+    if (v6 > 32767) fail('placed above max');
+    const v7 = b[15];
+    if (v7 > 7) fail('flags above max');
+    const v8 = b[16] | b[17] << 8 | b[18] << 16 | b[19] << 24;
+    if (v8 < -3142) fail('yaw below min');
+    if (v8 > 3142) fail('yaw above max');
+    const v9 = b[20] | b[21] << 8 | b[22] << 16 | b[23] << 24;
+    if (v9 < -1571) fail('pitch below min');
+    if (v9 > 1571) fail('pitch above max');
+    const v10 = b[24];
+    if (v10 > 100) fail('lean above max');
+    return { type: 0xA6, game: v1, ply: v3, touch: v4, aim: v5, placed: v6, flags: v7, yaw: v8, pitch: v9, lean: v10 };
+}
+
 /**
  * Decodes one message: { type, ...fields }. opts.dir ('c2s' | 's2c') refuses the other
  * direction's types. Throws ProtocolError (and nothing else) on any malformed input.
@@ -1748,6 +1925,7 @@ export function decode(buf, opts) {
         case 0x25: return d_Abort(b, n);
         case 0x26: return d_Resync(b, n);
         case 0x27: return d_Rematch(b, n);
+        case 0x28: return d_C_Gesture(b, n);
         case 0x80: return d_Welcome(b, n);
         case 0x81: return d_Error(b, n);
         case 0x82: return d_S_Ping(b, n);
@@ -1763,6 +1941,7 @@ export function decode(buf, opts) {
         case 0xA3: return d_GameEvent(b, n);
         case 0xA4: return d_GameEnd(b, n);
         case 0xA5: return d_RatingUpdate(b, n);
+        case 0xA6: return d_S_Gesture(b, n);
         default: return fail('unknown type');
     }
 }

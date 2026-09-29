@@ -9,11 +9,11 @@ the generator. The HTTPS account API is described in `docs/DESIGN.md` section 5.
 
 | | |
 |---|---|
-| `PROTOCOL_VERSION` | 1 |
-| `PROTOCOL_MIN` | 1 |
-| `SCHEMA_HASH` | `0x7B5D5600` (2069714432) |
+| `PROTOCOL_VERSION` | 2 |
+| `PROTOCOL_MIN` | 2 |
+| `SCHEMA_HASH` | `0x77977684` (2006414980) |
 | WebSocket subprotocol | `scacelith.v1` |
-| Messages | 18 client->server, 15 server->client |
+| Messages | 19 client->server, 16 server->client |
 
 Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibility) · [Connection](#connection-lifecycle) ·
 [Game flow](#game-flow) · [Clocks](#clocks) · [Replay protection](#duplicates-and-replay-protection) ·
@@ -292,7 +292,8 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
 | `0x25` | [Abort](#abort) | client -> server | 13 |
 | `0x26` | [Resync](#resync) | client -> server | 13 |
 | `0x27` | [Rematch](#rematch) | client -> server | 14 |
-| `0x80` | [Welcome](#welcome) | server -> client | 35+ |
+| `0x28` | [C_Gesture](#c_gesture) | client -> server | 29 |
+| `0x80` | [Welcome](#welcome) | server -> client | 39+ |
 | `0x81` | [Error](#error) | server -> client | 15 |
 | `0x82` | [S_Ping](#s_ping) | server -> client | 13 |
 | `0x83` | [S_Pong](#s_pong) | server -> client | 13 |
@@ -301,12 +302,13 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
 | `0x90` | [QueueStatus](#queuestatus) | server -> client | 14+ |
 | `0x91` | [ChallengeReceived](#challengereceived) | server -> client | 22+ |
 | `0x92` | [ChallengeStatus](#challengestatus) | server -> client | 12+ |
-| `0xA0` | [GameSnapshot](#gamesnapshot) | server -> client | 81+ |
+| `0xA0` | [GameSnapshot](#gamesnapshot) | server -> client | 82+ |
 | `0xA1` | [MoveMade](#movemade) | server -> client | 43 |
 | `0xA2` | [MoveRejected](#moverejected) | server -> client | 14 |
 | `0xA3` | [GameEvent](#gameevent) | server -> client | 19 |
 | `0xA4` | [GameEnd](#gameend) | server -> client | 31 |
 | `0xA5` | [RatingUpdate](#ratingupdate) | server -> client | 28+ |
+| `0xA6` | [S_Gesture](#s_gesture) | server -> client | 25 |
 
 ### Hello
 
@@ -484,9 +486,26 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
 | `game` | id53 | 8 | < 2^53 |
 | `accept` | bool | 1 | 0 or 1 |
 
+### C_Gesture
+
+`0x28`, client -> server, 29 bytes. The player's current gestures in game `game`, sent when they change (at most gestureRate per second, see Welcome): the head (yaw and pitch of the look in milliradians, seat-relative: 0 = straight ahead, level; lean 0..100), the piece in hand and where it is aimed, the move placed on the board before the clock press. The whole state travels every time, so a lost one heals with the next. ply: plies played when it was sent; touch / aim: squares (64 = none); placed: the move placed, packed as in Move (0 = none); flags: GestureFlag bits. The server forwards it to the opponent as a Gesture without looking at it: it never counts as a move.
+
+| Field | Type | Bytes | Limits |
+|---|---|---|---|
+| `seq` | u32 | 4 |  |
+| `game` | id53 | 8 | < 2^53 |
+| `ply` | u16 | 2 | 0..1199 |
+| `touch` | u8 | 1 | 0..64 |
+| `aim` | u8 | 1 | 0..64 |
+| `placed` | u16 | 2 | 0..32767 (bit 15 clear) |
+| `flags` | u8 | 1 | 0..7 |
+| `yaw` | i32 | 4 | -3142..3142 |
+| `pitch` | i32 | 4 | -1571..1571 |
+| `lean` | u8 | 1 | 0..100 |
+
 ### Welcome
 
-`0x80`, server -> client, at least 35 bytes. Hello accepted. When activeGame != 0 a GameSnapshot follows. heartbeatMs: interval of the server Ping; clientPingMs: interval the client should use for its own Ping (CLIENT_PING_INTERVAL_MS; 0 = the client's default).
+`0x80`, server -> client, at least 39 bytes. Hello accepted. When activeGame != 0 a GameSnapshot follows. heartbeatMs: interval of the server Ping; clientPingMs: interval the client should use for its own Ping (CLIENT_PING_INTERVAL_MS; 0 = the client's default). gestureRate / gestureBurst: the Gesture relay of this server (GESTURE_RATE, GESTURE_BURST): sustained messages per second and bucket size; 0 = no relay, send no Gesture.
 
 | Field | Type | Bytes | Limits |
 |---|---|---|---|
@@ -499,6 +518,8 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
 | `clientPingMs` | u32 | 4 |  |
 | `maxMsgPerSec` | u16 | 2 |  |
 | `activeGame` | id53 | 8 | < 2^53 |
+| `gestureRate` | u16 | 2 | 0..60 |
+| `gestureBurst` | u16 | 2 | 0..120 |
 
 ### Error
 
@@ -589,7 +610,7 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
 
 ### GameSnapshot
 
-`0xA0`, server -> client, at least 81 bytes. Complete authoritative state of a game: sent when it starts, after a (re)connection and on Resync, and also to the opponent when the held clock of a game restored after a restart starts (lifecycle step 6). Clocks are the remaining times at serverTime; the `running` side keeps counting from there (`running` is None while such a clock is held).
+`0xA0`, server -> client, at least 82 bytes. Complete authoritative state of a game: sent when it starts, after a (re)connection and on Resync, and also to the opponent when the held clock of a game restored after a restart starts (lifecycle step 6). Clocks are the remaining times at serverTime; the `running` side keeps counting from there (`running` is None while such a clock is held). autoPress: the robots press the clock by themselves once a move is on the board (AUTO_PRESS_CLOCK when the game was created); when false a client sends its Move only when its player presses the clock, so the clock runs until then.
 
 | Field | Type | Bytes | Limits |
 |---|---|---|---|
@@ -616,6 +637,7 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
 | `firstMoveMs` | u32 | 4 |  |
 | `startedAt` | f64 | 8 | finite |
 | `rematch` | enum [Color](#color) (u8) | 1 |  |
+| `autoPress` | bool | 1 | 0 or 1 |
 
 ### MoveMade
 
@@ -682,6 +704,22 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
 | `category` | str8 | 1 + len | 0..7 bytes UTF-8, no NUL |
 | `white` | struct [RatingChange](#ratingchange) | 9 |  |
 | `black` | struct [RatingChange](#ratingchange) | 9 |  |
+
+### S_Gesture
+
+`0xA6`, server -> client, 25 bytes. The opponent's gestures (the client Gesture minus seq, byte for byte). Cosmetic: never authoritative.
+
+| Field | Type | Bytes | Limits |
+|---|---|---|---|
+| `game` | id53 | 8 | < 2^53 |
+| `ply` | u16 | 2 | 0..1199 |
+| `touch` | u8 | 1 | 0..64 |
+| `aim` | u8 | 1 | 0..64 |
+| `placed` | u16 | 2 | 0..32767 (bit 15 clear) |
+| `flags` | u8 | 1 | 0..7 |
+| `yaw` | i32 | 4 | -3142..3142 |
+| `pitch` | i32 | 4 | -1571..1571 |
+| `lean` | u8 | 1 | 0..100 |
 
 ## Structs
 
@@ -814,6 +852,7 @@ Every enum travels as a u8; a value outside the enum is malformed.
 | 4 | `MatchmakingCooldown` | arg = end of the cooldown (epoch ms) |
 | 5 | `ReplacedByNewConnection` |  |
 | 6 | `Motd` | reserved (the message of the day comes from /api/v1/info) |
+| 7 | `RatingRestored` | arg = rating points given back: an opponent of your rated games was banned for cheating |
 
 ### ErrorCode
 
@@ -870,6 +909,14 @@ Every enum travels as a u8; a value outside the enum is malformed.
 | `0x20` | `Promotion` |
 | `0x40` | `Check` |
 | `0x80` | `Mate` |
+
+### GestureFlag (bit set, `Gesture.flags`)
+
+| Bit | Name |
+|---|---|
+| `0x01` | `Glance` |
+| `0x02` | `Promoting` |
+| `0x04` | `Side` |
 
 ## Move encoding
 

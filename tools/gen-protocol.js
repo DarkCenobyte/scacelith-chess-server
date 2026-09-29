@@ -37,7 +37,7 @@ const IDENT = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
 /**
  * Validates a schema module and resolves its types.
- * @param {object} s schema module ({ PROTOCOL_VERSION, PROTOCOL_MIN, WS_SUBPROTOCOL, enums, MoveFlag, CloseCode, structs, messages })
+ * @param {object} s schema module ({ PROTOCOL_VERSION, PROTOCOL_MIN, WS_SUBPROTOCOL, enums, MoveFlag, GestureFlag, CloseCode, structs, messages })
  * @returns {{ enums: object, structs: Map<string, object>, messages: object[] }}
  * @throws {Error} with a clear message when the schema cannot be generated
  */
@@ -777,6 +777,7 @@ export function generateCodec(s = defaultSchema) {
     for (const [name, e] of Object.entries(s.enums)) L.push(`    ${name}: Object.freeze(${jsObj(e, '    ')}),`);
     L.push('});');
     L.push(`export const MoveFlag = Object.freeze(${jsObj(s.MoveFlag)});`);
+    L.push(`export const GestureFlag = Object.freeze(${jsObj(s.GestureFlag)});`);
     L.push(`export const CloseCode = Object.freeze(${jsObj(s.CloseCode)});`);
     L.push('');
     L.push('export const MSG = Object.freeze({');
@@ -1273,6 +1274,12 @@ export function generateDocs(s = defaultSchema) {
     p('| Bit | Name |');
     p('|---|---|');
     for (const [k, v] of Object.entries(s.MoveFlag)) p(`| \`${hex(v)}\` | \`${k}\` |`);
+    p();
+    p('### GestureFlag (bit set, `Gesture.flags`)');
+    p();
+    p('| Bit | Name |');
+    p('|---|---|');
+    for (const [k, v] of Object.entries(s.GestureFlag)) p(`| \`${hex(v)}\` | \`${k}\` |`);
     p();
     p('## Move encoding');
     p();
