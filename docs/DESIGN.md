@@ -245,6 +245,7 @@ host.attach(gameId, userId, endpoint)      // endpoint: { send(buf), connId, sha
 host.detach(gameId, userId, endpoint)      // connection closed
 host.onClientMessage(gameId, userId, msg, endpoint) // decoded C2S game message (Move..Rematch)
 host.recover() -> count                    // replays the journal at start-up
+host.compactJournal(now) -> count          // journal snapshots the journal asks for (5.6), from the interval
 host.stats() -> { games, ... }
 host.shutdown()                            // flush journal + pending commits
 ```
@@ -333,17 +334,61 @@ Crash safety of games in progress without a database write per move. One journal
 `JOURNAL_DIR/shard-<n>/segment-<seq>.log`. Records are binary:
 `u32 length | u32 crc32c | u8 kind | id53 gameId | f64 at | payload`. Writes are buffered and
 flushed (one `write` + optional `fsync`) every `JOURNAL_FLUSH_MS`. Segments rotate at 16 MB; a
-segment is deleted when every game it mentions is ended *and* committed to the database. A torn
-last record is ignored on replay.
+segment is deleted when no game needs it any more: every game it mentions is ended *and*
+committed to the database, or has a newer snapshot (below). A segment holding a game's
+`committed` record outlives every other segment that mentions that game, so a recovery never
+sees a committed game without its `committed` record. A torn last record is ignored on replay.
 
 ```js
-const j = await openJournal({ dir, shard, flushMs, fsync })
-j.append(kind, gameId, payloadBuffer, at)   // kinds: 1 created (JSON spec), 2 move, 3 event, 4 ended, 5 committed
+const j = await openJournal({ dir, shard, flushMs, fsync, compactSegments })
+j.append(kind, gameId, payloadBuffer, at)   // kinds: 1 created (JSON spec), 2 move, 3 event, 4 ended, 5 committed, 6 snapshot
 j.flush() -> Promise ; j.committed(gameId)  // marks it safe to forget
-j.recover() -> Map<gameId, [{ kind, at, payload }]>  // games not committed, in order
-j.close()
+j.compactionCandidates(max) -> [gameId]      // games to snapshot now (at most max, 8 per flush)
+j.recover() -> Map<gameId, [{ kind, at, payload }]>  // games not committed, in order, from their latest snapshot
+j.stats() ; j.close()
 ```
-The game module decides the payloads (`GameRoom.journalState` / `fromJournal`).
+The game module decides the payloads (`GameRoom.journalState` / `journalSnapshot` / `fromJournal`).
+
+**Compaction.** Without it, a segment stays as long as the oldest game it mentions runs, so a
+shard would keep its write rate times the age of its oldest game on disk: with custom time
+controls (up to 3 h + 180 s, games of up to about 66 hours) that is gigabytes, and a restart
+replays all of it. A `snapshot` record holds the whole state of one game (`room.journalSnapshot`:
+the records of `journalState()`, i.e. the created spec, every move with its clocks, one
+checkpoint with the offers, presence, desyncs, flags, turn start and lag quotas, and the result
+of a finished game; about 45 bytes per ply, under 60 KB for the longest game) and supersedes
+every earlier record of its game. When the journal starts segment N, the games not committed
+whose first needed segment (the one of their first record, or of their latest snapshot) is
+`N - JOURNAL_COMPACT_SEGMENTS` or older are queued. The host's 10 ms interval asks
+`compactionCandidates(max)` and appends a snapshot of each queued game it hosts, running or
+ended and waiting for its commit, between two outcomes (so the snapshot includes every record
+already appended for that game). It builds at most 2 snapshots per 10 ms tick and a flushed batch
+holds at most 8, which keeps the cost off the move path: building one costs about 0.2 µs per ply,
+about 0.3 ms with its CRC for the longest game. Once the batch holding a snapshot is written and
+fsynced, that segment becomes the game's first needed one and the older segments are deleted by
+the rule above. A shard's journal therefore stays around `JOURNAL_COMPACT_SEGMENTS + 1` segments
+(80 MB by default) however long its games last, and so does the replay at start-up. Games that
+end sooner are never snapshotted (at 17 KB/s per shard, 3 to 4 segments of 16 MB are about 50 to
+65 minutes of writes); a game that lasts longer is written again once every
+`JOURNAL_COMPACT_SEGMENTS` segments, which adds little unless a shard runs thousands of such games.
+
+Crash safety of the compaction: before the batch holding a snapshot is durable, every older
+segment is still on disk, and a torn snapshot is ignored like any torn record (the game replays
+from its older records). Once it is durable, recovery starts each game from its latest snapshot
+and ignores the records before it, wherever they are, so a crash in the middle of the deletions
+is harmless too. A game with records left in an old segment that another game still needs keeps
+that segment listed among its own, so its `committed` record still outlives it. With
+`JOURNAL_FSYNC=true` this also holds after a power loss: a segment is deleted only once the
+`committed` or `snapshot` record that releases it is fsynced; at start-up the journal fsyncs the
+segments it read and their directory before it deletes anything (a record it reads may have been
+written by a process that died before its fsync); and a segment holding a `committed` record is
+deleted only after a directory fsync has made the deletion of that game's older segments durable
+(about once per rotation). The metrics `scacelith_journal_snapshots_total`,
+`scacelith_journal_segments` and `scacelith_journal_disk_bytes` (per shard) show the compaction at
+work. With `JOURNAL_FSYNC=false`, which gives no power-loss guarantee anyway, a power loss shortly
+after a compaction can lose a snapshot whose older segments are already deleted, and with it the
+game; a process crash cannot (the written data is in the page cache). Server versions older than
+the compaction do not know the `snapshot` record: rolled back to one, a shard cannot rebuild the
+games compacted so far and drops or aborts them.
 
 ### 5.7 Primary control plane: IPC catalog
 

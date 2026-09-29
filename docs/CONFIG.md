@@ -66,6 +66,7 @@ Sections:
 | `JOURNAL_DIR` | path (relative to the working directory) | (empty) | Append-only journal of the games in progress, replayed after a crash (default: DATA_DIR/journal). |
 | `JOURNAL_FLUSH_MS` | integer (5-1000) | `50` | Longest time a game event waits in memory before being written to the journal (group commit). |
 | `JOURNAL_FSYNC` | boolean (true/false, 1/0, yes/no, on/off) | `true` | fsync the journal at every flush (survives power loss, not only process crashes). |
+| `JOURNAL_COMPACT_SEGMENTS` | integer (1-1000) | `4` | Journal compaction: once a shard's journal has moved this many 16 MB segments past the oldest record a game still needs (its first record, or its latest snapshot), the game, running or waiting for its database commit, is written again as one snapshot record and the older segments can be deleted. A shard's journal then stays around (this + 1) x 16 MB however long the games last. Lower values write more snapshots; higher ones keep more on disk and lengthen the replay after a restart. |
 | `DB_COMMIT_MS` | integer (1-2000) | `50` | Finished games are committed to the database in batches, at most this long after they end. |
 | `DB_CACHE_MB` | integer (2-4096) | `64` | SQLite page cache of each server process (the primary and every worker), in megabytes. |
 | `DB_MMAP_MB` | integer (0-65536) | `256` | Part of the database file read through memory mapping, in megabytes (0 disables it). |

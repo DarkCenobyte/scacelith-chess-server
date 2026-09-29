@@ -35,7 +35,8 @@
 //   * A game reaching 1200 plies (the protocol's Move.ply limit) ends ServerAborted.
 //   * A draw offer made while the opponent's offer is pending is an agreement.
 //   * Presence and rematch changes after the end are not journaled (the journal may forget a
-//     game once it is committed, so nothing is appended after the `ended` record).
+//     game once it is committed, so nothing is appended after the `ended` record, except a
+//     compaction snapshot while the commit is pending).
 //
 // Journal payloads (little-endian; records are { kind, at, payload } as in DESIGN 5.6):
 //   1 created  JSON { v, id, category, baseMs, incMs, rated, white, black, createdAt, rematchOf }
@@ -50,6 +51,9 @@
 //              60-byte ones without the graces are read too)
 //   4 ended    24 bytes: u8 status | u8 reason | u8 culprit colour | u8 0 | u32 whiteMs |
 //              u32 blackMs | u32 gseq (of its GameEnd) | f64 endedAt
+//   6 snapshot the records of journalState() in one record (journal compaction, journalSnapshot()):
+//              u8 format (1) | u8 0 | u16 count | count x (u8 kind | u32 length | f64 at | payload);
+//              a replay starts from the latest snapshot and ignores the records before it
 // The round-trip averages are not journaled (they restart from the default after a restart).
 
 import { encode, enums } from '../protocol/index.js';
@@ -59,7 +63,7 @@ const { GameStatus: GS, EndReason: ER, GameEventKind: EV, ErrorCode: EC } = enum
 const WHITE = 0, BLACK = 1, NONE = 2;
 
 /** Journal record kinds (DESIGN 5.6). */
-export const JournalKind = Object.freeze({ Created: 1, Move: 2, Event: 3, Ended: 4, Committed: 5 });
+export const JournalKind = Object.freeze({ Created: 1, Move: 2, Event: 3, Ended: 4, Committed: 5, Snapshot: 6 });
 /** Kinds of the `event` journal records. */
 export const JournalEvent = Object.freeze({ DrawOffer: 1, DrawDecline: 2, Disconnect: 3, Reconnect: 4, Desync: 5, Recovered: 6, Checkpoint: 7 });
 /** Bits of `record().flags` (finished game record, DESIGN 5.5). */
@@ -85,6 +89,42 @@ const MOVE_REC_BYTES = 32, EVENT_REC_BYTES = 12, ENDED_REC_BYTES = 24, CHECKPOIN
 /** Thrown when a journal cannot be replayed. */
 export class JournalError extends Error {
     constructor(message) { super(`journal: ${message}`); this.name = 'JournalError'; }
+}
+
+const SNAPSHOT_FORMAT = 1, SNAPSHOT_HEADER = 4, SNAPSHOT_REC_HEADER = 13;
+
+// Header of one record inside the payload of a `snapshot` record (see the header of this file);
+// returns the offset of that record's payload.
+function putSnapshotHeader(b, o, kind, at, length) {
+    b[o] = kind;
+    b.writeUInt32LE(length, o + 1);
+    b.writeDoubleLE(at, o + 5);
+    return o + SNAPSHOT_REC_HEADER;
+}
+
+// One whole record ({ kind, at, payload }) inside a snapshot; returns the next offset.
+function putSnapshotRecord(b, o, rec) {
+    o = putSnapshotHeader(b, o, rec.kind, rec.at, rec.payload.length);
+    b.set(rec.payload, o);
+    return o + rec.payload.length;
+}
+
+function decodeSnapshot(payload) {
+    const b = asBuffer(payload);
+    if (b.length < SNAPSHOT_HEADER || b[0] !== SNAPSHOT_FORMAT) throw new JournalError('bad snapshot record');
+    const n = b.readUInt16LE(2);
+    const records = new Array(n);
+    let o = SNAPSHOT_HEADER;
+    for (let i = 0; i < n; i++) {
+        if (o + SNAPSHOT_REC_HEADER > b.length) throw new JournalError('short snapshot record');
+        const len = b.readUInt32LE(o + 1);
+        const end = o + SNAPSHOT_REC_HEADER + len;
+        if (end > b.length) throw new JournalError('short snapshot record');
+        records[i] = { kind: b[o], at: b.readDoubleLE(o + 5), payload: b.subarray(o + SNAPSHOT_REC_HEADER, end) };
+        o = end;
+    }
+    if (o !== b.length) throw new JournalError('bad snapshot record length');
+    return records;
 }
 
 /** Result of one GameRoom call (see the header of this file). */
@@ -620,7 +660,36 @@ export class GameRoom {
     }
 
     /**
-     * Rebuilds a room from its journal records ([{ kind, at, payload }], in order).
+     * The room as ONE `snapshot` journal record (journal compaction): journalState() in a single
+     * payload, which a replay uses in place of every earlier record of the game. Taken between two
+     * outcomes, it includes every record the host appended for this game so far.
+     * @param {number} now
+     * @returns {{kind:number, at:number, payload:Buffer}}
+     */
+    journalSnapshot(now) {
+        // journalState() written straight into one buffer, without a Buffer per move.
+        const created = this.createdRecord(), check = this._checkpointRecord(), ended = this._over ? this._endedRecord() : null;
+        const n = this.ply;
+        const count = n + (ended ? 3 : 2);
+        const size = SNAPSHOT_HEADER + count * SNAPSHOT_REC_HEADER + created.payload.length + n * MOVE_REC_BYTES
+            + check.payload.length + (ended ? ended.payload.length : 0);
+        const b = Buffer.alloc(size);            // zero-filled: the unused bytes of the move records
+        b[0] = SNAPSHOT_FORMAT;
+        b.writeUInt16LE(count, 2);
+        let o = putSnapshotRecord(b, SNAPSHOT_HEADER, created);
+        for (let i = 0; i < n; i++) {
+            o = putSnapshotHeader(b, o, JournalKind.Move, this.recvTime[i], MOVE_REC_BYTES);
+            this._writeMove(b, o, i);
+            o += MOVE_REC_BYTES;
+        }
+        o = putSnapshotRecord(b, o, check);
+        if (ended) putSnapshotRecord(b, o, ended);
+        return { kind: JournalKind.Snapshot, at: Math.floor(now), payload: b };
+    }
+
+    /**
+     * Rebuilds a room from its journal records ([{ kind, at, payload }], in order). A replay starts
+     * from the latest `snapshot` record when there is one (the records before it are ignored).
      * @param {Array<{kind:number, at:number, payload:Buffer}>} records
      * @param {{config?:object, createChessGame:Function, strict?:boolean}} opts strict=false stops at
      *   the first bad record (room.replayError is set) instead of throwing
@@ -628,6 +697,10 @@ export class GameRoom {
      */
     static fromJournal(records, { config = {}, createChessGame, strict = true } = {}) {
         if (!records || !records.length) throw new JournalError('no record');
+        let base = -1;
+        for (let i = records.length - 1; i >= 0; i--) if (records[i].kind === JournalKind.Snapshot) { base = i; break; }
+        if (base >= 0) records = [...decodeSnapshot(records[base].payload), ...records.slice(base + 1)];
+        if (!records.length) throw new JournalError('empty snapshot');
         const first = records[0];
         if (first.kind !== JournalKind.Created) throw new JournalError('the first record is not `created`');
         let spec;
@@ -647,6 +720,7 @@ export class GameRoom {
                     case JournalKind.Event: room._replayEvent(asBuffer(rec.payload), Math.floor(rec.at)); break;
                     case JournalKind.Ended: room._replayEnded(asBuffer(rec.payload)); break;
                     case JournalKind.Created: throw new JournalError('second created record');
+                    case JournalKind.Snapshot: throw new JournalError('snapshot inside a snapshot');
                     default: break;   // committed and unknown kinds carry no room state
                 }
             } catch (err) {
@@ -903,16 +977,21 @@ export class GameRoom {
 
     _moveRecord(i) {
         const b = Buffer.alloc(MOVE_REC_BYTES);
-        b.writeUInt16LE(i, 0);
-        b.writeUInt16LE(this.moves[i], 2);
-        b[4] = this.mflags[i];
-        b[5] = this.mbits[i];
-        b.writeUInt32LE(this.spent[i], 8);
-        b.writeUInt32LE(this.clockAfter[i], 12);
-        b.writeUInt32LE(this.quotaAfter[i], 16);
-        b.writeUInt32LE(this.gseqMove[i], 20);
-        b.writeDoubleLE(this.recvTime[i], 24);
+        this._writeMove(b, 0, i);
         return { kind: JournalKind.Move, at: this.recvTime[i], payload: b };
+    }
+
+    // The 32-byte move record of ply `i` at b[o..] (bytes 6-7 stay as they are: zero).
+    _writeMove(b, o, i) {
+        b.writeUInt16LE(i, o);
+        b.writeUInt16LE(this.moves[i], o + 2);
+        b[o + 4] = this.mflags[i];
+        b[o + 5] = this.mbits[i];
+        b.writeUInt32LE(this.spent[i], o + 8);
+        b.writeUInt32LE(this.clockAfter[i], o + 12);
+        b.writeUInt32LE(this.quotaAfter[i], o + 16);
+        b.writeUInt32LE(this.gseqMove[i], o + 20);
+        b.writeDoubleLE(this.recvTime[i], o + 24);
     }
 
     _eventRecord(kind, color, arg, at) {

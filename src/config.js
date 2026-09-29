@@ -65,6 +65,8 @@ key('JOURNAL_DIR', { section: 'storage', type: 'path', default: '', desc: 'Appen
 key('JOURNAL_FLUSH_MS', { section: 'storage', type: 'int', default: 50, min: 5, max: 1000,
     desc: 'Longest time a game event waits in memory before being written to the journal (group commit).' });
 key('JOURNAL_FSYNC', { section: 'storage', type: 'bool', default: true, desc: 'fsync the journal at every flush (survives power loss, not only process crashes).' });
+key('JOURNAL_COMPACT_SEGMENTS', { section: 'storage', type: 'int', default: 4, min: 1, max: 1000,
+    desc: 'Journal compaction: once a shard\'s journal has moved this many 16 MB segments past the oldest record a game still needs (its first record, or its latest snapshot), the game, running or waiting for its database commit, is written again as one snapshot record and the older segments can be deleted. A shard\'s journal then stays around (this + 1) x 16 MB however long the games last. Lower values write more snapshots; higher ones keep more on disk and lengthen the replay after a restart.' });
 key('DB_COMMIT_MS', { section: 'storage', type: 'int', default: 50, min: 1, max: 2000,
     desc: 'Finished games are committed to the database in batches, at most this long after they end.' });
 key('DB_CACHE_MB', { section: 'storage', type: 'int', default: 64, min: 2, max: 4096,

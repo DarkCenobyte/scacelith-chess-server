@@ -296,8 +296,9 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
 - A crash loses at most the last journal flush (`JOURNAL_FLUSH_MS`, 50 ms) of moves in progress;
   finished games and rating changes are committed in database transactions.
 - Players come back by themselves after a restart. The game spreads their reconnections over
-  about half a minute (players with a game in progress within 8 s, since the side to move's clock runs
-  again once the game is restored), so a restart does not turn into a burst of TLS handshakes.
+  about half a minute (players with a game in progress within 8 s, since the side to move's
+  clock runs again once the game is restored), so a restart does not turn into a burst of TLS
+  handshakes.
 - Retention: every `RETENTION_INTERVAL_MS` (one hour; the first run about a minute after the
   start) the server deletes expired and revoked sessions, expired tokens, security events older
   than `RETENTION_SECURITY_DAYS` (90), non-certain anomalies of the same age, conduct events and
@@ -306,6 +307,10 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
   `retention purge done` line with the counts. Games, ratings, analysed games, sanctions and
   reports are kept. SQLite reuses the freed pages; the file only shrinks after a `VACUUM`
   (server stopped). The full table is in the retention section of [docs/DESIGN.md](docs/DESIGN.md).
+- The journal of each worker (`journal/shard-<n>/`) keeps about `JOURNAL_COMPACT_SEGMENTS + 1`
+  segments of 16 MB (80 MB by default), however long the games last: a game still running after
+  that many segments is rewritten as one snapshot record and its older segments are deleted. Plan
+  about 100 MB of disk per worker for it; `scacelith_journal_disk_bytes` shows the actual size.
 
 ## Moderation
 

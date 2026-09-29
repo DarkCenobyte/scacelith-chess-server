@@ -41,6 +41,13 @@
 //     'game.recovered' { gameId, whiteId, blackId, shard } (not in the DESIGN 5.7 catalog: the
 //     primary needs it to give the players their active game back after a full restart).
 //   * the endpoint's `rttMs` (when a number) feeds room.onRtt before each message.
+//   * journal compaction (JOURNAL_COMPACT_SEGMENTS, src/store/journal.js): compactJournal(now),
+//     called by the 10 ms interval after the timers and the commits, appends a snapshot record
+//     (room.journalSnapshot) of each game the journal asks for (journal.compactionCandidates():
+//     at most SNAPSHOTS_PER_TICK per call and 8 per flushed batch, about 0.3 ms each for the
+//     longest game) that is hosted here and not committed yet. It runs between two outcomes, so
+//     the snapshot includes every record already appended for the game. A journal without
+//     compactionCandidates (the in-memory test journal) is never compacted.
 //
 // Payloads this module produces or expects:
 //   createGame(spec): { white, black: { userId, name, rating, provisional }, baseMs, incMs (ms),
@@ -69,6 +76,8 @@ const { ErrorCode: EC, EndReason: ER, GameStatus: GS } = enums;
 const NONE = 2;
 const SLOT_MS = 10;
 const MAX_BACKOFF_MS = 10000;
+/** Journal snapshots built per 10 ms interval at most (compaction stays off the move path). */
+const SNAPSHOTS_PER_TICK = 2;
 
 const ERROR_NAMES = Object.fromEntries(Object.entries(EC).map(([k, v]) => [v, k]));
 const REASON_NAMES = Object.fromEntries(Object.entries(ER).map(([k, v]) => [v, k]));
@@ -140,7 +149,7 @@ export class GameHost {
         this.nextCommitAt = Infinity;
         this.backoffMs = 0;
         this.commitInFlight = null;
-        this.counts = { created: 0, moves: 0, ended: 0, committed: 0, recovered: 0, requeued: 0, aborted: 0 };
+        this.counts = { created: 0, moves: 0, ended: 0, committed: 0, recovered: 0, requeued: 0, aborted: 0, snapshots: 0 };
         this.closed = false;
 
         const m = metrics;
@@ -337,10 +346,36 @@ export class GameHost {
         return null;
     }
 
+    /**
+     * Journal compaction: appends a snapshot record of each game the journal asks for (see the
+     * header). O(1) when the journal wants nothing. Returns the number of snapshots appended.
+     */
+    compactJournal(t = this.now()) {
+        const j = this.journal;
+        if (!j || typeof j.compactionCandidates !== 'function') return 0;
+        const ids = j.compactionCandidates(SNAPSHOTS_PER_TICK);
+        let n = 0;
+        for (let i = 0; i < ids.length; i++) {
+            const entry = this.rooms.get(ids[i]);
+            // Not hosted here, or its 'committed' record is already appended: nothing to keep.
+            if (!entry || entry.committed) continue;
+            let rec;
+            try { rec = entry.room.journalSnapshot(t); } catch (err) {
+                this.log.error('journal snapshot failed', { err, gameId: ids[i] });
+                continue;
+            }
+            this._append(ids[i], rec);
+            n++;
+        }
+        this.counts.snapshots += n;
+        return n;
+    }
+
     _onInterval() {
         const t = this.now();
         try { this.runTimers(t); } catch (err) { this.log.error('game timers failed', { err }); }
         try { this.pollCommits(t); } catch (err) { this.log.error('game commit poll failed', { err }); }
+        try { this.compactJournal(t); } catch (err) { this.log.error('journal compaction failed', { err }); }
     }
 
     // ---- recovery and shutdown -------------------------------------------------------------------

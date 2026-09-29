@@ -32,7 +32,8 @@ export async function main() {
 
     const primary = new Ipc(process, { log: log.child('ipc') });
     const store = openStore(config, { applyGame });
-    const journal = await openJournal({ dir: config.journalDir, shard, flushMs: config.journalFlushMs, fsync: config.journalFsync });
+    const journal = await openJournal({ dir: config.journalDir, shard, flushMs: config.journalFlushMs, fsync: config.journalFsync,
+        compactSegments: config.journalCompactSegments });
     const anticheat = createAnticheat({ config, store, primary, log: logger.child('anticheat') });
     const auth = createAuth({ config, store, primary, log: logger.child('auth') });
     const bus = createBus({ config, shard, serverId, log: log.child('bus') });
