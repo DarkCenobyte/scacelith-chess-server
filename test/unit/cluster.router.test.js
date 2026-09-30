@@ -367,6 +367,17 @@ describe('router: primary and bus', () => {
         await waitFor(() => env.host.of('detach').length === 1);
     });
 
+    it('answers conn.send with ok: false when a frame is refused as a slow consumer', async () => {
+        const env = await setup();
+        const { c } = await env.login();
+        const id = env.conn().id;
+        env.wss.sendBufferLimit = 4;                                    // any frame now overflows the send buffer
+        const notice = encode.Notice({ code: N.RatingRestored, arg: 12 });
+        assert.deepEqual(await env.primary.request('conn.send', { connId: id, frames: [notice] }), { ok: false });
+        assert.equal(await c.closed(), 4303);
+        assert.deepEqual(await env.primary.request('conn.send', { connId: id, frames: [notice] }), { ok: false });
+    });
+
     it('closes the connections of a revoked token only', async () => {
         const env = await setup();
         const { c } = await env.login();
@@ -596,6 +607,91 @@ describe('router: gestures', () => {
         const p2 = await c.until('S_Ping');
         c.send('C_Pong', { nonce: p2.nonce });
         await waitFor(() => env.host.of('rtt').length === 1);
+    });
+});
+
+describe('router: token buckets over time', () => {
+    // A Router alone with one fake ready connection in a game of this shard, fed messages at
+    // chosen clock.js times (or at the default one), as the socket handler would read them.
+    function bucketRig(env = {}) {
+        const cfg = testConfig(env);
+        const host = new FakeHost(), anomalies = [], requests = [];
+        const primary = { request: async (type) => { requests.push(type); return { ok: true }; }, notify() {} };
+        const router = new Router({
+            config: cfg, shard: 0, host, auth: { validateToken: async () => null }, primary, registry: new Registry(),
+            anticheat: { recordAnomaly: (x) => { anomalies.push(x); } },
+        });
+        const conn = {
+            id: 1, state: 'ready', userId: 1, openedAt: Date.now(), lastRecvAt: Date.now(), frames: [], closedWith: 0,
+            sendFrame(buf) { this.frames.push(buf); return true; },
+            close(code) { this.closedWith = code; this.state = 'closed'; },
+        };
+        router._onConnection(conn);
+        const gameId = new GameIdAllocator(0).next();
+        assert.deepEqual(router.attach(gameId, 1, conn.id), { ok: true });
+        let seq = 0;
+        const send = (name, fields, ...now) => router._onMessage(conn, encode[name]({ seq: ++seq, ...fields }), ...now);
+        const gesture = (...now) => send('C_Gesture', { game: gameId, ply: 0, touch: 64, aim: 64, placed: 0, flags: 0, yaw: 0, pitch: 0, lean: 0 }, ...now);
+        const relayed = () => host.of('gesture').length;
+        const errors = () => conn.frames.filter((f) => f[0] === MSG.Error).map((f) => decode(f).code);
+        return { cfg, router, conn, anomalies, requests, send, gesture, relayed, errors };
+    }
+
+    // A client pacing its gestures at `rate` for `ms` from `t`, read as they come; returns the end.
+    function paced(rig, rate, t, ms) {
+        for (let i = 0; i < ms * rate / 1000; i++) { t += 1000 / rate; rig.gesture(t); }
+        return t;
+    }
+    // The same client while nothing is read for `ms`: its gestures all arrive at the end.
+    function stalled(rig, rate, t, ms) {
+        const n = ms * rate / 1000;
+        t += ms;
+        for (let i = 0; i < n; i++) rig.gesture(t);
+        return t;
+    }
+
+    it('lets a client pacing its gestures at the rate live through a stall that delivers them in one burst', () => {
+        for (const [rate, stallMs] of [[4, 35000], [20, 5000], [20, 38000], [60, 2500], [60, 40000]]) {
+            const rig = bucketRig({ GESTURE_RATE: String(rate) });
+            const burst = rig.cfg.gestureBurst;
+            let t = paced(rig, rate, clockNow(), 10000);
+            assert.equal(rig.relayed(), 10 * rate, `rate ${rate}: nothing dropped while paced`);
+            t = stalled(rig, rate, t, stallMs);
+            assert.equal(rig.relayed(), 10 * rate + burst, `rate ${rate}: one bucket of the burst relayed`);
+            paced(rig, rate, t, 20000);
+            const what = `rate ${rate}, ${stallMs} ms stall`;
+            assert.deepEqual([rig.conn.closedWith, rig.anomalies], [0, []], what);
+            assert.equal(rig.relayed(), 30 * rate + burst, `${what}: the relay goes on at the rate`);
+        }
+    });
+
+    it('still closes a gross gesture flood 4301, whatever the rate', () => {
+        for (const rate of [4, 20, 60]) {
+            const rig = bucketRig({ GESTURE_RATE: String(rate) });
+            const t = paced(rig, rate, clockNow(), 5000);
+            const limit = Math.max(50, 10 * rig.cfg.gestureBurst, Math.ceil(rate * (30000 + 10000 + 250) / 1000));
+            for (let i = 0; i < 2 * limit && !rig.conn.closedWith; i++) rig.gesture(t + 100);
+            assert.equal(rig.conn.closedWith, 4301, `rate ${rate}`);
+            assert.deepEqual(rig.errors(), [E.Flood]);
+            assert.deepEqual(rig.anomalies.map((a) => [a.kind, a.detail.gestureDrops]), [['flood', limit + 1]], `rate ${rate}`);
+        }
+    });
+
+    it('keeps its buckets when the wall clock steps back', () => {
+        const rig = bucketRig();
+        rig.gesture();
+        rig.send('QueueLeave', {});
+        const wall = Date.now;
+        Date.now = () => wall() - 60000;                                // an NTP step, a resumed VM
+        try {
+            for (let i = 0; i < 3; i++) rig.gesture();
+            rig.send('QueueLeave', {});
+        } finally {
+            Date.now = wall;
+        }
+        assert.equal(rig.relayed(), 4, 'the gestures are relayed');
+        assert.deepEqual(rig.requests, ['mm.leave', 'mm.leave'], 'the request is not rate limited');
+        assert.deepEqual([rig.errors(), rig.conn.closedWith, rig.anomalies], [[], 0, []]);
     });
 });
 

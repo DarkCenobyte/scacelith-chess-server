@@ -119,13 +119,19 @@ clock press reach the opponent live, as `Gesture` (C2S 0x28), relayed as the ser
 never touches that bucket or answers `RateLimited` for it: the connection has a bucket of its own
 (`GESTURE_RATE` per second, `GESTURE_BURST`; both announced in `Welcome`, 0 and 0 when
 `GESTURE_RATE=0`), and a gesture beyond it is dropped silently, its seq still counted; more than
-max(50, 10 x `GESTURE_BURST`) drops in 10 s is a flood (4301). A gesture is then decoded and its
-seq checked like any message (malformed: 4300), and it must name a game attached to the
-connection. The local host gets `host.relayGesture(gameId, userId, frame)`; for another shard the
-raw frame goes over the bus as `ToHost` (skipped while that link holds a quarter of its queue),
-where the router recognises it by its type byte and does not decode it again. The host finds the
-room and the sender's colour (not a player: dropped, no anomaly: gestures are not
-authoritative), and copies the frame without its seq into an `S_Gesture` (the two layouts match
+max(50, 10 x `GESTURE_BURST`, `GESTURE_RATE` x (`HEARTBEAT_TIMEOUT_MS` + `HEARTBEAT_INTERVAL_MS` +
+the 250 ms sweeper tick)) drops in 10 s is a flood (4301). The bucket counts arrivals: after a
+stall of the network or of the worker, the gestures of a client pacing them at the rate arrive
+together, and the last term is what it sends during the longest silence that a connection lives
+through (the heartbeat notices a silence at its next visit), so no such burst is a flood. Both
+buckets and their drop windows run on the monotonic clock of `clock.js`: a step of the wall clock
+neither empties them nor holds a drop window open. A gesture is then decoded and its seq checked
+like any message (malformed: 4300), and it must name a game attached to the connection. The local
+host gets `host.relayGesture(gameId, userId, frame)`; for another shard the raw frame goes over
+the bus as `ToHost` (skipped while that link holds a quarter of its queue), where the router
+recognises it by its type byte and does not decode it again. The host finds the room and the
+sender's colour (not a player: dropped, no anomaly: gestures are not authoritative), and copies
+the frame without its seq into an `S_Gesture` (the two layouts match
 byte for byte: `protocol.codec.test.js`) for the opponent's endpoint, through its
 `sendDroppable`, which skips it when the connection already has a quarter of
 `WS_SEND_BUFFER_LIMIT` unsent or, for another shard, when the bus link has a quarter of its queue
@@ -295,13 +301,15 @@ new GameRoom({ id, category /* '3+2' | 'custom' */, baseMs, incMs, rated,
                white: { userId, name, rating, provisional }, black: {...},
                createdAt, config, rematchOf?, autoPress? /* true */,
                createChessGame /* () => new ChessGame(), injected by the host */ })
-// recvAt (optional, default now): the arrival the host credits after a stall of its worker (6.1)
-room.onMove(color, { seq, ply, move, posHash, thinkMs, drawOffer }, now, recvAt?)  -> Outcome
-room.onResign(color, now, seq?, recvAt?) / onDrawOffer(...) / onDrawAnswer(color, accept, now, seq?, recvAt?)
-room.onDrawClaim(color, now, seq?, recvAt?) / onAbort(color, now, seq?, recvAt?) / onRematch(color, accept, now)
-room.onDisconnect(color, now, recvAt?) / onReconnect(color, now, recvAt?) / onResync(color, now, recvAt?)
+// recvAt (optional, default now): the arrival the host credits after a stall of its worker (6.1);
+// stalledSince (optional, default Infinity): the start of that stall
+room.onMove(color, { seq, ply, move, posHash, thinkMs, drawOffer }, now, recvAt?, stalledSince?)  -> Outcome
+room.onResign(color, now, seq?, recvAt?, stalledSince?) / onDrawOffer(...) / onDrawAnswer(color, accept, now, seq?, recvAt?, stalledSince?)
+room.onDrawClaim(color, now, seq?, recvAt?, stalledSince?) / onAbort(color, now, seq?, recvAt?, stalledSince?)
+room.onRematch(color, accept, now, seq?, recvAt?, stalledSince?)
+room.onDisconnect(color, now, recvAt?, stalledSince?) / onReconnect(...) / onResync(color, now, recvAt?, stalledSince?)
 room.onRtt(color, rttMs)
-room.forfeit(color, now)            // anti-cheat: loss (EndReason.Forfeit)
+room.forfeit(color, now, recvAt?, stalledSince?)  // anti-cheat: loss (EndReason.Forfeit)
 room.serverAbort(now)                // EndReason.ServerAborted
 room.tick(now, stalledSince?) -> Outcome  // flags, first-move timeouts, grace expiries
 room.nextDeadline() -> ms | Infinity
@@ -324,7 +332,7 @@ host.attach(gameId, userId, endpoint)      // endpoint: { send(buf), sendDroppab
 host.detach(gameId, userId, endpoint)      // connection closed
 host.onClientMessage(gameId, userId, msg, endpoint) // decoded C2S game message (Move..Rematch)
 host.relayGesture(gameId, userId, frame) -> bool    // raw C_Gesture frame -> S_Gesture to the opponent (section 3)
-host.heartbeat(t) ; host.stallCredit(t) ; host.stallDuring(t0)  // stall detection and credit (6.1)
+host.heartbeat(t) ; host.stallStart(t) ; host.stallCredit(t) ; host.stallDuring(t0)  // stall detection and credit (6.1)
 host.recover() -> count                    // replays the journal at start-up
 host.compactJournal(now) -> count          // journal snapshots the journal asks for (5.6), from the interval
 host.stats() -> { games, ... }
@@ -740,21 +748,27 @@ change happens on POST (link scanners must not consume tokens).
   fire before the move that arrived in time and waited in a socket. Each run of the host's 10 ms
   interval is a beat; a beat more than `10 + GAME_STALL_MIN_MS` ms after the previous one is a
   stall (`scacelith_game_stall_ms`), and the timers, commits and compaction of that beat then run
-  from `setImmediate`, after the poll phase has read the sockets. Until then, and while a beat is
-  that late before the interval noticed it, a game request (Move, Resign, DrawOffer, DrawAnswer,
-  DrawClaim, Abort, Resync), an attach or a detach counts as arrived when the stall began, at
-  most `GAME_STALL_CREDIT_MAX_MS` before it is handled (`scacelith_game_stall_credit_ms_total`).
-  The room checks the deadlines, the flag and the time charged for a move at that arrival (never
-  before the latest move, never after now), a resignation, draw or abort takes effect at it, and
-  a disconnection, reconnection or Resync processes the deadlines due at it only; the next turn
-  starts at the real time of the `MoveMade`, so the stall is charged to nobody and uses no quota,
-  and the implausible-`thinkMs` test keeps the real time since the previous move. The timers that
-  run after the stall pass its start to `room.tick`: a first-move timeout that fell during it
-  aborts the game without a `noshow` conduct incident. Nothing of it is journaled (the journal
-  holds the clock values it produced, and a replay uses them), and a player gains at most one
-  stall; no client can cause one. `scacelith_game_timer_late_ms` measures how late the timers
-  fire. The credit covers stalls of the game's host worker only: a move relayed over the bus from
-  another shard that stalled is timed when the host reads it.
+  from `setImmediate`, after the poll phase has read the sockets. Those timers fire the deadlines
+  due by that beat only: the poll phase reads what the sockets held when it began, and when it
+  lasts (the backlog of a large stall), what reaches a socket meanwhile waits for the next poll
+  phase; a later deadline therefore waits for the next beat, which sees that poll phase as a stall
+  of its own. Until the timers ran, and while a beat is that late before the interval noticed it,
+  a game request (Move, Resign, DrawOffer, DrawAnswer, DrawClaim, Abort, Resync, Rematch), an
+  attach, a detach or a forfeit (`game.forfeit`) counts as arrived when the stall began, at most
+  `GAME_STALL_CREDIT_MAX_MS` before it is handled (`scacelith_game_stall_credit_ms_total`). The room
+  checks the deadlines, the flag and the time charged for a move at that arrival (never before the
+  latest move, never after now), a resignation, draw, abort or forfeit takes effect at it, and a
+  disconnection, reconnection or Resync processes the deadlines due at it only; the next turn starts
+  at the real time of the `MoveMade`, so the stall is charged to nobody and uses no quota, and the
+  implausible-`thinkMs` test keeps the real time since the previous move. The room also gets the
+  stall's start, from the timers that run after the stall (`room.tick`) and with each of those
+  requests: a first-move timeout that fell during the stall aborts the game without a `noshow`
+  conduct incident, whichever processes it (a request does when the stall lasted longer than the
+  credit). Nothing of it is journaled (the journal holds the clock values it produced, and a replay
+  uses them), and a player gains at most one stall; no client can cause one.
+  `scacelith_game_timer_late_ms` measures how late the timers fire. The credit covers stalls of the
+  game's host worker only: a move relayed over the bus from another shard that stalled is timed when
+  the host reads it.
 
 ### 6.2 Validation of a Move intent (in this order)
 

@@ -434,8 +434,11 @@ it at about half of an idle player's cost; 2 s would make it a third or more of 
 player in a 3+2 game.
 
 `GESTURE_RATE` is the other one. During a game the client sends its player's live gestures (the
-head, the piece in hand and where it is aimed) whenever they change, at most that many per second
-(4 by default, announced in `Welcome`), and the server relays each one to the opponent. A gesture
-costs about as much server CPU as a client ping, so a player who keeps moving costs several times
-their moves: [docs/SIZING.md](docs/SIZING.md#gestures) gives the capacity for each rate. Lower
-it to 2, or to 0 to turn the relay off, when the peak nears that capacity.
+head, the piece in hand and where it is aimed) whenever they change and at least once a second,
+even while its player sits still, at most that many per second (4 by default, announced in
+`Welcome`), and the server relays each one to the opponent. A gesture costs about as much server
+CPU as a client ping, so with the relay on every player in a game costs at least one relay a
+second, which alone halves the capacity of a server with the default 10 s ping, and a player who
+keeps moving costs several times their moves: [docs/SIZING.md](docs/SIZING.md#gestures) gives the
+capacity for each rate. Lower it to 2 or 1, or to 0 to turn the relay off, when the peak nears
+that capacity.

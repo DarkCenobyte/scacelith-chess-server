@@ -19,15 +19,20 @@
 //          GameHost or the host shard over the bus (raw frame, no re-encoding).
 //          C_Gesture has a token bucket of its own (GESTURE_RATE / GESTURE_BURST, announced in
 //          Welcome; rate 0 drops them all) and never spends or waits for a WS_MSG token: over it
-//          a gesture is dropped silently (no RateLimited; the seq stays in step as above), and
-//          more than max(50, 10 x burst) drops in 10 s is a flood (anomaly + close 4301). It is
-//          then decoded (malformed: 4300) and checked for seq like any message, and relayed only
-//          for a game attached to the connection: host.relayGesture(gameId, userId, frame) on
-//          the host shard (the raw frame over the bus, recognised by its type byte there and
-//          never decoded again; skipped while that bus link holds a quarter of its queue). The
-//          S_Gesture coming back is dropped when the connection already holds a quarter of
-//          WS_SEND_BUFFER_LIMIT unsent (a gesture must never close a slow client as a slow
-//          consumer).
+//          a gesture is dropped silently (no RateLimited; the seq stays in step as above). Only a
+//          gross excess is a flood (anomaly + close 4301): more drops in 10 s than max(50,
+//          10 x burst, rate x (HEARTBEAT_TIMEOUT_MS + HEARTBEAT_INTERVAL_MS + TICK_MS)). The
+//          bucket counts arrivals, and after a stall of the network or of this worker the
+//          gestures that a client pacing them at the rate sent meanwhile arrive together: all
+//          but a bucket of them are dropped. The last term is what such a client sends during
+//          the longest silence the heartbeat lets a connection live through (below), so that no
+//          such burst is a flood. A gesture is then decoded (malformed: 4300) and checked for
+//          seq like any message, and relayed only for a game attached to the connection:
+//          host.relayGesture(gameId, userId, frame) on the host shard (the raw frame over the
+//          bus, recognised by its type byte there and never decoded again; skipped while that
+//          bus link holds a quarter of its queue). The S_Gesture coming back is dropped when the
+//          connection already holds a quarter of WS_SEND_BUFFER_LIMIT unsent (a gesture must
+//          never close a slow client as a slow consumer).
 //   close  presence.release (the primary also leaves the queue and drops the user's pending
 //          challenges when the release matches the live connection), host.detach (local or bus).
 //
@@ -35,11 +40,14 @@
 // connection is visited once per HEARTBEAT_INTERVAL_MS or more often, without a timer per
 // connection: S_Ping with the server time when the last one is half an interval old or more (so
 // pings are between half an interval and an interval plus a tick apart), and close 1001 after
-// HEARTBEAT_TIMEOUT_MS of silence. Hello deadlines are a FIFO checked every tick (connections are
+// HEARTBEAT_TIMEOUT_MS of silence (seen at the next visit: a silence up to an interval plus a
+// tick longer goes unnoticed). Hello deadlines are a FIFO checked every tick (connections are
 // queued in arrival order, so the head is the oldest).
 //
 // Server times: Welcome, S_Ping and S_Pong carry clock.js now(), the clock of the game hosts
-// (MoveMade.serverTime), read when the frame is built (after the Hello's awaits). A round trip
+// (MoveMade.serverTime), read when the frame is built (after the Hello's awaits). The token
+// buckets and their drop windows run on that clock too: it is monotonic, so a step of the wall
+// clock (NTP, a resumed VM) neither empties a bucket nor holds a drop window open. A round trip
 // that overlaps a stall of this worker detected by its GameHost (host.stallDuring) is left out of
 // the RTT: it measured the stall, not the network.
 //
@@ -90,7 +98,7 @@ const MAX_PENDING_HELLO = 8;
 export const FULL_HOLD_MS = 5000;
 const MAX_GAMES_PER_CONN = 8;
 const RTT_CAP_MS = 2000;
-/** Gestures dropped in 10 s past which a connection is closed as a flood: max(this, 10 x burst). */
+/** Gestures dropped in 10 s past which a connection is closed as a flood: at least this (header). */
 const GESTURE_FLOOD_MIN = 50;
 const VALID_ERRORS = new Set(Object.values(E));
 
@@ -152,7 +160,11 @@ class RemoteEndpoint {
     }
 }
 
-/** Router state of one connection (fixed shape). */
+/**
+ * Router state of one connection (fixed shape). `now`: clock.js now(), the clock of the token
+ * buckets and their drop windows (monotonic: a step of the wall clock neither empties nor refills
+ * them). The heartbeat sweep runs on the wall clock of net/ws.js (openedAt, lastRecvAt).
+ */
 class ConnCtx {
     constructor(router, conn, now) {
         this.lastSeq = 0;
@@ -171,7 +183,7 @@ class ConnCtx {
         this.claimed = false;
         this.pingNonce = 0;
         this.pingSentAt = 0;
-        this.pingAt = now;
+        this.pingAt = conn.openedAt;
         this.lastClientPingAt = 0;
         this.games = null;
         this.endpoint = new LocalEndpoint(conn, router.shard, router.gestureBacklog);
@@ -216,7 +228,8 @@ export class Router {
         this.floodDrops = Math.max(10, config.wsMsgBurst);
         this.gRate = Number.isFinite(config.gestureRate) ? config.gestureRate : 0;
         this.gBurst = Number.isFinite(config.gestureBurst) ? config.gestureBurst : 1;
-        this.gFloodDrops = Math.max(GESTURE_FLOOD_MIN, 10 * this.gBurst);
+        const silenceMs = config.heartbeatTimeoutMs + config.heartbeatIntervalMs + tickMs;
+        this.gFloodDrops = Math.max(GESTURE_FLOOD_MIN, 10 * this.gBurst, Math.ceil(this.gRate * silenceMs / 1000));
         this.gestureBacklog = (config.wsSendBufferLimit || 262144) / 4;
         const lo = config.shardBase, hi = config.shardBase + config.workers;
         this.isShard = isShard || ((s) => s >= lo && s < hi);
@@ -361,8 +374,7 @@ export class Router {
     // ---- connections ----------------------------------------------------------------------------
 
     _onConnection(conn) {
-        const now = Date.now();
-        conn.ctx = new ConnCtx(this, conn, now);
+        conn.ctx = new ConnCtx(this, conn, clockNow());
         conn.onMessage = (cn, buf) => this._onMessage(cn, buf);
         conn.onClose = (cn, code) => this._onClose(cn, code);
         this.conns.set(conn.id, conn);
@@ -400,13 +412,13 @@ export class Router {
         ch.inc();
     }
 
-    _onMessage(conn, buf) {
+    /** One message of a connection. `now`: clock.js now() (see ConnCtx; exposed for tests). */
+    _onMessage(conn, buf, now = clockNow()) {
         const c = conn.ctx;
         if (conn.state !== 'ready') {
             if (conn.state === 'hello') this._onHelloMessage(conn, c, buf);
             return;
         }
-        const now = Date.now();
         const type = buf.length ? buf[0] : 0;
         if (type === MSG.C_Gesture) { this._gesture(conn, c, buf, now); return; }
         // Token bucket.
@@ -953,12 +965,17 @@ export class Router {
 
     // ---- primary -> shard -----------------------------------------------------------------------
 
-    /** Writes encoded frames on a connection ('conn.send'). */
+    /**
+     * Writes encoded frames on a connection ('conn.send'). { ok: true } only when every frame was
+     * written: a frame refused on the way (the connection closed as a slow consumer) answers
+     * { ok: false }, so that a sender waiting for the reply (the refund notices) tries again later.
+     */
     sendTo(connId, frames) {
         const conn = this.conns.get(connId);
         if (!conn || conn.state !== 'ready') return { ok: false };
-        for (const f of frames || []) conn.sendFrame(f);
-        return { ok: true };
+        let ok = true;
+        for (const f of frames || []) ok = conn.sendFrame(f) && ok;
+        return { ok };
     }
 
     /** Sends frames then closes a connection ('conn.kick'). */

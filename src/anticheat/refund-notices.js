@@ -9,8 +9,9 @@
 // One notice carries every refund of the victim not notified yet (the total of their points).
 // A refund is marked notified (store.refunds.markNotified) only once the shard reports the notice
 // written on the victim's connection ('conn.send' answered { ok: true }). A connection that is not
-// ready yet (the claim is answered before Welcome is written) answers { ok: false }: the notice is
-// tried again RETRY_MS later, RETRIES times, and then at each poll while the victim can get it.
+// ready yet (the claim is answered before Welcome is written), or one closed as a slow consumer
+// instead of taking the notice, answers { ok: false }: the notice is tried again RETRY_MS later,
+// RETRIES times, and then at each poll while the victim can get it.
 
 import { encode, enums } from '../protocol/index.js';
 

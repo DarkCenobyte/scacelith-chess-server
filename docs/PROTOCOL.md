@@ -234,44 +234,61 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
   `GameEnd{Timeout}` (or `TimeoutVsInsufficient`, a draw, when the opponent cannot mate). A move
   arriving after that is refused with `FlagFell`. The client never ends a game on its own clock.
 * **Server stalls.** When the server process hosting a game stops for a moment (more than
-  `GAME_STALL_MIN_MS`, 30 ms by default: garbage collection, disk I/O, CPU steal), what waited in
-  its sockets meanwhile is handled before its timers, as if it had arrived when the stall began
-  (at most `GAME_STALL_CREDIT_MAX_MS`, 5 s, before it was read): a move, a resignation, a draw
-  agreement or claim, an abort, a `Resync` or a closed connection is never overtaken by a flag or
-  a first-move timeout that fell during the stall. Such a move is charged the time until the stall
-  began, and the next player's clock starts when its `MoveMade` is sent, so the stall is charged
-  to nobody. A first-move timeout that fell during a stall still aborts the game, without counting
-  a no-show against the player, and a `Pong` whose `Ping` preceded a stall is left out of the
-  round-trip average.
+  `GAME_STALL_MIN_MS`, 30 ms by default: garbage collection, disk I/O, CPU steal, or reading the
+  backlog of such a stop), what waited in its sockets meanwhile is handled before its timers, as if
+  it had arrived when the stall began (at most `GAME_STALL_CREDIT_MAX_MS`, 5 s, before it was
+  read): a move, a resignation, a draw agreement or claim, an abort, a `Resync` or a closed
+  connection is never overtaken by a flag or a first-move timeout that fell during the stall.
+  Such a move is charged the time until the stall began, and the next player's clock starts when
+  its `MoveMade` is sent, so the stall is charged to nobody. A first-move timeout that fell during
+  a stall still aborts the game, without counting a no-show against the player, and a `Pong`
+  whose `Ping` preceded a stall is left out of the round-trip average.
 
 ## Gesture relay
 
-* **What.** `Gesture` carries a player's live, cosmetic state to the opponent, whose robot mirrors it:
-  the head (`yaw` and `pitch` of the look in milliradians, seat-relative, and `lean`; `GestureFlag`
-  tells a glance and a look at the table beside the board, the scoresheet included), the piece in
-  hand (`touch`) and where it is aimed (`aim`), and the move placed on the board before the clock
-  press (`placed`, in games without `autoPress`). It is never authoritative: only `Move` plays a
-  move, and the server does not look inside a gesture beyond checking that it decodes.
+* **What.** `Gesture` carries a player's live, cosmetic state to the opponent, whose robot mirrors
+  it: the head (`yaw` and `pitch` of the look in milliradians, seat-relative: 0 is straight ahead
+  and level, `yaw` > 0 to the left and `pitch` < 0 down; `lean` towards the board, in percent;
+  `GestureFlag` tells a glance and a look at the table beside the board, the scoresheet included),
+  the piece in hand (`touch`) and where it is aimed (`aim`), and the move placed on the board before
+  the clock press (`placed`, in games without `autoPress`). It is never authoritative: only `Move`
+  plays a move, and the server does not look inside a gesture beyond checking that it decodes.
 * **Sending.** The client sends `Gesture{seq, game, ply, ...}` for its game in progress when its
-  state changes, the whole state every time (a lost gesture heals with the next one), at most
-  `Welcome.gestureRate` per second sustained with bursts of `Welcome.gestureBurst`
-  (`GESTURE_RATE`, 4, and `GESTURE_BURST`, 8, by default). When `gestureRate` is 0 the server
-  relays nothing and the client sends none. A gesture takes the next `seq` like any message.
+  state changes, and at least once a second even when nothing changed, for the whole game and on the
+  opponent's turn too (the reference client stops following the opponent's head 2.5 s after its last
+  gesture and puts back a piece it mirrors after 5 s). It sends the whole state every time (a lost
+  gesture heals with the next one), at most `Welcome.gestureRate` per second sustained with bursts
+  of `Welcome.gestureBurst` (`GESTURE_RATE`, 4, and `GESTURE_BURST`, 8, by default), so every player
+  in a game sends between one and `gestureRate` gestures per second. When `gestureRate` is 0 the
+  server relays nothing and the client sends none. A gesture takes the next `seq` like any message.
+* **ply.** The number of plies played when the current state of the hand (`touch`, `aim`, `placed`,
+  `Promoting`) began: while a move is being prepared, the ply of that move. A change of the head
+  alone keeps it, so an idle hand keeps the ply at which it went idle, through the opponent's moves.
 * **Relay.** The server forwards it to the opponent's connection as the server `Gesture`: the client
   message without `seq`, byte for byte. It never goes back to the sender, and it is never stored
-  (not in the game's journal, not in the finished game) nor seen by the game's clocks, `gseq` or
-  the anti-cheat. It is relayed while the game exists, the rematch window included. A gesture may
-  reach the opponent after the `MoveMade` that followed it (the players may be on different
-  server workers): a client ignores a gesture whose `ply` is older than its position.
+  (not in the game's journal, not in the finished game) nor seen by the game's clocks, `gseq` or the
+  anti-cheat. It is relayed while the game exists, the rematch window included.
+* **Receiving.** The latest gesture wins. Its head (`yaw`, `pitch`, `lean`, `Glance`, `Side`) always
+  applies, whatever its `ply`. Its hand (`touch`, `aim`, `placed`, `Promoting`) describes a move
+  being prepared and applies only while the receiver's game has exactly `ply` plies and it is the
+  sender's turn: a gesture of an earlier ply is stale (that move is known), and one of a later ply
+  is ahead of a `MoveMade` the receiver has not got yet (a gesture and a `MoveMade` may cross when
+  the players are on different server workers). The reference client also checks the hand against
+  its own position (the sender's pieces, legal destinations and moves only): gestures come from the
+  other client and are not trusted.
 * **Silent drops.** Gestures have a token bucket of their own: they never spend or wait for the
   `WS_MSG_RATE` tokens of moves and requests, and a gesture beyond `gestureRate` is dropped with no
   `Error{RateLimited}` (its `seq` still counts, so the next message is in sequence). Only a gross
-  excess, more than max(50, 10 x `gestureBurst`) dropped in 10 s, closes the connection as a flood
-  (`Error{Flood, fatal}`, 4301). A gesture for a game the connection does not play, for an
-  opponent who is not connected, or towards a connection or a link between the server's workers
-  that already holds a backlog of unsent data (a quarter of its limit) is dropped as well: a slow
-  link loses gestures first, and a gesture never closes a slow client. A gesture that does not
-  decode is a protocol violation like any message (4300).
+  excess closes the connection as a flood (`Error{Flood, fatal}`, 4301): more than max(50, 10 x
+  `gestureBurst`, `gestureRate` x (the server's heartbeat timeout + `heartbeatMs` + 0.25 s)) dropped
+  in 10 s, 161 by default. The server counts gestures as it reads them: after a stall of the network
+  or of the server, the gestures that a client pacing them at `gestureRate` sent meanwhile arrive
+  together and all but a burst of them are dropped, but that never adds up to a flood while the
+  connection lives. A gesture for a game the connection does not play, for an opponent who is not
+  connected, or towards a connection or a link between the server's workers that already holds a
+  backlog of unsent data (a quarter of its limit) is dropped as well: a slow link loses gestures
+  first, and a gesture never closes a slow client. A gesture that does not decode is a protocol
+  violation like any message (4300).
 
 ## Duplicates and replay protection
 
@@ -543,7 +560,7 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
 
 ### C_Gesture
 
-`0x28`, client -> server, 29 bytes. The player's current gestures in game `game`, sent when they change (at most gestureRate per second, see Welcome): the head (yaw and pitch of the look in milliradians, seat-relative: 0 = straight ahead, level; lean 0..100), the piece in hand and where it is aimed, the move placed on the board before the clock press. The whole state travels every time, so a lost one heals with the next. ply: plies played when it was sent; touch / aim: squares (64 = none); placed: the move placed, packed as in Move (0 = none); flags: GestureFlag bits. The server forwards it to the opponent as a Gesture without looking at it: it never counts as a move.
+`0x28`, client -> server, 29 bytes. The player's current gestures in game `game`, sent when they change and at least once a second (at most gestureRate per second, see Welcome): the head (yaw and pitch of the look in milliradians, seat-relative: 0 = straight ahead, level, yaw > 0 to the left, pitch < 0 down; lean 0..100), the piece in hand and where it is aimed, the move placed on the board before the clock press. The whole state travels every time, so a lost one heals with the next. ply: plies played when the current state of the hand (touch, aim, placed, Promoting) began, which a change of the head alone keeps; touch / aim: squares (64 = none); placed: the move placed, packed as in Move (0 = none); flags: GestureFlag bits. The server forwards it to the opponent as a Gesture without looking at it: it never counts as a move.
 
 | Field | Type | Bytes | Limits |
 |---|---|---|---|

@@ -71,15 +71,22 @@
 //     after the previous one means the worker's event loop stopped meanwhile (garbage collection,
 //     blocking I/O, CPU steal): the beat then runs the timers, commits and compaction from
 //     setImmediate, once the poll phase has read what the sockets received during the stall,
-//     since Node runs its timers before it reads sockets. Until then (and while a beat is that
-//     late, before the interval has noticed) a game message, an attach or a detach counts as
-//     arrived when the stall began, GAME_STALL_CREDIT_MAX_MS earlier than it is handled at most
-//     (stallCredit(): the room's recvAt), so that a flag or a first-move timeout that fell during
-//     the stall overtakes neither a move nor a request queued behind the opponent's closed
-//     connection; the timers that run after the stall pass its start to room.tick(), so that a
-//     first-move timeout that fell during it records no no-show. Nothing of it is journaled: the
-//     journal holds the clock values it produced, and a replay uses them. Without the
-//     interval (autoStart false) there is no beat and no credit unless a test calls heartbeat().
+//     since Node runs its timers before it reads sockets. Those timers fire only the deadlines
+//     due by the beat that detected the stall (at the time they run): the poll phase read what
+//     the sockets held when it began, but when it lasts (the backlog of a large stall) what
+//     reaches a socket meanwhile waits for the next poll phase, so a later deadline waits for the
+//     next beat, which detects such a poll phase as a stall of its own. Until the timers ran (and
+//     while a beat is that late, before the interval has noticed) a game message (a Rematch
+//     included), an attach, a detach or a forfeit counts as arrived when the stall began,
+//     GAME_STALL_CREDIT_MAX_MS earlier than it is handled at most (stallCredit(): the room's
+//     recvAt), so that a flag or a first-move timeout that fell during the stall overtakes neither
+//     a move nor a request queued behind the opponent's closed connection. The start of the stall
+//     (stallStart()) goes to the room with it, and the timers that run after the stall pass it to
+//     room.tick(), so that a first-move timeout that fell during the stall records no no-show
+//     whichever of them processes it (a request does after a stall longer than the credit).
+//     Nothing of it is journaled: the journal holds the clock values it produced, and a replay
+//     uses them. Without the interval (autoStart false) there is no beat and no credit unless a
+//     test calls heartbeat().
 //     stallDuring(t0) tells the router whether a stall overlaps a round trip it measured.
 //   * gesture relay (GESTURE_RATE): relayGesture(gameId, userId, frame) copies a player's
 //     C_Gesture frame, without its seq, into an S_Gesture for the opponent's endpoint (the two
@@ -206,6 +213,7 @@ export class GameHost {
         this.stallCreditMaxMs = Number.isFinite(config.gameStallCreditMaxMs) ? config.gameStallCreditMaxMs : 5000;
         this._beat = NaN;                // time of the last beat (NaN: none yet, no stall detection)
         this._stallFrom = NaN;           // start of the stall the last beat detected, until its timers ran
+        this._firingAt = 0;              // time at which runTimers fires the rooms due
         this._firingStall = Infinity;    // stall start passed to room.tick() by the timers that run after it
         this.lastStallEnd = -Infinity;   // time of the beat that detected the last stall
 
@@ -250,8 +258,9 @@ export class GameHost {
         this._rejectChildren = new Map();
         this._endedChildren = new Map();
 
-        this._fire = (entry, t) => {
+        this._fire = (entry) => {
             if (entry.removed) return;
+            const t = this._firingAt;
             this.m.timerLate.observe(Math.max(0, t - entry._twDeadline));
             try {
                 this._process(entry, entry.room.tick(t, this._firingStall), null, -1, 0);
@@ -261,10 +270,11 @@ export class GameHost {
                 this.wheel.schedule(entry, t + 1000);
             }
         };
+        // The timers after a detected stall: those due by the beat that detected it (see the header).
         this._afterStall = () => {
             const from = this._stallFrom;
             this._stallFrom = NaN;
-            if (!this.closed) this._tick(this.now(), from);
+            if (!this.closed) this._tick(this.now(), from, this._beat);
         };
         this.interval = null;
         if (autoStart) {
@@ -330,8 +340,8 @@ export class GameHost {
         const cur = entry.ep[color];
         if (cur && endpoint && !sameEndpoint(cur, endpoint)) return false;
         entry.ep[color] = null;
-        const t = this.now();
-        this._process(entry, entry.room.onDisconnect(color, t, t - this.stallCredit(t)), null, -1, 0);
+        const t = this.now(), from = this.stallStart(t);
+        this._process(entry, entry.room.onDisconnect(color, t, t - this.stallCredit(t, from), from), null, -1, 0);
         return true;
     }
 
@@ -357,21 +367,22 @@ export class GameHost {
         }
         const t = this.now();
         // Arrival of a request that waited in a socket during a stall of this worker (header).
-        const credit = this.stallCredit(t);
+        const from = this.stallStart(t);
+        const credit = this.stallCredit(t, from);
         const te = t - credit;
-        if (endpoint && !entry.ep[color]) this._bind(entry, color, endpoint, false, t, te);
+        if (endpoint && !entry.ep[color]) this._bind(entry, color, endpoint, false, t, from, te);
         else if (endpoint && typeof endpoint.rttMs === 'number' && endpoint.rttMs > 0) room.onRtt(color, endpoint.rttMs);
         let out;
         try {
             switch (msg.type) {
-                case MSG.Move: out = room.onMove(color, msg, t, te); break;
-                case MSG.Resign: out = room.onResign(color, t, seq, te); break;
-                case MSG.DrawOffer: out = room.onDrawOffer(color, t, seq, te); break;
-                case MSG.DrawAnswer: out = room.onDrawAnswer(color, !!msg.accept, t, seq, te); break;
-                case MSG.DrawClaim: out = room.onDrawClaim(color, t, seq, te); break;
-                case MSG.Abort: out = room.onAbort(color, t, seq, te); break;
-                case MSG.Resync: out = room.onResync(color, t, te); break;
-                case MSG.Rematch: out = room.onRematch(color, !!msg.accept, t, seq); break;
+                case MSG.Move: out = room.onMove(color, msg, t, te, from); break;
+                case MSG.Resign: out = room.onResign(color, t, seq, te, from); break;
+                case MSG.DrawOffer: out = room.onDrawOffer(color, t, seq, te, from); break;
+                case MSG.DrawAnswer: out = room.onDrawAnswer(color, !!msg.accept, t, seq, te, from); break;
+                case MSG.DrawClaim: out = room.onDrawClaim(color, t, seq, te, from); break;
+                case MSG.Abort: out = room.onAbort(color, t, seq, te, from); break;
+                case MSG.Resync: out = room.onResync(color, t, te, from); break;
+                case MSG.Rematch: out = room.onRematch(color, !!msg.accept, t, seq, te, from); break;
                 default:
                     this._reject(endpoint, EC.NotInGame, seq, gameId);
                     return;
@@ -438,7 +449,9 @@ export class GameHost {
         const entry = id !== undefined && this.rooms.get(id);
         if (!entry || entry.room.isOver) return false;
         const color = entry.room.colorOf(userId);
-        this._process(entry, entry.room.forfeit(color, this.now()), null, -1, 0);
+        // Like a game request, the sanction may have waited in a socket during a stall (header).
+        const t = this.now(), from = this.stallStart(t);
+        this._process(entry, entry.room.forfeit(color, t, t - this.stallCredit(t, from), from), null, -1, 0);
         return true;
     }
 
@@ -465,13 +478,15 @@ export class GameHost {
     // ---- time ----------------------------------------------------------------------------------
 
     /**
-     * Fires the rooms whose deadline is due at `t` (the interval calls it every 10 ms).
-     * `stalledSince`: start of the stall these timers ran late for (room.tick()).
+     * Fires, at `t`, the rooms whose deadline is due at `dueBy` (`t` at most; the interval calls
+     * it every 10 ms with dueBy = t). `stalledSince`: start of the stall these timers ran late for
+     * (room.tick()).
      */
-    runTimers(t = this.now(), stalledSince = Infinity) {
+    runTimers(t = this.now(), stalledSince = Infinity, dueBy = t) {
+        this._firingAt = t;
         this._firingStall = stalledSince;
         try {
-            return this.wheel.advance(t, this._fire);
+            return this.wheel.advance(Math.min(dueBy, t), this._fire);
         } finally {
             this._firingStall = Infinity;
         }
@@ -479,7 +494,8 @@ export class GameHost {
 
     /**
      * One beat of the 10 ms interval (see the header): the timers, commits and compaction, at
-     * once, or from setImmediate after a stall. Returns whether this beat detected a stall.
+     * once, or from setImmediate after a stall (the timers due by this beat). Returns whether
+     * this beat detected a stall.
      * @param {number} [t]
      * @returns {boolean}
      */
@@ -502,18 +518,25 @@ export class GameHost {
 
     /**
      * Time given back to a game request handled at `t` (ms, 0 without a stall): from the start of
-     * the stall the last beat detected, until the timers ran after it, or from the moment the
-     * next beat was due when it is already GAME_STALL_MIN_MS late; GAME_STALL_CREDIT_MAX_MS at most.
+     * the stall it waited through (stallStart); GAME_STALL_CREDIT_MAX_MS at most.
+     * @param {number} t
+     * @param {number} [from] stallStart(t)
+     * @returns {number}
+     */
+    stallCredit(t, from = this.stallStart(t)) {
+        return from < Infinity ? Math.max(0, Math.min(this.stallCreditMaxMs, t - from)) : 0;
+    }
+
+    /**
+     * Start of the stall that a game request handled at `t` waited through (Infinity: none): the
+     * stall the last beat detected, until the timers ran after it, or the one that began when the
+     * next beat was due, when that beat is already GAME_STALL_MIN_MS late.
      * @param {number} t
      * @returns {number}
      */
-    stallCredit(t) {
-        let from = this._stallFrom;
-        if (Number.isNaN(from)) {
-            if (!(t - this._beat > SLOT_MS + this.stallMinMs)) return 0;
-            from = this._beat + SLOT_MS;
-        }
-        return Math.max(0, Math.min(this.stallCreditMaxMs, t - from));
+    stallStart(t) {
+        if (!Number.isNaN(this._stallFrom)) return this._stallFrom;
+        return t - this._beat > SLOT_MS + this.stallMinMs ? this._beat + SLOT_MS : Infinity;
     }
 
     /**
@@ -558,8 +581,8 @@ export class GameHost {
         return n;
     }
 
-    _tick(t, stalledSince = Infinity) {
-        try { this.runTimers(t, stalledSince); } catch (err) { this.log.error('game timers failed', { err }); }
+    _tick(t, stalledSince = Infinity, dueBy = t) {
+        try { this.runTimers(t, stalledSince, dueBy); } catch (err) { this.log.error('game timers failed', { err }); }
         try { this.pollCommits(t); } catch (err) { this.log.error('game commit poll failed', { err }); }
         try { this.compactJournal(t); } catch (err) { this.log.error('journal compaction failed', { err }); }
     }
@@ -666,11 +689,11 @@ export class GameHost {
         return 'custom';
     }
 
-    _bind(entry, color, endpoint, sendSnapshot, t = this.now(), te = t - this.stallCredit(t)) {
+    _bind(entry, color, endpoint, sendSnapshot, t = this.now(), from = this.stallStart(t), te = t - this.stallCredit(t, from)) {
         const room = entry.room;
         entry.ep[color] = endpoint;
         if (endpoint && typeof endpoint.rttMs === 'number' && endpoint.rttMs > 0) room.onRtt(color, endpoint.rttMs);
-        const out = room.isConnected(color) ? room.tick(te) : room.onReconnect(color, t, te);
+        const out = room.isConnected(color) ? room.tick(te, from) : room.onReconnect(color, t, te, from);
         this._process(entry, out, endpoint, color, 0);
         if (sendSnapshot && !entry.removed) this._send(endpoint, room.snapshotBuffer(color, t));
     }

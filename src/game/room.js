@@ -27,19 +27,23 @@
 // Deviations from the DESIGN 5.3 signatures (compatible additions):
 //   * onResign / onDrawOffer / onDrawAnswer / onDrawClaim / onAbort / onRematch take an optional
 //     trailing `seq` (the client message's seq) so that a refusal can be an Error{ref: seq}.
-//   * Stall credit (DESIGN 6.1): onMove, onResign, onDrawOffer, onDrawAnswer, onDrawClaim and
-//     onAbort take an optional `recvAt`, the moment the host counts the request as arrived when
-//     its worker stalled while the request waited in a socket (host.js). The deadlines, the flag
-//     check and the time charged for a move use it (never before the latest move, never after
-//     `now`); the next turn starts at `now` all the same, so the stall is charged to nobody, and
-//     the implausible-thinkMs test of a move keeps the real time since the previous move. A
-//     resignation, a draw agreement or claim and an abort take effect at that arrival.
+//   * Stall credit (DESIGN 6.1): onMove, onResign, onDrawOffer, onDrawAnswer, onDrawClaim,
+//     onAbort, onRematch and forfeit take an optional `recvAt`, the moment the host counts the
+//     request as arrived when its worker stalled while the request waited in a socket (host.js).
+//     The deadlines, the flag check and the time charged for a move use it (never before the
+//     latest move, never after `now`); the next turn starts at `now` all the same, so the stall is
+//     charged to nobody, and the implausible-thinkMs test of a move keeps the real time since the
+//     previous move. A resignation, a draw agreement or claim, an abort and a forfeit take effect
+//     at that arrival.
 //     onDisconnect, onReconnect and onResync take it too, for the deadlines they process first
 //     only (the event itself happens at `now`): what waited in the sockets during a stall, a
 //     connection's close included, never lets a deadline that fell during the stall overtake a
 //     request that waited with it. The host's timers process those deadlines once the stall is
 //     over: tick(now, stalledSince) gets the start of the stall, and a first-move timeout that
-//     fell during it aborts the game without a 'noshow' conduct incident.
+//     fell during it aborts the game without a 'noshow' conduct incident. The entry points above
+//     take that start too (`stalledSince`, after `recvAt`), for the deadlines they process first:
+//     a stall longer than the host's credit leaves such a timeout due at the credited arrival, and
+//     it records no incident whichever call processes it.
 //   * onResync(color, now) returns the snapshot as a reply (after processing due deadlines).
 //   * GameRoom.fromJournal(records, { config, createChessGame, strict }) needs the injected rules
 //     and configuration; room.recover(now) applies the restart semantics of DESIGN 6.4 separately
@@ -338,16 +342,17 @@ export class GameRoom {
      * @param {{seq:number, ply:number, move:number, posHash:number, thinkMs:number, drawOffer:boolean}} msg
      * @param {number} now
      * @param {number} [recvAt] arrival credited by the host after a stall (see the header)
+     * @param {number} [stalledSince] start of that stall (see the header)
      * @returns {Outcome}
      */
-    onMove(color, msg, now, recvAt = now) {
+    onMove(color, msg, now, recvAt = now, stalledSince = Infinity) {
         checkColor(color);
         now = Math.floor(now);
         const at = this._arrival(now, recvAt);
         const out = new Outcome();
         const ply = msg.ply | 0, move = msg.move & 0xffff;
         const wasOver = this._over;
-        this._advance(at, out);
+        this._advance(at, out, stalledSince);
         // 2. Game over (a flag that fell at this very moment for the sender is FlagFell).
         if (this._over) {
             const r = this.result.reason;
@@ -419,22 +424,22 @@ export class GameRoom {
     }
 
     /** Resignation (any time while the game runs). */
-    onResign(color, now, seq = 0, recvAt = now) {
+    onResign(color, now, seq = 0, recvAt = now, stalledSince = Infinity) {
         checkColor(color);
         now = this._arrival(Math.floor(now), recvAt);
         const out = new Outcome();
-        this._advance(now, out);
+        this._advance(now, out, stalledSince);
         if (this._over) return this._refuse(out, EC.GameOver, seq);
         this._end(winFor(color ^ 1), ER.Resignation, now, out, color, NONE);
         return out;
     }
 
     /** Draw offer without a move (DESIGN 6.3). */
-    onDrawOffer(color, now, seq = 0, recvAt = now) {
+    onDrawOffer(color, now, seq = 0, recvAt = now, stalledSince = Infinity) {
         checkColor(color);
         now = this._arrival(Math.floor(now), recvAt);
         const out = new Outcome();
-        this._advance(now, out);
+        this._advance(now, out, stalledSince);
         if (this._over) return this._refuse(out, EC.GameOver, seq);
         if (this.drawOffer === (color ^ 1)) {           // both want a draw
             this._end(GS.Draw, ER.Agreement, now, out, NONE, NONE);
@@ -450,11 +455,11 @@ export class GameRoom {
     }
 
     /** Answer to the opponent's pending draw offer. */
-    onDrawAnswer(color, accept, now, seq = 0, recvAt = now) {
+    onDrawAnswer(color, accept, now, seq = 0, recvAt = now, stalledSince = Infinity) {
         checkColor(color);
         now = this._arrival(Math.floor(now), recvAt);
         const out = new Outcome();
-        this._advance(now, out);
+        this._advance(now, out, stalledSince);
         if (this._over) return this._refuse(out, EC.GameOver, seq);
         if (this.drawOffer !== (color ^ 1)) return this._refuse(out, EC.NoPendingOffer, seq);
         if (accept) {
@@ -469,11 +474,11 @@ export class GameRoom {
     }
 
     /** Draw claim: threefold repetition or fifty-move rule in the current position. */
-    onDrawClaim(color, now, seq = 0, recvAt = now) {
+    onDrawClaim(color, now, seq = 0, recvAt = now, stalledSince = Infinity) {
         checkColor(color);
         now = this._arrival(Math.floor(now), recvAt);
         const out = new Outcome();
-        this._advance(now, out);
+        this._advance(now, out, stalledSince);
         if (this._over) return this._refuse(out, EC.GameOver, seq);
         const g = this.game;
         let reason = ER.None;
@@ -489,11 +494,11 @@ export class GameRoom {
     }
 
     /** Abort: only before the sender's own first move (conduct counter 'abort'). */
-    onAbort(color, now, seq = 0, recvAt = now) {
+    onAbort(color, now, seq = 0, recvAt = now, stalledSince = Infinity) {
         checkColor(color);
         now = this._arrival(Math.floor(now), recvAt);
         const out = new Outcome();
-        this._advance(now, out);
+        this._advance(now, out, stalledSince);
         if (this._over) return this._refuse(out, EC.GameOver, seq);
         if (this.ply > color) return this._refuse(out, EC.AbortNotAllowed, seq);
         this._end(GS.Aborted, ER.Aborted, now, out, color, NONE);
@@ -505,11 +510,11 @@ export class GameRoom {
      * Rematch after the end: accept=true offers or accepts, accept=false declines or withdraws.
      * When both accepted, Outcome.rematch holds the new game's players (colours swapped).
      */
-    onRematch(color, accept, now, seq = 0) {
+    onRematch(color, accept, now, seq = 0, recvAt = now, stalledSince = Infinity) {
         checkColor(color);
         now = Math.floor(now);
         const out = new Outcome();
-        this._advance(now, out);
+        this._advance(this._arrival(now, recvAt), out, stalledSince);
         if (!this._over || this.rematchState !== RM_OPEN) return this._refuse(out, EC.RematchUnavailable, seq);
         if (!accept) {
             this._closeRematch(out, color);
@@ -533,13 +538,13 @@ export class GameRoom {
 
     /**
      * The player's connection is gone (DESIGN 6.4). After the end it only closes the rematch window.
-     * `recvAt`: see the header (stall credit).
+     * `recvAt`, `stalledSince`: see the header (stall credit).
      */
-    onDisconnect(color, now, recvAt = now) {
+    onDisconnect(color, now, recvAt = now, stalledSince = Infinity) {
         checkColor(color);
         now = Math.floor(now);
         const out = new Outcome();
-        this._advance(this._arrival(now, recvAt), out);
+        this._advance(this._arrival(now, recvAt), out, stalledSince);
         if (this._over) {
             this.connected[color] = false;
             this._closeRematch(out, color);
@@ -553,12 +558,15 @@ export class GameRoom {
         return out;
     }
 
-    /** The player is back (the host sends the snapshot). `recvAt`: see the header (stall credit). */
-    onReconnect(color, now, recvAt = now) {
+    /**
+     * The player is back (the host sends the snapshot). `recvAt`, `stalledSince`: see the header
+     * (stall credit).
+     */
+    onReconnect(color, now, recvAt = now, stalledSince = Infinity) {
         checkColor(color);
         now = Math.floor(now);
         const out = new Outcome();
-        this._advance(this._arrival(now, recvAt), out);
+        this._advance(this._arrival(now, recvAt), out, stalledSince);
         if (this._over) {
             this.connected[color] = true;
             return out;
@@ -579,21 +587,27 @@ export class GameRoom {
         this.clock.setRtt(color, rttMs);
     }
 
-    /** Full snapshot for the sender (after processing due deadlines). `recvAt`: see the header. */
-    onResync(color, now, recvAt = now) {
+    /**
+     * Full snapshot for the sender (after processing due deadlines). `recvAt`, `stalledSince`: see
+     * the header.
+     */
+    onResync(color, now, recvAt = now, stalledSince = Infinity) {
         now = Math.floor(now);
         const out = new Outcome();
-        this._advance(this._arrival(now, recvAt), out);
+        this._advance(this._arrival(now, recvAt), out, stalledSince);
         out.reply.push(this.snapshotBuffer(color, now));
         return out;
     }
 
-    /** Anti-cheat: `color` loses (EndReason.Forfeit; a rated game is rated normally). */
-    forfeit(color, now) {
+    /**
+     * Anti-cheat: `color` loses (EndReason.Forfeit; a rated game is rated normally). `recvAt`,
+     * `stalledSince`: see the header (stall credit).
+     */
+    forfeit(color, now, recvAt = now, stalledSince = Infinity) {
         checkColor(color);
-        now = Math.floor(now);
+        now = this._arrival(Math.floor(now), recvAt);
         const out = new Outcome();
-        this._advance(now, out);
+        this._advance(now, out, stalledSince);
         if (this._over) return out;
         this._end(winFor(color ^ 1), ER.Forfeit, now, out, color, NONE);
         return out;
@@ -610,7 +624,8 @@ export class GameRoom {
 
     /**
      * Processes every deadline due at `now` (flags, first-move timeouts, grace, rematch window).
-     * `stalledSince`: start of a stall of the host's worker that ended just before (see the header).
+     * `stalledSince`: start of the stall of the host's worker these deadlines waited through (see
+     * the header).
      */
     tick(now, stalledSince = Infinity) {
         now = Math.floor(now);

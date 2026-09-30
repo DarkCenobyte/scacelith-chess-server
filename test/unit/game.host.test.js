@@ -750,3 +750,66 @@ test('stall credit: a first-move timeout that fell during a stall aborts without
     assert.equal(h.host.room(id2).result.reason, ER.NoShow);
     assert.deepEqual(h.primary.of('conduct.record'), [{ userId: 1, kind: 'noshow' }]);
 });
+
+test('stall credit: a move that reached its socket while the backlog of a stall was read beats the flag', async () => {
+    for (const moves of [true, false]) {
+        const { host, clock, id, ew, eb, deadline } = running();
+        clock.t = deadline - 1010;
+        host.heartbeat(clock.t);                                  // the last beat before the stall
+        clock.t = deadline - 400;
+        assert.equal(host.heartbeat(clock.t), true);              // a 600 ms stall, detected
+        // The poll phase reads the stall's backlog for 600 ms. White's move reaches its socket at
+        // deadline - 100, after that poll phase looked at it: it waits for the next one.
+        clock.t = deadline + 200;
+        await drain();                                            // the timers due by the detecting beat
+        assert.equal(host.room(id).isOver, false, 'the flag falls after the deadline the poll phase covered');
+        clock.t = deadline + 202;
+        assert.equal(host.heartbeat(clock.t), true);              // that poll phase was a stall of its own
+        if (moves) {
+            clock.t = deadline + 203;
+            assert.equal(host.stallCredit(clock.t), 593);
+            host.onClientMessage(id, 1, moveMsg(host.room(id)), ew);
+            assert.equal(last(eb).type, MSG.MoveMade);
+        }
+        await drain();
+        const room = host.room(id);
+        if (moves) assert.deepEqual([room.isOver, room.ply], [false, 3]);
+        else assert.deepEqual([room.result.reason, room.result.endedAt], [ER.Timeout, deadline + 202]);
+    }
+});
+
+test('stall credit: a first-move timeout that fell during a stall longer than the credit records no no-show when a request finds it', async () => {
+    for (const first of ['resync', 'move', 'close', 'attach', 'rematch', 'forfeit']) {
+        const { host, clock, primary } = mkHost();
+        const id = newGame(host);
+        const ew = new FakeEndpoint(1), eb = new FakeEndpoint(2);
+        host.attach(id, 1, ew); host.attach(id, 2, eb);
+        const dl = host.wheel.deadlineOf(host.rooms.get(id));    // White's first-move deadline
+        host.heartbeat(dl - 2010);
+        clock.t = dl + 18000;                                    // a 20 s stall, the deadline 2 s into it
+        host.heartbeat(clock.t);
+        assert.equal(host.stallCredit(clock.t), 5000);           // the request counts as arrived 3 s after the deadline
+        if (first === 'resync') host.onClientMessage(id, 2, { type: MSG.Resync, seq: 7, game: id }, eb);
+        else if (first === 'move') host.onClientMessage(id, 1, moveMsg(host.room(id)), ew);
+        else if (first === 'close') host.detach(id, 2, eb);
+        else if (first === 'attach') host.attach(id, 2, new FakeEndpoint(3));
+        else if (first === 'rematch') host.onClientMessage(id, 2, { type: MSG.Rematch, seq: 7, game: id, accept: true }, eb);
+        else assert.equal(host.forfeitUser(2), true);           // a sanction from the primary
+        assert.deepEqual([host.room(id).result.status, host.room(id).result.reason], [GS.Aborted, ER.NoShow], first);
+        await drain();
+        assert.deepEqual(primary.of('conduct.record'), [], first);
+    }
+    // A deadline due before the stall began (at the beat that did not come) records one all the same.
+    const { host, clock, primary } = mkHost();
+    const id = newGame(host);
+    const eb = new FakeEndpoint(2);
+    host.attach(id, 1, new FakeEndpoint(1)); host.attach(id, 2, eb);
+    const dl = host.wheel.deadlineOf(host.rooms.get(id));
+    host.heartbeat(dl - 5);
+    clock.t = dl + 18000;
+    host.heartbeat(clock.t);
+    host.onClientMessage(id, 2, { type: MSG.Resync, seq: 7, game: id }, eb);
+    assert.equal(host.room(id).result.reason, ER.NoShow);
+    assert.deepEqual(primary.of('conduct.record'), [{ userId: 1, kind: 'noshow' }]);
+    await drain();
+});
