@@ -4,13 +4,14 @@ This server separates three things that are often mixed up:
 
 | | What | Automatic action |
 |---|---|---|
-| **Certain protocol cheats** | A client did something an unmodified game client cannot do (forged message type, illegal move or move out of turn in a synchronised position, message for a game it does not play). | Yes: forfeit, disconnection, ban of `BAN_DURATION_HOURS`, integrity level `confirmed`. |
-| **Statistical suspicion** | Engine analysis of finished rated games says a player's moves and timing look like engine assistance. | **Never.** The integrity level and the evidence are written for a moderator. No ban, no matchmaking change. |
+| **Certain protocol cheats** | A client did something an unmodified game client cannot do (forged message type, illegal move or move out of turn in a synchronised position, message for a game it does not play). | Yes: forfeit, disconnection, ban of `BAN_DURATION_HOURS`, integrity level `confirmed`, rating refunds of the player's victims. |
+| **Statistical suspicion** | Engine analysis of finished rated games says a player's moves and timing look like engine assistance. | **Never.** The integrity level and the evidence are written for a moderator. No ban, no matchmaking change. A moderator who confirms it bans the player, which refunds the victims too. |
 | **Reports** | Players report opponents of their recent games. | **Never.** They raise the review priority, weighted by the reporter's credibility. |
 
-Code: `src/anticheat/` (`index.js` anomalies and sanctions, `analysis/` engine and features,
-`scoring.js` + `priors.js` model, `reports.js`, `admin.js`), `src/http/routes/reports.js`,
-`bin/analysis-worker.js`, `bin/admin.js`.
+Code: `src/anticheat/` (`index.js` anomalies and sanctions, `sanction.js` the database side of
+an automatic ban, `refunds.js` + `refund-notices.js` rating refunds, `analysis/` engine and
+features, `scoring.js` + `priors.js` model, `reports.js`, `admin.js`),
+`src/http/routes/reports.js`, `bin/analysis-worker.js`, `bin/admin.js`.
 
 ## 1. Anomalies (protocol)
 
@@ -35,8 +36,13 @@ Storage: certain anomalies are written at once; the others are buffered and writ
 `insertBatch` per second, repeats of the same kind in the same game coalesced into one row with
 `count` and `lastAt` (a flooding client cannot flood the database). When the buffer holds a
 suspicious anomaly, a shard also writes it right before it commits finished games, so that the
-analysis queue policy of the commit sees it. The buffer is bounded (5000 rows; info rows are
-dropped first) and losses are counted in
+analysis queue policy of the commit sees it. In a shard these writes, like the automatic
+sanctions, go through the store writer thread that commits the finished games
+(`src/store/writer.js`, its own SQLite connection): the event loop never waits for the disk or
+the database lock, and the thread writes its messages in the order they were sent (anomalies
+flushed before a commit are written before it, a certain anomaly before the ban it causes). A
+batch the thread could not write is counted as lost like any other. The buffer is bounded (5000
+rows; info rows are dropped first) and losses are counted in
 `scacelith_anticheat_anomalies_dropped_total`. Metrics: `scacelith_anticheat_anomalies_total{kind,severity}`.
 Suspicious and certain anomalies are logged with `log.security('anomaly', ...)`.
 
@@ -49,10 +55,55 @@ With `AUTO_SANCTION_CERTAIN_CHEATS=true` the host ends the game (`Forfeit`) and 
 * sets the integrity level to `confirmed` and appends `{ kind, gameId, at, banUntil }` to
   `evidence.certain` (existing statistical evidence is kept);
 * writes a `sanction_auto` security event and asks the primary to kick the player everywhere
-  (`sanction.applied`).
+  (`sanction.applied`);
+* refunds the player's victims (below).
 
 It is idempotent within a game: several certain anomalies of the same game (even reported by
-different shards) produce one ban. Another game is another offence and gets its own ban.
+different shards) produce one ban. Another game is another offence and gets its own ban. In a
+shard the database work runs on the store writer thread (section 1).
+
+### Rating refunds
+
+When a player is banned as a cheater, the rating points their opponents lost to them are given
+back (`refunds.js`, the store's `refunds`, table `rating_refunds`):
+
+* **When**: an automatic ban for a certain cheat (also when the player was already banned: the
+  refunds are idempotent), and a moderator's `integrity confirm` (unless `--no-refund`). A
+  `user ban` is not about cheating and refunds nothing.
+* **Which games**: the cheater's rated games that ended within `RATING_REFUND_DAYS` (default 60;
+  0 turns the automatic refunds off) before the ban, or since the moderator's `--refund-since`.
+* **What**: each opponent who lost points in such a game gets exactly those points back, added
+  to their **current** rating in that category; their peak rises with it when it is exceeded.
+  Nothing is recomputed: the victim's later games, the cheater's other opponents and the counts
+  (games, wins, draws, losses) stand as played. A draw that cost points (against a lower-rated
+  cheater) is refunded like a loss; a win is left alone; the cheater's own rating is not touched
+  (a `confirmed` player is off the leaderboard). Only a change of the K formula is refunded: the
+  game that gave a player their first rating moved them from a working rating, which was no
+  rating to lose (the K factor of each game is stored since migration 004; the games finished
+  before it were all K-formula changes and are refunded when they cost points).
+* **Once**: one refund per game and victim at most (`UNIQUE (game_id, victim_id)`): a second
+  ban, a retry or a moderator's `refunds apply` only gives the refunds still missing.
+* **Audit trail**: every refund is a row (game, victim, cheater, category, points, time, the ban
+  that triggered it, `auto` or `moderator` and the moderator's name, when the victim was told)
+  plus a `rating_refund` security event; a moderator's command adds its `moderator_action` with
+  the totals; the log has one `rating.refund` security line per ban or command that refunds.
+* **The victims are told** with `Notice{RatingRestored, arg: points}` (the total of their refunds
+  not told yet), out of a game only: at once when they are connected and neither playing nor
+  starting a game; otherwise right after their current game ends; otherwise at their next
+  connection, right after `Welcome`, unless that connection resumes a game (then after it ends).
+  The primary finds the refunds of an automatic ban at once (`sanction.applied` carries their
+  number) and those of an admin command within 5 s. A refund is marked notified only once the
+  shard reports the notice written on the victim's connection.
+* **An unban takes nothing back**, nor does `integrity clear`. The points were lost in games
+  against a player found cheating; lifting the ban (its end, leniency, an appeal) does not make
+  those games fair. Taking the points back later would hit the victims, who did nothing wrong,
+  on ratings that have moved on through honest games since, and they have already been told.
+  A mistaken confirmation costs at most the points its victims had lost in the window, which is
+  the lesser harm. `refunds list` shows what was given.
+
+Known limit: a game that ended on another shard in the last few tens of milliseconds before an
+automatic ban may not be in the database yet (its commit waits up to `DB_COMMIT_MS`): it is not
+refunded then. `refunds apply` gives it later (the refunds already given are skipped).
 
 ## 3. Engine analysis
 
@@ -246,8 +297,11 @@ plus `reviewed_by` / `created_by`).
 ```
 scacelith-admin integrity list [--level suspected|high_confidence|confirmed]   # by review priority
 scacelith-admin integrity show <name>        # evidence, per-game features, anomalies, reports
-scacelith-admin integrity confirm <name> --reason TEXT [--hours N]   # confirmed + ban, cheating reports -> actioned
+scacelith-admin integrity confirm <name> --reason TEXT [--hours N] [--refund-since DATE | --no-refund]
+                                             # confirmed + ban + rating refunds, cheating reports -> actioned
 scacelith-admin integrity clear <name> [--reason TEXT] [--dismiss-reports]
+scacelith-admin refunds apply <name> [--since DATE]   # refunds of a confirmed cheater (window: from the latest ban)
+scacelith-admin refunds list [<name>] [--victim NAME] [--limit N]
 scacelith-admin reports list | reports resolve <id> actioned|dismissed
 scacelith-admin anomalies <name> | user show|ban|unban|reset-mfa|verify-email|revoke-sessions <name> | stats
 ```
@@ -270,7 +324,17 @@ What to look at in `integrity show`:
 
 A ban from the CLI applies at the player's next connection (the CLI has no network access to
 the running server); `--revoke-sessions` also logs them out (shards drop cached sessions within
-30 s).
+30 s). Its rating refunds are in the database at once; the running server tells the victims
+within 5 s (or later, out of a game).
+
+Refunds: `integrity confirm` refunds the games of the last `RATING_REFUND_DAYS` by default;
+`--refund-since DATE` (`YYYY-MM-DD`, UTC, or an ISO 8601 time with its offset) sets another
+start, for a player who cheated longer; `--no-refund` gives none (for example when the evidence
+covers only some games: refund them later with `refunds apply --since`). `refunds apply` works
+on a `confirmed` player only. DATE cannot be in the future. The options are checked before
+anything is written; the refunds run in their own transaction after the ban, and if they fail
+(a database error) the ban stands, its `moderator_action` records the error, and the command
+exits with an error that gives the `refunds apply` to run.
 
 ## 7. False positives: what the model does about them
 
@@ -303,6 +367,8 @@ the running server); `--revoke-sessions` also logs them out (shards drop cached 
 | Population statistics (n, mean, M2 per metric, category and rating bucket; no personal data) | `store.integrity` population | kept |
 | Reports (reporter, reported, game, category, comment, weight, outcome, moderator) | `store.reports` | kept; comments are only shown to moderators |
 | Moderator actions | `store.security` (`moderator_action`) | security retention |
+| Rating refunds (game, victim, cheater, category, points, time, ban or moderator, notified) | `rating_refunds` | kept |
+| Refund events | `store.security` (`rating_refund`) | security retention |
 
 No IP address is stored by this module (reports and moderator events carry `ip: null`).
 
@@ -324,4 +390,5 @@ header of `src/anticheat/index.js`):
   a report does not touch the analysis queue);
 * `analysis.next()` returns each job with its `priority` (0 for the ordinary sample, the only
   jobs that feed the population);
-* free-form values are passed as objects and retried as JSON text if the store refuses them.
+* free-form values are passed as objects and retried as JSON text if the store refuses them;
+* the rating refunds use `refunds` when the store has it (a partial store gives none).

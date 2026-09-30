@@ -31,8 +31,9 @@
 //   running (and its new result is ignored by the database).
 //   Right before finishBatch, the anti-cheat's buffered anomalies are written when one of them is
 //   not info (anticheat.flush() when anticheat.pendingSignalCount > 0), so that the analysis
-//   queue policy of the commit sees those of the game's last second; that is a synchronous
-//   write on the main thread's SQLite connection (bounded by busy_timeout). After the commit:
+//   queue policy of the commit sees those of the game's last second. In a shard both go to the
+//   store writer thread, which writes its messages in order (src/store/writer.js): the flush only
+//   hands the rows over. After the commit:
 //   RatingUpdate to both endpoints still attached, journal.committed(id), primary 'game.ended'.
 //   A finished room stays in memory until it is committed and its rematch window is closed.
 // * recover() replays the journal at start-up: unfinished games are restored (both players
@@ -951,8 +952,8 @@ export class GameHost {
         }
         // The anomalies still buffered by the anti-cheat (up to a second old) are written first
         // when one of them is not info: the commit's analysis queue policy looks for the game's
-        // suspicious anomalies. This is a synchronous write on the main thread's connection
-        // (bounded by busy_timeout); info anomalies wait for the anti-cheat's own timer.
+        // suspicious anomalies. In a shard they are handed to the store writer thread ahead of the
+        // commit (written in that order); info anomalies wait for the anti-cheat's own timer.
         const ac = this.anticheat;
         if (ac && typeof ac.flush === 'function' && ac.pendingSignalCount > 0) {
             try { ac.flush(); } catch (err) { this.log.warn('anticheat flush failed', { err }); }

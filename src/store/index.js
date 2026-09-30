@@ -34,8 +34,21 @@
 //   - tokens.consume(kind, hash, now) refuses expired tokens as well as consumed ones.
 //   - sso.link throws StoreError 'sso_taken' when the identity belongs to another account;
 //     sso.forUser(userId) lists an account's identities.
-//   - ratings.leaderboard(category, limit, minGames) leaves out deleted accounts and players whose
-//     integrity level is 'confirmed'.
+//   - ratings.leaderboard(category, limit, minGames) leaves out deleted accounts, players whose
+//     integrity level is 'confirmed' and records still in their unrated phase.
+//   - ratings: a record carries the FIDE unrated phase of match/elo.js (rated, unratedGames,
+//     unratedOpponents, unratedHalfPoints; migration 004); a missing record is unrated at
+//     INITIAL_RATING. A rating function that returns records without `rated` (tests) rates every
+//     game. `provisional` (forUser, the RatingChange objects) is: unrated, or fewer than
+//     PROVISIONAL_GAMES games. finishBatch also stores the K factor of each side's change
+//     (games.white_k / black_k, 0 when the K formula did not apply), which the refunds read.
+//   - refunds (anticheat/refunds.js): applyForCheater({ cheaterId, since, now, sanctionId, source,
+//     by }) gives back, in one transaction, to each opponent of the cheater the rating points they
+//     lost (a K-formula change: k > 0, or NULL for the games finished before migration 004) in a
+//     rated game against them that ended at `since` or later, on the victim's current record of that
+//     category (the peak rises with it); one refund per (game, victim) at most (a second call
+//     skips those already given). Returns the refunds given. list({ cheaterId, victimId, limit }),
+//     pendingSince(afterId, limit) and pendingFor(victimId) (not notified yet), markNotified(ids, now).
 //   - games.recentForUser returns summaries (no move arrays); games.byId the full record.
 //     games.countBetween(a, b, since, { rated }) counts both colour orders; extra
 //     games.countForUser(userId) (public profile).
@@ -609,35 +622,45 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
 
     // ---- ratings -------------------------------------------------------------------------------
 
-    const defaultRating = () => ({ rating: initialRating, games: 0, wins: 0, draws: 0, losses: 0, peak: initialRating, reachedSenior: false });
+    const RATING_COLS = 'rating, games, wins, draws, losses, peak, reached_senior, rated, unrated_games, unrated_opponents, unrated_half_points';
+    const defaultRating = () => ({
+        rating: initialRating, games: 0, wins: 0, draws: 0, losses: 0, peak: initialRating, reachedSenior: false,
+        rated: false, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0,
+    });
     const toRating = (r) => ({
         rating: r.rating, games: r.games, wins: r.wins, draws: r.draws, losses: r.losses, peak: r.peak, reachedSenior: !!r.reached_senior,
+        rated: !!r.rated, unratedGames: r.unrated_games, unratedOpponents: r.unrated_opponents, unratedHalfPoints: r.unrated_half_points,
     });
+    // Shown as "1500?": unrated, or fewer than PROVISIONAL_GAMES games (K = 40).
+    const provisionalOf = (rec) => !rec.rated || rec.games < provisionalGames;
     function readRating(userId, category) {
-        const r = st('SELECT rating, games, wins, draws, losses, peak, reached_senior FROM ratings WHERE user_id = ? AND category = ?')
-            .get(userId, category);
+        const r = st(`SELECT ${RATING_COLS} FROM ratings WHERE user_id = ? AND category = ?`).get(userId, category);
         return r ? toRating(r) : defaultRating();
     }
     function writeRating(userId, category, rec, now) {
-        st(`INSERT INTO ratings (user_id, category, rating, games, wins, draws, losses, peak, reached_senior, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        st(`INSERT INTO ratings (user_id, category, ${RATING_COLS}, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (user_id, category) DO UPDATE SET rating = excluded.rating, games = excluded.games, wins = excluded.wins,
             draws = excluded.draws, losses = excluded.losses, peak = excluded.peak, reached_senior = excluded.reached_senior,
-            updated_at = excluded.updated_at`)
-            .run(userId, category, rec.rating, rec.games, rec.wins, rec.draws, rec.losses, rec.peak, b01(rec.reachedSenior), now);
+            rated = excluded.rated, unrated_games = excluded.unrated_games, unrated_opponents = excluded.unrated_opponents,
+            unrated_half_points = excluded.unrated_half_points, updated_at = excluded.updated_at`)
+            .run(userId, category, rec.rating, rec.games, rec.wins, rec.draws, rec.losses, rec.peak, b01(rec.reachedSenior), b01(rec.rated),
+                rec.unratedGames, rec.unratedOpponents, rec.unratedHalfPoints, now);
     }
 
     const ratings = {
         get(userId, category) { return readRating(userId, category); },
         forUser(userId) {
-            return st(`SELECT category, rating, games, wins, draws, losses, peak, reached_senior, updated_at FROM ratings
-                WHERE user_id = ? ORDER BY category`).all(userId)
-                .map((r) => ({ category: r.category, ...toRating(r), provisional: r.games < provisionalGames, updatedAt: r.updated_at }));
+            return st(`SELECT category, ${RATING_COLS}, updated_at FROM ratings WHERE user_id = ? ORDER BY category`).all(userId)
+                .map((r) => {
+                    const rec = toRating(r);
+                    return { category: r.category, ...rec, provisional: provisionalOf(rec), updatedAt: r.updated_at };
+                });
         },
         leaderboard(category, limit = 100, minGames = provisionalGames) {
             return st(`SELECT r.user_id, u.username, r.rating, r.games, r.wins, r.draws, r.losses, r.peak
                 FROM ratings r JOIN users u ON u.id = r.user_id LEFT JOIN player_integrity pi ON pi.user_id = r.user_id
-                WHERE r.category = ? AND r.games >= ? AND u.status = 'active' AND (pi.level IS NULL OR pi.level <> 'confirmed')
+                WHERE r.category = ? AND r.games >= ? AND r.rated = 1 AND u.status = 'active'
+                AND (pi.level IS NULL OR pi.level <> 'confirmed')
                 ORDER BY r.rating DESC, r.games DESC, r.user_id LIMIT ?`).all(category, minGames, limit)
                 .map((r) => ({ userId: r.user_id, username: r.username, rating: r.rating, games: r.games, wins: r.wins, draws: r.draws,
                     losses: r.losses, peak: r.peak }));
@@ -679,10 +702,12 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
     }
 
     // The rating record written after a game: applyGame's record, completed from the previous one
-    // for any field it does not return.
+    // for any field it does not return (a record without `rated` comes from a rating function
+    // without the unrated phase, which rates every game).
     function nextRecord(prev, side, score) {
         const rec = (side && side.record) || {};
         const after = Math.round(side.after ?? rec.rating);
+        const rated = rec.rated ?? true;
         return {
             rating: Math.round(rec.rating ?? after),
             games: rec.games ?? prev.games + 1,
@@ -691,6 +716,10 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             losses: rec.losses ?? prev.losses + (score === 0 ? 1 : 0),
             peak: Math.round(rec.peak ?? Math.max(prev.peak, after)),
             reachedSenior: !!(rec.reachedSenior ?? prev.reachedSenior),
+            rated: !!rated,
+            unratedGames: rated ? 0 : Math.floor(rec.unratedGames ?? 0),
+            unratedOpponents: rated ? 0 : Math.floor(rec.unratedOpponents ?? 0),
+            unratedHalfPoints: rated ? 0 : Math.floor(rec.unratedHalfPoints ?? 0),
         };
     }
 
@@ -699,10 +728,13 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         const w = readRating(row.white_id, row.category);
         const b = readRating(row.black_id, row.category);
         return {
-            white: { before: row.white_before, after: row.white_after, games: w.games, provisional: w.games < provisionalGames },
-            black: { before: row.black_before, after: row.black_after, games: b.games, provisional: b.games < provisionalGames },
+            white: { before: row.white_before, after: row.white_after, games: w.games, provisional: provisionalOf(w) },
+            black: { before: row.black_before, after: row.black_after, games: b.games, provisional: provisionalOf(b) },
         };
     }
+
+    // The K factor applyGame reports for one side (0: no K-formula change), NULL when it reports none.
+    const kOf = (side) => (Number.isInteger(side?.k) ? side.k : null);
 
     // Whether player `userId` already has SIGNAL_JOBS_PER_PLAYER signal jobs waiting (two range
     // scans of the partial indexes of migration 003, at most that many entries each). The literal
@@ -784,6 +816,7 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         const played = r.status !== GameStatus.Aborted;
         const rate = !!r.rated && played && r.category !== 'custom';
         let changes = null;
+        let k = [null, null];
         if (rate) {
             if (typeof applyGame !== 'function') {
                 throw new StoreError('no_rating_function', 'openStore(config, { applyGame }) is required to commit rated games');
@@ -798,21 +831,23 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             writeRating(r.blackId, r.category, bRec, now);
             changes = {
                 white: { before: Math.round(res.white.before ?? w.rating), after: wRec.rating, games: wRec.games,
-                    provisional: wRec.games < provisionalGames },
+                    provisional: provisionalOf(wRec) },
                 black: { before: Math.round(res.black.before ?? b.rating), after: bRec.rating, games: bRec.games,
-                    provisional: bRec.games < provisionalGames },
+                    provisional: provisionalOf(bRec) },
             };
+            k = [kOf(res.white), kOf(res.black)];
         }
         const moves = packArray(r.moves ?? [], Uint16Array);
         const plies = r.moves ? r.moves.length : 0;
         st(`INSERT INTO games (id, category, rated, base_ms, inc_ms, white_id, black_id, white_name, black_name, white_rating,
             black_rating, started_at, ended_at, status, reason, ply_count, white_before, white_after, black_before, black_after,
-            rematch_of, flags, moves, spent, clocks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+            white_k, black_k, rematch_of, flags, moves, spent, clocks)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
             .run(r.id, r.category, b01(r.rated), ms(r.baseMs ?? 0), ms(r.incMs ?? 0), r.whiteId, r.blackId,
                 String(r.whiteName ?? ''), String(r.blackName ?? ''), ms(r.whiteRating), ms(r.blackRating),
                 ms(r.startedAt ?? r.endedAt ?? now), ms(r.endedAt ?? now), r.status, r.reason ?? 0, plies,
                 changes ? changes.white.before : null, changes ? changes.white.after : null,
-                changes ? changes.black.before : null, changes ? changes.black.after : null,
+                changes ? changes.black.before : null, changes ? changes.black.after : null, k[0], k[1],
                 r.rematchOf ? r.rematchOf : null, r.flags ?? 0,
                 moves, packArray(r.spentMs, Uint32Array), packArray(r.clockMs, Uint32Array));
         const entry = { gameId: r.id, ratings: changes };
@@ -1216,6 +1251,77 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         },
     };
 
+    // ---- rating refunds ----------------------------------------------------------------------------
+
+    const REFUND_COLS = 'f.id, f.game_id, f.victim_id, f.cheater_id, f.category, f.points, f.created_at, f.sanction_id, f.source, '
+        + 'f.created_by, f.notified_at';
+    const toRefund = (r) => ({
+        id: r.id, gameId: r.game_id, victimId: r.victim_id, cheaterId: r.cheater_id, category: r.category, points: r.points,
+        createdAt: r.created_at, sanctionId: r.sanction_id, source: r.source, createdBy: r.created_by, notifiedAt: r.notified_at,
+        victimName: r.victim_name, cheaterName: r.cheater_name,
+    });
+
+    const refunds = {
+        /**
+         * Refunds the victims of a banned cheater (one transaction; header). The games are the
+         * cheater's rated games that ended at `since` or later in which the opponent's rating fell
+         * by the K formula. Returns [{ id, gameId, victimId, category, points, endedAt }].
+         */
+        applyForCheater({ cheaterId, since = 0, now = Date.now(), sanctionId = null, source = 'moderator', by = null }) {
+            return tx(() => {
+                const games = st(`SELECT id, category, ended_at, black_id AS victim, black_before - black_after AS points, black_k AS k
+                    FROM games WHERE white_id = ?1 AND ended_at >= ?2 AND rated = 1 AND black_before IS NOT NULL
+                    UNION ALL SELECT id, category, ended_at, white_id, white_before - white_after, white_k
+                    FROM games WHERE black_id = ?1 AND ended_at >= ?2 AND rated = 1 AND white_before IS NOT NULL
+                    ORDER BY 1`).all(cheaterId, ms(since));
+                const out = [];
+                for (const g of games) {
+                    if (!(g.points > 0) || g.k === 0 || g.victim === cheaterId) continue;
+                    const rec = st('SELECT rating, peak FROM ratings WHERE user_id = ? AND category = ?').get(g.victim, g.category);
+                    if (!rec) continue;
+                    const ins = st(`INSERT INTO rating_refunds (game_id, victim_id, cheater_id, category, points, created_at, sanction_id,
+                        source, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (game_id, victim_id) DO NOTHING`)
+                        .run(g.id, g.victim, cheaterId, g.category, g.points, ms(now), sanctionId || null, source,
+                            by === null || by === undefined ? null : String(by));
+                    if (Number(ins.changes) !== 1) continue;
+                    const rating = rec.rating + g.points;
+                    st('UPDATE ratings SET rating = ?, peak = ?, updated_at = ? WHERE user_id = ? AND category = ?')
+                        .run(rating, Math.max(rec.peak, rating), ms(now), g.victim, g.category);
+                    out.push({ id: Number(ins.lastInsertRowid), gameId: g.id, victimId: g.victim, category: g.category, points: g.points,
+                        endedAt: g.ended_at });
+                }
+                return out;
+            });
+        },
+        /** Newest first: the refunds of a cheater's games, those of a victim, or all of them. */
+        list({ cheaterId = null, victimId = null, limit = 100 } = {}) {
+            const where = cheaterId !== null ? 'f.cheater_id = ?1' : victimId !== null ? 'f.victim_id = ?1' : '?1 IS NULL';
+            return st(`SELECT ${REFUND_COLS}, v.username AS victim_name, c.username AS cheater_name FROM rating_refunds f
+                JOIN users v ON v.id = f.victim_id JOIN users c ON c.id = f.cheater_id WHERE ${where} ORDER BY f.id DESC LIMIT ?2`)
+                .all(cheaterId ?? victimId, limit).map(toRefund);
+        },
+        /** Refunds not notified yet, with an id above `afterId`, oldest first: [{ id, victimId, points }]. */
+        pendingSince(afterId = 0, limit = 1000) {
+            return st(`SELECT id, victim_id, points FROM rating_refunds WHERE notified_at IS NULL AND id > ? ORDER BY id LIMIT ?`)
+                .all(afterId, limit).map((r) => ({ id: r.id, victimId: r.victim_id, points: r.points }));
+        },
+        /** A victim's refunds not notified yet: { ids, points } (the partial index of migration 004). */
+        pendingFor(victimId) {
+            const rows = st('SELECT id, points FROM rating_refunds WHERE victim_id = ? AND notified_at IS NULL').all(victimId);
+            return { ids: rows.map((r) => r.id), points: rows.reduce((n, r) => n + r.points, 0) };
+        },
+        /** Marks refunds notified (those not marked yet); returns how many changed. */
+        markNotified(ids, now = Date.now()) {
+            if (!ids || !ids.length) return 0;
+            return tx(() => {
+                let n = 0;
+                const up = st('UPDATE rating_refunds SET notified_at = ? WHERE id = ? AND notified_at IS NULL');
+                for (const id of ids) n += Number(up.run(ms(now), id).changes);
+                return n;
+            });
+        },
+    };
+
     // ---- retention ------------------------------------------------------------------------------------
 
     // The purge as a list of chunked statements (?1 the cutoff, ?2 the LIMIT; one short autocommit
@@ -1328,7 +1434,7 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
 
     const store = {
         meta, users, mfa, sessions, tokens, sso, ratings, games, conduct, sanctions, anomalies, security, analysis, integrity,
-        reports, retention,
+        reports, refunds, retention,
         readonly,
         path: file,
         /** Runs fn() in one write transaction (BEGIN IMMEDIATE; nested calls use savepoints). */

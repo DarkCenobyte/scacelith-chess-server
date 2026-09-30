@@ -178,9 +178,10 @@ key('CHALLENGE_TTL_MS', { section: 'games', type: 'int', default: 60000, min: 50
 key('PRIVATE_GAME_TTL_MS', { section: 'games', type: 'int', default: 900000, min: 60000, desc: 'A private game code expires after this long.' });
 
 // ---- Matchmaking and ratings ------------------------------------------------------------------------
-key('INITIAL_RATING', { section: 'matchmaking', type: 'int', default: 1500, min: 100, max: 3000, desc: 'Rating of a new player in every category.' });
+key('INITIAL_RATING', { section: 'matchmaking', type: 'int', default: 1500, min: 100, max: 3000,
+    desc: 'Working rating of a new player in every category: shown and used for pairing until their first rating, which FIDE\'s rules compute after five rated games, not counting the losses before the first draw or win (docs/DESIGN.md, ratings), and what an unrated opponent counts for in those games.' });
 key('PROVISIONAL_GAMES', { section: 'matchmaking', type: 'int', default: 30, min: 0, max: 100,
-    desc: 'Games in a category during which the rating is provisional (K = 40, shown with "?").' });
+    desc: 'Games in a category, the five of the unrated phase included, during which the rating is provisional: K = 40 and shown with "?" (an unrated player is always provisional). FIDE uses 30.' });
 key('MATCH_TICK_MS', { section: 'matchmaking', type: 'int', default: 250, min: 50, max: 5000, desc: 'Interval between pairing rounds.' });
 key('MATCH_WINDOW_START', { section: 'matchmaking', type: 'int', default: 100, min: 0, desc: 'Largest rating difference accepted right after joining the queue.' });
 key('MATCH_WINDOW_STEP', { section: 'matchmaking', type: 'int', default: 50, min: 0, desc: 'Widening of the window at each step.' });
@@ -197,6 +198,8 @@ key('CONDUCT_ABANDON_LIMIT', { section: 'matchmaking', type: 'int', default: 3, 
 key('AUTO_SANCTION_CERTAIN_CHEATS', { section: 'anticheat', type: 'bool', default: true,
     desc: 'A technically certain cheat (forged protocol, illegal move in a synchronised position, playing out of turn) loses the game, disconnects the player and bans them for BAN_DURATION_HOURS.' });
 key('BAN_DURATION_HOURS', { section: 'anticheat', type: 'int', default: 24, min: 1, max: 87600, desc: 'Length of an automatic ban.' });
+key('RATING_REFUND_DAYS', { section: 'anticheat', type: 'int', default: 60, min: 0, max: 3650,
+    desc: 'When a player is banned as a cheater (a certain cheat, or a moderator\'s integrity confirm), each opponent who lost rating points to them in a rated game that ended within this many days before the ban gets those points back on their current rating (docs/ANTICHEAT.md, rating refunds). 0: no refunds unless a moderator asks for them (scacelith-admin refunds apply).' });
 key('ANALYSIS_ENGINE_PATH', { section: 'anticheat', type: 'path', default: '',
     desc: 'UCI engine (Stockfish) used to analyse rated games after they end. Empty: engine-based statistics are disabled (timing and reports still count).' });
 key('ANALYSIS_WORKERS', { section: 'anticheat', type: 'int', default: 1, min: 0, max: 64, desc: 'Engine processes analysing games (each uses one core, at low priority).' });

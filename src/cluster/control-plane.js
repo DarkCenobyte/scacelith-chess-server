@@ -7,8 +7,10 @@
 //               broadcast(type, payload), list() -> [shard] }       (the live shard workers)
 //   matchmaker / challenges / conduct   DESIGN 5.4 objects (conduct optional)
 //   activeBan(userId, now) -> { until } | until | null              (store.sanctions.activeBan)
-//   ratingOf(userId, category) -> { rating, games } | null           (store.ratings.get)
+//   ratingOf(userId, category) -> { rating, games, rated } | null    (store.ratings.get)
 //   acceptsChallenges(userId) -> bool                                 (store.users.byId().acceptChallenges)
+//   refunds   store.refunds (pendingSince, pendingFor, markNotified): Notice{RatingRestored} of the
+//             rating refunds, out of a game (anticheat/refund-notices.js); none without it
 //
 // Game placement: a paired game is hosted by the shard of the player who waited longer (its
 // frames then never cross the bus for that player); when that shard reports overload
@@ -25,6 +27,11 @@
 // QueueStatus every 3 s.
 //
 // Extensions to the catalog (documented for the integrators):
+//   shard -> primary  'sanction.applied' also carries `refunds` (victims refunded): the refund
+//                     notices are looked for at once
+//   primary -> shard  'conn.send' is also sent as a request for the refund notices: its reply
+//                     { ok } tells whether the frames were written (a connection not ready yet,
+//                     or gone, answers ok: false)
 //   shard -> primary  'shard.load' { conns, games, lagP99, overloaded }   (every 2 s)
 //                     'shard.ready' { shard }   (after host.recover() and listen: re-attaches the
 //                     live connections of players whose game that shard hosts)
@@ -41,6 +48,7 @@
 //   pending challenges (so the router does not need a separate mm.leave that could race with a
 //   newer connection's QueueJoin).
 
+import { RefundNotices } from '../anticheat/refund-notices.js';
 import { metrics as defaultRegistry } from '../metrics.js';
 import { encode, enums, CloseCode } from '../protocol/index.js';
 import { isGameId, shardOfGameId } from '../util/ids.js';
@@ -75,13 +83,14 @@ export class ControlPlane {
      * @param {Function} [o.activeBan]
      * @param {Function} [o.ratingOf]
      * @param {Function} [o.acceptsChallenges]
+     * @param {object} [o.refunds]
      * @param {object} [o.log]
      * @param {() => number} [o.now]
      * @param {() => number} [o.random]
      * @param {object} [o.registry]
      */
     constructor({ config, presence, matchmaker, challenges, conduct = null, limiter, once, shards, activeBan = null, ratingOf = null,
-        acceptsChallenges = null, log = null, now = Date.now, random = Math.random, registry = defaultRegistry }) {
+        acceptsChallenges = null, refunds = null, log = null, now = Date.now, random = Math.random, registry = defaultRegistry }) {
         this.config = config;
         this.presence = presence;
         this.mm = matchmaker;
@@ -109,6 +118,11 @@ export class ControlPlane {
         this.loads = new Map();
         this.readyShards = new Set();
         this._timers = [];
+        this.refundNotices = refunds ? new RefundNotices({
+            refunds, log, now,
+            canNotify: (userId) => !!this.presence.get(userId) && !this._busy(userId),
+            send: (userId, frames) => this._sendUserConfirmed(userId, frames),
+        }) : null;
 
         const r = registry;
         r.gaugeFn('scacelith_presence_online', 'Authenticated players online', () => this.presence.size);
@@ -164,9 +178,14 @@ export class ControlPlane {
         every(QUEUE_REFRESH_MS, () => this.refreshQueues());
         every(1000, () => this.expireChallenges());
         every(10000, () => this.sweep());
+        this.refundNotices?.start();
     }
 
-    stop() { for (const t of this._timers) clearInterval(t); this._timers = []; }
+    stop() {
+        for (const t of this._timers) clearInterval(t);
+        this._timers = [];
+        this.refundNotices?.stop();
+    }
 
     // ---- helpers --------------------------------------------------------------------------------
 
@@ -175,6 +194,14 @@ export class ControlPlane {
         if (!p) return false;
         this.shards.notify(p.shard, 'conn.send', { connId: p.connId, frames });
         return true;
+    }
+
+    // The same, as a request: true once the shard has written the frames on the connection.
+    async _sendUserConfirmed(userId, frames) {
+        const p = this.presence.get(userId);
+        if (!p) return false;
+        const r = await this.shards.request(p.shard, 'conn.send', { connId: p.connId, frames }, { timeoutMs: 5000 });
+        return !!(r && r.ok);
     }
 
     _kick(userId, reason, code, closeCode, frames) {
@@ -209,7 +236,7 @@ export class ControlPlane {
             if (category && category !== 'custom' && this.ratingOf) {
                 try {
                     const r = this.ratingOf(p.userId, category);
-                    if (r) { rating = r.rating; provisional = (r.games ?? 0) < this.config.provisionalGames; }
+                    if (r) { rating = r.rating; provisional = r.rated === false || (r.games ?? 0) < this.config.provisionalGames; }
                 } catch (e) { this.log?.error?.('rating read failed', { err: e }); }
             }
             out.rating = rating;
@@ -303,7 +330,9 @@ export class ControlPlane {
             });
             this._leaveQueue(userId, false);
         }
-        return { ok: true, activeGame: this.activeGames.get(userId) || 0, kicked: !!previous };
+        const activeGame = this.activeGames.get(userId) || 0;
+        this.refundNotices?.connected(userId, activeGame);
+        return { ok: true, activeGame, kicked: !!previous };
     }
 
     presenceRelease({ userId, connId }, from) {
@@ -552,6 +581,7 @@ export class ControlPlane {
 
     gameEnded({ gameId, whiteId, blackId }) {
         for (const u of [whiteId, blackId]) if (u && this.activeGames.get(u) === gameId) this.activeGames.delete(u);
+        this.refundNotices?.gameEnded([whiteId, blackId]);
         return { ok: true };
     }
 
@@ -608,7 +638,7 @@ export class ControlPlane {
 
     // ---- sanctions and sessions -----------------------------------------------------------------
 
-    sanctionApplied({ userId, until, reason }) {
+    sanctionApplied({ userId, until, reason, refunds = 0 }) {
         const end = +until || this.now() + 86400000;
         this.bans.set(userId, end);
         this.log?.security?.('sanction applied', { userId, until: end, reason });
@@ -616,6 +646,7 @@ export class ControlPlane {
         const gameId = this.activeGames.get(userId);
         if (gameId) this.shards.notify(shardOfGameId(gameId), 'game.forfeit', { userId, gameId });
         this._userGone(userId);
+        if (refunds > 0) this.refundNotices?.poll();
         return { ok: true };
     }
 

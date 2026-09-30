@@ -14,6 +14,7 @@ import { applyGame } from '../../src/match/elo.js';
 import { enums, encodeMove, MSG } from '../../src/protocol/index.js';
 import { Registry } from '../../src/metrics.js';
 import { testConfig } from '../../src/config.js';
+import { DatabaseSync } from 'node:sqlite';
 
 const { GameStatus: GS } = enums;
 const T0 = 1_800_000_000_000;
@@ -28,6 +29,12 @@ test('writer thread: a rated game is committed with its ratings; errors keep the
     try {
         const alice = store.users.create({ username: 'alice', email: 'alice@example.org' });
         const bob = store.users.create({ username: 'bob', email: 'bob@example.org' });
+        // Rated records (10 games, K 40): a newcomer's first games are its unrated phase.
+        const raw = new DatabaseSync(config.dbPath);
+        const seed = raw.prepare(`INSERT INTO ratings (user_id, category, rating, games, wins, peak, rated, updated_at)
+            VALUES (?, '3+2', 1500, 10, 5, 1500, 1, 0)`);
+        for (const u of [alice, bob]) seed.run(u);
+        raw.close();
         const clock = { t: T0 };
         const host = new GameHost({
             shard: 0, config, store: { games: { finishBatch: (r) => writer.finishBatch(r) } }, anticheat: new FakeAnticheat(),

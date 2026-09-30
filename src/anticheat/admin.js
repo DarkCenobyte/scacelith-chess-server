@@ -1,4 +1,5 @@
-// Administration commands (bin/admin.js): accounts, sanctions, integrity reviews, reports.
+// Administration commands (bin/admin.js): accounts, sanctions, integrity reviews, reports, rating
+// refunds.
 //
 // Every handler takes a Store object (DESIGN 5.5), so the commands run against the database on
 // the server host (no network) and are tested with a fake store. Every moderator action is
@@ -11,6 +12,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from 'node:sqlite';
 import { readIntegrity, writeIntegrity, writeStructured, parseMaybeJson, levelRank, LEVELS, HOUR_MS, DAY_MS } from './util.js';
+import { refundVictims, refundWindowStart, victimTotals } from './refunds.js';
 import { reviewPriority, recentReportWeight } from './reports.js';
 import { sideOf } from './scoring.js';
 
@@ -29,9 +31,18 @@ Accounts
 Integrity
   integrity list [--level suspected|high_confidence|confirmed] [--limit N]
   integrity show <name>                       evidence, per-game features, anomalies, reports
-  integrity confirm <name> --reason TEXT [--hours N] [--keep-reports]
-                                              level confirmed + ban (open cheating reports -> actioned)
+  integrity confirm <name> --reason TEXT [--hours N] [--keep-reports] [--refund-since DATE | --no-refund]
+                                              level confirmed + ban (open cheating reports -> actioned) +
+                                              rating refunds of the games since DATE (default:
+                                              RATING_REFUND_DAYS before now)
   integrity clear <name> [--reason TEXT] [--dismiss-reports]
+
+Rating refunds (the points the victims of a confirmed cheater lost to them, given back)
+  refunds apply <name> [--since DATE]         refunds of a confirmed cheater's games since DATE (default:
+                                              RATING_REFUND_DAYS before their latest ban); those
+                                              already given are skipped
+  refunds list [<name>] [--victim NAME] [--limit N]
+                                              refunds of a cheater's games, received by a victim, or all
 
 Reports and anomalies
   reports list [--limit N]                    open reports grouped by reported player, by priority
@@ -49,7 +60,8 @@ Test servers only
 Common options: --json (machine-readable output), --by NAME (moderator name; default: OS user)
 `;
 
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'revoke-sessions', 'keep-reports', 'dismiss-reports', 'i-know-this-is-a-test-server', 'verify']);
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'revoke-sessions', 'keep-reports', 'dismiss-reports', 'i-know-this-is-a-test-server', 'verify',
+    'no-refund']);
 
 /**
  * Parses command-line arguments: positionals, --flag value, --flag=value, boolean flags.
@@ -113,6 +125,19 @@ function textFlag(ctx, name, { required = false, max = 300 } = {}) {
     const s = String(v).trim();
     if (s.length > max) throw new AdminError(`--${name} is limited to ${max} characters`);
     return s;
+}
+
+// A date option: YYYY-MM-DD (00:00 UTC) or an ISO 8601 time with its offset (2026-05-01T18:30Z),
+// not in the future.
+function dateFlag(ctx, name) {
+    const v = ctx.args.flags[name];
+    if (v === undefined) return null;
+    const s = String(v).trim();
+    const valid = /^\d{4}-\d{2}-\d{2}$/.test(s) || /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(s);
+    const t = valid ? Date.parse(s) : NaN;
+    if (!Number.isFinite(t)) throw new AdminError(`--${name} expects a date: YYYY-MM-DD (UTC) or an ISO 8601 time with its offset`);
+    if (t > ctx.now()) throw new AdminError(`--${name} is in the future`);
+    return t;
 }
 
 // Audit trail of a moderator action.
@@ -290,6 +315,9 @@ function integrityConfirm(ctx) {
     const u = requireUser(ctx, ctx.args.positional[2]);
     const reason = textFlag(ctx, 'reason', { required: true });
     const hours = intFlag(ctx, 'hours', { min: 1, max: 87600, def: ctx.config?.banDurationHours ?? 24 });
+    const noRefund = !!ctx.args.flags['no-refund'];
+    const since = dateFlag(ctx, 'refund-since');
+    if (noRefund && since !== null) throw new AdminError('--refund-since and --no-refund exclude each other');
     const now = ctx.now();
     const prev = readIntegrity(ctx.store, u.id);
     const ev = { ...prev.evidence };
@@ -299,9 +327,42 @@ function integrityConfirm(ctx) {
     const until = now + hours * HOUR_MS;
     const id = ctx.store.sanctions.create({ userId: u.id, kind: 'ban', reason: `confirmed: ${reason}`, source: 'moderator', gameId: null, startsAt: now, endsAt: until, createdBy: ctx.moderator });
     const resolved = ctx.args.flags['keep-reports'] ? 0 : resolveOpenCheatingReports(ctx, u.id, 'actioned');
-    audit(ctx, 'integrity_confirm', u.id, { reason, previousLevel: prev.level, score: prev.score, sanctionId: id, until, reportsActioned: resolved });
-    return { data: { level: 'confirmed', sanctionId: id, until, reportsActioned: resolved },
-        text: `${u.username}: integrity confirmed (was ${prev.level}), banned until ${iso(until)} (sanction #${id}), ${resolved} open cheating report(s) marked actioned.\n` };
+    const from = noRefund ? null : since ?? refundWindowStart(ctx.config, now);
+    // The ban stands whatever happens to the refunds (one transaction of their own): a failure is
+    // audited with the ban and reported, and `refunds apply` gives them later.
+    let refunds = [], refundError = null;
+    if (from !== null) {
+        try {
+            refunds = refundVictims(ctx.store, { cheaterId: u.id, since: from, now, sanctionId: id, source: 'moderator', by: ctx.moderator, log: ctx.log });
+        } catch (e) {
+            refundError = e.message || String(e);
+        }
+    }
+    const victims = victimTotals(refunds);
+    audit(ctx, 'integrity_confirm', u.id, { reason, previousLevel: prev.level, score: prev.score, sanctionId: id, until, reportsActioned: resolved,
+        refundSince: from, refunds: refunds.length, refundedVictims: victims.length, refundedPoints: sumPoints(refunds), refundError });
+    if (refundError) {
+        throw new AdminError(`${u.username}: integrity confirmed and banned until ${iso(until)} (sanction #${id}), but the rating refunds failed `
+            + `(${refundError}): give them with \`refunds apply ${u.username}${since !== null ? ` --since ${iso(since)}` : ''}\``);
+    }
+    return { data: { level: 'confirmed', sanctionId: id, until, reportsActioned: resolved, refundSince: from, refunds },
+        text: `${u.username}: integrity confirmed (was ${prev.level}), banned until ${iso(until)} (sanction #${id}), ${resolved} open cheating report(s) marked actioned.\n`
+            + refundText(ctx, from, refunds) };
+}
+
+function sumPoints(refunds) { return refunds.reduce((n, r) => n + r.points, 0); }
+
+function refundText(ctx, from, refunds) {
+    if (from === null) return 'No rating refunds (--no-refund, or RATING_REFUND_DAYS=0).\n';
+    const victims = victimTotals(refunds);
+    const name = (id) => safe(() => ctx.store.users.byId(id)?.username, null) ?? `#${id}`;
+    let t = `Rating refunds of the games since ${iso(from)}: ${refunds.length} game(s), ${sumPoints(refunds)} point(s) to ${victims.length} player(s)`
+        + (refunds.length ? ' (they are told at their next moment out of a game).\n' : '.\n');
+    if (refunds.length) {
+        t += table(refunds.map((r) => ({ game: r.gameId, victim: name(r.victimId), category: r.category, points: r.points, ended: iso(r.endedAt) })),
+            ['game', 'victim', 'category', 'points', 'ended']);
+    }
+    return t;
 }
 
 function integrityClear(ctx) {
@@ -382,6 +443,40 @@ function stats(ctx) {
     t += `Open reports: ${openReports}\n`;
     if (extra) t += `Store: ${JSON.stringify(extra)}\n`;
     return { data, text: t };
+}
+
+// ---- rating refunds ------------------------------------------------------------------------------------
+
+function refundsApply(ctx) {
+    const u = requireUser(ctx, ctx.args.positional[2]);
+    if (readIntegrity(ctx.store, u.id).level !== 'confirmed') {
+        throw new AdminError(`${u.username} is not a confirmed cheater (integrity confirm first)`);
+    }
+    const now = ctx.now();
+    const bans = safe(() => ctx.store.sanctions.list(u.id), []).filter((x) => x.kind === 'ban' && (x.startsAt ?? 0) <= now)
+        .sort((a, b) => (b.startsAt ?? 0) - (a.startsAt ?? 0));
+    const ban = bans[0] || null;
+    const since = dateFlag(ctx, 'since') ?? refundWindowStart(ctx.config, ban ? ban.startsAt : now);
+    if (since === null) throw new AdminError('RATING_REFUND_DAYS is 0: give the start of the refunds with --since DATE');
+    const refunds = refundVictims(ctx.store, { cheaterId: u.id, since, now, sanctionId: ban?.id ?? null, source: 'moderator', by: ctx.moderator, log: ctx.log });
+    audit(ctx, 'refunds_apply', u.id, { since, sanctionId: ban?.id ?? null, refunds: refunds.length, refundedVictims: victimTotals(refunds).length,
+        refundedPoints: sumPoints(refunds) });
+    return { data: { since, sanctionId: ban?.id ?? null, refunds }, text: `${u.username}: ` + refundText(ctx, since, refunds) };
+}
+
+function refundsList(ctx) {
+    const limit = intFlag(ctx, 'limit', { min: 1, max: 10000, def: 100 });
+    const cheater = ctx.args.positional[2] ? requireUser(ctx, ctx.args.positional[2]) : null;
+    const victimName = ctx.args.flags.victim;
+    if (victimName === true) throw new AdminError('--victim NAME');
+    const victim = victimName === undefined ? null : requireUser(ctx, String(victimName));
+    if (cheater && victim) throw new AdminError('give a cheater or --victim, not both');
+    const rows = ctx.store.refunds.list({ cheaterId: cheater?.id ?? null, victimId: victim?.id ?? null, limit });
+    const text = table(rows.map((r) => ({
+        id: r.id, at: iso(r.createdAt), game: r.gameId, cheater: r.cheaterName, victim: r.victimName, category: r.category, points: r.points,
+        source: r.source, by: r.createdBy || (r.sanctionId ? `ban #${r.sanctionId}` : ''), notified: r.notifiedAt ? iso(r.notifiedAt) : 'not yet',
+    })), ['id', 'at', 'game', 'cheater', 'victim', 'category', 'points', 'source', 'by', 'notified']);
+    return { data: rows, text };
 }
 
 // ---- bench accounts ------------------------------------------------------------------------------------
@@ -507,6 +602,8 @@ export const COMMANDS = Object.freeze({
     'integrity clear': integrityClear,
     'reports list': reportsList,
     'reports resolve': reportsResolve,
+    'refunds apply': refundsApply,
+    'refunds list': refundsList,
     'anomalies': anomaliesCmd,
     'stats': stats,
     'bench-accounts': benchAccounts,

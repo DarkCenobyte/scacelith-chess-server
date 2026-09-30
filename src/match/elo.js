@@ -1,33 +1,98 @@
-// Elo ratings per time-control category: a pure mirror of the game's offline rating
-// (src/game/elo.h / elo.cpp), so a player's online and offline numbers mean the same thing.
+// Elo ratings per time-control category, as FIDE computes them (FIDE Rating Regulations effective
+// from 1 March 2024): a pure mirror of the game's offline rating (src/game/elo.h / elo.cpp), so a
+// player's online and offline numbers mean the same thing. Both are checked against the same
+// vectors (test/fixtures/elo-vectors.json, written by tools/gen-elo-vectors.js; read by
+// test/unit/match.elo.test.js and the game's tests/elo_tests.cpp).
 //
-//   expected score  E = 1 / (1 + 10^((Ro - Rp) / 400)), the difference counting at most 400
-//                   points (FIDE rating regulations 8.3.1)
-//   change          lround(K * (score - E)), score 1 / 0.5 / 0; rounding half away from zero
-//                   like std::lround
-//   K               40 while provisional (fewer than PROVISIONAL_GAMES games in the category),
-//                   20 afterwards, 10 once the player has reached 2400 (for good: the peak
-//                   counts, and the senior check comes first, exactly as elo.cpp)
-//   floor           a rating never drops below 100
+//   expected score  PD from FIDE's table 8.1.2 (FIDE_PD_TABLE) for the rating difference D, D counting
+//                   at most 400 points (8.3.1); the higher-rated player gets PD, the lower 1 - PD
+//   change          K x (score - PD), rounded to the nearest point (halves away from zero), computed
+//                   in whole hundredths so that the two languages agree to the last point
+//   K               40 until the player has PROVISIONAL_GAMES (30) games in the category, the games
+//                   of the unrated phase included; 20 afterwards; 10 once the player has reached
+//                   2400 (for good: the peak counts)
+//   unrated phase   (8.2) a new record is unrated, with a working rating equal to INITIAL_RATING
+//                   (used for pairing and as the opponent value of the other player). Each rated
+//                   game adds the opponent's rating and the score; after UNRATED_GAMES (5) games
+//                   Ru = Ra + dp(p), with Ra = (sum of the opponents' ratings + 2 x 1800) / (n + 2)
+//                   and p = (score + 1) / (n + 2) rounded to hundredths (two hypothetical draws
+//                   against 1800-rated opponents), dp from FIDE's table 8.1.1 (FIDE_DP_TABLE),
+//                   rounded to the nearest point and capped at 2200. The peak becomes Ru.
+//   zero score      FIDE disregards a zero score in a player's first event (8.2.1); here, one
+//                   game at a time: the losses before the player's first half point stay out of
+//                   the unrated phase (they count in the games and the losses, not in the five
+//                   games, the opponents' sum or the score). Five losses to Stockfish at full
+//                   strength would otherwise give a first rating of 2200.
+//   unrated opponent a rated player's game against an unrated opponent does not change the rated
+//                   player's rating (8.3: only games against rated opponents count); it counts in
+//                   the games and the wins / draws / losses
+//   floor           a rating never drops below 100. FIDE's list starts at 1400, which makes no sense
+//                   here: players range from beginners to weak Stockfish presets rated 800.
+//
+// Departures from FIDE, needed by a game server:
+//   * Games are rated one by one, each against the ratings before that game. FIDE rates monthly
+//     periods, with ratings fixed within the period and K x games capped at 700 per period.
+//   * A game between two unrated players counts for both, at the other's working rating. FIDE
+//     ignores it, but then a new server (or two new names in a rated hot-seat game) could never
+//     obtain a rating.
+//   * FIDE's K = 40 for players under 18 does not apply (no ages here).
 //
 // A record is kept per player and category:
-//   { rating, games, wins, draws, losses, peak, reachedSenior }
-// `reachedSenior` is the persisted form of the C++ `peak >= 2400` test (both are honoured).
+//   { rating, games, wins, draws, losses, peak, reachedSenior, rated, unratedGames,
+//     unratedOpponents, unratedHalfPoints }
+// `reachedSenior` is the persisted form of the C++ `peak >= 2400` test (both are honoured; the
+// working rating of an unrated record is no rating and never counts).
+// `rated` is false during the unrated phase, which accumulates `unratedGames`, the sum of the
+// opponents' ratings `unratedOpponents` and the score in half points `unratedHalfPoints` (the
+// games counted: none before the first half point).
+// A record that has games but no `rated` field (stored before the unrated phase existed) is rated.
 //
 // Categories: the official time controls come from cfg.categories ([{ id: '3+2', baseMs, incMs }]);
 // any other time control is 'custom' and never rated.
 
 /** Rating from which K drops to 10 for good. */
 export const SENIOR_RATING = 2400;
-/** Largest rating difference taken into account (FIDE). */
+/** Largest rating difference taken into account (FIDE 8.3.1). */
 export const MAX_RATING_GAP = 400;
 /** Ratings never drop below this. */
 export const RATING_FLOOR = 100;
+/** Games of the unrated phase before the first rating (FIDE 8.2; leading losses do not count). */
+export const UNRATED_GAMES = 5;
+/** Rating of the two hypothetical opponents drawn with in the first rating (FIDE 8.2). */
+export const HYPOTHETICAL_OPPONENT = 1800;
+/** Highest first rating (FIDE 8.2). */
+export const MAX_INITIAL_RATING = 2200;
 /** Defaults of the game (elo.h), used when no configuration is given. */
 export const DEFAULT_INITIAL_RATING = 1500;
 export const DEFAULT_PROVISIONAL_GAMES = 30;
 /** Id of every non-official time control. */
 export const CUSTOM_CATEGORY = 'custom';
+
+/**
+ * FIDE table 8.1.2 as published: [highest D of the row, PD of the higher-rated player in
+ * hundredths]. D above 735 gives 1.00. The table is the normal distribution with a standard
+ * deviation of 2000 / 7 rounded to hundredths, except at six differences where FIDE's rows keep
+ * the neighbouring value (54, 343, 344, 358, 392 and 620; match.elo.test.js): FIDE applies the
+ * table, so the table is what counts. The 400-point rule caps D before the lookup; the rows past
+ * 400 are the published table's, and FIDE_DP_TABLE is the middle of each row (rounded down).
+ */
+export const FIDE_PD_TABLE = Object.freeze([
+    [3, 50], [10, 51], [17, 52], [25, 53], [32, 54], [39, 55], [46, 56], [53, 57], [61, 58], [68, 59],
+    [76, 60], [83, 61], [91, 62], [98, 63], [106, 64], [113, 65], [121, 66], [129, 67], [137, 68], [145, 69],
+    [153, 70], [162, 71], [170, 72], [179, 73], [188, 74], [197, 75], [206, 76], [215, 77], [225, 78], [235, 79],
+    [245, 80], [256, 81], [267, 82], [278, 83], [290, 84], [302, 85], [315, 86], [328, 87], [344, 88], [357, 89],
+    [374, 90], [391, 91], [411, 92], [432, 93], [456, 94], [484, 95], [517, 96], [559, 97], [619, 98], [735, 99],
+].map(Object.freeze));
+
+/**
+ * FIDE table 8.1.1: dp for p = 1.00, 0.99 ... 0.50 (index 0 is p = 1.00, index 50 is p = 0.50).
+ * Below 0.50, dp(p) = -dp(1 - p).
+ */
+export const FIDE_DP_TABLE = Object.freeze([
+    800, 677, 589, 538, 501, 470, 444, 422, 401, 383, 366, 351, 336, 322, 309, 296, 284, 273, 262, 251,
+    240, 230, 220, 211, 202, 193, 184, 175, 166, 158, 149, 141, 133, 125, 117, 110, 102, 95, 87, 80,
+    72, 65, 57, 50, 43, 36, 29, 21, 14, 7, 0,
+]);
 
 function initialRatingOf(cfg) {
     return cfg && Number.isFinite(cfg.initialRating) ? cfg.initialRating : DEFAULT_INITIAL_RATING;
@@ -37,37 +102,83 @@ function provisionalGamesOf(cfg) {
     return cfg && Number.isFinite(cfg.provisionalGames) ? cfg.provisionalGames : DEFAULT_PROVISIONAL_GAMES;
 }
 
-// std::lround: nearest integer, halves away from zero (Math.round rounds -2.5 to -2).
-function lround(x) {
-    return x < 0 ? -Math.round(-x) : Math.round(x);
+// Integer division rounded to the nearest integer, halves away from zero (std::lround of a/b).
+function divRound(a, b) {
+    return a < 0 ? -Math.floor((-2 * a + b) / (2 * b)) : Math.floor((2 * a + b) / (2 * b));
 }
 
 /**
- * Expected score (0..1) of a player rated `rating` against `opponent`.
+ * PD of FIDE table 8.1.2, in hundredths, for a rating difference `d` (its absolute value; no cap).
+ * @param {number} d
+ * @returns {number} 50..100
+ */
+export function scoringProbability(d) {
+    const x = Math.abs(Math.trunc(d));
+    for (const [hi, pd] of FIDE_PD_TABLE) if (x <= hi) return pd;
+    return 100;
+}
+
+/**
+ * dp of FIDE table 8.1.1 for a percentage score p (in hundredths, 0..100).
+ * @param {number} p
+ * @returns {number} -800..800
+ */
+export function ratingDifference(p) {
+    const q = Math.min(100, Math.max(0, Math.trunc(p)));
+    return q >= 50 ? FIDE_DP_TABLE[100 - q] : -FIDE_DP_TABLE[q];
+}
+
+// Expected score in hundredths: the table's PD after the 400-point rule.
+function expected100(rating, opponent) {
+    const d = Math.min(MAX_RATING_GAP, Math.abs(rating - opponent));
+    const pd = scoringProbability(d);
+    return rating >= opponent ? pd : 100 - pd;
+}
+
+/**
+ * Expected score (0..1) of a player rated `rating` against `opponent` (FIDE table 8.1.2).
  * @param {number} rating
  * @param {number} opponent
  * @returns {number}
  */
 export function expectedScore(rating, opponent) {
-    let gap = opponent - rating;
-    if (gap > MAX_RATING_GAP) gap = MAX_RATING_GAP;
-    else if (gap < -MAX_RATING_GAP) gap = -MAX_RATING_GAP;
-    return 1 / (1 + Math.pow(10, gap / 400));
+    return expected100(rating, opponent) / 100;
+}
+
+// A score (clamped to 0..1) in half points: 2 win, 1 draw, 0 loss.
+function halfPoints(score) {
+    return Math.round(Math.min(1, Math.max(0, score)) * 2);
 }
 
 /**
- * A fresh record: INITIAL_RATING, no game.
+ * First rating of an unrated record after its unrated phase (FIDE 8.2): Ra + dp(p) with the two
+ * hypothetical draws against 1800, rounded, capped at MAX_INITIAL_RATING, floored at RATING_FLOOR.
+ * @param {{unratedGames:number, unratedOpponents:number, unratedHalfPoints:number}} rec
+ * @returns {number}
+ */
+export function initialRating(rec) {
+    const n = rec.unratedGames + 2;
+    // p = (score + 1) / (n + 2) = (half points + 2) / (2 (n + 2)), in hundredths rounded half up.
+    const p = divRound(100 * (rec.unratedHalfPoints + 2), 2 * n);
+    const ru = divRound(rec.unratedOpponents + 2 * HYPOTHETICAL_OPPONENT + ratingDifference(p) * n, n);
+    return Math.min(MAX_INITIAL_RATING, Math.max(RATING_FLOOR, ru));
+}
+
+/**
+ * A fresh record: unrated, the working rating INITIAL_RATING, no game.
  * @param {object} [cfg] configuration (initialRating)
- * @returns {{rating:number, games:number, wins:number, draws:number, losses:number, peak:number, reachedSenior:boolean}}
  */
 export function defaultRecord(cfg) {
     const r = initialRatingOf(cfg);
-    return { rating: r, games: 0, wins: 0, draws: 0, losses: 0, peak: r, reachedSenior: r >= SENIOR_RATING };
+    return {
+        rating: r, games: 0, wins: 0, draws: 0, losses: 0, peak: r, reachedSenior: false,
+        rated: false, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0,
+    };
 }
 
 /**
  * A complete record from a possibly partial one (missing fields take the defaults; the peak is
- * at least the rating). Returns a new object.
+ * at least the rating; without a `rated` field, a record with games is rated). Returns a new object.
  * @param {object|null|undefined} rec
  * @param {object} [cfg]
  */
@@ -77,29 +188,45 @@ export function normalizeRecord(rec, cfg) {
     const int = (v, dflt) => (Number.isFinite(v) ? Math.trunc(v) : dflt);
     const rating = int(rec.rating, d.rating);
     const peak = Math.max(int(rec.peak, rating), rating);
+    const games = Math.max(0, int(rec.games, 0));
+    const rated = typeof rec.rated === 'boolean' ? rec.rated : games > 0;
     return {
         rating,
-        games: Math.max(0, int(rec.games, 0)),
+        games,
         wins: Math.max(0, int(rec.wins, 0)),
         draws: Math.max(0, int(rec.draws, 0)),
         losses: Math.max(0, int(rec.losses, 0)),
         peak,
-        reachedSenior: !!rec.reachedSenior || peak >= SENIOR_RATING,
+        reachedSenior: !!rec.reachedSenior || (rated && peak >= SENIOR_RATING),
+        rated,
+        unratedGames: rated ? 0 : Math.max(0, int(rec.unratedGames, 0)),
+        unratedOpponents: rated ? 0 : Math.max(0, int(rec.unratedOpponents, 0)),
+        unratedHalfPoints: rated ? 0 : Math.max(0, int(rec.unratedHalfPoints, 0)),
     };
 }
 
 /**
- * Whether the rating is still provisional (fewer than PROVISIONAL_GAMES games in the category).
- * @param {{games:number}} record
- * @param {object} [cfg]
+ * Whether the record has no rating yet (its unrated phase).
+ * @param {{rated?:boolean, games?:number}} record
  */
-export function isProvisional(record, cfg) {
-    return (record ? record.games || 0 : 0) < provisionalGamesOf(cfg);
+export function isUnrated(record) {
+    if (!record) return true;
+    return typeof record.rated === 'boolean' ? !record.rated : !(record.games > 0);
 }
 
 /**
- * Development coefficient for the next game: 10 once 2400 has been reached (checked first, as
- * in elo.cpp), else 40 while provisional, else 20.
+ * Whether the rating is shown as provisional ("1500?"): unrated, or fewer than PROVISIONAL_GAMES
+ * games in the category (K = 40).
+ * @param {{games:number, rated?:boolean}} record
+ * @param {object} [cfg]
+ */
+export function isProvisional(record, cfg) {
+    return isUnrated(record) || (record.games || 0) < provisionalGamesOf(cfg);
+}
+
+/**
+ * Development coefficient of a rated player's next game: 10 once 2400 has been reached (checked
+ * first, as in elo.cpp), else 40 before PROVISIONAL_GAMES games, else 20.
  * @param {{rating:number, games:number, peak?:number, reachedSenior?:boolean}} record
  * @param {object} [cfg]
  * @returns {10|20|40}
@@ -110,36 +237,52 @@ export function kFactor(record, cfg) {
 }
 
 /**
- * Rating change a result would bring, without applying it.
+ * Rating change of the K formula for a rated record against a rated opponent, before the floor:
+ * K x (score - PD), rounded.
  * @param {object} record
  * @param {number} opponent opponent's rating before the game
- * @param {number} score 1, 0.5 or 0 (clamped to 0..1)
+ * @param {number} score 1, 0.5 or 0 (rounded to the nearest half point)
  * @param {object} [cfg]
  */
 export function ratingDelta(record, opponent, score, cfg) {
-    const s = Math.min(1, Math.max(0, score));
-    return lround(kFactor(record, cfg) * (s - expectedScore(record.rating, opponent)));
+    return divRound(kFactor(record, cfg) * (50 * halfPoints(score) - expected100(record.rating, opponent)), 100);
 }
 
-// One side of a game (elo::applyResult): returns the change and the updated record (new object).
-function applySide(rec, opponent, score, cfg) {
-    const k = kFactor(rec, cfg);
-    const expected = expectedScore(rec.rating, opponent);
-    const after = Math.max(RATING_FLOOR, rec.rating + ratingDelta(rec, opponent, score, cfg));
-    const record = { ...rec, rating: after, games: rec.games + 1 };
-    if (score > 0.75) record.wins++;
-    else if (score < 0.25) record.losses++;
+// One side of a game (elo::applyResult against a record): returns the change and the updated
+// record (a new object). `opp` is the opponent's record before the game.
+function applySide(rec, opp, score, cfg) {
+    const half = halfPoints(score);
+    const record = { ...rec, games: rec.games + 1 };
+    if (half === 2) record.wins++;
+    else if (half === 0) record.losses++;
     else record.draws++;
-    record.peak = Math.max(rec.peak, after);
-    record.reachedSenior = rec.reachedSenior || record.peak >= SENIOR_RATING;
+    let k = 0;
+    if (!rec.rated) {
+        // The zero-score rule: the losses before the first half point are disregarded.
+        if (half > 0 || rec.unratedHalfPoints > 0) {
+            record.unratedGames++;
+            record.unratedOpponents += opp.rating;
+            record.unratedHalfPoints += half;
+            if (record.unratedGames >= UNRATED_GAMES) {
+                record.rating = record.peak = initialRating(record);
+                record.rated = true;
+                record.unratedGames = record.unratedOpponents = record.unratedHalfPoints = 0;
+            }
+        }
+    } else if (opp.rated) {
+        k = kFactor(rec, cfg);
+        record.rating = Math.max(RATING_FLOOR, rec.rating + ratingDelta(rec, opp.rating, score, cfg));
+        record.peak = Math.max(rec.peak, record.rating);
+    }
+    record.reachedSenior = rec.reachedSenior || (record.rated && record.peak >= SENIOR_RATING);
     return {
-        before: rec.rating, after, delta: after - rec.rating, k, expected,
-        games: record.games, provisional: isProvisional(record, cfg), record,
+        before: rec.rating, after: record.rating, delta: record.rating - rec.rating, k,
+        expected: expectedScore(rec.rating, opp.rating), games: record.games, provisional: isProvisional(record, cfg), record,
     };
 }
 
 /**
- * Rates one game. Both changes are computed from the ratings before the game. The input records
+ * Rates one game. Both changes are computed from the records before the game. The input records
  * are not modified (partial records are completed with the defaults).
  * @param {object} white White's record in the game's category
  * @param {object} black Black's record
@@ -147,16 +290,17 @@ function applySide(rec, opponent, score, cfg) {
  * @param {object} [cfg] configuration (initialRating, provisionalGames)
  * @returns {{white: {before:number, after:number, delta:number, k:number, expected:number, games:number, provisional:boolean, record:object},
  *            black: {before:number, after:number, delta:number, k:number, expected:number, games:number, provisional:boolean, record:object}}}
- *   `before`, `after`, `games` and `provisional` are the protocol's RatingChange fields;
- *   `record` is the updated record to store.
+ *   `before`, `after`, `games` and `provisional` are the protocol's RatingChange fields; `k` is the
+ *   coefficient applied (0 when the game did not change the rating by the K formula: the unrated
+ *   phase, or a rated player against an unrated one); `record` is the updated record to store.
  */
 export function applyGame(white, black, score, cfg) {
     if (typeof score !== 'number' || !(score >= 0 && score <= 1)) throw new RangeError(`elo: score must be 0..1, got ${score}`);
     const w = normalizeRecord(white, cfg);
     const b = normalizeRecord(black, cfg);
     return {
-        white: applySide(w, b.rating, score, cfg),
-        black: applySide(b, w.rating, 1 - score, cfg),
+        white: applySide(w, b, score, cfg),
+        black: applySide(b, w, 1 - score, cfg),
     };
 }
 

@@ -496,7 +496,7 @@ export class Router {
         if (category !== 'custom' && this.store?.ratings?.get) {
             try {
                 const r = this.store.ratings.get(userId, category);
-                if (r) return { rating: r.rating, provisional: (r.games ?? 0) < this.config.provisionalGames };
+                if (r) return { rating: r.rating, provisional: r.rated === false || (r.games ?? 0) < this.config.provisionalGames };
             } catch (e) {
                 this.log?.error?.('rating read failed', { err: e });
             }

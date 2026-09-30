@@ -143,14 +143,15 @@ the database. Every `DB_COMMIT_MS` the host commits the queued games in one tran
 (so the database never has a finished game whose `ended` record a crash could still lose, which
 would bring the game back running after the restart). When the anti-cheat still buffers an
 anomaly that is not `info`, it writes the buffer first, so that the analysis-job policy sees it
-(section 6.5); `info` anomalies wait for the anti-cheat's own 1 s timer. That anomaly write is a
-synchronous insert on the main thread's SQLite connection: it waits for the disk
-(`synchronous=FULL`) and, when another process holds the database's write lock, for that lock,
-up to `busy_timeout` (5 s). The transaction holds the game record + both ratings (read and
-written inside the transaction) + analysis job (queue policy: section 6.5). It runs on the
-shard's store writer thread (`src/store/writer.js`, its own SQLite connection), so the event
-loop never waits for the transaction, its disk writes or the write lock it takes. After the
-commit it sends `RatingUpdate` and tells the primary `game.ended`.
+(section 6.5); `info` anomalies wait for the anti-cheat's own 1 s timer. The transaction holds
+the game record + both ratings (read and written inside the transaction, section 6.6) +
+analysis job (queue policy: section 6.5). It runs on the shard's store writer thread
+(`src/store/writer.js`, its own SQLite connection), so the event loop never waits for the
+transaction, its disk writes or the write lock it takes. The anti-cheat writes through the same
+thread (the anomaly rows, the automatic sanction of a certain cheat and its rating refunds), and
+the thread handles its messages one at a time in the order they were sent: the anomalies flushed
+right before a commit are written before it, without the event loop waiting for either. After
+the commit it sends `RatingUpdate` and tells the primary `game.ended`.
 
 When the journal's writes keep failing (a full disk, a read-only or failing `JOURNAL_DIR`
 volume, too many open files), waiting for the journal would keep every finished game out of the
@@ -338,10 +339,12 @@ and, for a certain cheat with `AUTO_SANCTION_CERTAIN_CHEATS`, calls `room.forfei
 ### 5.4 Match (`src/match/`)
 
 ```js
-// elo.js: pure, mirrors src/game/elo.h of the game.
-expectedScore(rating, opponent); kFactor(record /* {rating, games, reachedSenior} */, cfg);
+// elo.js: pure, mirrors src/game/elo.h of the game (FIDE ratings, section 6.6).
+expectedScore(rating, opponent); kFactor(record /* {rating, games, peak, reachedSenior, rated} */, cfg);
 applyGame(white /* record */, black, score /* 1, 0.5, 0 from White's side */, cfg)
-  -> { white: { before, after, record }, black: {...} }   // records updated (games, w/d/l, peak, reachedSenior)
+  -> { white: { before, after, delta, k, expected, games, provisional, record }, black: {...} }
+  // records updated (games, w/d/l, peak, reachedSenior, rated and the unrated-phase sums);
+  // k: the K factor of the change, 0 when the K formula did not apply (unrated phase, unrated opponent)
 // matchmaker.js (primary)
 new Matchmaker({ config, now })
 mm.join({ userId, username, category, rated, rating, provisional, shard, connId, colorBalance, joinedAt }) -> { ok } | { error: ErrorCode }
@@ -381,11 +384,15 @@ store.sessions.byTokenHash(hash) -> { id, userId, createdAt, lastSeenAt, expires
 store.sessions.touch(id, now, idleExpiresAt) ; revoke(id) ; revokeAllForUser(userId, exceptId?) -> [tokenHash] ; listForUser(userId) ; enforceLimit(userId, max)
 store.tokens.create({ kind, tokenHash, userId, data, expiresAt }) ; consume(kind, tokenHash, now) -> row | null (atomic single use) ; get(kind, tokenHash) ; update(kind, tokenHash, data)
 store.sso.find(provider, subject) -> { userId } | null ; link(userId, provider, subject, email)
-store.ratings.get(userId, category) -> { rating, games, wins, draws, losses, peak, reachedSenior }  // defaults when absent
-store.ratings.forUser(userId) -> [{ category, ... }] ; leaderboard(category, limit, minGames)
+store.ratings.get(userId, category) -> { rating, games, wins, draws, losses, peak, reachedSenior, rated, unratedGames,
+  unratedOpponents, unratedHalfPoints }  // defaults when absent: unrated at INITIAL_RATING
+store.ratings.forUser(userId) -> [{ category, ..., provisional }] ; leaderboard(category, limit, minGames)  // rated records only
+store.refunds.applyForCheater({ cheaterId, since, now, sanctionId, source, by }) -> [refund]   // section 6.6, one transaction
+store.refunds.list({ cheaterId, victimId, limit }) ; pendingSince(afterId, limit) ; pendingFor(victimId) ; markNotified(ids, now)
 store.games.finishBatch(records) -> [{ gameId, ratings: null | { white: RatingChange, black: RatingChange } }]
   // One transaction for the batch: inserts each game, applies match/elo.applyGame to rated games
-  // with the ratings read inside the transaction, queues rated games of >= ANALYSIS_MIN_PLIES for analysis
+  // with the ratings read inside the transaction (and stores the K factor of each side's change),
+  // queues rated games of >= ANALYSIS_MIN_PLIES for analysis
   // (section 6.5: a game left out by the policy has analysisSkipped: 'sample' | 'backlog' | 'player' in its entry,
   // and a game that took over waiting jobs past the per-player cap has analysisDisplaced: [gameId]).
   // record: { id, category, rated, baseMs, incMs, whiteId, blackId, whiteName, blackName, whiteRating, blackRating,
@@ -523,7 +530,7 @@ Shard -> primary:
 | `ratelimit.take` | `{ key, limit, windowMs, cost }` | `{ allowed, retryAfterMs, count }` |
 | `ratelimit.refund` | `{ key, windowMs, cost, ageMs }` | `{ refunded }` (gives back a take granted `ageMs` ago, in the window that counted it) |
 | `once.consume` | `{ key, ttlMs }` | `{ fresh }` |
-| `sanction.applied` | `{ userId, until, reason }` | - (primary kicks the user everywhere) |
+| `sanction.applied` | `{ userId, until, reason, refunds }` | - (primary kicks the user everywhere; `refunds`: victims refunded, whose notices it looks for at once) |
 | `session.revoked` | `{ userId, tokenHashes }` | - (broadcast to every shard's auth cache) |
 
 Primary -> shard:
@@ -532,7 +539,7 @@ Primary -> shard:
 |---|---|---|
 | `game.create` | `{ spec }` | host creates the room, replies `{ ok, gameId }` |
 | `game.attach` | `{ gameId, userId, connId }` | the shard binds that connection to the game (local or via bus) |
-| `conn.send` | `{ connId, frames: [Buffer] }` | writes encoded S2C frames (QueueStatus, Challenge*, Notice) |
+| `conn.send` | `{ connId, frames: [Buffer] }` | writes encoded S2C frames (QueueStatus, Challenge*, Notice); as a request (refund notices) it replies `{ ok }`, false when the connection is gone or has not had its Welcome yet |
 | `conn.kick` | `{ connId, code, closeCode, frames }` | sends then closes |
 | `auth.invalidate` | `{ userId, tokenHashes }` | drops cached sessions |
 | `metrics.snapshot` | - | replies `registry.snapshot()` |
@@ -845,7 +852,8 @@ rules before sending, so steps 6 and 7 only happen with a modified client.
 Certain cheat with `AUTO_SANCTION_CERTAIN_CHEATS=true`: the game (if any) ends
 `Forfeit` (a rated game is rated normally: the opponent wins), `Error{CheatDetected, fatal}`,
 close 4302, ban `BAN_DURATION_HOURS` (source `auto`), integrity level `confirmed` with the
-evidence. Everything else is only recorded.
+evidence, and the rating refunds of the player's victims (section 6.6). Everything else is only
+recorded.
 
 Statistical assistance detection never bans automatically. Per player and category the
 analysis process accumulates, over rated games of at least `ANALYSIS_MIN_PLIES`: accuracy
@@ -907,6 +915,65 @@ and `scacelith_anticheat_analysis_queue_priority` show the backlog (each counted
 The policy only decides what is analysed and when: it changes no level and no sanction, and
 statistics never ban.
 
+### 6.6 Ratings
+
+One Elo rating per player and official category (`3+2`, ...; a custom time control is never
+rated), computed as FIDE computes ratings (FIDE Rating Regulations effective from 1 March 2024)
+by `src/match/elo.js`, which mirrors the game's offline rating (`src/game/elo.cpp`) to the last
+point: both are checked against the same vectors (`test/fixtures/elo-vectors.json`).
+
+* **Expected score**: FIDE's table 8.1.2 as published (`PD` for the rating difference `D`, the
+  higher-rated player gets `PD`, the lower `1 - PD`), `D` counted as 400 at most (8.3.1). The
+  table is the normal distribution with a standard deviation of 2000/7 rounded to hundredths,
+  except at six differences where FIDE's rows differ (54, 343, 344, 358, 392, 620); the
+  published table is what FIDE applies, so it is used as published.
+* **Change**: `K x (score - PD)`, rounded to the nearest point (halves away from zero),
+  computed in whole hundredths. `K` is 40 until the player has `PROVISIONAL_GAMES` (30) games in
+  the category, the games of the unrated phase included, then 20, and 10 for good once the
+  player has reached 2400.
+* **Unrated phase and first rating** (8.2): a new record is unrated, with a working rating of
+  `INITIAL_RATING` (1500) that is shown and used for pairing. Its rated games add up the
+  opponents' ratings and the score (see the zero score below); after five, `Ru = Ra + dp(p)` with
+  `Ra = (sum of the opponents' ratings + 2 x 1800) / (n + 2)` and
+  `p = (score + 1) / (n + 2)` rounded to hundredths (two hypothetical draws against
+  1800-rated players), `dp` from FIDE's table 8.1.1, rounded to the nearest point and capped at
+  2200. The peak becomes `Ru`. Five draws against 1500 give 1586, five wins 1895.
+* **Zero score** (8.2.1: FIDE disregards a zero score in a player's first event), one game at a
+  time: the losses before the player's first half point stay out of the unrated phase (they
+  count in the games and losses, not in the five games, the sum or the score); a newcomer who
+  only loses stays unrated instead of getting a first rating from the strength of the players
+  who beat them.
+* **Unrated opponent**: a rated player's game against an unrated one leaves the rated player's
+  rating unchanged (only games against rated opponents count, 8.3) but counts in their games and
+  wins, draws and losses.
+* **Floor**: a rating never drops below 100 (FIDE's list starts at 1400, which makes no sense
+  for players who range from beginners to weak engine presets rated 800).
+
+Departures from FIDE, needed by a game server: games are rated one by one against the ratings
+before each game (FIDE rates monthly periods with ratings fixed within the period and `K x
+games` capped at 700); a game between two unrated players counts for both, at the other's
+working rating (FIDE ignores it, but a new server could then never rate anyone); FIDE's `K = 40`
+for players under 18 does not apply (no ages here).
+
+On the wire nothing changed: an unrated record is `provisional` (so is a rated one with fewer
+than `PROVISIONAL_GAMES` games), its `rating` is the working rating, and the `RatingChange` of a
+game of the unrated phase has `before = after`, except the fifth game, which goes from the
+working rating to the first rating. The records stored before migration 004 (the previous
+logistic formula, same K factors, start and floor) that have games stay rated; a record without
+games starts unrated. The leaderboard lists rated records only.
+
+**Refunds.** When a player is banned as a cheater (a certain cheat, section 6.5, or a
+moderator's `integrity confirm`), every opponent who lost rating points to them in a rated game
+that ended within `RATING_REFUND_DAYS` (60) before the ban gets exactly those points back, added
+to their current rating in that category (their peak rises with it when it is exceeded).
+Nothing is recomputed: wins against the cheater and every other game stand as played; a draw
+that cost points is refunded like a loss; only a change of the K formula is refunded (the game
+that gave a first rating moved it from a working rating); one refund per game and victim at
+most. The victim gets `Notice{RatingRestored, arg: points}` out of a game only: at once when
+connected and idle, otherwise after their current game, otherwise right after `Welcome` at
+their next connection (after the game that connection resumes, if any). Moderator options,
+audit trail and the reasons an unban takes nothing back: docs/ANTICHEAT.md, rating refunds.
+
 ## 7. What lives where, and what survives a crash
 
 | Data | Where | Written | After a crash |
@@ -916,6 +983,7 @@ statistics never ban.
 | Ratings, finished games, analysis queue | SQLite | batched every `DB_COMMIT_MS`, one transaction per batch | kept once committed; games ended but not committed are in the journal and committed at recovery |
 | Games in progress (moves, clocks, offers) | memory of the host shard + journal | journal flushed every `JOURNAL_FLUSH_MS` | replayed; at most `JOURNAL_FLUSH_MS` of moves lost (clients resend: stale ply / resync); both players get `RECOVERY_GRACE_MS` to come back, and the clock of the side to move waits for its player (`RECOVERY_CLOCK_HOLD_MS` at most, 6.4) |
 | Sanctions, anomalies (certain), integrity levels, reports | SQLite | sanctions immediately; anomalies batched (1 s) | kept (a batch in flight may be lost for `info` anomalies) |
+| Rating refunds (6.6) | SQLite | with the ban that triggers them (their own transaction); `notified_at` once the notice is written | kept; the notices not marked are sent again after a restart |
 | Presence, queues, challenges, private codes, rate-limit counters | primary memory | - | lost: clients reconnect and re-queue |
 | Security events (failed logins...) | SQLite | batched (1 s) | kept, purged after `RETENTION_SECURITY_DAYS` |
 

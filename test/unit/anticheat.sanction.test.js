@@ -36,7 +36,7 @@ test('certain cheat: one ban per game, integrity confirmed with evidence, primar
     assert.equal(integ.evidence.certain.length, 1);
     assert.deepEqual({ ...integ.evidence.certain[0], at: 0 }, { kind: 'illegal_move', gameId: 77, at: 0, banUntil: a.banUntil });
     await new Promise((r) => setImmediate(r));
-    assert.deepEqual(primary.sent, [{ type: 'sanction.applied', payload: { userId: 5, until: a.banUntil, reason: 'certain_cheat:illegal_move' } }]);
+    assert.deepEqual(primary.sent, [{ type: 'sanction.applied', payload: { userId: 5, until: a.banUntil, reason: 'certain_cheat:illegal_move', refunds: 0 } }]);
     assert.equal(store._.security.filter((e) => e.kind === 'sanction_auto').length, 1);
     ac.close();
 });
@@ -76,7 +76,7 @@ test('a new game after the ban expired gets a new ban', () => {
 test('AUTO_SANCTION_CERTAIN_CHEATS=false: nothing happens', () => {
     const store = createFakeStore();
     const ac = createAnticheat({ config: testConfig({ AUTO_SANCTION_CERTAIN_CHEATS: 'false' }), store, primary: fakePrimary(), log: quiet });
-    assert.deepEqual(ac.sanctionCertain({ userId: 1, gameId: 2, kind: 'illegal_move' }), { banUntil: 0, applied: false });
+    assert.deepEqual(ac.sanctionCertain({ userId: 1, gameId: 2, kind: 'illegal_move' }), { banUntil: 0, applied: false, refunds: 0 });
     assert.equal(store._.sanctions.length, 0);
     assert.equal(store.integrity.get(1), null);
 });

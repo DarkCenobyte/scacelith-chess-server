@@ -169,8 +169,8 @@ Sections:
 
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
-| `INITIAL_RATING` | integer (100-3000) | `1500` | Rating of a new player in every category. |
-| `PROVISIONAL_GAMES` | integer (0-100) | `30` | Games in a category during which the rating is provisional (K = 40, shown with "?"). |
+| `INITIAL_RATING` | integer (100-3000) | `1500` | Working rating of a new player in every category: shown and used for pairing until their first rating, which FIDE's rules compute after five rated games, not counting the losses before the first draw or win (docs/DESIGN.md, ratings), and what an unrated opponent counts for in those games. |
+| `PROVISIONAL_GAMES` | integer (0-100) | `30` | Games in a category, the five of the unrated phase included, during which the rating is provisional: K = 40 and shown with "?" (an unrated player is always provisional). FIDE uses 30. |
 | `MATCH_TICK_MS` | integer (50-5000) | `250` | Interval between pairing rounds. |
 | `MATCH_WINDOW_START` | integer (&gt;= 0) | `100` | Largest rating difference accepted right after joining the queue. |
 | `MATCH_WINDOW_STEP` | integer (&gt;= 0) | `50` | Widening of the window at each step. |
@@ -187,6 +187,7 @@ Sections:
 | --- | --- | --- | --- |
 | `AUTO_SANCTION_CERTAIN_CHEATS` | boolean (true/false, 1/0, yes/no, on/off) | `true` | A technically certain cheat (forged protocol, illegal move in a synchronised position, playing out of turn) loses the game, disconnects the player and bans them for BAN_DURATION_HOURS. |
 | `BAN_DURATION_HOURS` | integer (1-87600) | `24` | Length of an automatic ban. |
+| `RATING_REFUND_DAYS` | integer (0-3650) | `60` | When a player is banned as a cheater (a certain cheat, or a moderator's integrity confirm), each opponent who lost rating points to them in a rated game that ended within this many days before the ban gets those points back on their current rating (docs/ANTICHEAT.md, rating refunds). 0: no refunds unless a moderator asks for them (scacelith-admin refunds apply). |
 | `ANALYSIS_ENGINE_PATH` | path (relative to the working directory) | (empty) | UCI engine (Stockfish) used to analyse rated games after they end. Empty: engine-based statistics are disabled (timing and reports still count). |
 | `ANALYSIS_WORKERS` | integer (0-64) | `1` | Engine processes analysing games (each uses one core, at low priority). |
 | `ANALYSIS_DEPTH_FAST` | integer (4-30) | `10` | Shallow analysis depth (a weak engine's choice). |

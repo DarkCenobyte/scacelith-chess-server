@@ -1,0 +1,261 @@
+// Rating refunds of the victims of a banned cheater (src/anticheat/refunds.js, store.refunds,
+// migration 004), with the real store and the real FIDE rating function: the automatic ban of a
+// certain cheat, a moderator's integrity confirm (--refund-since, --no-refund) and the refunds
+// commands.
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { createAnticheat } from '../../src/anticheat/index.js';
+import { runAdmin } from '../../src/anticheat/admin.js';
+import { refundWindowStart } from '../../src/anticheat/refunds.js';
+import { testConfig } from '../../src/config.js';
+import { applyGame } from '../../src/match/elo.js';
+import { enums } from '../../src/protocol/schema.js';
+import { openStore, migrate } from '../../src/store/index.js';
+
+const { GameStatus, EndReason } = enums;
+const DAY = 86400000;
+const NOW = Date.UTC(2026, 8, 1, 12);
+const quiet = { debug() {}, info() {}, warn() {}, error() {}, security() {}, child() { return this; } };
+
+let nextId = 7_000_000_000_000;
+function game(white, black, status, endedAt, extra = {}) {
+    const plies = 40;
+    return {
+        id: ++nextId, category: '3+2', rated: true, baseMs: 180000, incMs: 2000, whiteId: white, blackId: black, whiteName: 'W',
+        blackName: 'B', startedAt: endedAt - 600000, endedAt, status, reason: status === GameStatus.Draw ? EndReason.Agreement : EndReason.Resignation,
+        moves: new Uint16Array(plies), spentMs: new Uint32Array(plies), clockMs: new Uint32Array(plies), ...extra,
+    };
+}
+const W = GameStatus.WhiteWins, B = GameStatus.BlackWins, D = GameStatus.Draw;
+
+// Players with rated records (40 games, K 20) seeded in the file, and one newcomer (Nova).
+function world(overrides = {}, t) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-refunds-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const config = testConfig({ DB_PATH: path.join(dir, 'db.sqlite'), DATA_DIR: dir, ...overrides });
+    const store = openStore(config, { applyGame });
+    migrate(store);
+    t.after(() => store.close());
+    const id = {};
+    for (const n of ['Cheat', 'Vic', 'Val', 'Vera', 'Vold', 'Omar', 'Nova']) id[n] = store.users.create({ username: n, email: `${n}@example.org` });
+    const raw = new DatabaseSync(config.dbPath);
+    const seed = raw.prepare(`INSERT INTO ratings (user_id, category, rating, games, wins, losses, peak, rated, updated_at)
+        VALUES (?, '3+2', ?, 40, 20, 20, ?, 1, 0)`);
+    for (const [n, r] of [['Cheat', 1500], ['Vic', 1500], ['Val', 1700], ['Vera', 1500], ['Vold', 1500], ['Omar', 1500]]) seed.run(id[n], r, r);
+    raw.close();
+    return { config, store, id };
+}
+
+// The games of the scenario, in the order they are committed; returns the games by name.
+function play(store, id) {
+    const g = {
+        old: game(id.Cheat, id.Vold, W, NOW - 70 * DAY),              // outside the 60-day window
+        vicLoss: game(id.Cheat, id.Vic, W, NOW - 20 * DAY),           // refunded
+        casual: game(id.Vic, id.Cheat, B, NOW - 19 * DAY, { rated: false }),   // no rating change
+        valDraw: game(id.Val, id.Cheat, D, NOW - 18 * DAY),           // the higher-rated Val loses points: refunded
+        veraWin: game(id.Vera, id.Cheat, W, NOW - 17 * DAY),          // a win: untouched
+        vicOmar: game(id.Omar, id.Vic, W, NOW - 16 * DAY),            // Vic loses to someone else: untouched
+    };
+    const batch = [g.old, g.vicLoss, g.casual, g.valDraw, g.veraWin, g.vicOmar];
+    // Nova's unrated phase: a draw and three losses against Omar, then a fifth game lost to the
+    // cheater, which gives Nova a first rating below the working rating (no K-formula loss: not
+    // refunded).
+    for (let i = 0; i < 4; i++) batch.push(game(id.Omar, id.Nova, i === 0 ? D : W, NOW - (15 - i) * DAY));
+    g.novaFirst = game(id.Cheat, id.Nova, W, NOW - 10 * DAY);
+    batch.push(g.novaFirst);
+    g.vicAfter = game(id.Vic, id.Omar, W, NOW - 5 * DAY);            // Vic's rating moved on since
+    batch.push(g.vicAfter);
+    store.games.finishBatch(batch);
+    return g;
+}
+
+const lost = (store, g, side) => {
+    const c = store.games.byId(g.id).ratingChanges[side];
+    return c.before - c.after;
+};
+const rating = (store, userId) => store.ratings.get(userId, '3+2');
+
+test('an automatic ban gives back what each victim lost to the cheater in the window, on their current rating', (t) => {
+    const { config, store, id } = world({}, t);
+    const g = play(store, id);
+    const vicLost = lost(store, g.vicLoss, 'black');
+    const valLost = lost(store, g.valDraw, 'white');
+    assert.equal(vicLost, 10, 'equal ratings, K 20: 20 x 0.5');
+    assert.ok(valLost > 0, 'a draw against a lower-rated player costs points');
+    assert.ok(lost(store, g.novaFirst, 'black') > 0, "Nova's first rating is below the working rating");
+    assert.ok(lost(store, g.old, 'black') > 0);
+    const before = Object.fromEntries(Object.entries(id).map(([n, u]) => [n, rating(store, u)]));
+
+    const sent = [];
+    const primary = { request: async (type, payload) => { sent.push({ type, payload }); return {}; } };
+    const ac = createAnticheat({ config, store, primary, log: quiet, now: () => NOW });
+    const r = ac.sanctionCertain({ userId: id.Cheat, gameId: 999, kind: 'illegal_move' });
+    assert.equal(r.applied, true);
+    assert.equal(r.refunds, 2, 'Vic and Val');
+
+    assert.equal(rating(store, id.Vic).rating, before.Vic.rating + vicLost, 'added to the current rating, nothing recomputed');
+    assert.equal(rating(store, id.Val).rating, before.Val.rating + valLost);
+    for (const n of ['Vera', 'Vold', 'Omar', 'Nova', 'Cheat']) assert.deepEqual(rating(store, id[n]), before[n], `${n} untouched`);
+    // Counts are left alone: the games still happened.
+    assert.equal(rating(store, id.Vic).games, before.Vic.games);
+
+    const rows = store.refunds.list({ cheaterId: id.Cheat });
+    assert.deepEqual(rows.map((x) => [x.gameId, x.victimName, x.points, x.source, x.category]).sort(),
+        [[g.vicLoss.id, 'Vic', vicLost, 'auto', '3+2'], [g.valDraw.id, 'Val', valLost, 'auto', '3+2']].sort());
+    const ban = store.sanctions.activeBan(id.Cheat, NOW);
+    assert.ok(rows.every((x) => x.sanctionId === ban.id && x.createdAt === NOW && x.notifiedAt === null && x.createdBy === null));
+    assert.deepEqual(store.refunds.pendingFor(id.Vic), { ids: [rows.find((x) => x.victimId === id.Vic).id], points: vicLost });
+    return new Promise((resolve) => setImmediate(resolve)).then(() => {
+        assert.deepEqual(sent, [{ type: 'sanction.applied', payload: { userId: id.Cheat, until: ban.endsAt, reason: 'certain_cheat:illegal_move', refunds: 2 } }]);
+        ac.close();
+    });
+});
+
+test('refunds are given once per game and victim: a second ban and a moderator\'s apply give nothing twice', (t) => {
+    const { config, store, id } = world({}, t);
+    const g = play(store, id);
+    let now = NOW;
+    const ac = createAnticheat({ config, store, log: quiet, now: () => now });
+    assert.equal(ac.sanctionCertain({ userId: id.Cheat, gameId: 1, kind: 'illegal_move' }).refunds, 2);
+    const vic = rating(store, id.Vic).rating;
+    // A later cheat in another game, after the first ban expired: a new ban, no new refund.
+    now += 2 * DAY;
+    const again = ac.sanctionCertain({ userId: id.Cheat, gameId: 2, kind: 'out_of_turn' });
+    assert.equal(again.applied, true);
+    assert.equal(again.refunds, 0);
+    assert.equal(rating(store, id.Vic).rating, vic);
+    assert.equal(store.refunds.list().length, 2);
+    // The store itself refuses a second refund of a game (UNIQUE (game_id, victim_id)).
+    assert.deepEqual(store.refunds.applyForCheater({ cheaterId: id.Cheat, since: 0, now, source: 'moderator', by: 'x' })
+        .map((x) => x.gameId), [g.old.id], 'only the game outside the first window is new');
+    assert.equal(store.refunds.applyForCheater({ cheaterId: id.Cheat, since: 0, now, source: 'moderator', by: 'x' }).length, 0);
+    ac.close();
+});
+
+test('the victim\'s peak rises with a refund that takes them above it; an unban takes nothing back', async (t) => {
+    const { config, store, id } = world({}, t);
+    play(store, id);
+    const vic = rating(store, id.Vic);
+    assert.equal(vic.peak, 1500, 'the seeded peak');
+    const ac = createAnticheat({ config, store, log: quiet, now: () => NOW });
+    ac.sanctionCertain({ userId: id.Cheat, gameId: 1, kind: 'illegal_move' });
+    const after = rating(store, id.Vic);
+    assert.equal(after.peak, Math.max(1500, after.rating));
+    assert.ok(after.rating > 1500, `${after.rating}`);
+    const out = { write() {} };
+    assert.equal(await runAdmin(['user', 'unban', 'Cheat'], { store, config, out, err: out, now: () => NOW + 1000, moderator: 'mod' }), 0);
+    assert.equal(store.sanctions.activeBan(id.Cheat, NOW + 1000), null);
+    assert.equal(rating(store, id.Vic).rating, after.rating);
+    ac.close();
+});
+
+test('RATING_REFUND_DAYS=0: no automatic refunds; the window is counted back from the ban', (t) => {
+    const { config, store, id } = world({ RATING_REFUND_DAYS: '0' }, t);
+    play(store, id);
+    const ac = createAnticheat({ config, store, log: quiet, now: () => NOW });
+    assert.equal(ac.sanctionCertain({ userId: id.Cheat, gameId: 1, kind: 'illegal_move' }).refunds, 0);
+    assert.deepEqual(store.refunds.list(), []);
+    assert.equal(refundWindowStart(config, NOW), null);
+    assert.equal(refundWindowStart(testConfig(), NOW), NOW - 60 * DAY);
+    assert.equal(refundWindowStart(testConfig({ RATING_REFUND_DAYS: '90' }), NOW), NOW - 90 * DAY);
+    ac.close();
+});
+
+async function admin(store, config, argv, now = NOW) {
+    let out = '', err = '';
+    const code = await runAdmin(argv, { store, config, out: { write: (x) => { out += x; } }, err: { write: (x) => { err += x; } }, now: () => now, moderator: 'mod-anna' });
+    return { code, out, err, json: argv.includes('--json') && code === 0 ? JSON.parse(out) : null };
+}
+
+test('moderator: integrity confirm refunds the window, --refund-since widens it, --no-refund skips; refunds apply / list', async (t) => {
+    const { config, store, id } = world({}, t);
+    const g = play(store, id);
+    const vold = rating(store, id.Vold).rating;
+
+    // --no-refund: a ban without refunds; --refund-since and --no-refund exclude each other.
+    assert.equal((await admin(store, config, ['integrity', 'confirm', 'Cheat', '--reason', 'r', '--no-refund', '--refund-since', '2026-01-01'])).code, 1);
+    assert.equal((await admin(store, config, ['integrity', 'confirm', 'Cheat', '--reason', 'r', '--refund-since', '2099-01-01'])).code, 1);
+    assert.equal(store.integrity.get(id.Cheat).level, 'none', 'a refused command writes nothing');
+    assert.equal(store.sanctions.activeBan(id.Cheat, NOW), null);
+    const noRefund = await admin(store, config, ['integrity', 'confirm', 'Cheat', '--reason', 'engine', '--no-refund', '--json']);
+    assert.equal(noRefund.code, 0, noRefund.err);
+    assert.deepEqual(noRefund.json.refunds, []);
+    assert.equal(noRefund.json.refundSince, null);
+    assert.deepEqual(store.refunds.list(), []);
+
+    // refunds apply: a confirmed cheater only; the window counts back from the latest ban.
+    assert.equal((await admin(store, config, ['refunds', 'apply', 'Vic'])).code, 1, 'Vic is not a confirmed cheater');
+    assert.equal((await admin(store, config, ['refunds', 'apply', 'Cheat', '--since', '2099-01-01'])).code, 1, 'a date in the future');
+    assert.equal((await admin(store, config, ['refunds', 'apply', 'Cheat', '--since', 'yesterday'])).code, 1);
+    const apply = await admin(store, config, ['refunds', 'apply', 'Cheat', '--json'], NOW + 3 * DAY);
+    assert.equal(apply.code, 0, apply.err);
+    assert.equal(apply.json.since, NOW - 60 * DAY, 'RATING_REFUND_DAYS before the ban, not before the command');
+    assert.deepEqual(apply.json.refunds.map((r) => r.gameId).sort(), [g.vicLoss.id, g.valDraw.id].sort());
+    assert.equal(rating(store, id.Vold).rating, vold, 'outside the window');
+
+    // --since reaches the older game; the games already refunded are skipped.
+    const since = new Date(NOW - 80 * DAY).toISOString().slice(0, 10);
+    const wider = await admin(store, config, ['refunds', 'apply', 'Cheat', '--since', since]);
+    assert.equal(wider.code, 0, wider.err);
+    assert.match(wider.out, /1 game\(s\), 10 point\(s\) to 1 player\(s\)/);
+    assert.equal(rating(store, id.Vold).rating, vold + 10);
+    const rows = store.refunds.list();
+    assert.equal(rows.length, 3);
+    assert.ok(rows.every((r) => r.source === 'moderator' && r.createdBy === 'mod-anna'));
+
+    // Audit: one moderator_action per command, one rating_refund event per refund.
+    const audit = new DatabaseSync(config.dbPath, { readOnly: true });
+    const kinds = audit.prepare(`SELECT kind, json_extract(detail, '$.action') AS action FROM security_events ORDER BY id`).all().map((r) => r.action || r.kind);
+    audit.close();
+    assert.deepEqual(kinds, ['integrity_confirm', 'rating_refund', 'rating_refund', 'refunds_apply', 'rating_refund', 'refunds_apply']);
+
+    // refunds list: by cheater, by victim, all.
+    const byCheater = await admin(store, config, ['refunds', 'list', 'Cheat', '--json']);
+    assert.equal(byCheater.json.length, 3);
+    const byVictim = await admin(store, config, ['refunds', 'list', '--victim', 'Vold', '--json']);
+    assert.deepEqual(byVictim.json.map((r) => [r.gameId, r.points, r.cheaterName]), [[g.old.id, 10, 'Cheat']]);
+    assert.equal((await admin(store, config, ['refunds', 'list', 'Cheat', '--victim', 'Vold'])).code, 1);
+    const text = await admin(store, config, ['refunds', 'list']);
+    assert.match(text.out, /Vold\s+3\+2\s+10\s+moderator\s+mod-anna\s+not yet/);
+});
+
+test('moderator: integrity confirm refunds RATING_REFUND_DAYS back by default, or from --refund-since', async (t) => {
+    const { config, store, id } = world({}, t);
+    const g = play(store, id);
+    const conf = await admin(store, config, ['integrity', 'confirm', 'Cheat', '--reason', 'engine', '--refund-since', new Date(NOW - 80 * DAY).toISOString()]);
+    assert.equal(conf.code, 0, conf.err);
+    assert.match(conf.out, /3 game\(s\)/);
+    const ban = store.sanctions.activeBan(id.Cheat, NOW);
+    const rows = store.refunds.list({ cheaterId: id.Cheat });
+    assert.deepEqual(rows.map((r) => r.gameId).sort(), [g.old.id, g.vicLoss.id, g.valDraw.id].sort());
+    assert.ok(rows.every((r) => r.sanctionId === ban.id && r.source === 'moderator'));
+
+    const { config: c2, store: s2, id: id2 } = world({}, t);
+    play(s2, id2);
+    const def = await admin(s2, c2, ['integrity', 'confirm', 'Cheat', '--reason', 'engine', '--json']);
+    assert.equal(def.code, 0, def.err);
+    assert.equal(def.json.refundSince, NOW - 60 * DAY);
+    assert.equal(def.json.refunds.length, 2);
+});
+
+test('moderator: refunds that fail leave the ban standing and audited, and say how to give them later', async (t) => {
+    const { config, store, id } = world({}, t);
+    const g = play(store, id);
+    const failing = { ...store, refunds: { ...store.refunds, applyForCheater: () => { throw new Error('database is locked'); } } };
+    const conf = await admin(failing, config, ['integrity', 'confirm', 'Cheat', '--reason', 'engine']);
+    assert.equal(conf.code, 1);
+    assert.match(conf.err, /banned until .*, but the rating refunds failed \(database is locked\): give them with `refunds apply Cheat`/);
+    assert.ok(store.sanctions.activeBan(id.Cheat, NOW));
+    assert.equal(store.integrity.get(id.Cheat).level, 'confirmed');
+    const raw = new DatabaseSync(config.dbPath, { readOnly: true });
+    const detail = JSON.parse(raw.prepare(`SELECT detail FROM security_events WHERE kind = 'moderator_action'`).get().detail);
+    raw.close();
+    assert.deepEqual([detail.action, detail.refundError, detail.refunds], ['integrity_confirm', 'database is locked', 0]);
+    const later = await admin(store, config, ['refunds', 'apply', 'Cheat', '--json']);
+    assert.deepEqual(later.json.refunds.map((r) => r.gameId).sort(), [g.vicLoss.id, g.valDraw.id].sort());
+});

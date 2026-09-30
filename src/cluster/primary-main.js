@@ -77,6 +77,7 @@ export async function main() {
         },
         ratingOf: (userId, category) => store.ratings.get(userId, category),
         acceptsChallenges: (userId) => store.users.byId(userId)?.acceptChallenges !== false,
+        refunds: store.refunds,
     });
     log.info('primary ready', { serverId, workers: config.workers, shardBase: config.shardBase, metricsPort: primary.metricsPort });
 
