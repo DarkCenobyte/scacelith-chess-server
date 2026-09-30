@@ -110,8 +110,12 @@ describe('cluster end to end (primary + 2 shard processes)', { timeout: 60000 },
         const config = testConfig({ ...base, METRICS_PORT: String(metricsPort), METRICS_BIND: '127.0.0.1' });
         fs.mkdirSync(config.runDir, { recursive: true, mode: 0o700 });
         children = new Map();
+        // Another process's registry served with the shards' (the analysis process's).
+        const analysis = new Registry();
+        analysis.gauge('scacelith_anticheat_analysis_engines_shared', 'Analysis engines sharing their network').set(2);
         primary = await startPrimary({
             config, log: silent, registry: new Registry(),
+            extraMetrics: async () => [{ shard: 'analysis', snapshot: analysis.snapshot() }],
             matchmaker: new Matchmaker({ config }), challenges: new Challenges({ config }),
             fork: (shard) => {
                 const env = { ...base, API_PORT: String(ports[shard]), WS_PORT: String(ports[shard]) };
@@ -189,6 +193,7 @@ describe('cluster end to end (primary + 2 shard processes)', { timeout: 60000 },
         assert.match(r.body, /scacelith_ws_connections\{shard="0"\} \d+/);
         assert.match(r.body, /scacelith_ws_connections\{shard="1"\} 2/);
         assert.match(r.body, /scacelith_presence_online 2/);
+        assert.match(r.body, /scacelith_anticheat_analysis_engines_shared 2/);
         assert.equal((await get(metricsPort, '/readyz')).status, 200);
     });
 

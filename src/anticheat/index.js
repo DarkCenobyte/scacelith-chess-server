@@ -6,7 +6,7 @@
 //   ac.sanctionCertain({ userId, gameId, kind }) -> { banUntil, applied, refunds } (a Promise of it with a writer)
 //   ac.classify(kind, ctx) -> { severity, certain }
 //   ac.flush() -> rows written (handed to the writer) ; ac.pendingCount / ac.pendingSignalCount (buffered rows / of them not info)
-//   startAnalysisProcess(config) -> handle { enabled, pid, restarts, stop() }   (primary only)
+//   startAnalysisProcess(config) -> handle { enabled, pid, restarts, metricsSnapshot(), stop() }   (primary only)
 //
 // Writes of a shard: with `writer` (the shard's store writer thread, src/store/writer.js) the
 // anomaly rows and the automatic sanctions (sanction.js, with the rating refunds of refunds.js)
@@ -42,7 +42,9 @@
 //   * A 'repeated_desync' anomaly is reported by the caller (the room counts desyncs); a plain
 //     'desync' stays info whatever its number.
 //   * startAnalysisProcess forks bin/analysis-worker.js, which loads its configuration itself
-//     (same environment, same .env) and opens its own store.
+//     (same environment, same .env) and opens its own store. Its metrics (games analysed, engines
+//     running, network sharing) reach the primary's /metrics through the IPC channel
+//     ('metrics.snapshot', as the shards'), under the shard label 'analysis'.
 //   * store.refunds (rating refunds, refunds.js) is used when present: a partial store gives none.
 //   * 'sanction.applied' carries `refunds` (the number of victims refunded): the primary then
 //     looks for the refunds to notify at once (refund-notices.js).
@@ -50,6 +52,7 @@
 import { fork } from 'node:child_process';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { Ipc } from '../cluster/ipc.js';
 import { logger as rootLogger } from '../log.js';
 import { metrics } from '../metrics.js';
 import { applyCertainSanction } from './sanction.js';
@@ -264,16 +267,17 @@ export function createAnticheat({ config, store, primary = null, log = null, now
  * ANALYSIS_ENGINE_PATH is empty or ANALYSIS_WORKERS is 0.
  * @param {object} config
  * @param {{ log?: object, script?: string, env?: object, minBackoffMs?: number, maxBackoffMs?: number, stableMs?: number }} [o]
- * @returns {{ enabled: boolean, readonly pid: number|null, readonly restarts: number, stop: (graceMs?: number) => Promise<void> }}
+ * @returns {{ enabled: boolean, readonly pid: number|null, readonly restarts: number, metricsSnapshot: (timeoutMs?: number) => Promise<object[]|null>, stop: (graceMs?: number) => Promise<void> }}
+ *          metricsSnapshot: the process's metrics registry snapshot, null while it is not running or does not answer
  */
 export function startAnalysisProcess(config, { log = null, script = null, env = {}, minBackoffMs = 1000, maxBackoffMs = 60000, stableMs = 60000 } = {}) {
     const lg = log || rootLogger.child('anticheat');
     if (!config.analysisEnginePath || !config.analysisWorkers) {
         lg.info('engine analysis disabled', { reason: !config.analysisEnginePath ? 'ANALYSIS_ENGINE_PATH empty' : 'ANALYSIS_WORKERS=0' });
-        return { enabled: false, pid: null, restarts: 0, stop: async () => {} };
+        return { enabled: false, pid: null, restarts: 0, metricsSnapshot: async () => null, stop: async () => {} };
     }
     const file = script || fileURLToPath(new URL('../../bin/analysis-worker.js', import.meta.url));
-    let child = null, timer = null, stopped = false, restarts = 0, delay = minBackoffMs;
+    let child = null, ipc = null, timer = null, stopped = false, restarts = 0, delay = minBackoffMs;
 
     function launch() {
         timer = null;
@@ -287,10 +291,12 @@ export function startAnalysisProcess(config, { log = null, script = null, env = 
         }
         try { os.setPriority(child.pid, os.constants.priority.PRIORITY_LOW); } catch { /* the worker lowers itself too */ }
         lg.info('analysis process started', { pid: child.pid });
-        const me = child;
+        const me = child, channel = new Ipc(child, { name: 'analysis', log: lg });
+        ipc = channel;
         me.on('error', (e) => lg.warn('analysis process error', { err: e }));
         me.on('exit', (code, signal) => {
-            if (child === me) child = null;
+            channel.close('analysis process exited');
+            if (child === me) { child = null; ipc = null; }
             if (stopped) return;
             lg.warn('analysis process exited', { code, signal });
             retry(startedAt);
@@ -311,6 +317,10 @@ export function startAnalysisProcess(config, { log = null, script = null, env = 
         enabled: true,
         get pid() { return child?.pid ?? null; },
         get restarts() { return restarts; },
+        async metricsSnapshot(timeoutMs = 2000) {
+            if (!ipc) return null;
+            try { return await ipc.request('metrics.snapshot', null, { timeoutMs }); } catch { return null; }
+        },
         async stop(graceMs = 5000) {
             stopped = true;
             if (timer) { clearTimeout(timer); timer = null; }

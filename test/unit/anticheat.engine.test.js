@@ -153,7 +153,7 @@ test('real engine: the worker analyses a queued game end to end', { skip, timeou
     assert.equal(job.status, 'done');
     assert.equal(job.features.plies, g.moves.length);
     assert.ok(job.features.white.n > 0 && job.features.engine.startsWith('Stockfish'));
-    assert.match(job.features.profile, /; nn-[0-9a-f]{12}\.nnue; depth 4\/8; hash 32; analysis 1$/, 'the profile names the network');
+    assert.match(job.features.profile, /; nn-[0-9a-f]{12}\.nnue; depth 4\/8; hash 32; analysis 2$/, 'the profile names the network');
     assert.equal(store._.jobs.get(9002).status, 'failed');
     assert.ok(store.integrity.get(w), 'integrity computed for both players');
     assert.equal(store.integrity.get(w).level, 'none');

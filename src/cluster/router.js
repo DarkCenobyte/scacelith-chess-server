@@ -46,10 +46,12 @@
 //
 // Server times: Welcome, S_Ping and S_Pong carry clock.js now(), the clock of the game hosts
 // (MoveMade.serverTime), read when the frame is built (after the Hello's awaits). The token
-// buckets and their drop windows run on that clock too: it is monotonic, so a step of the wall
-// clock (NTP, a resumed VM) neither empties a bucket nor holds a drop window open. A round trip
-// that overlaps a stall of this worker detected by its GameHost (host.stallDuring) is left out of
-// the RTT: it measured the stall, not the network.
+// buckets and their drop windows, the heartbeat sweep and the hello deadlines run on that clock
+// too (net/ws.js stamps openedAt and lastRecvAt with it): it is monotonic, so a step of the wall
+// clock (NTP, a resumed VM) neither empties a bucket nor holds a drop window open, and neither
+// closes every connection as silent nor holds the pings back. A round trip that overlaps a stall
+// of this worker detected by its GameHost (host.stallDuring) is left out of the RTT: it measured
+// the stall, not the network.
 //
 // Deviations from DESIGN 5.3/5.7, documented for the integrators:
 //   - Endpoints given to the GameHost: { send(buf), sendDroppable(buf), close(code, reason),
@@ -163,7 +165,7 @@ class RemoteEndpoint {
 /**
  * Router state of one connection (fixed shape). `now`: clock.js now(), the clock of the token
  * buckets and their drop windows (monotonic: a step of the wall clock neither empties nor refills
- * them). The heartbeat sweep runs on the wall clock of net/ws.js (openedAt, lastRecvAt).
+ * them). The heartbeat sweep runs on that clock too, as do net/ws.js's openedAt and lastRecvAt.
  */
 class ConnCtx {
     constructor(router, conn, now) {
@@ -816,7 +818,7 @@ export class Router {
             gestureRate: this.gRate, gestureBurst: this.gRate > 0 ? this.gBurst : 0,
         }));
         this._hello.labels('ok').inc();
-        this._helloMs.observe(Date.now() - conn.openedAt);
+        this._helloMs.observe(clockNow() - conn.openedAt);
         if (activeGame) this.attach(activeGame, conn.userId, conn.id);
         const pending = c.pending;
         c.pending = null;
@@ -1006,8 +1008,8 @@ export class Router {
 
     // ---- heartbeat ------------------------------------------------------------------------------
 
-    /** One sweeper tick (exposed for tests). */
-    sweep(now = Date.now()) {
+    /** One sweeper tick (exposed for tests). `now`: clock.js now(), the clock of the connections' times. */
+    sweep(now = clockNow()) {
         const cfg = this.config;
         // Hello deadlines (FIFO in arrival order).
         const q = this._helloQ;

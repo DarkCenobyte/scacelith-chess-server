@@ -26,6 +26,7 @@
 
 import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import { now as clockNow } from '../game/clock.js';
 import { metrics as defaultRegistry } from '../metrics.js';
 import { CloseCode, WS_SUBPROTOCOL } from '../protocol/index.js';
 
@@ -148,7 +149,10 @@ export class WsConnection {
         /** @type {'hello'|'ready'|'closing'|'closed'} */
         this.state = 'hello';
         this.rttMs = 0;
-        this.openedAt = Date.now();
+        // Monotonic epoch milliseconds (clock.js now()), compared by the router's heartbeat sweep
+        // and hello deadlines on the same clock: a step of the wall clock neither closes every
+        // connection as silent nor holds the pings and timeouts back.
+        this.openedAt = clockNow();
         this.lastRecvAt = this.openedAt;
         this.onMessage = null;
         this.onClose = null;
@@ -270,7 +274,7 @@ export class WsConnection {
 
     _onData(chunk) {
         if (this._failed || this._closed) return;
-        this.lastRecvAt = Date.now();
+        this.lastRecvAt = clockNow();
         this._server._bytesIn.inc(chunk.length);
         while (this._rest !== null && chunk.length > 0) {
             const rest = this._rest;

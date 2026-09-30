@@ -125,9 +125,11 @@ stall of the network or of the worker, the gestures of a client pacing them at t
 together, and the last term is what it sends during the longest silence that a connection lives
 through (the heartbeat notices a silence at its next visit), so no such burst is a flood. Both
 buckets and their drop windows run on the monotonic clock of `clock.js`: a step of the wall clock
-neither empties them nor holds a drop window open. A gesture is then decoded and its seq checked
-like any message (malformed: 4300), and it must name a game attached to the connection. The local
-host gets `host.relayGesture(gameId, userId, frame)`; for another shard the raw frame goes over
+neither empties them nor holds a drop window open. So does the heartbeat sweep (pings, silence
+timeout, hello deadline): a step neither closes every connection nor holds the pings back. A
+gesture is then decoded and its seq checked like any message (malformed: 4300), and it must name a
+game attached to the connection. The local host gets `host.relayGesture(gameId, userId, frame)`;
+for another shard the raw frame goes over
 the bus as `ToHost` (skipped while that link holds a quarter of its queue), where the router
 recognises it by its type byte and does not decode it again. The host finds the room and the
 sender's colour (not a player: dropped, no anomaly: gestures are not authoritative), and copies

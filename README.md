@@ -19,9 +19,9 @@ community server, and players choose the server in the game's Options.
 - A TLS certificate for the server's public name (see [TLS certificates](#tls-certificates)).
 - Linux is the reference platform (Windows works for tests). One CPU core per game shard; the
   default is one shard per core, up to 16.
-- Optional: the official Stockfish 19 binary for the anti-cheat analysis (`ANALYSIS_ENGINE_PATH`;
-  download and checksum in [docs/ANTICHEAT.md](docs/ANTICHEAT.md#engine)), and an SMTP account
-  for e-mail confirmation and password resets.
+- Optional: the official Stockfish 19 binary for the anti-cheat analysis, the engine it is
+  calibrated for (`ANALYSIS_ENGINE_PATH`; see [Anti-cheat engine](#anti-cheat-engine)), and an
+  SMTP account for e-mail confirmation and password resets.
 
 ## Quick start
 
@@ -186,6 +186,42 @@ WantedBy=multi-user.target
 
 With `DATA_DIR=/var/lib/scacelith` in the environment file. `LimitNOFILE` must exceed
 `MAX_CONNECTIONS`. This unit is an example: adapt the paths to your installation.
+
+### Anti-cheat engine
+
+The engine analysis of the anti-cheat is optional (an empty `ANALYSIS_ENGINE_PATH` turns it off).
+Use **Stockfish 19**, the official release. The anti-cheat is calibrated on it: its priors, its
+synthetic engine profile and the default depths were measured with Stockfish 19. At those depths
+it needs less CPU per game than Stockfish 16 did at its former defaults, and its analysis engines
+share one copy of their evaluation network, where each Stockfish 16 engine loads its own.
+Stockfish 16, or another UCI engine, still works, but the default depths and the detection
+figures of docs/ANTICHEAT.md are not for it.
+
+```sh
+curl -LO https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+sha256sum stockfish-linux-x86-64-universal.tar.gz
+# 9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f
+tar xzf stockfish-linux-x86-64-universal.tar.gz
+sudo install -m 755 stockfish/stockfish-linux-x86-64-universal /usr/local/bin/stockfish-19
+stockfish-19 compiler | grep architecture      # x86-64-bmi2 on an OVH vCore (Haswell)
+```
+
+This one Linux binary holds every x86-64 build of Stockfish 19 and runs the best one for the CPU
+(the release has no separate Linux file per CPU); it needs glibc 2.35 or later. Compare the
+checksum with the digest the release page shows next to the file too. Then set
+`ANALYSIS_ENGINE_PATH=/usr/local/bin/stockfish-19`, and `ANALYSIS_WORKERS` as
+[docs/SIZING.md](docs/SIZING.md) suggests for your machine. Replace the binary with the server
+stopped.
+
+The engines share their network through a directory they create in `/tmp` (`/tmp/stockfish-<uid>`),
+so `/tmp` must be writable and the same for all of them. The unit above gives the service a
+private, writable `/tmp` (`PrivateTmp=true`); with `ProtectSystem=strict` and no `PrivateTmp`, add
+`ReadWritePaths=/tmp`. Each engine start is logged (`analysis engine started`, with `"network":
+"shared memory"`). An engine that could not share while others run logs a warning instead
+(`analysis engine started with its own copy of the network`, with Stockfish's reason), and then
+takes about 110 MB more. In the metrics, `scacelith_anticheat_analysis_engines_shared` equals
+`scacelith_anticheat_analysis_engines` when every engine shares. Details:
+[docs/ANTICHEAT.md](docs/ANTICHEAT.md#engine).
 
 ### Kernel settings (Linux)
 
@@ -418,9 +454,11 @@ priors (docs/ANTICHEAT.md, section 3).
 
 `http://127.0.0.1:9464/metrics` (Prometheus text format; `METRICS_TOKEN` adds a bearer token):
 connections, messages, games, move latency, commits, journal, rate limits, anti-cheat (including
-the analysis backlog and the skipped games), the retention purge (`scacelith_retention_*`), process
-memory and event-loop lag per shard, the stalls of a shard's event loop and the time given back to
-the players for them (`scacelith_game_stall_*`), and the gesture relay (`scacelith_gestures_*`).
+the analysis backlog, the skipped games, and the analysis engines running and sharing their
+network: `scacelith_anticheat_analysis_engines*`), the retention purge (`scacelith_retention_*`),
+process memory and event-loop lag per shard, the stalls of a shard's event loop and the time given
+back to the players for them (`scacelith_game_stall_*`), and the gesture relay
+(`scacelith_gestures_*`).
 `/healthz` answers when the process runs, `/readyz` when it accepts players.
 
 ## Scaling

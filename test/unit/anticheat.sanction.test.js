@@ -108,6 +108,32 @@ test('startAnalysisProcess is disabled without an engine or workers', async () =
     await h1.stop();
     const h2 = startAnalysisProcess(testConfig({ ANALYSIS_ENGINE_PATH: '/usr/games/stockfish', ANALYSIS_WORKERS: '0' }), { log: quiet });
     assert.equal(h2.enabled, false);
+    assert.equal(await h2.metricsSnapshot(), null);
+});
+
+test('startAnalysisProcess serves the metrics of the analysis process to the primary', async (t) => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ac-proc-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    // The IPC side of bin/analysis-worker.js, with one gauge of its own.
+    const script = path.join(dir, 'metrics.mjs');
+    fs.writeFileSync(script, `
+import { Ipc } from ${JSON.stringify(new URL('../../src/cluster/ipc.js', import.meta.url).href)};
+import { Registry } from ${JSON.stringify(new URL('../../src/metrics.js', import.meta.url).href)};
+const registry = new Registry();
+registry.gauge('scacelith_anticheat_analysis_engines_shared', 'test').set(2);
+const ipc = new Ipc(process);
+ipc.on('metrics.snapshot', () => registry.snapshot());
+process.on('message', (m) => { if (m.type === 'shutdown') { ipc.close(); process.disconnect(); } });
+`);
+    const h = startAnalysisProcess(testConfig({ ANALYSIS_ENGINE_PATH: '/bin/true' }), { log: quiet, script });
+    let snapshot = null;
+    for (const end = Date.now() + 10000; !snapshot && Date.now() < end;) snapshot = await h.metricsSnapshot(500);
+    assert.deepEqual(snapshot.map((m) => [m.name, m.children[0].v]), [['scacelith_anticheat_analysis_engines_shared', 2]]);
+    await h.stop(3000);
+    assert.equal(await h.metricsSnapshot(), null, 'no process, no metrics');
 });
 
 test('startAnalysisProcess restarts a crashing worker with backoff and stops cleanly', async (t) => {

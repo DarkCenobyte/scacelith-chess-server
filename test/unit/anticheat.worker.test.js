@@ -6,6 +6,7 @@ import { EngineError } from '../../src/anticheat/analysis/engine.js';
 import { createFakeStore } from '../../src/anticheat/testing/fake-store.js';
 import { AnalysisPriority } from '../../src/store/index.js';
 import { MODEL } from '../../src/anticheat/scoring.js';
+import { metrics } from '../../src/metrics.js';
 
 const config = testConfig({ ANALYSIS_ENGINE_PATH: '/fake/engine', ANALYSIS_DEPTH_FAST: '4', ANALYSIS_DEPTH_DEEP: '8', ANALYSIS_POLL_MS: '100' });
 
@@ -49,10 +50,31 @@ test('processJob: features stored, both players scored, population updated', asy
     assert.equal(store._.jobs.get(11).status, 'done');
     assert.equal(store.integrity.get(w).level, 'none');
     assert.equal(store.integrity.get(b).evidence.statistics.games, 1);
-    assert.equal(f.profile, 'fake; depth 4/8; analysis 1');
+    assert.equal(f.profile, 'fake; depth 4/8; analysis 2');
     assert.equal(store.integrity.get(b).evidence.statistics.profile, f.profile);
     assert.equal(store._.population.get(`${f.profile}|5+0|1500|accuracy`).n, 2);
     assert.equal(worker.stats.analysed, 1);
+});
+
+test('the rating evidence of a side is its counted games once rated, 0 while unrated, whatever the games played', async () => {
+    const store = createFakeStore();
+    const { moveToUci } = await import('../../src/anticheat/analysis/moves.js');
+    const cases = [
+        [{ games: 60, rated: false, countedGames: 3, unratedGames: 3 }, 0],      // many games, never rated
+        [{ games: 50, rated: true, countedGames: 12 }, 12],                      // the unrated phase's losses did not count
+        [{ games: 45, rated: true, countedGames: 45 }, 45],
+        [{ games: 40 }, 40],                                                    // stored before `rated` existed: rated, all counted
+        [{ games: 0 }, 0],
+    ];
+    const worker = createAnalysisWorker({ config, store, engineFactory: () => null, workerId: 't' });
+    for (const [i, [rating, expected]] of cases.entries()) {
+        const { w, b, moves } = addGame(store, 71 + i);
+        store._.setRating(w, '5+0', rating);
+        store._.setRating(b, '5+0', { games: 60, rated: true, countedGames: 60 });
+        const engine = fakeEngine((ply) => (ply < moves.length ? moveToUci(moves[ply]) : null));
+        const f = await worker.processJob(engine, store.analysis.next(1, 't', Date.now())[0]);
+        assert.deepEqual([f.white.ratingGames, f.black.ratingGames], [expected, 60], JSON.stringify(rating));
+    }
 });
 
 test('only games claimed at ordinary priority (the random sample) feed the population statistics', async () => {
@@ -154,4 +176,46 @@ test('the run loop analyses queued games and idles when the queue is empty', asy
     await worker.stop();
     await run;
     assert.equal(engine.closed, true);
+});
+
+test('every engine start is logged with where its network lives, and the gauges count the engines that share it', async () => {
+    const gauge = (name) => metrics.snapshot().find((m) => m.name === name).children[0].v;
+    const run = async (workers, reports) => {
+        const store = createFakeStore();
+        const logs = [];
+        const log = { info: (msg, f) => logs.push(['info', msg, f]), warn: (msg, f) => logs.push(['warn', msg, f]), error() {} };
+        // Engines as UciEngine leaves them after a start (engine.js): alive, with their report.
+        const engines = reports.map(([netMemory, netMemoryError]) => ({ ...fakeEngine(() => null), name: 'Stockfish 19', net: 'nn-1a298aa575a0.nnue',
+            alive: true, starts: 1, netMemory, netMemoryError }));
+        const worker = createAnalysisWorker({ config: { ...config, analysisWorkers: workers }, store, log, engineFactory: (i) => engines[i], pollMs: 10 });
+        const running = worker.run();
+        const t0 = Date.now();
+        while (logs.filter((l) => l[1] !== 'analysis worker started').length < workers && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 5));
+        const counts = [gauge('scacelith_anticheat_analysis_engines'), gauge('scacelith_anticheat_analysis_engines_shared')];
+        engines[0].starts = 2;                                   // restarted: reported once more
+        while (logs.filter((l) => l[1] !== 'analysis worker started').length < workers + 1 && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 5));
+        await worker.stop();
+        await running;
+        return { logs: logs.filter((l) => l[1] !== 'analysis worker started'), counts };
+    };
+
+    const shared = await run(2, [['shared', null], ['shared', null]]);
+    assert.deepEqual(shared.counts, [2, 2]);
+    assert.deepEqual(shared.logs.map((l) => [l[0], l[1], l[2].network]), Array(3).fill(['info', 'analysis engine started', 'shared memory']));
+    assert.deepEqual(shared.logs.map((l) => l[2].engine).sort(), [0, 0, 1], 'once per start of each engine');
+
+    // Stockfish 19 without sharing while two engines run: a warning with the engine's reason.
+    const local = await run(2, [['local', 'Shared memory is not serving to other processes'], ['shared', null]]);
+    assert.deepEqual(local.counts, [2, 1]);
+    const warn = local.logs.find((l) => l[0] === 'warn');
+    assert.equal(warn[1], 'analysis engine started with its own copy of the network');
+    assert.deepEqual([warn[2].network, warn[2].why, warn[2].engines], ['local memory', 'Shared memory is not serving to other processes', 2]);
+
+    // Alone, a copy of its own costs nothing more; an engine that says nothing (Stockfish 16).
+    const alone = await run(1, [['local', 'why']]);
+    assert.deepEqual(alone.logs.map((l) => [l[0], l[2].network]), [['info', 'local memory'], ['info', 'local memory']]);
+    const sf16 = await run(1, [[null, null]]);
+    assert.deepEqual(sf16.counts, [1, 0]);
+    assert.deepEqual(sf16.logs.map((l) => [l[0], l[2].network]), [['info', 'not reported'], ['info', 'not reported']]);
+    assert.deepEqual([gauge('scacelith_anticheat_analysis_engines'), gauge('scacelith_anticheat_analysis_engines_shared')], [0, 0], 'stopped workers count no engine');
 });

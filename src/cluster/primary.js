@@ -23,9 +23,11 @@ import { ShardSupervisor } from './supervisor.js';
  * @param {object} [o.refunds] store.refunds (the rating refund notices)
  * @param {number[]} [o.shards] default: SHARD_BASE .. SHARD_BASE + WORKERS - 1
  * @param {object} [o.registry]
+ * @param {() => Promise<Array<{shard: string, snapshot: object[]}>>} [o.extraMetrics] snapshots of other
+ *        processes to serve with the shards' (the analysis process)
  */
 export async function startPrimary({ config, log, fork, matchmaker, challenges, conduct = null, activeBan = null, ratingOf = null,
-    acceptsChallenges = null, refunds = null, shards, registry = defaultRegistry }) {
+    acceptsChallenges = null, refunds = null, shards, registry = defaultRegistry, extraMetrics = null }) {
     const shardNumbers = shards || Array.from({ length: config.workers }, (_, i) => config.shardBase + i);
     const proc = startProcessMetrics({ registry });
     const presence = new Presence({ maxConnections: config.maxConnections, maxPerIp: config.maxConnectionsPerIp });
@@ -56,10 +58,12 @@ export async function startPrimary({ config, log, fork, matchmaker, challenges, 
             config, ready, log: log.child('metrics'),
             collect: async () => {
                 const parts = [{ shard: 'primary', snapshot: registry.snapshot() }];
-                for (const { shard, reply } of await supervisor.requestAll('metrics.snapshot', null, { timeoutMs: 2000 })) {
-                    if (reply) parts.push({ shard, snapshot: reply });
-                }
-                return parts;
+                const [replies, extra] = await Promise.all([
+                    supervisor.requestAll('metrics.snapshot', null, { timeoutMs: 2000 }),
+                    extraMetrics ? extraMetrics().catch(() => []) : [],
+                ]);
+                for (const { shard, reply } of replies) if (reply) parts.push({ shard, snapshot: reply });
+                return parts.concat(extra);
             },
         });
     }

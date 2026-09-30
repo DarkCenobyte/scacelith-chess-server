@@ -3,6 +3,11 @@
 // ordinary random sample only, the population statistics. One loop per engine (ANALYSIS_WORKERS
 // engines, one core each). Everything statistical is per analysis profile (analyzer.js): a game
 // joins, and its players are judged against, the population of the profile it was analysed with.
+//
+// Every engine start is logged with where the engine keeps its network: Stockfish 19 and later
+// share one copy between all the engines (engine.js, netMemory), and one that falls back to a
+// copy of its own while several engines run is a warning (each engine then takes about 110 MB
+// more). The gauges below count the running engines and those that share.
 
 import os from 'node:os';
 import { metrics } from '../../metrics.js';
@@ -19,6 +24,16 @@ const gamesCounter = metrics.counter('scacelith_anticheat_analysis_games_total',
 const okGames = gamesCounter.labels('ok');
 const failedGames = gamesCounter.labels('failed');
 const analysisSeconds = metrics.histogram('scacelith_anticheat_analysis_seconds', 'Engine analysis time per game', [5, 15, 30, 60, 120, 300, 600]);
+// Engines of the running workers of this process, read at each scrape.
+const liveEngines = new Set();
+function countEngines(pred) {
+    let n = 0;
+    for (const list of liveEngines) for (const e of list) if (e.alive && pred(e)) n++;
+    return n;
+}
+metrics.gaugeFn('scacelith_anticheat_analysis_engines', 'Analysis engine processes running', () => countEngines(() => true));
+metrics.gaugeFn('scacelith_anticheat_analysis_engines_shared', 'Analysis engines whose network is in memory shared with the other engines (Stockfish 19 and later)',
+    () => countEngines((e) => e.netMemory === 'shared'));
 
 /**
  * Creates the worker.
@@ -67,8 +82,20 @@ export function createAnalysisWorker({ config, store, log = null, engineFactory 
         return pop;
     }
 
+    // The evidence behind the player's rating in the category, which sets the width of the rating
+    // band of the z-scores (scoring.js: provisional below MODEL.provisionalGames): 0 while unrated
+    // (the rating is only a starting value), the counted games once rated. Games played are not
+    // evidence: the lost games of the unrated phase never enter the rating. A record stored before
+    // `rated` / `countedGames` existed is read as src/match/elo.js reads it: rated when it has
+    // games, all of them counted.
     function ratingGames(userId, category) {
-        try { return store.ratings.get(userId, category)?.games ?? null; } catch { return null; }
+        try {
+            const r = store.ratings.get(userId, category);
+            if (!r) return null;
+            const rated = typeof r.rated === 'boolean' ? r.rated : r.games > 0;
+            if (!rated) return 0;
+            return Number.isFinite(r.countedGames) ? r.countedGames : r.games ?? null;
+        } catch { return null; }
     }
 
     /**
@@ -123,10 +150,23 @@ export function createAnalysisWorker({ config, store, log = null, engineFactory 
         }
     }
 
+    // One line per engine process: which engine, and whether its network is shared (a warning
+    // when it is not while other engines run: each holds its own copy).
+    function reportStart(i, engine) {
+        const fields = { engine: i, name: engine.name, net: engine.net ?? null, pid: engine.proc?.pid ?? null,
+            network: engine.netMemory === 'shared' ? 'shared memory' : engine.netMemory === 'local' ? 'local memory' : 'not reported' };
+        if (engine.netMemory !== 'local') { log?.info('analysis engine started', fields); return; }
+        fields.why = engine.netMemoryError;
+        if (count > 1) {
+            log?.warn('analysis engine started with its own copy of the network', { ...fields, engines: count,
+                hint: 'the engines share it through /tmp/stockfish-<uid>: /tmp must be writable and the same for all of them' });
+        } else log?.info('analysis engine started', fields);
+    }
+
     async function loop(i) {
         const engine = factory(i);
         engines.push(engine);
-        let backoff = 5000;
+        let backoff = 5000, reported = 0;
         while (!stopping) {
             // Never claim a job without a working engine: a wrong ANALYSIS_ENGINE_PATH must not
             // mark the whole queue failed.
@@ -134,6 +174,11 @@ export function createAnalysisWorker({ config, store, log = null, engineFactory 
                 try {
                     await engine.start();
                     backoff = 5000;
+                    // A restart during a game's analysis is reported here, before the next job.
+                    if (engine.starts !== undefined && engine.starts !== reported) {
+                        reported = engine.starts;
+                        reportStart(i, engine);
+                    }
                 } catch (e) {
                     if (stopping) break;
                     log?.error('analysis engine unavailable', { err: e, retryInMs: backoff });
@@ -157,6 +202,7 @@ export function createAnalysisWorker({ config, store, log = null, engineFactory 
         run() {
             if (!running) {
                 log?.info('analysis worker started', { engines: count, depthFast: config.analysisDepthFast, depthDeep: config.analysisDepthDeep, workerId });
+                liveEngines.add(engines);
                 running = Promise.all(Array.from({ length: count }, (_, i) => loop(i))).then(() => undefined);
             }
             return running;
@@ -167,6 +213,7 @@ export function createAnalysisWorker({ config, store, log = null, engineFactory 
             sleepers.clear();
             await Promise.all(engines.map((e) => e.close().catch(() => {})));
             if (running) await running.catch(() => {});
+            liveEngines.delete(engines);
         },
     };
 }

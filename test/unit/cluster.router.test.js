@@ -201,10 +201,10 @@ describe('router: hello', () => {
         const env = await setup();
         const c = await env.connect();
         await waitFor(() => env.router.conns.size === 1);
-        env.router.sweep(Date.now() + 500);
+        env.router.sweep(clockNow() + 500);
         await sleep(20);
         assert.equal(env.router.conns.size, 1);
-        env.router.sweep(Date.now() + 1100);
+        env.router.sweep(clockNow() + 1100);
         const m = await c.recv();
         assert.deepEqual([m.name, m.code], ['Error', E.HelloRequired]);
         assert.equal(await c.closed(), 4010);
@@ -288,7 +288,7 @@ describe('router: ready connections', () => {
         c.send('C_Ping', { nonce: 78 });                         // too soon: dropped
         const pong = await c.recv();
         assert.deepEqual([pong.name, pong.nonce], ['S_Pong', 77]);
-        env.router.sweep(Date.now() + 1000);
+        env.router.sweep(clockNow() + 1000);
         const ping = await c.recv();
         assert.equal(ping.name, 'S_Ping');
         await sleep(15);
@@ -304,8 +304,28 @@ describe('router: ready connections', () => {
     it('closes a connection silent past the heartbeat timeout with 1001', async () => {
         const env = await setup();
         const { c } = await env.login();
-        env.router.sweep(Date.now() + 3100);
+        env.router.sweep(clockNow() + 3100);
         assert.equal(await c.closed(), 1001);
+    });
+
+    it('keeps its heartbeat when the wall clock steps', async () => {
+        const env = await setup();
+        const { c } = await env.login();
+        const wall = Date.now;
+        try {
+            // Forward by more than HEARTBEAT_TIMEOUT_MS (3 s here): nobody is silent that long.
+            Date.now = () => wall() + 3100;
+            env.router.sweep();
+            await sleep(20);
+            assert.equal(env.router.conns.size, 1, 'the connection stays open');
+            // Back by a minute (an NTP step, a resumed VM): the pings go on, every half interval.
+            Date.now = () => wall() - 60000;
+            await sleep(550);
+            env.router.sweep();
+            assert.equal((await c.until('S_Ping')).name, 'S_Ping');
+        } finally {
+            Date.now = wall;
+        }
     });
 
     it('queues with the stored rating, closes the rematch window, and maps refusals', async () => {
@@ -600,7 +620,7 @@ describe('router: gestures', () => {
         const env = await setup({ claim: { ok: true, activeGame: gameId } });
         const { c } = await env.login();
         env.host.stalled = true;
-        env.router.sweep(Date.now() + 1000);
+        env.router.sweep(clockNow() + 1000);
         const p1 = await c.until('S_Ping');
         assert.ok(Math.abs(p1.serverTime - clockNow()) < 1000);
         c.send('C_Pong', { nonce: p1.nonce });
@@ -609,7 +629,7 @@ describe('router: gestures', () => {
         assert.ok(Math.abs(pong.serverTime - clockNow()) < 1000);
         assert.equal(env.host.of('rtt').length, 0);
         env.host.stalled = false;
-        env.router.sweep(Date.now() + 2000);
+        env.router.sweep(clockNow() + 2000);
         const p2 = await c.until('S_Ping');
         c.send('C_Pong', { nonce: p2.nonce });
         await waitFor(() => env.host.of('rtt').length === 1);
@@ -628,7 +648,7 @@ describe('router: token buckets over time', () => {
             anticheat: { recordAnomaly: (x) => { anomalies.push(x); } },
         });
         const conn = {
-            id: 1, state: 'ready', userId: 1, openedAt: Date.now(), lastRecvAt: Date.now(), frames: [], closedWith: 0,
+            id: 1, state: 'ready', userId: 1, openedAt: clockNow(), lastRecvAt: clockNow(), frames: [], closedWith: 0,
             sendFrame(buf) { this.frames.push(buf); return true; },
             close(code) { this.closedWith = code; this.state = 'closed'; },
         };
@@ -710,7 +730,7 @@ describe('router: heartbeat sweep', () => {
         const router = new Router({
             config: cfg, shard: 0, host: new FakeHost(), auth: { validateToken: async () => null }, primary, registry: new Registry(), tickMs,
         });
-        const t0 = Date.now();
+        const t0 = clockNow();
         const conns = [];
         for (let i = 1; i <= n; i++) {
             const conn = {

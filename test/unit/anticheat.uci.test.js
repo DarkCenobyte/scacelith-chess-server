@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseInfoLine, mergeInfo, finalLines, UciEngine, EngineError } from '../../src/anticheat/analysis/engine.js';
+import { fileURLToPath } from 'node:url';
+import { parseInfoLine, mergeInfo, finalLines, parseNetworkReplica, networkMemory, UciEngine, EngineError } from '../../src/anticheat/analysis/engine.js';
 import { moveToUci, uciToMove, numberList } from '../../src/anticheat/analysis/moves.js';
 import { spearman, ranks, winPercent, moveAccuracy, coefficientOfVariation, welfordAdd, welfordVariance, normalTail } from '../../src/anticheat/analysis/stats.js';
 
@@ -97,4 +98,77 @@ test('an engine that hangs is killed and the error says timeout', async () => {
     await assert.rejects(e.start(), (err) => err instanceof EngineError && err.code === 'timeout');
     assert.equal(e.alive, false);
     await e.close();
+});
+
+test('parses where Stockfish keeps a replica of its network, and nothing else', () => {
+    assert.deepEqual(parseNetworkReplica('info string Network replica 1: Shared memory.'), { replica: 1, memory: 'shared', error: null });
+    assert.deepEqual(parseNetworkReplica('info string Network replica 2: Local memory. Shared memory not supported by the OS. Local allocation fallback.'),
+        { replica: 2, memory: 'local', error: 'Shared memory not supported by the OS. Local allocation fallback.' });
+    assert.deepEqual(parseNetworkReplica('info string Network replica 2: No allocation.'), { replica: 2, memory: 'none', error: null });
+    // A status of a later version: kept as the explanation.
+    assert.deepEqual(parseNetworkReplica('info string Network replica 1: Unknown status.'), { replica: 1, memory: 'unknown', error: 'Unknown status.' });
+    for (const other of ['info string NNUE evaluation using nn-1a298aa575a0.nnue (109MiB, (86896, 1024, 32, 32, 1))', 'info string Using 1 thread',
+        'info string Available processors: 0-3', 'info depth 1 seldepth 1 multipv 1 score cp 20 pv e2e4', 'bestmove e2e4', '']) {
+        assert.equal(parseNetworkReplica(other), null, other);
+    }
+});
+
+test('a network is shared when every allocated replica is', () => {
+    const r = (memory, error = null) => ({ memory, error });
+    assert.deepEqual(networkMemory([]), { memory: null, error: null }, 'not reported (Stockfish 16, another engine)');
+    assert.deepEqual(networkMemory([r('shared')]), { memory: 'shared', error: null });
+    assert.deepEqual(networkMemory([r('shared'), r('none')]), { memory: 'shared', error: null }, 'a NUMA node without threads needs no replica');
+    assert.deepEqual(networkMemory([r('shared'), r('local', 'why')]), { memory: 'local', error: 'why' });
+    assert.deepEqual(networkMemory([r('unknown', 'Unknown status.')]), { memory: 'local', error: 'Unknown status.' });
+    assert.equal(networkMemory([r('none')]).memory, 'local');
+});
+
+const FAKE = fileURLToPath(new URL('./helpers/fake-uci-engine.js', import.meta.url));
+const fakeEngine = (...strings) => new UciEngine({ path: process.execPath, args: [FAKE, ...strings], lowPriority: false });
+
+test('the engine learns at start where its network lives, among its other info strings', async (t) => {
+    const sf19 = fakeEngine('Available processors: 0-3', 'Using 1 thread', 'NNUE evaluation using nn-1a298aa575a0.nnue (109MiB, (86896, 1024, 32, 32, 1))',
+        'Network replica 1: Shared memory.');
+    t.after(() => sf19.close());
+    await sf19.start();
+    assert.deepEqual([sf19.name, sf19.net, sf19.netMemory, sf19.netMemoryError, sf19.starts], ['Fake Engine 1', 'nn-1a298aa575a0.nnue', 'shared', null, 1]);
+    // A search still reads its score line.
+    assert.equal((await sf19.analyse(['e2e4'], { depth: 5 })).lines[0].cp, 20);
+    assert.equal(sf19.netMemory, 'shared');
+
+    const fallback = fakeEngine('NNUE evaluation using nn-1a298aa575a0.nnue (109MiB, (86896, 1024, 32, 32, 1))',
+        'Network replica 1: Local memory. Shared memory is not serving to other processes');
+    t.after(() => fallback.close());
+    await fallback.start();
+    assert.deepEqual([fallback.netMemory, fallback.netMemoryError], ['local', 'Shared memory is not serving to other processes']);
+
+    const sf16 = fakeEngine('NNUE evaluation using nn-5af11540bbfe.nnue enabled');
+    t.after(() => sf16.close());
+    await sf16.start();
+    assert.deepEqual([sf16.net, sf16.netMemory, sf16.netMemoryError], ['nn-5af11540bbfe.nnue', null, null], 'Stockfish 16 says nothing: not reported');
+});
+
+test('a restarted engine reports where its network lives anew', async (t) => {
+    const e = fakeEngine('Network replica 1: Shared memory.');
+    t.after(() => e.close());
+    await e.start();
+    e.args = [FAKE];                     // the restarted process says nothing (another build)
+    e.proc.kill('SIGKILL');              // a crash
+    await e.start();
+    assert.deepEqual([e.starts, e.netMemory], [2, null]);
+});
+
+test('a search within a node limit says whether the limit stopped it', async (t) => {
+    const e = fakeEngine();
+    t.after(() => e.close());
+    await e.start();
+    const sent = [];
+    const send = e._send.bind(e);
+    e._send = (cmd) => { sent.push(cmd); send(cmd); };
+    // The fake engine completes depth 1 in 20 nodes, and never goes deeper.
+    assert.equal((await e.analyse(['e2e4'], { depth: 1 })).nodeLimited, false, 'no limit');
+    assert.equal((await e.analyse(['e2e4'], { depth: 1, nodes: 1000 })).nodeLimited, false, 'the depth completed within the limit');
+    assert.equal((await e.analyse(['e2e4'], { depth: 1, nodes: 20 })).nodeLimited, true, 'the limit reached');
+    assert.equal((await e.analyse(['e2e4'], { depth: 5, nodes: 1000 })).nodeLimited, true, 'stopped before the depth was complete');
+    assert.deepEqual(sent.filter((c) => c.startsWith('go')), ['go depth 1', 'go depth 1 nodes 1000', 'go depth 1 nodes 20', 'go depth 5 nodes 1000']);
 });

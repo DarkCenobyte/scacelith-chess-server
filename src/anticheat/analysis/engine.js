@@ -8,7 +8,9 @@
 //
 // Scores are reported as the engine gives them: from the side to move's point of view. The
 // engine's identity is learnt when it starts: its `id name` and the evaluation network(s) it
-// reports (name, net), which are part of the analysis profile (analyzer.js).
+// reports (name, net), which are part of the analysis profile (analyzer.js). Where its network
+// lives (netMemory) is learnt then too, but it is operational only and not part of the profile:
+// it changes the memory the engines take, never their results.
 
 import { spawn } from 'node:child_process';
 import os from 'node:os';
@@ -23,11 +25,50 @@ export class EngineError extends Error {
 }
 
 const SKIP_ONE = new Set(['seldepth', 'nodes', 'nps', 'time', 'hashfull', 'tbhits', 'currmovenumber', 'cpuload', 'currmove', 'sbhits']);
+// Nodes searched so far, as an info line reports them.
+const NODES = /\bnodes (\d+)/;
 
 // Stockfish names the network(s) it evaluates with when a search starts, e.g. "info string NNUE
 // evaluation using nn-1a298aa575a0.nnue (109MiB, ...)" (Stockfish 16: "... nn-5af11540bbfe.nnue
 // enabled"; one line per network when it has several).
 const NET_LINE = /^info string NNUE evaluation using (\S+)/;
+
+// Stockfish 19 and later keep the network in memory shared by every process of the same
+// executable, user and network (on Linux a memfd handed over unix sockets under
+// /tmp/stockfish-<uid>/, on Windows a named file mapping), and say with every search where each
+// replica lives (one per NUMA node in use): "info string Network replica 1: Shared memory.", or
+// "... Local memory. <why>" when sharing failed and the process holds its own copy. Earlier
+// versions and other engines say nothing.
+const REPLICA_LINE = /^info string Network replica (\d+): (?:(Shared memory|Local memory|No allocation)\.\s*)?(.*)$/;
+const REPLICA_MEMORY = { 'Shared memory': 'shared', 'Local memory': 'local', 'No allocation': 'none' };
+
+/**
+ * Parses Stockfish's report of where a replica of its network lives. Returns null for any other
+ * line. `memory` is 'unknown' for a status this parser does not know (a later wording), whose
+ * text is then the `error`.
+ * @param {string} line
+ * @returns {null | { replica: number, memory: 'shared'|'local'|'none'|'unknown', error: string|null }}
+ */
+export function parseNetworkReplica(line) {
+    const m = REPLICA_LINE.exec(String(line).trim());
+    if (!m) return null;
+    return { replica: Number(m[1]), memory: m[2] ? REPLICA_MEMORY[m[2]] : 'unknown', error: m[3] || null };
+}
+
+/**
+ * Where a process's network lives, from the replica reports of one search: 'shared' when every
+ * allocated replica is in shared memory, 'local' when one is not (its explanation in `error`),
+ * null when the engine reported none.
+ * @param {{ memory: string, error: string|null }[]} replicas
+ * @returns {{ memory: 'shared'|'local'|null, error: string|null }}
+ */
+export function networkMemory(replicas) {
+    if (!replicas.length) return { memory: null, error: null };
+    const unshared = replicas.find((r) => r.memory !== 'shared' && r.memory !== 'none');
+    if (unshared) return { memory: 'local', error: unshared.error };
+    if (replicas.some((r) => r.memory === 'shared')) return { memory: 'shared', error: null };
+    return { memory: 'local', error: 'no replica allocated' };
+}
 
 function toInt(s) {
     const v = Number.parseInt(s, 10);
@@ -129,6 +170,8 @@ export class UciEngine {
         this.proc = null;
         this.name = '';
         this.nets = [];                 // evaluation networks the running engine reported, in order
+        this.netMemory = null;          // where its network lives: 'shared', 'local', null (not reported)
+        this.netMemoryError = null;     // why it is not shared, as the engine says
         this.options = new Map();      // option name -> current value (to avoid resending)
         this.buffer = '';
         this.onLine = null;             // current consumer of output lines
@@ -136,6 +179,7 @@ export class UciEngine {
         this.starting = null;
         this.closed = false;
         this.restarts = 0;
+        this.starts = 0;                // processes started and past the handshake
         this.searches = 0;
     }
 
@@ -167,6 +211,8 @@ export class UciEngine {
         this.buffer = '';
         this.options.clear();
         this.nets = [];                 // a restarted engine may be another build: it reports anew
+        this.netMemory = null;
+        this.netMemoryError = null;
         proc.stdout.setEncoding('utf8');
         proc.stdout.on('data', (chunk) => this._onData(chunk));
         proc.stdin.on('error', () => { /* EPIPE when the engine died: reported through 'exit' */ });
@@ -198,14 +244,24 @@ export class UciEngine {
         this._setOption('Threads', this.threads);
         this._setOption('Hash', this.hashMb);
         await this.ready();
-        // The network is only named when a search starts: a one-ply search of the initial
-        // position reports it before any analysis, so every record names its full profile.
+        // The network, and where it lives, are only reported when a search starts: a one-ply
+        // search of the initial position reports them before any analysis, so every record names
+        // its full profile. (Stockfish repeats both with every search; they do not change while
+        // the process lives.)
         this._send('position startpos');
+        const replicas = [];
         await this._command('go depth 1', (line) => {
-            const net = NET_LINE.exec(line)?.[1];
-            if (net && !this.nets.includes(net)) this.nets.push(net);
+            if (line.startsWith('info string ')) {
+                const net = NET_LINE.exec(line)?.[1];
+                if (net && !this.nets.includes(net)) this.nets.push(net);
+                const replica = parseNetworkReplica(line);
+                if (replica) replicas.push(replica);
+                return undefined;
+            }
             return line.startsWith('bestmove') ? true : undefined;
         }, this.handshakeTimeoutMs);
+        ({ memory: this.netMemory, error: this.netMemoryError } = networkMemory(replicas));
+        this.starts++;
         return this;
     }
 
@@ -295,15 +351,17 @@ export class UciEngine {
     }
 
     /**
-     * Searches a position to a fixed depth.
+     * Searches a position to a fixed depth, within `nodes` nodes when given.
      * @param {string[]} moves  UCI moves from the start position (or from `fen`)
-     * @param {{ depth: number, multiPv?: number, fen?: string }} opts
-     * @returns {Promise<{ lines: object[], bestmove: string|null }>}  bestmove null when the side to move has no legal move
+     * @param {{ depth: number, multiPv?: number, fen?: string, nodes?: number|null }} opts
+     * @returns {Promise<{ lines: object[], bestmove: string|null, nodeLimited: boolean }>}  bestmove null when the side to
+     *          move has no legal move; nodeLimited: the node limit ended the search before the depth was complete (the
+     *          lines are those of an unfinished search)
      */
-    async analyse(moves, { depth, multiPv = 1, fen = null } = {}) {
+    async analyse(moves, { depth, multiPv = 1, fen = null, nodes = null } = {}) {
         await this.start();
         try {
-            return await this._analyse(moves, depth, multiPv, fen);
+            return await this._analyse(moves, depth, multiPv, fen, nodes);
         } catch (e) {
             if (e instanceof EngineError && (e.code === 'timeout' || e.code === 'crashed') && !e.recovered) {
                 // The next call starts a fresh process.
@@ -315,16 +373,20 @@ export class UciEngine {
         }
     }
 
-    async _analyse(moves, depth, multiPv, fen) {
+    async _analyse(moves, depth, multiPv, fen, nodes) {
         this._setOption('MultiPV', multiPv);
         const pos = (fen ? `position fen ${fen}` : 'position startpos') + (moves.length ? ` moves ${moves.join(' ')}` : '');
         this._send(pos);
         const acc = new Map();
+        const limit = nodes > 0 ? Math.floor(nodes) : 0;
+        let reached = 0, searched = 0;
         this.searches++;
-        return this._command(`go depth ${depth | 0}`, (line, state) => {
+        return this._command(`go depth ${depth | 0}${limit ? ` nodes ${limit}` : ''}`, (line, state) => {
             if (line.startsWith('info ')) {
                 const info = parseInfoLine(line);
-                if (info) mergeInfo(acc, info);
+                if (info) { mergeInfo(acc, info); reached = Math.max(reached, info.depth); }
+                const n = NODES.exec(line);
+                if (n) searched = Math.max(searched, Number(n[1]));
                 return undefined;
             }
             if (line.startsWith('bestmove')) {
@@ -337,7 +399,11 @@ export class UciEngine {
                 }
                 const parts = line.split(/\s+/);
                 const best = parts[1] && parts[1] !== '(none)' && parts[1] !== '0000' ? parts[1] : null;
-                return { lines: finalLines(acc), bestmove: best };
+                // Stopped by the limit: the last lines report the limit reached (Stockfish prints the
+                // unfinished iteration when it stops), or the last complete iteration is shallower
+                // than the depth asked for (it printed nothing when it stopped).
+                const nodeLimited = !!limit && best !== null && (searched >= limit || reached < depth);
+                return { lines: finalLines(acc), bestmove: best, nodeLimited };
             }
             return undefined;
         }, this.timeoutMs, () => this._send('stop'));

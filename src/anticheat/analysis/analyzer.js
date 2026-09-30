@@ -3,14 +3,15 @@
 // Positions analysed (the game always starts from the initial position):
 //   * deep pass: every position from ply 2*OPENING_PLIES_PER_SIDE to the final one, depth
 //     ANALYSIS_DEPTH_DEEP, MultiPV 3, one `ucinewgame` for the game and the positions in game
-//     order (the hash carries over, as in any game analysis);
+//     order (the hash carries over, as in any game analysis); a search that the node limit
+//     (ANALYSIS.deepNodeLimit) ends is repeated from an empty hash, without the limit;
 //   * shallow pass: the positions actually scored, depth ANALYSIS_DEPTH_FAST, MultiPV 1, with
 //     the hash cleared before each search so the answer is really a shallow engine's choice and
 //     does not inherit the deep pass.
-// Single thread + fixed depth + controlled hash make the analysis reproducible: running it again
-// with the same engine version and network (any build variant) gives the same numbers (evidence a
-// moderator can re-check). Every record names its analysis profile (analysisProfile below), and
-// only records of the same profile are ever compared or pooled.
+// Single thread + fixed depth + node limit + controlled hash make the analysis reproducible:
+// running it again with the same engine version and network (any build variant) gives the same
+// numbers (evidence a moderator can re-check). Every record names its analysis profile
+// (analysisProfile below), and only records of the same profile are ever compared or pooled.
 //
 // A move is scored unless:
 //   * it is among the first OPENING_PLIES_PER_SIDE moves of its side (opening theory);
@@ -26,7 +27,7 @@ import { moveToUci, numberList } from './moves.js';
 import { winPercent, moveAccuracy, mean, harmonicMean, spearman, coefficientOfVariation, clamp } from './stats.js';
 
 export const ANALYSIS = Object.freeze({
-    version: 1,
+    version: 2,             // 2: the deep pass's node limit
     openingPliesPerSide: 8,
     decidedCp: 600,
     goodMarginCp: 50,
@@ -35,6 +36,15 @@ export const ANALYSIS = Object.freeze({
     mateCp: 10000,
     minTimedMoves: 8,       // time features need at least this many scored moves with a clock time
     multiPv: 3,
+    // A fixed-depth search can blow up on the hash that the game's earlier positions left:
+    // Stockfish 19 at depth 15 spent over 200 million nodes (4 minutes, past the position timeout,
+    // which fails the whole game) on a position of the calibration games that it searches in half
+    // a million from an empty hash. The deep pass stops a search at this many nodes and searches
+    // the position again from an empty hash. A count of nodes, unlike a time, is the same on every
+    // machine and build, so the analysis stays reproducible. At depth 15, 1,153 searches of the
+    // same games took 0.3 million nodes at the median and 9.2 million at most; a deeper setting
+    // repeats more of its searches, at a cost in time but not in correctness.
+    deepNodeLimit: 25_000_000,
 });
 
 /**
@@ -45,7 +55,7 @@ export const ANALYSIS = Object.freeze({
  * kept per profile and a player is scored on the games of one profile (scoring.js). The CPU does
  * not matter: one thread at a fixed depth gives the same numbers with every build variant.
  * @param {{ engine: string, net?: string|null, depthFast: number, depthDeep: number, hashMb?: number|null }} p
- * @returns {string} e.g. 'Stockfish 19; nn-1a298aa575a0.nnue; depth 9/15; hash 32; analysis 1'
+ * @returns {string} e.g. 'Stockfish 19; nn-1a298aa575a0.nnue; depth 9/15; hash 32; analysis 2'
  */
 export function analysisProfile({ engine, net = null, depthFast, depthDeep, hashMb = null }) {
     const parts = [String(engine || 'engine')];
@@ -75,7 +85,7 @@ const clampEval = (cp) => clamp(cp, -ANALYSIS.evalClampCp, ANALYSIS.evalClampCp)
 
 /**
  * Runs the engine over a game.
- * @param {object} engine   UciEngine-like: newGame(), clearHash(), analyse(moves, {depth, multiPv}), name
+ * @param {object} engine   UciEngine-like: newGame(), clearHash(), analyse(moves, {depth, multiPv, nodes}), name
  * @param {string[]} uci    the game's moves in UCI
  * @param {{ depthFast: number, depthDeep: number, fromPly?: number, onProgress?: Function }} o
  * @returns {Promise<{ deep: Map<number, object>, fast: Map<number, object> }>}
@@ -86,7 +96,13 @@ export async function analysePositions(engine, uci, { depthFast, depthDeep, from
     if (n <= fromPly) return { deep, fast };
     await engine.newGame();
     for (let p = fromPly; p <= n; p++) {
-        deep.set(p, await engine.analyse(uci.slice(0, p), { depth: depthDeep, multiPv: ANALYSIS.multiPv }));
+        const moves = uci.slice(0, p);
+        let d = await engine.analyse(moves, { depth: depthDeep, multiPv: ANALYSIS.multiPv, nodes: ANALYSIS.deepNodeLimit });
+        if (d.nodeLimited) {
+            await engine.clearHash();
+            d = await engine.analyse(moves, { depth: depthDeep, multiPv: ANALYSIS.multiPv });
+        }
+        deep.set(p, d);
     }
     for (let p = fromPly; p < n; p++) {
         const d = deep.get(p);

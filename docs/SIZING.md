@@ -124,8 +124,37 @@ Fixed costs to subtract from the visible RAM before dividing by the cost of a co
 - Measured: 20,000 connections in games used 1.41-1.49 GB of RSS. At the comfortable point, VPS-1 uses about 1.9 GiB with a 2 s ping and about 2.3 GiB with a 10 s ping, VPS-2 about 3.6 and 4.4 GiB (inferred).
 - The hash peak assumes the default `PASSWORD_HASH_CONCURRENCY=1`: one hash or verification per worker at a time, the dummy check of an unknown account included. Each step higher adds 128 MiB per worker with scrypt. Argon2id halves the peak, to 128 and 256 MiB, except while scrypt hashes are still checked: those of accounts created before, and one at each worker's start to time the padding of failed logins.
 - With the default `DB_CACHE_MB=64` (and `DB_MMAP_MB=256`), the budget gives about 21,000-25,000 connections on VPS-1 and 51,000-61,000 on VPS-2 (inferred: 240 MiB more SQLite cache on VPS-1; on VPS-2, 288 MiB more cache and 256 MiB less mapped memory nearly cancel out).
-- The engine analysis process, when enabled, adds 290-350 MB (a Node process, its SQLite connection, and Stockfish 19 with its hash table, about 270 MB of it; Stockfish 16 took 110 MB less): VPS-2 then holds 47,000-57,000 connections (inferred). A second engine (`ANALYSIS_WORKERS=2`) adds about 70 MB, since the engines share one copy of the network ([ANTICHEAT.md](ANTICHEAT.md#engine)).
+- The engine analysis process, when enabled, adds 290-350 MB with one engine: a Node process and its SQLite connection (20-80 MB), and Stockfish 19 with its hash table (273 MB). VPS-2 then holds 47,000-58,000 connections (inferred). Further engines: [Anti-cheat engines](#anti-cheat-engines).
 - `DB_MMAP_MB` only covers the start of the file. A database of several GB is read mostly through the OS page cache, and the per-connection cache only keeps the hot pages, so 16 or 32 MB is enough (inferred).
+
+### Anti-cheat engines
+
+Memory of the analysis engines (`ANALYSIS_WORKERS`), measured with the official Stockfish 19 release (its universal binary, which ran its `x86-64-avx512icl` build on the development container) and the default `ANALYSIS_HASH_MB=32`, after each engine had analysed 12 positions at each of the default depths (9 and 15): the proportional set size (PSS, which splits a shared page between the processes that map it), summed over the engines.
+
+| Engines | 1 | 2 | 4 | 8 | Each further engine |
+|---|---|---|---|---|---|
+| **Stockfish 19, network shared** (the normal case) | 273 MB | 340 MB | 474 MB | 742 MB | 67 MB |
+| Stockfish 19, each engine with its own copy | 273 MB | 450 MB | 804 MB | 1,512 MB | 177 MB |
+| Stockfish 16 (shares nothing), for comparison | 162 MB | 285 MB | 531 MB | | 123 MB |
+
+- The first Stockfish 19 engine holds 110 MB of network, 67 MB of its own (the 32 MB hash table, search stacks and heap) and 96 MB of pages of the binary (clean pages of the file, which the kernel can drop and read again). Each further engine adds only its own 67 MB while the network is shared, and 177 MB when it has to load a copy.
+- Summed RSS counts the shared network once per engine (2,103 MB for 8 sharing engines, against 742 MB of PSS): judge the engines by PSS (`/proc/<pid>/smaps_rollup`) or by the free memory, not by RSS.
+- The depths do not change these figures: the hash table is allocated and cleared when the engine starts.
+- The unshared line runs each engine in a mount namespace of its own, whose `/tmp/stockfish-0` Stockfish cannot use, so it falls back to a copy of its own as it does when `/tmp` is not writable: the same binary at the same path, only the sharing is off, so no correction applies.
+- Whether the running engines share is in the log and the metrics ([ANTICHEAT.md](ANTICHEAT.md#engine)).
+
+Budget of the analysis process (the Node side, 20-80 MB, plus the engines) against the connections of the memory table above (69-83 KB each):
+
+| `ANALYSIS_WORKERS` | Analysis process | Connections it takes (inferred) | VPS-1 memory limit | VPS-2 memory limit |
+|---|---|---|---|---|
+| none (analysis off) | 0 | 0 | 24,000-29,000 | 51,000-62,000 |
+| 1 | 290-350 MB | about 4,200 | 20,000-25,000 | 47,000-58,000 |
+| 2, network shared | 360-420 MB | about 5,100 | 19,000-24,000 | 46,000-57,000 |
+| 2, not shared | 470-530 MB | about 6,600 | 17,500-22,500 | 44,500-55,500 |
+| 4, network shared | 490-550 MB | about 6,900 | 17,000-22,000 | 44,000-55,000 |
+| 4, not shared | 820-880 MB | about 11,300 | 13,000-18,000 | 40,000-51,000 |
+
+CPU sets the number of engines, not memory: an engine busy with the backlog takes a whole vCore (at low priority, on the CPU the server leaves idle). Run one on VPS-1 and two on VPS-2 (`ANALYSIS_WORKERS=2` when the CPU allows); at those counts the memory limit is about the p99 CPU limit with a 10 s ping (22,000 and 44,500 at `s` = 0.65): on VPS-1 it can come up to 2,000 connections before it, on VPS-2 it stays above. Sharing saves 110 MB per engine after the first: nothing with one engine, 1,500 connections' worth with two.
 
 ## Network
 
@@ -286,7 +315,7 @@ Restart at quiet hours, keep `SHUTDOWN_GRACE_MS` so clients receive the notice, 
 | `RECOVERY_GRACE_MS`, `RECOVERY_CLOCK_HOLD_MS` | 90000 (default), 45000 | same | after a crash or a graceful restart near the comfortable load, the default grace brings every player back, and 45000 keeps the clock of the side to move stopped until the last of them is back (inferred); the default hold of 20000 covers about 10,000 / 20,000 clients; raise the grace to 130000 if `MAX_CONNECTIONS` goes above the comfortable load |
 | `HEARTBEAT_INTERVAL_MS`, `HEARTBEAT_TIMEOUT_MS` | 10000, 30000 (default) | same | the heartbeat round trip feeds lag compensation, and the game drops a connection after two silent intervals |
 | `JOURNAL_FLUSH_MS`, `JOURNAL_FSYNC`, `DB_COMMIT_MS` | 50, true, 50 (default) | same | NVMe has plenty of room |
-| `ANALYSIS_ENGINE_PATH` | empty | optional: the official Stockfish 19 binary, `ANALYSIS_WORKERS=1` (2 when the CPU allows) | one engine takes a whole vCore and about 300 MB, and analyses about 870 games a day (inferred) |
+| `ANALYSIS_ENGINE_PATH` | empty | optional: the official Stockfish 19 binary, `ANALYSIS_WORKERS=1` (2 when the CPU allows) | one engine takes a whole vCore and about 300 MB (70 MB more per further engine, with the network shared), and analyses about 870 games a day (inferred) |
 | `TLS_MODE`, `TLS_MIN_VERSION` | native, TLSv1.2 | same | the TLS gate needs native TLS, and a proxy on the same machine only moves the cost; Windows 10 WinHTTP lacks TLS 1.3 (inferred) |
 | `TLS_CERT_FILE`, `TLS_KEY_FILE` | full chain, ECDSA P-256 key | same | the key type all measurements used; RSA adds about 1 ms per handshake (inferred) |
 | `DATA_DIR` | /var/lib/scacelith | same | as in the README's systemd unit and the backup command above |
@@ -378,6 +407,7 @@ for i in 1 2 3 4 5; do node -e "const c=require('crypto');const t=process.cpuUsa
 | `scacelith_ws_hello_total{result="server_full"}`, `scacelith_ws_handshakes_rejected_total{reason="server_full"}` | newcomers refused at login by `MAX_CONNECTIONS`, the sign of a full server; upgrades refused (HTTP 503) once its reserve is in use too, after which the TLS gate sheds (`scacelith_tls_refused_total{reason="server_full"}`) |
 | `scacelith_password_hash_rejected_total{reason}`, `scacelith_password_hash_queued` | `queue_full` or `timeout` outside an attack: not enough CPU for the logins; `source_limit`: clients held to `PASSWORD_HASH_WAITERS_PER_SOURCE` (2) waiting hashes while the queue was at least half full |
 | `scacelith_retention_runs_total{result}`, `scacelith_retention_run_seconds` | a `failed` result, or runs growing longer |
+| `scacelith_anticheat_analysis_engines`, `scacelith_anticheat_analysis_engines_shared` | fewer engines than `ANALYSIS_WORKERS` (an engine that does not start), fewer sharing engines than engines (each of those takes 110 MB more; the log says why) |
 | `scacelith_anticheat_analysis_queue_ordinary`, `scacelith_anticheat_analysis_queue_priority`, `scacelith_anticheat_analysis_skipped_total{reason}` | the ordinary queue held at `ANALYSIS_QUEUE_MAX`, a growing priority queue; `displaced` counts waiting games replaced by a game with a suspicious (not `info`) anomaly of its own |
 | `scacelith_journal_disk_bytes` (per shard) | more than about (`JOURNAL_COMPACT_SEGMENTS` + 1) × 16 MB |
 | `scacelith_journal_errors_total`, `scacelith_game_commit_unjournaled_total` | any increase: the journal cannot be written, and finished games are committed without it; fix the disk before a restart |

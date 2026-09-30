@@ -116,7 +116,13 @@ restarts it with exponential backoff (1 s .. 60 s) if it dies. It does nothing w
 worker runs `ANALYSIS_WORKERS` engines (one thread each, `ANALYSIS_HASH_MB` of hash, low
 priority), claims rated games of at least `ANALYSIS_MIN_PLIES` from the queue, and for each game:
 
-1. **Deep pass**: every position from ply 16 to the end at `ANALYSIS_DEPTH_DEEP`, MultiPV 3.
+1. **Deep pass**: every position from ply 16 to the end at `ANALYSIS_DEPTH_DEEP`, MultiPV 3, in
+   game order with the hash kept between positions. A search is stopped at 25 million nodes and
+   repeated from an empty hash: a fixed-depth search can blow up on the hash that the earlier
+   positions left. With Stockfish 19 that happened in 3 of the 108 calibration games at 9/15 and
+   in 4 at 10/18 (section 4; over 200 million nodes, minutes, on positions it searches in half a
+   million from an empty hash), and without the limit the position timeout failed those games.
+   Normal deep searches at depth 15 took 0.3 million nodes at the median and 9.2 million at most.
 2. **Shallow pass**: every scored position at `ANALYSIS_DEPTH_FAST`, MultiPV 1, with the hash
    cleared before each search (a shallow engine's real choice, not a deep result from the hash).
 3. **Moves scored**: all except the first 8 moves of each side (opening theory), moves in
@@ -132,15 +138,16 @@ priority), claims rated games of at least `ANALYSIS_MIN_PLIES` from the queue, a
    of variation of think times, number of scored moves, skipped moves by reason, and a compact
    per-move table for moderators.
 
-Single thread, fixed depth and controlled hash make the analysis **reproducible** with the same
-engine version and network: a moderator can re-run it and get the same numbers. The CPU does not
-matter: the sse41, avx2, bmi2, vnni512 and avx512icl builds of Stockfish 19 and its official
-binary gave identical features on the same games (another hash size did not).
+Single thread, fixed depth, a node limit (not a time) and controlled hash make the analysis
+**reproducible** with the same engine version and network: a moderator can re-run it and get the
+same numbers. The CPU does not matter: the sse41, avx2, bmi2, vnni512 and avx512icl builds of
+Stockfish 19 and its official binary gave identical features on the same games (another hash
+size did not).
 
 **Analysis profile.** Each engine learns, when it starts, the engine's `id name` and the
 network(s) it reports on a one-ply search (`info string NNUE evaluation using ...`). Every
 analysed game records its profile: engine, network, depths, hash and the version of the rules
-above, for example `Stockfish 19; nn-1a298aa575a0.nnue; depth 9/15; hash 32; analysis 1`.
+above, for example `Stockfish 19; nn-1a298aa575a0.nnue; depth 9/15; hash 32; analysis 2`.
 Features of different profiles are not comparable (on the same games, Stockfish 19 at 9/15 finds
 the human stand-ins' ACPL 26 % higher than Stockfish 16 at 10/18, and scores 16 % fewer moves), so
 the statistics never mix them (section 4).
@@ -171,7 +178,8 @@ by a steady random sample of ordinary games: only games claimed at ordinary prio
 **Cost.** CPU per position analysed (both passes), over the 38 games of the real-engine test
 analysed with the `x86-64-bmi2` build of each engine (the one an OVH vCore runs) on one core of
 the development container: Stockfish 19 takes 830 ms at 9/15, 1.23 s at 9/16 and about 2.4 s at
-10/18 (1.96 times 9/16), Stockfish 16 0.97 s at its former defaults 10/18. On an OVH vCore that is
+10/18 (1.96 times 9/16), Stockfish 16 0.97 s at its former defaults 10/18 (9/14, tried in the
+calibration, took half to 60 % of 9/15 with the official binary). On an OVH vCore that is
 about 1.5 s per position at 9/15 (inferred: 1.83 times the container, from the speed factors of
 [SIZING.md](SIZING.md)), so a game of 80 plies (65 positions analysed) takes about 100 s of one
 core: an engine analyses about 870 games a day, 540 to 1,260 for games of 120 to 60 plies
@@ -179,15 +187,27 @@ core: an engine analyses about 870 games a day, 540 to 1,260 for games of 120 to
 of 1.23 s). Raise `ANALYSIS_WORKERS` if `scacelith_anticheat_analysis_queue_ordinary` stays at
 `ANALYSIS_QUEUE_MAX` (ordinary games are then being skipped), or lower `ANALYSIS_SAMPLE_RATE` to
 analyse a smaller, steadier share of them; lower depths are cheaper too, but restart the
-statistics (below). A job whose engine times out (`ANALYSIS_POSITION_TIMEOUT_MS`) or crashes is
-marked failed and the engine restarted; an engine that cannot start makes the worker wait
+statistics (below). A deep search stopped by the node limit (rare: 4 positions, in the 3
+calibration games that had failed at 9/15) costs up to 25 million nodes more, about 50 s of an
+OVH vCore (inferred). A job whose engine times out (`ANALYSIS_POSITION_TIMEOUT_MS`) or crashes
+is marked failed and the engine restarted; an engine that cannot start makes the worker wait
 (5 s .. 5 min) without claiming jobs.
 
 ### Engine
 
-Install the official **Stockfish 19** release for Linux x86-64: one file that picks the best
-build for the CPU when it starts (on an OVH vCore, a Haswell without AVX-512, the `x86-64-bmi2`
-build) and needs glibc 2.35 or later (Ubuntu 22.04, Debian 12 or later).
+**Use Stockfish 19**, the official release: it is the engine the anti-cheat is calibrated for.
+The priors' accuracy relation, the synthetic engine profile of `testing/synthetic.js`, the
+calibration of section 4 and the default depths were all measured with it. Its engines share one
+copy of their network (below), and at the default depths it analyses a position for less CPU
+than Stockfish 16 did at its former defaults (cost, above). Stockfish 16 or any other UCI engine
+still works, but it is not calibrated (its statistics are those of its own profile, and the
+detection figures of section 4 do not apply to it) and not shared (every engine loads its own
+copy of its network).
+
+The release has one file for Linux x86-64, which holds every x86-64 build and runs the best one
+for the CPU (on an OVH vCore, a Haswell with AVX2 and BMI2 but no AVX-512, the `x86-64-bmi2`
+build); there is no separate file per CPU to choose. It needs glibc 2.35 or later (Ubuntu 22.04,
+Debian 12 or later).
 
 ```sh
 curl -LO https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
@@ -199,15 +219,44 @@ stockfish-19 compiler | grep architecture      # the build it picked on this CPU
 ```
 
 Compare the checksum with the digest the release page shows next to the asset too. Then set
-`ANALYSIS_ENGINE_PATH=/usr/local/bin/stockfish-19`. An engine takes about 270 MB, 110 MB more
-than Stockfish 16 (its network loaded is 109 MiB); a second one (`ANALYSIS_WORKERS=2`) adds about
-70 MB, because the engines of one user share a single copy of the network through a socket under
-`/tmp` (the unit's `PrivateTmp` keeps it private to the service). The defaults
-(`ANALYSIS_DEPTH_FAST=9`, `ANALYSIS_DEPTH_DEEP=15`) are chosen for it: on an OVH vCore they cost
-14 % less than Stockfish 16 at the former defaults 10/18 (9/16 would cost 27 % more), and they
-separate the assisted player of the real-engine test from the human stand-ins as well as 9/16
-and 10/18 do (section 4, calibration). Stockfish 16 or any other UCI engine still works; the
-statistics are then those of its own profile.
+`ANALYSIS_ENGINE_PATH=/usr/local/bin/stockfish-19`. Replace the binary with the server stopped:
+running engines and new ones find each other by the path of the executable.
+
+**Shared network.** Stockfish 19 keeps its network (109 MiB) in memory that its processes share
+when they run the same executable, load the same network and belong to the same user. The first
+engine creates it; the others attach through unix sockets in `/tmp/stockfish-<uid>/`
+(always `/tmp`: Stockfish does not read `TMPDIR`). The server starts every engine from
+`ANALYSIS_ENGINE_PATH` as the service's user, so they all share, including an engine restarted
+after a crash or a timeout (checked with the release binary: one engine of three killed with
+SIGKILL, and one stopped until its position timed out, came back attached to the same copy; the
+socket a killed engine leaves behind is removed by the next engine that finds it dead). An
+engine that cannot use `/tmp/stockfish-<uid>` (a read-only `/tmp`, or a directory of that name
+owned by another user or open to others) loads a copy of its own and says why. So `/tmp` must be
+writable and the same for all the engines: the README's systemd unit gives the service a private
+writable `/tmp` (`PrivateTmp=true`, which `ProtectSystem=strict` leaves writable); with
+`ProtectSystem=strict` and no `PrivateTmp`, add `ReadWritePaths=/tmp`. Memory per engine, with
+and without sharing: [SIZING.md](SIZING.md) (about 273 MB for the first engine, then 67 MB per
+engine shared and 177 MB unshared).
+
+To check it, look at the engine starts in the log (each start and restart is logged once):
+`analysis engine started` with `"network": "shared memory"` is an engine that shares (the first
+one too: it created the copy the others use). `analysis engine started with its own copy of the
+network` is a warning: several engines run and this one could not share; `why` holds
+Stockfish's reason (for instance `Shared memory not supported by the OS. Local allocation
+fallback.`). With a single engine (`ANALYSIS_WORKERS=1`) a copy of its own costs nothing more
+and is logged as `"network": "local memory"`, and an engine that does not say (Stockfish 16,
+for instance) as `"network": "not reported"`. In the metrics,
+`scacelith_anticheat_analysis_engines_shared` equals `scacelith_anticheat_analysis_engines` when
+every running engine shares.
+
+**Default depths.** `ANALYSIS_DEPTH_FAST=9` and `ANALYSIS_DEPTH_DEEP=15` are chosen for Stockfish
+19 (section 4, calibration): of the settings tried (9/14, 9/15, 9/16, 10/18) it is the best
+overall (the others flag engine users later in most cases), and on an OVH vCore it costs 14 %
+less than Stockfish 16 at its former defaults 10/18 (9/16 would cost 27 % more, 10/18 about 2.5
+times as much). It flags engine users assisted by Stockfish 19 as early as Stockfish 16 at 10/18
+did or earlier from 2000 up, and under a game later below. Against weaker or older assistance (a
+depth-12 search, Stockfish 16) Stockfish 16 at 10/18 flagged them up to 5 games earlier, and no
+Stockfish 19 setting closes that gap: 9/15 leaves the smallest.
 
 **Changing the engine, its network, a depth or `ANALYSIS_HASH_MB` restarts the statistics**: the
 population of the new profile starts from the priors, and every player is scored on their games
@@ -223,8 +272,9 @@ Welford statistics (n, mean, M2) of each per-game metric of rated games. Until a
 own data, **priors** stand in: hard-coded means and per-game standard deviations by rating
 (accuracy, ACPL, T1 by rating from published human data: lichess accuracy/ACPL statistics and
 Regan & Haworth / Guid & Bratko engine-matching studies; accuracy derived from the ACPL row
-through the relation our pipeline measures, accuracy ~ 100 - 0.275 ACPL up to an ACPL of about
-90, flattening above: about 74 at 110, 70 at 150), adjusted by time class (bullet, blitz, rapid,
+through the relation our pipeline measures, accuracy ~ 100 - 0.28 ACPL up to an ACPL of about
+90, flattening above: about 71 at 110, 66 at 140, the same with Stockfish 19 at every depth
+tried and with Stockfish 16), adjusted by time class (bullet, blitz, rapid,
 classical: faster games are less accurate). The prior counts as 40 games and its standard
 deviations are inflated by 25%, so a young server is deliberately cautious; the server's own
 data takes over bucket by bucket. Only the games of the random sample feed the population (the
@@ -248,8 +298,10 @@ engine produced them.
 
 Each metric of a game becomes an oriented z-score (positive = more engine-like) against the
 population of its category at the player's rating. The rating is uncertain, so the z-score is
-the **smallest over the rating band** (+/-100, +/-400 while the player has fewer than 30 games in
-the category): smurfs, returning players and fast improvers get the benefit of the doubt.
+the **smallest over the rating band** (+/-100, +/-400 while the player's rating in the category
+rests on fewer than 30 counted games, the games that entered it: none while it is unrated,
+however many games were played): smurfs, returning players and fast improvers get the benefit
+of the doubt.
 
 Metrics are grouped into signals of different nature:
 
@@ -297,41 +349,77 @@ rows, where `integrity show` reads them.
 
 ### Calibration and validation
 
-* Synthetic populations (`src/anticheat/testing/synthetic.js`, honest players drawn from the
-  population with personal offsets, 1% strongly underrated, personal timing styles): no honest
-  player flagged (3000 players with learned statistics, 1500 with priors only, each checked at
-  5, 10, 20 and 30 games); honest players improving by one per-game sd within 10 games: about 1%
-  suspected. Full engine users (profile measured with Stockfish 19): with learned statistics
-  flagged after a median of 11 to 13 games at 1000 and 1500, 15 (blitz) to 19 (rapid) at 2000
-  and 24 at 2400 blitz (2400 rapid: 5 % within 30 games); with priors only (fresh server) after
-  18 games at 1000, 24 to 26 at 1500, and mostly not within 30 games above.
+* **Stockfish 19 against Stockfish 16, per setting.** A synthetic calibration (the model of
+  `src/anticheat/testing/synthetic.js`: honest players drawn from the population with personal
+  offsets, 1 % strongly underrated, personal timing styles) was made for each analysis setting from
+  the same games analysed by each: 16 games of a player assisted by Stockfish 19 at depth 20,
+  deeper than any analysis (set C), the same games assisted by Stockfish 16 (set C16), and the 38
+  games each of the real-engine test generated by Stockfish 19 (set A) and by Stockfish 16 (set B),
+  whose assisted player moves at depth 12 and whose human stand-ins give the honest players. Engine
+  users take the per-game values each setting measures on an assisted player; honest players are
+  the priors, moved by how each setting measures the stand-ins compared with Stockfish 16 at 10/18
+  (at 9/15, over sets A and B, Stockfish 19 finds their ACPL 25 % higher and scores 14 % fewer
+  moves: it calls more positions decided); every setting draws the same random numbers; games a
+  setting could not analyse are left out of all of them. Mean number of games until an engine user
+  assisted by Stockfish 19 (set C) is flagged, 1000 per cell, with learned statistics / with priors
+  only (a fresh server); ">30": most are not flagged within 30 games:
+
+  | Rating, time control | Stockfish 16 10/18 | Stockfish 19 9/14 | **9/15** | 9/16 | 10/18 |
+  |---|---|---|---|---|---|
+  | 1000, 5+0 | 8.9 / 14.2 | 10.0 / 16.0 | 8.9 / 14.8 | 10.0 / 15.7 | 10.0 / 15.9 |
+  | 1000, 15+10 | 9.0 / 16.8 | 10.0 / 18.3 | 9.7 / 16.8 | 10.0 / 16.5 | 10.0 / 17.4 |
+  | 1500, 5+0 | 11.0 / 22.9 | 12.0 / 24.2 | 11.0 / 21.6 | 12.0 / 20.6 | 12.0 / 22.4 |
+  | 1500, 15+10 | 12.7 / 25.9 | 14.1 / 26.0 | 13.4 / 23.0 | 14.0 / 21.8 | 14.0 / 23.8 |
+  | 2000, 5+0 | 14.9 / >30 | 15.4 / >30 | 14.1 / 29.1 | 14.1 / 27.3 | 14.6 / >30 |
+  | 2000, 15+10 | 16.3 / >30 | 16.5 / >30 | 14.6 / >30 | 14.4 / >30 | 15.4 / >30 |
+  | 2400, 5+0 | 18.7 / >30 | 18.7 / >30 | 16.0 / >30 | 15.6 / >30 | 17.0 / >30 |
+  | 2400, 15+10 | 20.8 / >30 | 20.4 / >30 | 17.0 / >30 | 17.5 / >30 | 18.6 / >30 |
+
+  With every setting and every kind of engine user: no honest player flagged (3000 with learned
+  statistics and 1500 with priors only, each checked at 5, 10, 20 and 30 games), and at most 0.6 %
+  of honest players improving by one per-game sd within 10 games suspected. Against Stockfish 19's
+  assistance, 9/15 flags engine users from 2000 up as early as Stockfish 16 at 10/18 or earlier
+  (2.7 and 3.8 games earlier at 2400), and at 1000 and 1500 under a game later (fewer scored moves
+  per game); with priors only it is ahead at 1500 and 0.6 game behind at 1000 blitz. Against weaker
+  or older assistance Stockfish 16 at 10/18 stays ahead: against the depth-12 assisted player of
+  sets A and B, 9/15 needs up to 1.8 more games with learned statistics at 1000 to 2000 (3 to 5
+  more with priors only), and against Stockfish 16's own depth-20 assistance 1.8 to 4.8 more (an
+  analysis engine likely recognises its own moves best). No Stockfish 19 setting matches Stockfish 16 at
+  10/18 in every case, and the deeper ones do worse, not better (against Stockfish 16's assistance
+  at 2400 rapid, 9/16 and 10/18 need 6.9 and 10.2 more games), while 9/14 loses the lead against
+  Stockfish 19's assistance. 9/15 falls the least behind of them against every kind of engine user,
+  and costs less than Stockfish 16 at 10/18 (section 3). A second draw of the random numbers moved
+  the difference between 9/15 and Stockfish 16 by up to 1.2 games in a cell (2000 blitz: 0.8 game
+  earlier, then 0.4 later).
 * Real engine (`test/unit/anticheat.engine.test.js` with `SCACELITH_TEST_ENGINE` set to the
-  official Stockfish 19 binary, analysis at 6/10): an assisted player (depth 12 best move,
-  relayed with 2-5 s delays) against human stand-ins (random plausible moves among the top 4 at
-  low depth, thinking longer on harder moves). Assisted: accuracy 98.2, ACPL 7, T1 0.69,
-  time/complexity correlation 0.02, time CV 0.25; stand-ins: 80.1, 73, 0.28, 0.21, 0.82. With
-  the server's own statistics (the stand-ins' games), the assisted player is `none` for the
-  first 11 games and `high_confidence` from the 12th; the stand-ins are never flagged. On a
-  fresh server (priors only) the same 18 games stay just under the thresholds (Q 3.17, T 1.75):
-  the intended caution of the inflated priors. With Stockfish 16 (its own games): assisted 98.3,
-  6, 0.69, -0.04, 0.26, stand-ins 80.4, 67, 0.26, 0.19, 0.87; `suspected` at the 5th game and
-  `high_confidence` from the 12th with the server's statistics, and on a fresh server
-  `high_confidence` at the 18th (Q 3.21, T 1.86).
-* Production depths (the real-engine test's 38 games, generated by Stockfish 19, analysed at hash
-  32 by each profile): effect sizes of the assisted player against the stand-ins (accuracy, ACPL,
-  T1, T1 in complex positions, time CV) 3.60, -2.74, 3.04, 2.50, -5.06 for Stockfish 19 at 9/15;
-  3.78, -2.71, 3.06, 2.07, -5.10 at 9/16; 3.85, -2.82, 3.25, 2.24, -4.79 at 10/18; and 3.83,
-  -2.99, 4.19, 3.81, -4.17 for Stockfish 16 at 10/18. With statistics learned from the stand-ins,
-  the assisted player reaches `high_confidence` at the 14th game at 9/15, the 13th at 9/16 and
-  10/18, and the 14th with Stockfish 16; the stand-ins' scores stay under 0.45 with Stockfish 19
-  (under 0.9 with Stockfish 16); on a fresh server all four stay under the thresholds after 18
-  games (Q 2.97 to 3.16). The differences between the depths are within the noise of 18 games,
-  while 9/15 costs a third less than 9/16 (Cost, section 3).
+  official Stockfish 19 binary or its `x86-64-bmi2` build, which give the same numbers; analysis
+  at 6/10): an assisted player (depth 12 best move, relayed with 2-5 s delays) against human
+  stand-ins (random plausible moves among the top 4 at low depth, thinking longer on harder
+  moves). Assisted: accuracy 98.2, ACPL 7, T1 0.69, time/complexity correlation 0.02, time CV
+  0.25; stand-ins: 80.1, 73, 0.28, 0.21, 0.82. With the server's own statistics (the stand-ins'
+  games), the assisted player is `none` for the first 11 games and `high_confidence` from the
+  12th; the stand-ins are never flagged. On a fresh server (priors only) the same 18 games reach
+  `high_confidence` (Q 3.29, T 1.75). With Stockfish 16 (its own games): assisted 98.3, 6, 0.69,
+  -0.04, 0.26, stand-ins 80.4, 67, 0.26, 0.19, 0.87; `suspected` at the 5th game and
+  `high_confidence` from the 12th with the server's statistics, and `high_confidence` after 18
+  games on a fresh server (Q 3.33, T 1.86).
+* Production depths (sets A and B, analysed at hash 32 by each setting; set B without its two
+  games that blew up a deep search, section 3): with statistics learned from the stand-ins, the
+  assisted player reaches `high_confidence` at the 13th game of set A with Stockfish 19 at 9/15,
+  9/16 and 10/18 (the 12th at 9/14) and the 14th with Stockfish 16 at 10/18; on set B at the 14th
+  at 9/15, the 15th at 9/14 and 10/18, the 16th at 9/16, and the 13th with Stockfish 16. The
+  stand-ins' scores stay under 0.6 with Stockfish 19 (under 0.93 with Stockfish 16). Effect sizes
+  of the assisted player against the stand-ins at 9/15 (accuracy, ACPL, T1, T1 in complex
+  positions, time CV): 3.60, -2.74, 3.04, 2.50, -5.06 on set A and 3.79, -4.00, 3.15, 1.86, -4.32
+  on set B; with Stockfish 16 at 10/18, 3.83, -2.99, 4.19, 3.81, -4.17 and 3.56, -3.94, 3.51,
+  2.79, -5.09. On a fresh server only Stockfish 16 on set A flags the assisted player within its
+  18 games (Q 3.28); the others stay under the thresholds (Q 2.73 to 3.17).
 
 Known limits: players using the engine for a minority of their moves (about half or less) look
 like strong humans and are not flagged by statistics within 30 games; top players (2400+) have
-little room between their own accuracy and an engine's; a fresh server is slow to flag. Reports
-and moderators' judgement cover these cases.
+little room between their own accuracy and an engine's; a fresh server is slow to flag; engine
+users assisted by an older or weaker engine than the analysis are flagged a few games later
+(above). Reports and moderators' judgement cover these cases.
 
 ## 5. Reports
 
