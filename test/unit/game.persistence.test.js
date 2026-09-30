@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { GameHost, JOURNAL_GATE_TRIES } from '../../src/game/host.js';
 import { GameRoom, JournalKind } from '../../src/game/room.js';
 import { FakeAnticheat, FakePrimary, FakeEndpoint, FakeChessGame, FakeStore, fakeMove, silentLog } from '../../src/game/testing.js';
@@ -56,6 +57,12 @@ test('real store + journal + rules: a rated game is committed with ratings, an o
         const alice = s.store.users.create({ username: 'alice', email: 'alice@example.org' });
         const bob = s.store.users.create({ username: 'bob', email: 'bob@example.org' });
         const carol = s.store.users.create({ username: 'carol', email: 'carol@example.org' });
+        // Rated records (10 games, K 40): a newcomer's first games are its unrated phase.
+        const raw = new DatabaseSync(s.config.dbPath);
+        const seed = raw.prepare(`INSERT INTO ratings (user_id, category, rating, games, wins, peak, rated, updated_at)
+            VALUES (?, '3+2', 1500, 10, 5, 1500, 1, 0)`);
+        for (const u of [alice, bob]) seed.run(u);
+        raw.close();
         const p = (userId, name) => ({ userId, name, rating: 1500, provisional: true });
 
         // 1. Fool's mate in 3+2, rated.
@@ -79,7 +86,7 @@ test('real store + journal + rules: a rated game is committed with ratings, an o
         const row = s.store.games.byId(g1);
         assert.equal(row.status, GS.BlackWins);
         assert.equal(s.store.ratings.get(bob, '3+2').rating, 1520);
-        assert.equal(s.store.ratings.get(alice, '3+2').games, 1);
+        assert.equal(s.store.ratings.get(alice, '3+2').games, 11);
         assert.deepEqual(s.primary.of('game.ended').map((e) => e.gameId), [g1]);
 
         // 2. A game in progress, then the process goes away (journal flushed, nothing committed).

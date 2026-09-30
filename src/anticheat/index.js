@@ -1,19 +1,28 @@
 // Anti-cheat: anomaly classification and recording, automatic sanctions of certain protocol
 // cheats, and the supervisor of the engine-analysis process.
 //
-//   const ac = createAnticheat({ config, store, primary, log });
+//   const ac = createAnticheat({ config, store, primary, log, writer });
 //   ac.recordAnomaly({ userId, gameId, kind, detail, posMatched }) -> { severity, certain }
-//   ac.sanctionCertain({ userId, gameId, kind }) -> { banUntil }
+//   ac.sanctionCertain({ userId, gameId, kind }) -> { banUntil, applied, refunds } (a Promise of it with a writer)
 //   ac.classify(kind, ctx) -> { severity, certain }
-//   ac.flush() -> rows written ; ac.pendingCount / ac.pendingSignalCount (buffered rows / of them not info)
-//   startAnalysisProcess(config) -> handle { enabled, pid, restarts, stop() }   (primary only)
+//   ac.flush() -> rows written (handed to the writer) ; ac.pendingCount / ac.pendingSignalCount (buffered rows / of them not info)
+//   startAnalysisProcess(config) -> handle { enabled, pid, restarts, metricsSnapshot(), stop() }   (primary only)
+//
+// Writes of a shard: with `writer` (the shard's store writer thread, src/store/writer.js) the
+// anomaly rows and the automatic sanctions (sanction.js, with the rating refunds of refunds.js)
+// are written by that thread, never on the event loop. The thread handles its messages in order,
+// so the anomalies flushed right before a commit of finished games (GameHost) are written before
+// it (DESIGN 6.5: the commit's analysis queue policy sees them), and a certain anomaly before the
+// ban it causes. Without a writer (tools, tests) they are written on the caller's connection.
 //
 // Deviations from / precisions on docs/DESIGN.md (the contracts left these open):
 //   * store.integrity.populationStats(prefix) / updatePopulation(observations, now): statistics are
-//     kept per '<category>|<ratingBucket>|<metric>' (DESIGN only says "ratingBucket"; they must
-//     also be per time control). populationStats('<category>|<ratingBucket>') returns
-//     { <metric>: { n, mean, m2 } }; the analysis process (the only writer) sends one
-//     { key, value } observation per metric and game, which the store merges (Welford).
+//     kept per '<profile>|<category>|<ratingBucket>|<metric>' (DESIGN only says "ratingBucket";
+//     they must also be per time control, and per analysis profile: games analysed by another
+//     engine or at other depths are not comparable). populationStats('<profile>|<category>|
+//     <ratingBucket>') returns { <metric>: { n, mean, m2 } }; the analysis process (the only
+//     writer) sends one { key, value } observation per metric and game, which the store merges
+//     (Welford).
 //   * store.analysis.forUser(userId, limit) must return that player's completed analyses, newest
 //     first, each row carrying the `features` object given to complete() (or being it).
 //   * store.reports.forReporter(reporterId) (not in DESIGN) is used when present to weigh a
@@ -33,14 +42,22 @@
 //   * A 'repeated_desync' anomaly is reported by the caller (the room counts desyncs); a plain
 //     'desync' stays info whatever its number.
 //   * startAnalysisProcess forks bin/analysis-worker.js, which loads its configuration itself
-//     (same environment, same .env) and opens its own store.
+//     (same environment, same .env) and opens its own store. Its metrics (games analysed, engines
+//     running, network sharing) reach the primary's /metrics through the IPC channel
+//     ('metrics.snapshot', as the shards'), under the shard label 'analysis'.
+//   * store.refunds (rating refunds, refunds.js) is used when present: a partial store gives none.
+//   * 'sanction.applied' carries `refunds` (the number of victims refunded): the primary then
+//     looks for the refunds to notify at once (refund-notices.js).
 
 import { fork } from 'node:child_process';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { Ipc } from '../cluster/ipc.js';
 import { logger as rootLogger } from '../log.js';
 import { metrics } from '../metrics.js';
-import { readIntegrity, writeIntegrity, writeStructured, HOUR_MS } from './util.js';
+import { CheatBanReason } from './refunds.js';
+import { applyCertainSanction } from './sanction.js';
+import { writeStructured, HOUR_MS } from './util.js';
 
 /** Severity of every anomaly kind (DESIGN 6.5). */
 export const ANOMALY_KINDS = Object.freeze({
@@ -82,7 +99,6 @@ const anomalyDropped = metrics.counter('scacelith_anticheat_anomalies_dropped_to
 const sanctionCounter = metrics.counter('scacelith_anticheat_sanctions_total', 'Automatic sanctions applied', ['kind']);
 
 const MAX_PENDING = 5000;           // distinct buffered anomaly rows
-const MAX_EVIDENCE_ITEMS = 50;
 
 /**
  * Creates the anti-cheat service of a process (shard or primary).
@@ -93,8 +109,9 @@ const MAX_EVIDENCE_ITEMS = 50;
  * @param {object} [o.log]
  * @param {() => number} [o.now]
  * @param {number} [o.flushMs=1000]  batching period of non-certain anomalies
+ * @param {object} [o.writer]  store writer thread (insertAnomalies, sanction): the writes go through it
  */
-export function createAnticheat({ config, store, primary = null, log = null, now = Date.now, flushMs = 1000 }) {
+export function createAnticheat({ config, store, primary = null, log = null, now = Date.now, flushMs = 1000, writer = null }) {
     const lg = log || rootLogger.child('anticheat');
     const pending = new Map();      // userId|gameId|kind -> row (repeats coalesced)
     let pendingSignal = 0;          // buffered rows that are not info (suspicious)
@@ -107,12 +124,21 @@ export function createAnticheat({ config, store, primary = null, log = null, now
         flushTimer.unref?.();
     }
 
-    function insertRows(rows) {
-        writeStructured((r) => store.anomalies.insertBatch(r), rows, ['detail']);
+    // Throws when written here; through the writer, a failure is counted and logged when it answers.
+    function insertRows(rows, what) {
+        if (!writer) {
+            writeStructured((r) => store.anomalies.insertBatch(r), rows, ['detail']);
+            return;
+        }
+        writer.insertAnomalies(rows).catch((e) => {
+            anomalyDropped.inc(rows.length);
+            lg.error(what, { err: e, rows: rows.length });
+        });
     }
 
     /**
-     * Writes the buffered anomalies now (one insertBatch). Returns the number of rows written.
+     * Writes the buffered anomalies now (one insertBatch, handed to the writer thread when there
+     * is one). Returns the number of rows written or handed over.
      */
     function flush() {
         if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
@@ -125,7 +151,7 @@ export function createAnticheat({ config, store, primary = null, log = null, now
         pending.clear();
         pendingSignal = 0;
         try {
-            insertRows(rows);
+            insertRows(rows, 'anomaly batch lost');
             return rows.length;
         } catch (e) {
             anomalyDropped.inc(rows.length);
@@ -156,7 +182,7 @@ export function createAnticheat({ config, store, primary = null, log = null, now
         else if (c.certain || !pending.has(key)) lg.security('anomaly', { userId, gameId, kind: label, severity: c.severity, detail: d });
 
         if (c.certain) {
-            try { insertRows([row]); } catch (e) {
+            try { insertRows([row], 'certain anomaly not persisted'); } catch (e) {
                 anomalyDropped.inc();
                 lg.error('certain anomaly not persisted', { err: e, userId, kind });
             }
@@ -175,63 +201,46 @@ export function createAnticheat({ config, store, primary = null, log = null, now
     }
 
     /**
-     * Automatic sanction of a certain cheat: ban BAN_DURATION_HOURS (source 'auto'), integrity
-     * level 'confirmed' with the evidence appended, security event, and 'sanction.applied' to
-     * the primary (which kicks the player everywhere). Idempotent within a game: several certain
+     * Automatic sanction of a certain cheat (sanction.js): ban BAN_DURATION_HOURS (source 'auto'),
+     * integrity level 'confirmed' with the evidence appended, security event, the rating refunds
+     * of the player's victims, and 'sanction.applied' to the primary (which kicks the player
+     * everywhere and notifies the refunded victims). Idempotent within a game: several certain
      * anomalies of one game make one ban. Does nothing when AUTO_SANCTION_CERTAIN_CHEATS is off.
+     * With a writer the database work runs on its thread and this returns a Promise.
      * @param {{ userId: number, gameId?: number, kind: string }} s
-     * @returns {{ banUntil: number, applied: boolean }}
+     * @returns {{ banUntil: number, applied: boolean, refunds: number }|Promise<object>}
      */
     function sanctionCertain({ userId, gameId = 0, kind }) {
-        if (!config.autoSanctionCertainCheats) return { banUntil: 0, applied: false };
+        if (!config.autoSanctionCertainCheats) return { banUntil: 0, applied: false, refunds: 0 };
         const t = now();
         const key = `${userId}|${gameId || 0}`;
         const seen = sanctioned.get(key);
-        if (seen && seen > t) return { banUntil: seen, applied: false };
+        if (seen && seen > t) return { banUntil: seen, applied: false, refunds: 0 };
         if (sanctioned.size > 10000) for (const [k, v] of sanctioned) if (v <= t) sanctioned.delete(k);
+        // Taken at once (the thread answers later): the next certain anomaly of this game is a repeat.
+        sanctioned.set(key, t + config.banDurationHours * HOUR_MS);
+        const s = { userId, gameId: gameId || 0, kind, at: t };
 
-        const reason = `certain_cheat:${kind}`;
-        let until = t + config.banDurationHours * HOUR_MS;
-        let created = false;
-        let active = null;
-        try { active = store.sanctions.activeBan(userId, t); } catch { active = null; }
-        // A ban without an end (permanent) counts as ending in 100 years.
-        const activeEnd = active ? Number(active.endsAt ?? active.ends_at ?? 0) || t + 100 * 365 * 24 * HOUR_MS : 0;
-        const sameGame = active && gameId && Number(active.gameId ?? active.game_id) === Number(gameId);
-        if (active && (sameGame || activeEnd >= until)) {
-            // Already banned (another shard, or an earlier anomaly of this game): no second ban.
-            until = activeEnd;
-        } else {
-            try {
-                store.sanctions.create({ userId, kind: 'ban', reason, source: 'auto', gameId: gameId || null, startsAt: t, endsAt: until, createdBy: null });
-                created = true;
-            } catch (e) {
-                lg.error('automatic ban not stored', { err: e, userId, kind });
+        const done = (r) => {
+            sanctioned.set(key, r.until);
+            if (r.created) {
+                sanctionCounter.labels(kind in ANOMALY_KINDS ? kind : 'unknown').inc();
+                lg.security('sanction.auto', { userId, gameId, kind, until: r.until, refunds: r.refunds.length });
+                if (primary?.request) {
+                    Promise.resolve()
+                        .then(() => primary.request('sanction.applied', { userId, until: r.until, reason: `${CheatBanReason.certain}${kind}`, refunds: r.refunds.length }))
+                        .catch((e) => lg.warn('sanction.applied not delivered', { err: e, userId }));
+                }
             }
-        }
-        sanctioned.set(key, until);
-
-        try {
-            const prev = readIntegrity(store, userId);
-            const ev = { ...prev.evidence };
-            ev.certain = [...(Array.isArray(ev.certain) ? ev.certain : []), { kind, gameId: gameId || 0, at: t, banUntil: until }].slice(-MAX_EVIDENCE_ITEMS);
-            writeIntegrity(store, userId, { level: 'confirmed', score: prev.score, evidence: ev, updatedAt: t });
-        } catch (e) {
-            lg.error('integrity not updated after a certain cheat', { err: e, userId });
-        }
-        if (created) {
-            sanctionCounter.labels(kind in ANOMALY_KINDS ? kind : 'unknown').inc();
-            lg.security('sanction.auto', { userId, gameId, kind, until });
-            try {
-                writeStructured((r) => store.security.insertBatch(r), [{ kind: 'sanction_auto', userId, ip: null, detail: { kind, gameId: gameId || 0, until }, at: t }], ['detail']);
-            } catch (e) { lg.warn('security event not stored', { err: e }); }
-            if (primary?.request) {
-                Promise.resolve()
-                    .then(() => primary.request('sanction.applied', { userId, until, reason }))
-                    .catch((e) => lg.warn('sanction.applied not delivered', { err: e, userId }));
-            }
-        }
-        return { banUntil: until, applied: created };
+            return { banUntil: r.until, applied: r.created, refunds: r.refunds.length };
+        };
+        if (!writer) return done(applyCertainSanction(store, config, s, lg));
+        return writer.sanction(s).then(done, (e) => {
+            // The thread died before answering: a later certain anomaly of this game tries again.
+            sanctioned.delete(key);
+            lg.error('automatic ban not stored', { err: e, userId, kind });
+            return { banUntil: 0, applied: false, refunds: 0 };
+        });
     }
 
     /** Flushes and stops the batching timer. */
@@ -259,16 +268,17 @@ export function createAnticheat({ config, store, primary = null, log = null, now
  * ANALYSIS_ENGINE_PATH is empty or ANALYSIS_WORKERS is 0.
  * @param {object} config
  * @param {{ log?: object, script?: string, env?: object, minBackoffMs?: number, maxBackoffMs?: number, stableMs?: number }} [o]
- * @returns {{ enabled: boolean, readonly pid: number|null, readonly restarts: number, stop: (graceMs?: number) => Promise<void> }}
+ * @returns {{ enabled: boolean, readonly pid: number|null, readonly restarts: number, metricsSnapshot: (timeoutMs?: number) => Promise<object[]|null>, stop: (graceMs?: number) => Promise<void> }}
+ *          metricsSnapshot: the process's metrics registry snapshot, null while it is not running or does not answer
  */
 export function startAnalysisProcess(config, { log = null, script = null, env = {}, minBackoffMs = 1000, maxBackoffMs = 60000, stableMs = 60000 } = {}) {
     const lg = log || rootLogger.child('anticheat');
     if (!config.analysisEnginePath || !config.analysisWorkers) {
         lg.info('engine analysis disabled', { reason: !config.analysisEnginePath ? 'ANALYSIS_ENGINE_PATH empty' : 'ANALYSIS_WORKERS=0' });
-        return { enabled: false, pid: null, restarts: 0, stop: async () => {} };
+        return { enabled: false, pid: null, restarts: 0, metricsSnapshot: async () => null, stop: async () => {} };
     }
     const file = script || fileURLToPath(new URL('../../bin/analysis-worker.js', import.meta.url));
-    let child = null, timer = null, stopped = false, restarts = 0, delay = minBackoffMs;
+    let child = null, ipc = null, timer = null, stopped = false, restarts = 0, delay = minBackoffMs;
 
     function launch() {
         timer = null;
@@ -282,10 +292,12 @@ export function startAnalysisProcess(config, { log = null, script = null, env = 
         }
         try { os.setPriority(child.pid, os.constants.priority.PRIORITY_LOW); } catch { /* the worker lowers itself too */ }
         lg.info('analysis process started', { pid: child.pid });
-        const me = child;
+        const me = child, channel = new Ipc(child, { name: 'analysis', log: lg });
+        ipc = channel;
         me.on('error', (e) => lg.warn('analysis process error', { err: e }));
         me.on('exit', (code, signal) => {
-            if (child === me) child = null;
+            channel.close('analysis process exited');
+            if (child === me) { child = null; ipc = null; }
             if (stopped) return;
             lg.warn('analysis process exited', { code, signal });
             retry(startedAt);
@@ -306,6 +318,10 @@ export function startAnalysisProcess(config, { log = null, script = null, env = 
         enabled: true,
         get pid() { return child?.pid ?? null; },
         get restarts() { return restarts; },
+        async metricsSnapshot(timeoutMs = 2000) {
+            if (!ipc) return null;
+            try { return await ipc.request('metrics.snapshot', null, { timeoutMs }); } catch { return null; }
+        },
         async stop(graceMs = 5000) {
             stopped = true;
             if (timer) { clearTimeout(timer); timer = null; }

@@ -236,7 +236,7 @@ export function createAccounts(svc) {
         const t = now();
         const ratings = (store.ratings.forUser(userId) || []).map((r) => ({
             category: r.category, rating: r.rating, games: r.games, wins: r.wins, draws: r.draws, losses: r.losses,
-            peak: r.peak, provisional: (r.games ?? 0) < config.provisionalGames,
+            peak: r.peak, provisional: r.provisional,
         }));
         const sanctions = (store.sanctions.list(userId) || [])
             .filter((s) => !s.liftedAt && (s.startsAt ?? 0) <= t && (s.endsAt == null || s.endsAt > t))

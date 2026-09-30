@@ -6,6 +6,10 @@
 //   c.move(snap.game, 0, encodeMove(12, 28), posHash, 800);
 //   await c.waitFor('MoveMade', (m) => m.ply === 0);
 //   c.games.get(snap.game)            // last snapshot + applied MoveMade / GameEvent / GameEnd
+//                                     // (autoPress: the game's clock press; gesture: the
+//                                     // opponent's last S_Gesture)
+//   c.gesture(snap.game, { ply: 0, touch: 12, aim: 28, yaw: 300 });  // live gesture (cosmetic)
+//   c.on('Gesture', (g) => ...)       // the opponent's gestures (S_Gesture)
 //
 // It numbers every client message (seq), answers the server's Ping at once, measures its own
 // round trip and clock offset with ping(), and dispatches decoded server messages by name
@@ -285,6 +289,21 @@ export class ScacelithClient {
     rematch(game, accept = true) { const seq = ++this.seq; this._send(encode.Rematch({ seq, game, accept })); return seq; }
 
     /**
+     * Live gesture (C_Gesture), relayed to the opponent as it is and never stored. Omitted fields
+     * are "nothing": no touched or aimed square (64), no piece placed, no flags, head straight.
+     * The server drops, without an answer, gestures beyond Welcome.gestureRate per second (burst
+     * gestureBurst; 0: the relay is off), and closes a connection that grossly exceeds it.
+     * Returns its seq.
+     * @param {number} game
+     * @param {{ply?:number, touch?:number, aim?:number, placed?:number, flags?:number, yaw?:number, pitch?:number, lean?:number}} [fields]
+     */
+    gesture(game, { ply = 0, touch = 64, aim = 64, placed = 0, flags = 0, yaw = 0, pitch = 0, lean = 0 } = {}) {
+        const seq = ++this.seq;
+        this._send(encode.C_Gesture({ seq, game, ply, touch, aim, placed, flags, yaw, pitch, lean }));
+        return seq;
+    }
+
+    /**
      * Resolves with the Ack of request `seq`, rejects with a ScacelithError on an Error quoting it.
      * @param {number} seq
      * @param {number} [timeoutMs]
@@ -458,6 +477,7 @@ export class ScacelithClient {
                 break;
             }
             case T.MoveRejected: g.lastRejected = msg; break;
+            case T.S_Gesture: g.gesture = msg; break;
             case T.GameEvent:
                 if (msg.gseq > g.gseq) g.gseq = msg.gseq;
                 switch (msg.kind) {

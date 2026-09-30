@@ -1,5 +1,5 @@
 // Wire helpers of the load generator: WebSocket client frames and a fast path for the messages
-// of the hot loop (Move, C_Ping, C_Pong out; MoveMade, S_Ping, S_Pong in).
+// of the hot loop (Move, C_Ping, C_Pong, C_Gesture out; MoveMade, S_Ping, S_Pong in).
 //
 // The fast path writes and reads fixed-offset fields directly. The offsets are computed from
 // src/protocol/schema.js (not hard-coded), and selfCheck() compares the fast encoders and readers
@@ -33,6 +33,7 @@ const L = {
     Move: layout('Move', 'c2s'),
     C_Ping: layout('Ping', 'c2s'),
     C_Pong: layout('Pong', 'c2s'),
+    C_Gesture: layout('Gesture', 'c2s'),
     MoveMade: layout('MoveMade', 's2c'),
     S_Ping: layout('Ping', 's2c'),
     S_Pong: layout('Pong', 's2c'),
@@ -147,6 +148,13 @@ export function pingFrame(seq, nonce, mask) {
     return clientFrame(encode.C_Ping({ seq, nonce }), mask);
 }
 
+/** C_Gesture frame: a head look (yaw, pitch in milliradians), nothing in hand. */
+export function gestureFrame(seq, game, ply, yaw, pitch, mask) {
+    const g = { seq, game, ply, touch: 64, aim: 64, placed: 0, flags: 0, yaw, pitch, lean: 0 };
+    if (fast) return fastFrame(L.C_Gesture, g, mask);
+    return clientFrame(encode.C_Gesture(g), mask);
+}
+
 /** Reads MoveMade { game, ply, move } from a payload at offset `o`. */
 export function readMoveMade(buf, o, len, out) {
     if (fast && len === L.MoveMade.size) {
@@ -197,6 +205,9 @@ export function selfCheck() {
         if (!pg.equals(encode.C_Pong({ seq: 9, nonce: 0xabcdef01 }))) return { fast, reason: 'C_Pong bytes differ' };
         const pi = unmask(fastFrame(L.C_Ping, { seq: 10, nonce: 7 }, mask));
         if (!pi.equals(encode.C_Ping({ seq: 10, nonce: 7 }))) return { fast, reason: 'C_Ping bytes differ' };
+        const ge = { seq: 11, game: 2 ** 40 + 5, ply: 33, touch: 64, aim: 64, placed: 0, flags: 0, yaw: -1234, pitch: 321, lean: 0 };
+        const gf = unmask(fastFrame(L.C_Gesture, ge, mask));
+        if (!gf.equals(encode.C_Gesture(ge))) return { fast, reason: 'C_Gesture bytes differ' };
         const mm = encode.MoveMade({ game: 2 ** 41 + 99, gseq: 5, ply: 12, move: 0x0abc, flags: 0, spentMs: 10, whiteMs: 1000, blackMs: 2000, serverTime: Date.now(), drawOffer: false, firstMoveMs: 0 });
         fast = true;
         const r = readMoveMade(mm, 0, mm.length, {});
@@ -216,5 +227,5 @@ export const T = {
     Welcome: MSG.Welcome, Error: MSG.Error, S_Ping: MSG.S_Ping, S_Pong: MSG.S_Pong, Ack: MSG.Ack, Notice: MSG.Notice,
     QueueStatus: MSG.QueueStatus, ChallengeReceived: MSG.ChallengeReceived, ChallengeStatus: MSG.ChallengeStatus,
     GameSnapshot: MSG.GameSnapshot, MoveMade: MSG.MoveMade, MoveRejected: MSG.MoveRejected, GameEvent: MSG.GameEvent,
-    GameEnd: MSG.GameEnd, RatingUpdate: MSG.RatingUpdate,
+    GameEnd: MSG.GameEnd, RatingUpdate: MSG.RatingUpdate, S_Gesture: MSG.S_Gesture,
 };

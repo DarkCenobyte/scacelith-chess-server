@@ -8,7 +8,8 @@
 //   u32 connId     connection on the source shard (ToHost, Control) or the destination (ToConn)
 //   u32 userId     authenticated user of that connection
 //   u64 gameId     id53 (0 when not applicable)
-//   ... payload    ToHost: the client's raw C2S frame; ToConn: an encoded S2C frame;
+//   ... payload    ToHost: the client's raw C2S frame (a game message or a C_Gesture);
+//                  ToConn: an encoded S2C frame;
 //                  Control: u8 op + op data (Hello: u8 shard, 32-byte token; Rtt: u16 ms;
 //                  Close: u16 close code; Attach / Detach / Forfeit / RematchDecline: none)
 //
@@ -156,6 +157,11 @@ class OutLink {
     }
 }
 
+/** Bytes queued on an outgoing link, in its batch buffer and in its socket. */
+function queuedOf(link) {
+    return link.len + (link.socket && link.connected ? link.socket.writableLength : 0);
+}
+
 class InLink {
     constructor(socket) {
         this.socket = socket;
@@ -228,8 +234,7 @@ export class Bus {
         const link = this._link(peer);
         const plen = payload ? payload.length : 0;
         const need = BUS_HEADER_BYTES + plen;
-        const queued = link.len + (link.socket && link.connected ? link.socket.writableLength : 0);
-        if (queued + need > this.maxQueueBytes) { this._dropped.inc(); return false; }
+        if (queuedOf(link) + need > this.maxQueueBytes) { this._dropped.inc(); return false; }
         this._reserve(link, need);
         writeHeader(link.buf, link.len, need - 4, kind, connId, userId, gameId);
         if (plen) payload.copy(link.buf, link.len + BUS_HEADER_BYTES);
@@ -240,6 +245,17 @@ export class Bus {
             if (!this._scheduled) { this._scheduled = true; setImmediate(this._flush); }
         }
         return true;
+    }
+
+    /**
+     * Bytes waiting for a peer shard: its batch buffer and the link's socket (0 before the first
+     * frame to it). Senders of droppable frames (gestures) skip them above a share of maxQueueBytes.
+     * @param {number} peer
+     * @returns {number}
+     */
+    queuedBytes(peer) {
+        const link = this.out.get(peer);
+        return link ? queuedOf(link) : 0;
     }
 
     /**

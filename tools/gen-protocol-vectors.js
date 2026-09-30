@@ -89,14 +89,14 @@ function snapshot(over = {}) {
         white: player(1017, 'Łukasz', 1532), black: player(2048, 'ユキ', 1498, true), you: C.White,
         moves, running: C.White, whiteMs: white, blackMs: black, serverTime: T0, drawOffer: C.None,
         status: enums.GameStatus.Ongoing, reason: enums.EndReason.None, whiteConnected: true, blackConnected: true,
-        graceMs: 18000, firstMoveMs: 0, startedAt: T0 - 95000.25, rematch: C.None, ...over,
+        graceMs: 18000, firstMoveMs: 0, startedAt: T0 - 95000.25, rematch: C.None, autoPress: true, ...over,
     };
 }
 
 // ---- typical value of each message ---------------------------------------------------------------
 
 const TYPICAL = {
-    Hello: { seq: 1, proto: 1, schema: SCHEMA_HASH, client: 'Scacelith/1.4.0 (Windows x64)', token: TOKEN },
+    Hello: { seq: 1, proto: 2, schema: SCHEMA_HASH, client: 'Scacelith/1.4.0 (Windows x64)', token: TOKEN },
     C_Ping: { seq: 7, nonce: 123456 },
     C_Pong: { seq: 8, nonce: 0xdeadbeef },
     QueueJoin: { seq: 2, category: '3+2', rated: true },
@@ -114,7 +114,8 @@ const TYPICAL = {
     Abort: { seq: 9, game: GAME },
     Resync: { seq: 10, game: GAME },
     Rematch: { seq: 30, game: GAME, accept: true },
-    Welcome: { proto: 1, serverTime: T0, userId: 1017, username: 'Łukasz', serverName: 'Scacelith Community Server', heartbeatMs: 10000, clientPingMs: 10000, maxMsgPerSec: 20, activeGame: 0 },
+    C_Gesture: { seq: 31, game: GAME, ply: 6, touch: 5, aim: 26, placed: 0, flags: 0, yaw: -212, pitch: -598, lean: 35 },
+    Welcome: { proto: 2, serverTime: T0, userId: 1017, username: 'Łukasz', serverName: 'Scacelith Community Server', heartbeatMs: 10000, clientPingMs: 10000, maxMsgPerSec: 20, activeGame: 0, gestureRate: 4, gestureBurst: 8 },
     Error: { ref: 12, code: E.IllegalMove, fatal: false, game: GAME },
     S_Ping: { nonce: 991, serverTime: T0 },
     S_Pong: { nonce: 123456, serverTime: T0 + 12.25 },
@@ -128,6 +129,7 @@ const TYPICAL = {
     MoveRejected: { game: GAME, ply: 6, move: mv('b5a4'), code: E.Desync },
     GameEvent: { game: GAME, gseq: 9, kind: enums.GameEventKind.PlayerDisconnected, color: C.Black, arg: 18000 },
     GameEnd: { game: GAME, gseq: 61, status: enums.GameStatus.WhiteWins, reason: enums.EndReason.Checkmate, whiteMs: 41250, blackMs: 3999, serverTime: T0 + 600000 },
+    S_Gesture: { game: GAME, ply: 6, touch: 5, aim: 26, placed: 0, flags: 0, yaw: -212, pitch: -598, lean: 35 },
     RatingUpdate: {
         game: GAME, category: '3+2',
         white: { before: 1532, after: 1548, games: 31, provisional: false },
@@ -313,9 +315,9 @@ export function buildVectors() {
     ok('Move', { seq: 14, game: 0xffffffff, ply: 8, move: mv('e1g1'), posHash: 0x12345678, thinkMs: 812, drawOffer: false }, 'game = 2^32 - 1, castling e1g1');
     ok('Resign', { seq: 1, game: 1 }, 'smallest game id');
     ok('Rematch', { seq: 31, game: MAX53 - 1, accept: false }, 'decline, game = 2^53 - 2');
-    ok('Welcome', { proto: 1, serverTime: 0, userId: 0xffffffff, username: 'ユキユキユキユキ', serverName: '♜'.repeat(21) + 'x', heartbeatMs: 0, clientPingMs: 0xffffffff, maxMsgPerSec: 0xffff, activeGame: MAX53 },
+    ok('Welcome', { proto: 2, serverTime: 0, userId: 0xffffffff, username: 'ユキユキユキユキ', serverName: '♜'.repeat(21) + 'x', heartbeatMs: 0, clientPingMs: 0xffffffff, maxMsgPerSec: 0xffff, activeGame: MAX53, gestureRate: 60, gestureBurst: 120 },
         'username at its maximum (24 bytes of 3-byte characters), serverName at its maximum (64 bytes), activeGame = 2^53 - 1, serverTime 0');
-    ok('Welcome', { proto: 1, serverTime: -123456.789, userId: 1, username: 'مُحَمَّد', serverName: '', heartbeatMs: 10000, clientPingMs: 0, maxMsgPerSec: 20, activeGame: GAME },
+    ok('Welcome', { proto: 2, serverTime: -123456.789, userId: 1, username: 'مُحَمَّد', serverName: '', heartbeatMs: 10000, clientPingMs: 0, maxMsgPerSec: 20, activeGame: GAME, gestureRate: 0, gestureBurst: 0 },
         'negative f64, Arabic username, empty serverName');
     ok('Error', { ref: 0, code: E.CheatDetected, fatal: true, game: 0 }, 'fatal, no request, no game');
     ok('Error', { ref: 1, code: E.Malformed, fatal: true, game: 0 }, 'smallest ErrorCode');
@@ -391,7 +393,7 @@ export function buildVectors() {
     bad([0x00], 'c2s', 'unknown type', 'type 0x00');
     bad([0x04, 1, 0, 0, 0], 'c2s', 'unknown type', 'unassigned client type 0x04');
     bad([0x7f, 1, 0, 0, 0], 'c2s', 'unknown type', 'unassigned client type 0x7F');
-    bad([0xa6, 0], 's2c', 'unknown type', 'unassigned server type 0xA6');
+    bad([0xa7, 0], 's2c', 'unknown type', 'unassigned server type 0xA7');
     bad([0xff], 's2c', 'unknown type', 'type 0xFF');
     bad(enc('Welcome', T.Welcome), 'c2s', 'wrong direction', 'server message (Welcome) received by the server');
     bad(enc('S_Ping', T.S_Ping), 'c2s', 'wrong direction', 'server Ping received by the server');

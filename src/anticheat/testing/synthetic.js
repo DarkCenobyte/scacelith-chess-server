@@ -28,10 +28,12 @@ export function gauss(r) {
 
 /**
  * Engine-assisted per-game values (a relay of engine moves with random delays), as measured with
- * Stockfish 16 in test/unit/anticheat.engine.test.js (assisted depth 12, analysis 6/10).
+ * Stockfish 19 in test/unit/anticheat.engine.test.js (assisted depth 12, analysis 6/10: like a
+ * real engine user against the production depths, the assistance searches deeper than the
+ * analysis; Stockfish 16 gave the same values but a shallow T1 of 0.5).
  */
 export const ENGINE_PROFILE = Object.freeze({
-    accuracy: { mean: 98, sd: 1.5 }, acpl: { mean: 7, sd: 4 }, t1Deep: { mean: 0.7, sd: 0.1 }, t1Fast: { mean: 0.5, sd: 0.1 },
+    accuracy: { mean: 98, sd: 1.5 }, acpl: { mean: 7.5, sd: 5.5 }, t1Deep: { mean: 0.7, sd: 0.13 }, t1Fast: { mean: 0.56, sd: 0.12 },
     t1Complex: { mean: 0.6, sd: 0.15 }, timeCorr: { mean: 0.0, sd: 0.2 }, timeCv: { mean: 0.26, sd: 0.08 },
 });
 

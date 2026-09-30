@@ -4,6 +4,11 @@
 // moderator. It never bans and never changes matchmaking. docs/ANTICHEAT.md explains the model;
 // the summary:
 //
+// 0. Analysis profile. Features are only comparable between games analysed alike (engine,
+//    network, depths, hash: analyzer.js, analysisProfile). A Population holds the games of one
+//    profile, and a player is scored on their games of that profile only: changing the engine
+//    or the depths restarts the statistics from the priors. Until a player has enough games of
+//    the new profile to be judged (suspected.minGames), the level reached before stays.
 // 1. Population. For every (category, 100-point rating bucket) the server keeps Welford
 //    statistics (n, mean, M2) of each per-game metric, blended with hard-coded priors
 //    (priors.js) worth PRIOR_GAMES games, so the model works from the first day and is replaced
@@ -95,30 +100,37 @@ function normaliseStats(raw) {
 }
 
 /**
- * Population statistics per (category, rating bucket), blended with the priors.
+ * Population statistics of one analysis profile per (category, rating bucket), blended with the
+ * priors.
  *
- * Store contract used: populationStats('<category>|<bucket>') returns { <metric>: { n, mean, m2 } }
- * (arrays of { metric, n, mean, m2 } rows and JSON text are accepted too), and
- * updatePopulation([{ key: '<category>|<bucket>|<metric>', value }], now) merges one observation
- * per metric into the stored running statistics (Welford, one transaction).
+ * Store contract used: populationStats('<profile>|<category>|<bucket>') returns { <metric>: { n,
+ * mean, m2 } } (arrays of { metric, n, mean, m2 } rows and JSON text are accepted too), and
+ * updatePopulation([{ key: '<profile>|<category>|<bucket>|<metric>', value }], now) merges one
+ * observation per metric into the stored running statistics (Welford, one transaction). Without
+ * a profile (tests, tools) the keys start at the category.
  */
 export class Population {
     /**
      * @param {object|null} store   needs store.integrity.populationStats / updatePopulation (null: priors only)
-     * @param {{ reloadMs?: number, now?: () => number }} [o]
+     * @param {{ profile?: string|null, reloadMs?: number, now?: () => number }} [o]
+     *        profile: the analysis profile (features.profile) of the games it holds
      */
-    constructor(store, { reloadMs = 600000, now = Date.now } = {}) {
+    constructor(store, { profile = null, reloadMs = 600000, now = Date.now } = {}) {
         this.store = store;
+        this.profile = profile || null;
         this.reloadMs = reloadMs;
         this.now = now;
         this.cache = new Map();   // key -> { at, stats }
     }
 
-    static key(category, bucket) { return `${category}|${bucket}`; }
+    key(category, bucket) { return this.profile ? `${this.profile}|${category}|${bucket}` : `${category}|${bucket}`; }
+
+    /** Whether a features record (or a sideOf record) was analysed with this population's profile. */
+    holds(features) { return (features?.profile || null) === this.profile; }
 
     /** Raw server statistics of a bucket: { metric: { n, mean, m2 } }. */
     raw(category, bucket) {
-        const key = Population.key(category, bucket);
+        const key = this.key(category, bucket);
         const c = this.cache.get(key);
         if (c && this.now() - c.at < this.reloadMs) return c.stats;
         let stats = {};
@@ -152,7 +164,7 @@ export class Population {
      * current effective distribution) and writes it back.
      */
     update(category, bucket, side, tc) {
-        const key = Population.key(category, bucket);
+        const key = this.key(category, bucket);
         const stats = { ...this.raw(category, bucket) };
         const observations = [];
         for (const m of PRIOR_METRICS) {
@@ -189,7 +201,7 @@ export function sideOf(features, userId) {
     if (!side) return null;
     return {
         gameId: f.gameId, category: f.category || 'custom', baseMs: f.baseMs || 0, incMs: f.incMs || 0,
-        endedAt: f.endedAt || f.analysedAt || 0, analysedAt: f.analysedAt || 0,
+        endedAt: f.endedAt || f.analysedAt || 0, analysedAt: f.analysedAt || 0, profile: f.profile || null,
         ...side,
     };
 }
@@ -282,14 +294,15 @@ function jumpScore(chrono) {
 const r2 = (x) => (x === null || x === undefined || !Number.isFinite(x) ? null : Math.round(x * 100) / 100);
 
 /**
- * Scores a player from their analysed games.
+ * Scores a player from their analysed games of the population's analysis profile (the others
+ * are left out).
  * @param {object[]} games   sideOf() records, any order (sorted newest first here)
  * @param {Population} pop
  * @returns {{ level: string, score: number, groups: object, windows: object, jump: object, reasons: string[], perGame: object[], games: number, moves: number }}
  */
 export function scorePlayer(games, pop) {
     const usable = games
-        .filter((g) => g && (g.n || 0) >= MODEL.minMovesPerGame)
+        .filter((g) => g && (g.n || 0) >= MODEL.minMovesPerGame && pop.holds(g))
         .sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0) || (b.analysedAt || 0) - (a.analysedAt || 0))
         .slice(0, MODEL.windowGames);
     const items = usable.map((g) => ({ g, gz: gameZ(g, pop) }));
@@ -413,27 +426,34 @@ export function playerGames(store, userId, limit = MODEL.windowGames) {
 /**
  * Recomputes a player's automatic integrity level after a new analysed game and stores it.
  *
- * Rules on top of scorePlayer: `confirmed` is never touched; `high_confidence` does not fall
- * back below `suspected` without a moderator; after a moderator cleared the player the level
- * only rises again on new evidence (high_confidence, or a score 1.0 above the cleared one with
- * at least 5 games analysed since).
+ * Rules on top of scorePlayer: `confirmed` is never touched; a player whose recent games were
+ * analysed with another profile keeps their level until they have MODEL.suspected.minGames games
+ * of the population's profile (the statistics restarted: too few games to judge);
+ * `high_confidence` does not fall back below `suspected` without a moderator; after a moderator
+ * cleared the player the level only rises again on new evidence (high_confidence, or a score 1.0
+ * above the cleared one with at least 5 games analysed since).
+ * @param {{ store: object, userId: number, population: Population, now?: number, log?: object }} o
+ *        population: the one of the analysis profile of the game just analysed
  * @returns {{ level: string, previous: string, score: number, result: object }}
  */
 export function updatePlayerIntegrity({ store, userId, population, now = Date.now(), log = null }) {
     const prev = readIntegrity(store, userId);
     const games = playerGames(store, userId, MODEL.windowGames);
     const result = scorePlayer(games, population);
+    const restarted = games.some((g) => !population.holds(g));
     let level = result.level;
     const ev = { ...prev.evidence };
     const review = ev.review || null;
     if (prev.level === 'confirmed') level = 'confirmed';
     else {
+        // Statistics restarted by a new profile: too few of its games to judge yet.
+        if (restarted && result.games < MODEL.suspected.minGames && levelRank(level) < levelRank(prev.level)) level = prev.level;
         if (prev.level === 'high_confidence' && levelRank(level) < levelRank('suspected')) level = 'suspected';
         // Hysteresis: a suspected player stays suspected until the evidence clearly recedes
         // (no flapping of the moderators' queue around the threshold).
         if (prev.level === 'suspected' && level === 'none' && result.groups.accuracyType >= MODEL.suspected.accuracyType - MODEL.suspected.hysteresis) level = 'suspected';
         if (review?.clearedAt && prev.level === 'none' && level === 'suspected') {
-            const since = games.filter((g) => (g.analysedAt || g.endedAt || 0) > review.clearedAt).length;
+            const since = games.filter((g) => population.holds(g) && (g.analysedAt || g.endedAt || 0) > review.clearedAt).length;
             if (!(result.score >= (review.clearedScore || 0) + 1.0 && since >= 5)) level = 'none';
         }
     }
@@ -441,10 +461,11 @@ export function updatePlayerIntegrity({ store, userId, population, now = Date.no
     // analysis rows (bin/admin.js integrity show reads them there); the full explanation is only
     // kept when there is something to explain.
     const notable = level !== 'none' || result.score >= NOTABLE_SCORE;
+    const profile = population.profile;
     ev.statistics = notable
-        ? { model: MODEL.version, computedAt: now, level: result.level, score: result.score, trigger: result.trigger, groups: result.groups,
+        ? { model: MODEL.version, profile, computedAt: now, level: result.level, score: result.score, trigger: result.trigger, groups: result.groups,
             windows: result.windows, jump: result.jump, reasons: result.reasons, highWindow: result.highWindow, games: result.games, moves: result.moves }
-        : { model: MODEL.version, computedAt: now, level: result.level, score: result.score, groups: result.groups, games: result.games, moves: result.moves };
+        : { model: MODEL.version, profile, computedAt: now, level: result.level, score: result.score, groups: result.groups, games: result.games, moves: result.moves };
     if (notable && (!ev.peak || result.score > (ev.peak.score || 0))) ev.peak = { at: now, score: result.score, level: result.level, trigger: result.trigger, groups: result.groups, reasons: result.reasons };
     writeIntegrity(store, userId, { level, score: Math.max(result.score, 0), evidence: ev, updatedAt: now });
     if (level !== prev.level) log?.security?.('integrity.level', { userId, from: prev.level, to: level, score: result.score, groups: result.groups });
@@ -453,14 +474,15 @@ export function updatePlayerIntegrity({ store, userId, population, now = Date.no
 
 /**
  * Adds an analysed game to the population statistics (both sides), skipping players already
- * flagged high_confidence / confirmed and sides with too few scored moves.
+ * flagged high_confidence / confirmed and sides with too few scored moves. A game analysed with
+ * another profile than the population's is refused.
  * @param {Population} population
  * @param {object} features
  * @param {(userId: number) => string} levelOf
  */
 export function updatePopulationFromGame(population, features, levelOf = () => 'none') {
     const f = parseMaybeJson(features, null);
-    if (!f) return 0;
+    if (!f || !population.holds(f)) return 0;
     let added = 0;
     for (const side of [f.white, f.black]) {
         if (!side || (side.n || 0) < MODEL.population.minMoves) continue;

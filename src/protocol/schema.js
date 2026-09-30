@@ -37,8 +37,8 @@
 // passant capture is actually legal ("-" otherwise) and castling is "KQkq" order or "-". This is
 // exactly the prefix of chess::Position::fen() in the game.
 
-export const PROTOCOL_VERSION = 1;
-export const PROTOCOL_MIN = 1;
+export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_MIN = 2;
 export const WS_SUBPROTOCOL = 'scacelith.v1';
 
 export const enums = {
@@ -76,6 +76,7 @@ export const enums = {
         MatchmakingCooldown: 4,   // arg = end of the cooldown (epoch ms)
         ReplacedByNewConnection: 5,
         Motd: 6,                  // reserved (the message of the day comes from /api/v1/info)
+        RatingRestored: 7,        // arg = rating points given back: an opponent of your rated games was banned for cheating
     },
     ErrorCode: {
         Malformed: 1, UnsupportedProtocol: 2, Unauthorized: 3, Banned: 4, RateLimited: 5,
@@ -94,6 +95,11 @@ export const enums = {
 
 // Move flags (MoveMade.flags, bit set).
 export const MoveFlag = { Capture: 1, EnPassant: 2, CastleKing: 4, CastleQueen: 8, DoublePush: 16, Promotion: 32, Check: 64, Mate: 128 };
+
+// Gesture flags (Gesture.flags, bit set). Side: the look falls on the table beside the board (the
+// clock, the captured pieces or the scoresheet): each client puts the clock at its own player's
+// right, so the other client mirrors that look.
+export const GestureFlag = { Glance: 1, Promoting: 2, Side: 4 };
 
 // WebSocket close codes used by the server (4000 + ErrorCode where one applies).
 export const CloseCode = {
@@ -158,11 +164,19 @@ export const messages = [
     { id: 0x27, name: 'Rematch', dir: C2S, doc: 'After the end: accept=true offers (or accepts) a rematch with colours swapped, accept=false declines or withdraws.',
       fields: [['seq', 'u32'], ['game', 'id53'], ['accept', 'bool']] },
 
+    // ---- live gestures (cosmetic, relayed to the opponent as they are, never stored) ----
+    { id: 0x28, name: 'Gesture', dir: C2S,
+      doc: 'The player\'s current gestures in game `game`, sent when they change and at least once a second (at most gestureRate per second, see Welcome): the head (yaw and pitch of the look in milliradians, seat-relative: 0 = straight ahead, level, yaw > 0 to the left, pitch < 0 down; lean 0..100), the piece in hand and where it is aimed, the move placed on the board before the clock press. The whole state travels every time, so a lost one heals with the next. ply: plies played when the current state of the hand (touch, aim, placed, Promoting) began, which a change of the head alone keeps; touch / aim: squares (64 = none); placed: the move placed, packed as in Move (0 = none); flags: GestureFlag bits. The server forwards it to the opponent as a Gesture without looking at it: it never counts as a move.',
+      fields: [['seq', 'u32'], ['game', 'id53'], ['ply', 'u16', { max: 1199 }], ['touch', 'u8', { max: 64 }], ['aim', 'u8', { max: 64 }],
+               ['placed', 'u16', { max: 0x7fff }], ['flags', 'u8', { max: 7 }],
+               ['yaw', 'i32', { min: -3142, max: 3142 }], ['pitch', 'i32', { min: -1571, max: 1571 }], ['lean', 'u8', { max: 100 }]] },
+
     // ---- server -> client ----
     { id: 0x80, name: 'Welcome', dir: S2C,
-      doc: 'Hello accepted. When activeGame != 0 a GameSnapshot follows. heartbeatMs: interval of the server Ping; clientPingMs: interval the client should use for its own Ping (CLIENT_PING_INTERVAL_MS; 0 = the client\'s default).',
+      doc: 'Hello accepted. When activeGame != 0 a GameSnapshot follows. heartbeatMs: interval of the server Ping; clientPingMs: interval the client should use for its own Ping (CLIENT_PING_INTERVAL_MS; 0 = the client\'s default). gestureRate / gestureBurst: the Gesture relay of this server (GESTURE_RATE, GESTURE_BURST): sustained messages per second and bucket size; 0 = no relay, send no Gesture.',
       fields: [['proto', 'u16'], ['serverTime', 'f64'], ['userId', 'u32'], ['username', 'str8', { max: 24 }], ['serverName', 'str8', { max: 64 }],
-               ['heartbeatMs', 'u32'], ['clientPingMs', 'u32'], ['maxMsgPerSec', 'u16'], ['activeGame', 'id53']] },
+               ['heartbeatMs', 'u32'], ['clientPingMs', 'u32'], ['maxMsgPerSec', 'u16'], ['activeGame', 'id53'],
+               ['gestureRate', 'u16', { max: 60 }], ['gestureBurst', 'u16', { max: 120 }]] },
     { id: 0x81, name: 'Error', dir: S2C, doc: 'A request was refused. fatal: the server closes the connection after it.',
       fields: [['ref', 'u32'], ['code', 'enum:ErrorCode'], ['fatal', 'bool'], ['game', 'id53']] },
     { id: 0x82, name: 'Ping', dir: S2C, doc: 'Heartbeat; answer with Pong at once (the server measures the latency with it).',
@@ -179,14 +193,14 @@ export const messages = [
       fields: [['id', 'u32'], ['state', 'enum:ChallengeState'], ['target', 'str8', { max: 24 }], ['code', 'str8', { max: 12 }], ['baseSec', 'u16'], ['incSec', 'u8'], ['rated', 'bool']] },
 
     { id: 0xA0, name: 'GameSnapshot', dir: S2C,
-      doc: 'Complete authoritative state of a game: sent when it starts, after a (re)connection and on Resync, and also to the opponent when the held clock of a game restored after a restart starts (lifecycle step 6). Clocks are the remaining times at serverTime; the `running` side keeps counting from there (`running` is None while such a clock is held).',
+      doc: 'Complete authoritative state of a game: sent when it starts, after a (re)connection and on Resync, and also to the opponent when the held clock of a game restored after a restart starts (lifecycle step 6). Clocks are the remaining times at serverTime; the `running` side keeps counting from there (`running` is None while such a clock is held). autoPress: the robots press the clock by themselves once a move is on the board (AUTO_PRESS_CLOCK when the game was created); when false a client sends its Move only when its player presses the clock, so the clock runs until then.',
       fields: [['game', 'id53'], ['gseq', 'u32'], ['category', 'str8', { max: 7 }], ['baseMs', 'u32'], ['incMs', 'u32'], ['rated', 'bool'],
                ['white', 'struct:PlayerInfo'], ['black', 'struct:PlayerInfo'], ['you', 'enum:Color'],
                ['moves', 'list16:struct:MoveRec', { max: 1200 }],
                ['running', 'enum:Color'], ['whiteMs', 'u32'], ['blackMs', 'u32'], ['serverTime', 'f64'],
                ['drawOffer', 'enum:Color'], ['status', 'enum:GameStatus'], ['reason', 'enum:EndReason'],
                ['whiteConnected', 'bool'], ['blackConnected', 'bool'], ['graceMs', 'u32'], ['firstMoveMs', 'u32'],
-               ['startedAt', 'f64'], ['rematch', 'enum:Color']] },
+               ['startedAt', 'f64'], ['rematch', 'enum:Color'], ['autoPress', 'bool']] },
     { id: 0xA1, name: 'MoveMade', dir: S2C,
       doc: 'A move accepted by the server, sent to both players (for the mover it is the confirmation). Clocks as in GameSnapshot; firstMoveMs: time the next player has for their first move (0 when not applicable).',
       fields: [['game', 'id53'], ['gseq', 'u32'], ['ply', 'u16'], ['move', 'u16'], ['flags', 'u8'], ['spentMs', 'u32'],
@@ -198,4 +212,8 @@ export const messages = [
       fields: [['game', 'id53'], ['gseq', 'u32'], ['status', 'enum:GameStatus'], ['reason', 'enum:EndReason'], ['whiteMs', 'u32'], ['blackMs', 'u32'], ['serverTime', 'f64']] },
     { id: 0xA5, name: 'RatingUpdate', dir: S2C, doc: 'Rating changes of a finished rated game, sent after the database transaction committed.',
       fields: [['game', 'id53'], ['category', 'str8', { max: 7 }], ['white', 'struct:RatingChange'], ['black', 'struct:RatingChange']] },
+    { id: 0xA6, name: 'Gesture', dir: S2C, doc: 'The opponent\'s gestures (the client Gesture minus seq, byte for byte). Cosmetic: never authoritative.',
+      fields: [['game', 'id53'], ['ply', 'u16', { max: 1199 }], ['touch', 'u8', { max: 64 }], ['aim', 'u8', { max: 64 }],
+               ['placed', 'u16', { max: 0x7fff }], ['flags', 'u8', { max: 7 }],
+               ['yaw', 'i32', { min: -3142, max: 3142 }], ['pitch', 'i32', { min: -1571, max: 1571 }], ['lean', 'u8', { max: 100 }]] },
 ];

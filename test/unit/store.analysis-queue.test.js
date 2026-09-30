@@ -451,17 +451,23 @@ test('migration 003 records the players of the jobs queued by an earlier build',
     let store = openStore(config, { applyGame });
     assert.deepEqual(migrate(store, { dir: migDir }).applied, [1, 2]);
     const [a, b, c] = ['Ann', 'Ben', 'Cid'].map((n) => store.users.create({ username: n, email: `${n}@example.org` }));
-    // Games stored (unrated: this build inserts no job for them) and jobs as build 002 wrote them.
+    // Games and jobs as build 002 wrote them (the game rows of its schema: this build writes columns
+    // of later migrations).
     const games = Array.from({ length: 20 }, (_, i) => record(i % 2 ? c : a, i % 2 ? b : c, { rated: false }));
-    store.games.finishBatch(games);
     store.close();
     const raw = new DatabaseSync(config.dbPath);
+    const game = raw.prepare(`INSERT INTO games (id, category, rated, base_ms, inc_ms, white_id, black_id, white_name, black_name,
+        started_at, ended_at, status, reason, ply_count) VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     const put = raw.prepare('INSERT INTO analysis_jobs (game_id, queued_at, priority) VALUES (?, ?, 1)');
-    for (const g of games) put.run(g.id, Date.now());
+    for (const g of games) {
+        game.run(g.id, g.category, g.baseMs, g.incMs, g.whiteId, g.blackId, g.whiteName, g.blackName, g.startedAt, g.endedAt,
+            g.status, g.reason, g.moves.length);
+        put.run(g.id, Date.now());
+    }
     raw.close();
 
     store = openStore(config, { applyGame });
-    assert.deepEqual(migrate(store).applied, [3]);
+    assert.deepEqual(migrate(store).applied.slice(0, 1), [3]);
     const check = new DatabaseSync(config.dbPath, { readOnly: true });
     const rows = check.prepare(`SELECT j.white_id AS jw, j.black_id AS jb, g.white_id AS gw, g.black_id AS gb FROM analysis_jobs j
         JOIN games g ON g.id = j.game_id`).all();

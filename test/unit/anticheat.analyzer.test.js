@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analyseGame, computeFeatures, lineCp, ANALYSIS } from '../../src/anticheat/analysis/analyzer.js';
+import { analyseGame, analysePositions, computeFeatures, lineCp, ANALYSIS } from '../../src/anticheat/analysis/analyzer.js';
 import { moveToUci } from '../../src/anticheat/analysis/moves.js';
 
 // Distinct dummy moves (the analyser never checks legality: the engine does).
@@ -111,4 +111,32 @@ test('short games give empty features', async () => {
     const f = await analyseGame(engine, { id: 1, moves: [mv(1), mv(2)], spentMs: [0, 0], whiteId: 1, blackId: 2 }, { depthFast: 2, depthDeep: 4 });
     assert.equal(f.white.n, 0);
     assert.equal(f.black.accuracy, null);
+});
+
+test('a deep search stopped by the node limit is repeated from an empty hash, without the limit', async () => {
+    const uci = Array.from({ length: 20 }, (_, i) => moveToUci(mv(i)));
+    const calls = [];
+    const engine = {
+        name: 'fake-engine',
+        async newGame() { calls.push('newGame'); },
+        async clearHash() { calls.push('clearHash'); },
+        async analyse(ms, { depth, nodes }) {
+            calls.push([ms.length, depth, nodes ?? null]);
+            // The search of ply 18 blows up on the hash: the limit stops it, with an unfinished answer.
+            const nodeLimited = depth === 12 && ms.length === 18 && nodes !== undefined;
+            const cp = nodeLimited ? 900 : 10;
+            return { lines: [line(1, uci[ms.length] ?? null, cp), line(2, 'h1h1', cp - 20), line(3, 'h2h2', cp - 40)], bestmove: uci[ms.length] ?? null, nodeLimited };
+        },
+    };
+    const { deep } = await analysePositions(engine, uci, { depthFast: 4, depthDeep: 12 });
+    const deepCalls = calls.filter((c) => c === 'clearHash' || c[1] === 12);
+    assert.deepEqual(deepCalls, [
+        [16, 12, ANALYSIS.deepNodeLimit], [17, 12, ANALYSIS.deepNodeLimit],
+        [18, 12, ANALYSIS.deepNodeLimit], 'clearHash', [18, 12, null],
+        [19, 12, ANALYSIS.deepNodeLimit], [20, 12, ANALYSIS.deepNodeLimit],
+        // The shallow pass clears the hash before each of its searches.
+        'clearHash', 'clearHash', 'clearHash', 'clearHash',
+    ]);
+    assert.equal(deep.get(18).lines[0].cp, 10, 'the answer of the repeated search');
+    assert.ok(ANALYSIS.deepNodeLimit >= 10_000_000, 'far above a normal deep search');
 });

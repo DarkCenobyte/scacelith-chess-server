@@ -34,11 +34,12 @@ export async function main() {
     const store = openStore(config, { applyGame });
     const journal = await openJournal({ dir: config.journalDir, shard, flushMs: config.journalFlushMs, fsync: config.journalFsync,
         compactSegments: config.journalCompactSegments });
-    const anticheat = createAnticheat({ config, store, primary, log: logger.child('anticheat') });
+    // Finished-game commits and the anti-cheat's writes run on a writer thread: the event loop
+    // never waits for SQLite.
+    const writer = startStoreWriter({ config, shard, log: log.child('writer') });
+    const anticheat = createAnticheat({ config, store, primary, log: logger.child('anticheat'), writer });
     const auth = createAuth({ config, store, primary, log: logger.child('auth') });
     const bus = createBus({ config, shard, serverId, log: log.child('bus') });
-    // Finished-game commits run on a writer thread: the event loop never waits for SQLite.
-    const writer = startStoreWriter({ config, shard, log: log.child('writer') });
     const hostStore = { games: { finishBatch: (records) => writer.finishBatch(records) } };
     const host = new GameHost({
         shard, config, store: hostStore, journal, anticheat, bus, primary, log: logger.child('game'),
@@ -54,6 +55,7 @@ export async function main() {
         config, shard, serverId, primary, host, auth, anticheat, store, apiHandler, bus, log,
         onStopped: async () => {
             try { await journal.flush?.(); await journal.close?.(); } catch (e) { log.error('journal close failed', { err: e }); }
+            anticheat.close();   // its buffered anomalies reach the writer before its close
             try { await writer.close(); } catch (e) { log.error('store writer close failed', { err: e }); }
             try { store.close(); } catch (e) { log.error('store close failed', { err: e }); }
             primary.flush();

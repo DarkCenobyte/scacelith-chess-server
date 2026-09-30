@@ -235,7 +235,8 @@ test('bad journals: strict replay throws, lenient replay stops at the bad record
 test('journal payload formats', () => {
     const j = journaled();
     const created = JSON.parse(j.log[0].payload.toString('utf8'));
-    assert.deepEqual(Object.keys(created).sort(), ['baseMs', 'black', 'category', 'createdAt', 'id', 'incMs', 'rated', 'rematchOf', 'v', 'white']);
+    assert.deepEqual(Object.keys(created).sort(), ['autoPress', 'baseMs', 'black', 'category', 'createdAt', 'id', 'incMs', 'rated', 'rematchOf', 'v', 'white']);
+    assert.equal(created.autoPress, true);
     j.mv(W, T0 + 1000);
     const mvRec = j.log[1];
     assert.equal(mvRec.kind, JournalKind.Move);
@@ -267,4 +268,41 @@ test('journal payload formats', () => {
     const o = room.onMove(W, { seq: 1, ply: 0, move: fakeMove(0), posHash: room.game.position.digest(), thinkMs: 0, drawOffer: true }, T0 + 10);
     assert.equal(decode(o.broadcast[0]).type, MSG.MoveMade);
     assert.deepEqual(room._encodeMoveMade(0), o.broadcast[0]);
+});
+
+test('autoPress is journaled: a replay and a compacted journal keep it, a created record without it means true', () => {
+    const room = new GameRoom({
+        id: 987654322, category: '5+3', baseMs: 300000, incMs: 3000, rated: true, autoPress: false,
+        white: { userId: 5, name: 'white-player', rating: 1720, provisional: false },
+        black: { userId: 6, name: 'black-player', rating: 1690, provisional: false },
+        createdAt: T0, ...opts(),
+    });
+    const log = [room.createdRecord()];
+    for (const [c, t] of [[W, T0 + 1000], [B, T0 + 2000]]) {
+        const out = room.onMove(c, { seq: 1, ply: room.ply, move: fakeMove(room.ply), posHash: room.game.position.digest(), thinkMs: 0, drawOffer: false }, t);
+        for (const r of out.journal) log.push({ kind: r.kind, at: r.at, payload: Buffer.from(r.payload) });
+    }
+    assert.equal(GameRoom.fromJournal(log, opts()).autoPress, false);
+    assert.equal(GameRoom.fromJournal(room.journalState(), opts()).autoPress, false);
+    const compacted = GameRoom.fromJournal([room.journalSnapshot(T0 + 3000)], opts());
+    assert.equal(compacted.autoPress, false);
+    assert.equal(compacted.snapshot(W, T0 + 3000).autoPress, false);
+    // A journal written by an older build: no autoPress key.
+    const spec = JSON.parse(log[0].payload.toString('utf8'));
+    delete spec.autoPress;
+    const old = GameRoom.fromJournal([{ kind: JournalKind.Created, at: T0, payload: Buffer.from(JSON.stringify(spec)) }, ...log.slice(1)], opts());
+    assert.equal(old.autoPress, true);
+    assert.equal(old.snapshot(B, T0 + 3000).autoPress, true);
+});
+
+test('a move and a disconnection credited after a stall replay to identical clocks', () => {
+    const j = journaled();
+    j.mv(W, T0 + 1000);
+    j.mv(B, T0 + 2000);
+    const deadline = j.room.nextDeadline();
+    j.run(j.room.onMove(W, { seq: 1, ply: 2, move: fakeMove(2), posHash: j.room.game.position.digest(), thinkMs: 0, drawOffer: false }, deadline + 3000, deadline - 200));
+    j.run(j.room.onDisconnect(B, deadline + 3001, deadline - 200));
+    assert.deepEqual([j.room.ply, j.room.isOver], [3, false]);
+    const copy = GameRoom.fromJournal(j.log, opts());
+    assert.deepEqual(state(copy, deadline + 4000), state(j.room, deadline + 4000));
 });

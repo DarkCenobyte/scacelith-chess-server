@@ -111,7 +111,7 @@ test('hostile list counts and string lengths are bounded by the buffer (no alloc
     // GameSnapshot claiming 1200 moves with none present; strings claiming 255 bytes.
     const snap = Buffer.from(vectors.valid.find((v) => v.name === 'GameSnapshot' && v.fields.moves.length === 0).hex, 'hex');
     const withCount = Buffer.from(snap);
-    const countAt = snap.length - 41;            // moves count sits before the 39-byte tail (see PROTOCOL.md)
+    const countAt = snap.length - 42;            // moves count sits before the 40-byte tail (see PROTOCOL.md)
     assert.equal(withCount.readUInt16LE(countAt), 0);
     withCount.writeUInt16LE(1200, countAt);
     assert.throws(() => P.decode(withCount), (e) => e instanceof P.ProtocolError && e.reason === 'truncated');

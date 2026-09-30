@@ -942,7 +942,9 @@ test('the host\'s own 10 ms interval compacts the journal (no explicit call)', a
         while ((journal.stats().compactQueue > 0 || journal.stats().snapshots < ids.length) && Date.now() < deadline) {
             await new Promise((r) => setTimeout(r, 20));
         }
-        await journal.flush();
+        // Stops the interval, then flushes: no snapshot is appended behind the last flush (on a
+        // busy machine the interval could otherwise compact again while it is written).
+        await host.shutdown();
         assert.ok(journal.stats().snapshots >= ids.length, 'the games were snapshotted by the interval');
         assert.equal(host.stats().snapshots, journal.stats().snapshots);
         assert.ok(segments(dir).length <= 2, `${segments(dir).length} segments left`);

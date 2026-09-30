@@ -36,7 +36,7 @@ test('certain cheat: one ban per game, integrity confirmed with evidence, primar
     assert.equal(integ.evidence.certain.length, 1);
     assert.deepEqual({ ...integ.evidence.certain[0], at: 0 }, { kind: 'illegal_move', gameId: 77, at: 0, banUntil: a.banUntil });
     await new Promise((r) => setImmediate(r));
-    assert.deepEqual(primary.sent, [{ type: 'sanction.applied', payload: { userId: 5, until: a.banUntil, reason: 'certain_cheat:illegal_move' } }]);
+    assert.deepEqual(primary.sent, [{ type: 'sanction.applied', payload: { userId: 5, until: a.banUntil, reason: 'certain_cheat:illegal_move', refunds: 0 } }]);
     assert.equal(store._.security.filter((e) => e.kind === 'sanction_auto').length, 1);
     ac.close();
 });
@@ -62,6 +62,20 @@ test('idempotency across processes: an existing ban of the same game is reused',
     assert.equal(store.integrity.get(9).evidence.certain.length, 3, 'every sanction call adds evidence');
 });
 
+test('a longer ban stands for the automatic one only when it is a ban for cheating that refunds', () => {
+    const t = 1_800_000_000_000;
+    const long = { kind: 'ban', source: 'moderator', gameId: null, startsAt: t - 1000, endsAt: t + 30 * 24 * 3600000, createdBy: 'mod' };
+    for (const [reason, reused] of [['confirmed: engine', true], ['confirmed, no refund: engine', false], ['abusive chat', false]]) {
+        const store = createFakeStore();
+        store.sanctions.create({ userId: 3, reason, ...long });
+        const ac = createAnticheat({ config: testConfig(), store, log: quiet, now: () => t });
+        const r = ac.sanctionCertain({ userId: 3, gameId: 8, kind: 'illegal_move' });
+        assert.deepEqual([r.applied, store._.sanctions.length], reused ? [false, 1] : [true, 2], reason);
+        assert.equal(r.banUntil, reused ? long.endsAt : t + 24 * 3600000, reason);
+        ac.close();
+    }
+});
+
 test('a new game after the ban expired gets a new ban', () => {
     const store = createFakeStore();
     let t = 1_800_000_000_000;
@@ -76,7 +90,7 @@ test('a new game after the ban expired gets a new ban', () => {
 test('AUTO_SANCTION_CERTAIN_CHEATS=false: nothing happens', () => {
     const store = createFakeStore();
     const ac = createAnticheat({ config: testConfig({ AUTO_SANCTION_CERTAIN_CHEATS: 'false' }), store, primary: fakePrimary(), log: quiet });
-    assert.deepEqual(ac.sanctionCertain({ userId: 1, gameId: 2, kind: 'illegal_move' }), { banUntil: 0, applied: false });
+    assert.deepEqual(ac.sanctionCertain({ userId: 1, gameId: 2, kind: 'illegal_move' }), { banUntil: 0, applied: false, refunds: 0 });
     assert.equal(store._.sanctions.length, 0);
     assert.equal(store.integrity.get(1), null);
 });
@@ -108,6 +122,32 @@ test('startAnalysisProcess is disabled without an engine or workers', async () =
     await h1.stop();
     const h2 = startAnalysisProcess(testConfig({ ANALYSIS_ENGINE_PATH: '/usr/games/stockfish', ANALYSIS_WORKERS: '0' }), { log: quiet });
     assert.equal(h2.enabled, false);
+    assert.equal(await h2.metricsSnapshot(), null);
+});
+
+test('startAnalysisProcess serves the metrics of the analysis process to the primary', async (t) => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ac-proc-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    // The IPC side of bin/analysis-worker.js, with one gauge of its own.
+    const script = path.join(dir, 'metrics.mjs');
+    fs.writeFileSync(script, `
+import { Ipc } from ${JSON.stringify(new URL('../../src/cluster/ipc.js', import.meta.url).href)};
+import { Registry } from ${JSON.stringify(new URL('../../src/metrics.js', import.meta.url).href)};
+const registry = new Registry();
+registry.gauge('scacelith_anticheat_analysis_engines_shared', 'test').set(2);
+const ipc = new Ipc(process);
+ipc.on('metrics.snapshot', () => registry.snapshot());
+process.on('message', (m) => { if (m.type === 'shutdown') { ipc.close(); process.disconnect(); } });
+`);
+    const h = startAnalysisProcess(testConfig({ ANALYSIS_ENGINE_PATH: '/bin/true' }), { log: quiet, script });
+    let snapshot = null;
+    for (const end = Date.now() + 10000; !snapshot && Date.now() < end;) snapshot = await h.metricsSnapshot(500);
+    assert.deepEqual(snapshot.map((m) => [m.name, m.children[0].v]), [['scacelith_anticheat_analysis_engines_shared', 2]]);
+    await h.stop(3000);
+    assert.equal(await h.metricsSnapshot(), null, 'no process, no metrics');
 });
 
 test('startAnalysisProcess restarts a crashing worker with backoff and stops cleanly', async (t) => {

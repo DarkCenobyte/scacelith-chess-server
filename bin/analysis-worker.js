@@ -2,11 +2,14 @@
 // Engine-analysis process of the anti-cheat (started by the primary through
 // startAnalysisProcess, or by hand for maintenance). It reads its configuration like the
 // server (environment + .env), opens the database, lowers its own CPU priority and analyses the
-// queued games until it receives SIGTERM / SIGINT or a { type: 'shutdown' } IPC message.
+// queued games until it receives SIGTERM / SIGINT or a { type: 'shutdown' } IPC message. Started
+// by the primary, it answers the primary's 'metrics.snapshot' requests (its metrics in /metrics).
 
 import os from 'node:os';
+import { Ipc } from '../src/cluster/ipc.js';
 import { loadConfig } from '../src/config.js';
 import { configureLogging, logger } from '../src/log.js';
+import { metrics } from '../src/metrics.js';
 import { createAnalysisWorker } from '../src/anticheat/analysis/worker.js';
 
 async function main() {
@@ -24,6 +27,8 @@ async function main() {
     try { ({ applyGame } = await import('../src/match/elo.js')); } catch { applyGame = undefined; }
     const store = openStore(config, { applyGame });
     const worker = createAnalysisWorker({ config, store, log });
+    const ipc = process.send ? new Ipc(process, { name: 'primary', log }) : null;
+    ipc?.on('metrics.snapshot', () => metrics.snapshot());
 
     let stopping = null;
     const stop = (why) => {
@@ -41,6 +46,7 @@ async function main() {
     await worker.run();
     await stop('done');
     try { store.close(); } catch { /* already closed */ }
+    ipc?.close('stopped');
     if (process.connected) process.disconnect();   // the IPC channel would keep the process alive
     return 0;
 }

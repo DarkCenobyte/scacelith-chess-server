@@ -1,10 +1,11 @@
 # Scacelith dedicated server
 
 The online multiplayer server of Scacelith: accounts, rated matchmaking, challenges and private
-games, authoritative games with server clocks, one Elo per official time control, anti-cheat and
-reports. It is a plain Node.js program with no npm dependency. The game (the Windows binary) is
-only a client of it; anyone can run a community server, and players choose the server in the
-game's Options.
+games, authoritative games with server clocks (the robots press the clock by themselves unless
+`AUTO_PRESS_CLOCK=false`), the opponent's live gestures (head, hand) relayed without being
+stored, one Elo per official time control, anti-cheat and reports. It is a plain Node.js program
+with no npm dependency. The game (the Windows binary) is only a client of it; anyone can run a
+community server, and players choose the server in the game's Options.
 
 - Official server: `caissa.scacelith.com`, TCP port `44664` (HTTPS API and WSS on the same port).
 - Design and contracts: [docs/DESIGN.md](docs/DESIGN.md). Every setting: [docs/CONFIG.md](docs/CONFIG.md).
@@ -18,8 +19,9 @@ game's Options.
 - A TLS certificate for the server's public name (see [TLS certificates](#tls-certificates)).
 - Linux is the reference platform (Windows works for tests). One CPU core per game shard; the
   default is one shard per core, up to 16.
-- Optional: a Stockfish binary for the anti-cheat analysis (`ANALYSIS_ENGINE_PATH`), and an SMTP
-  account for e-mail confirmation and password resets.
+- Optional: the official Stockfish 19 binary for the anti-cheat analysis, the engine it is
+  calibrated for (`ANALYSIS_ENGINE_PATH`; see [Anti-cheat engine](#anti-cheat-engine)), and an
+  SMTP account for e-mail confirmation and password resets.
 
 ## Quick start
 
@@ -184,6 +186,42 @@ WantedBy=multi-user.target
 
 With `DATA_DIR=/var/lib/scacelith` in the environment file. `LimitNOFILE` must exceed
 `MAX_CONNECTIONS`. This unit is an example: adapt the paths to your installation.
+
+### Anti-cheat engine
+
+The engine analysis of the anti-cheat is optional (an empty `ANALYSIS_ENGINE_PATH` turns it off).
+Use **Stockfish 19**, the official release. The anti-cheat is calibrated on it: its priors, its
+synthetic engine profile and the default depths were measured with Stockfish 19. At those depths
+it needs less CPU per game than Stockfish 16 did at its former defaults, and its analysis engines
+share one copy of their evaluation network, where each Stockfish 16 engine loads its own.
+Stockfish 16, or another UCI engine, still works, but the default depths and the detection
+figures of docs/ANTICHEAT.md are not for it.
+
+```sh
+curl -LO https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+sha256sum stockfish-linux-x86-64-universal.tar.gz
+# 9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f
+tar xzf stockfish-linux-x86-64-universal.tar.gz
+sudo install -m 755 stockfish/stockfish-linux-x86-64-universal /usr/local/bin/stockfish-19
+stockfish-19 compiler | grep architecture      # x86-64-bmi2 on an OVH vCore (Haswell)
+```
+
+This one Linux binary holds every x86-64 build of Stockfish 19 and runs the best one for the CPU
+(the release has no separate Linux file per CPU); it needs glibc 2.35 or later. Compare the
+checksum with the digest the release page shows next to the file too. Then set
+`ANALYSIS_ENGINE_PATH=/usr/local/bin/stockfish-19`, and `ANALYSIS_WORKERS` as
+[docs/SIZING.md](docs/SIZING.md) suggests for your machine. Replace the binary with the server
+stopped.
+
+The engines share their network through a directory they create in `/tmp` (`/tmp/stockfish-<uid>`),
+so `/tmp` must be writable and the same for all of them. The unit above gives the service a
+private, writable `/tmp` (`PrivateTmp=true`); with `ProtectSystem=strict` and no `PrivateTmp`, add
+`ReadWritePaths=/tmp`. Each engine start is logged (`analysis engine started`, with `"network":
+"shared memory"`). An engine that could not share while others run logs a warning instead
+(`analysis engine started with its own copy of the network`, with Stockfish's reason), and then
+takes about 110 MB more. In the metrics, `scacelith_anticheat_analysis_engines_shared` equals
+`scacelith_anticheat_analysis_engines` when every engine shares. Details:
+[docs/ANTICHEAT.md](docs/ANTICHEAT.md#engine).
 
 ### Kernel settings (Linux)
 
@@ -397,26 +435,34 @@ with the same `.env`. See `node bin/admin.js` for the commands and
 [docs/ANTICHEAT.md](docs/ANTICHEAT.md) for how suspicion levels are computed. Certain cheats
 (a move for someone else's game, out of turn or illegal in a position both sides agree on, a
 forged server message) forfeit the game and ban for `BAN_DURATION_HOURS` (24) automatically when
-`AUTO_SANCTION_CERTAIN_CHEATS` is on; statistical suspicion never bans by itself.
+`AUTO_SANCTION_CERTAIN_CHEATS` is on; statistical suspicion never bans by itself. A ban for
+cheating (that automatic one, or `integrity confirm` unless `--no-refund`) gives the cheater's
+victims back the rating points they lost to them, games still in progress at the ban included; a
+`user ban` is for anything else and refunds nothing (docs/ANTICHEAT.md, rating refunds).
 
-One analysis engine handles roughly 1,000 to 12,000 games a day, fewer than a busy server
-plays. Moderator requests, games reported by credible players, and games of players already
-under suspicion (integrity level, open credible report) or with a suspicious anomaly are
-analysed first, but one engine claim in four still takes the oldest ordinary game, and at most
-20 flagged games of one player wait at a time (past that, a game with an anomaly of its own
-takes the place of a waiting one that has none). Ordinary games are sampled
-(`ANALYSIS_SAMPLE_RATE`) and skipped while `ANALYSIS_QUEUE_MAX` (5000) of them already wait;
-only they feed the population statistics the players are compared with. If
-`scacelith_anticheat_analysis_queue_ordinary` stays at that cap, add engines
-(`ANALYSIS_WORKERS`), lower `ANALYSIS_DEPTH_DEEP`, or lower the sample rate.
+One analysis engine (Stockfish 19 at the default depths 9/15) handles about 870 games a day on a
+VPS vCore (540 to 1,260 depending on their length), far fewer than a busy server plays. Moderator
+requests, games reported by credible players, and games of players already under suspicion
+(integrity level, open credible report) or with a suspicious anomaly are analysed first, but one
+engine claim in four still takes the oldest ordinary game, and at most 20 flagged games of one
+player wait at a time (past that, a game with an anomaly of its own takes the place of a waiting
+one that has none). Ordinary games are sampled (`ANALYSIS_SAMPLE_RATE`) and skipped while
+`ANALYSIS_QUEUE_MAX` (5000) of them already wait; only they feed the population statistics the
+players are compared with. If `scacelith_anticheat_analysis_queue_ordinary` stays at that cap, add
+engines (`ANALYSIS_WORKERS`) or lower the sample rate. The statistics are kept per analysis
+profile: changing the engine, its network, a depth or `ANALYSIS_HASH_MB` restarts them from the
+priors (docs/ANTICHEAT.md, section 3).
 
 ## Monitoring
 
 `http://127.0.0.1:9464/metrics` (Prometheus text format; `METRICS_TOKEN` adds a bearer token):
 connections, messages, games, move latency, commits, journal, rate limits, anti-cheat (including
-the analysis backlog and the skipped games), the retention purge (`scacelith_retention_*`), process
-memory and event-loop lag per shard. `/healthz` answers when the process runs, `/readyz` when it
-accepts players.
+the analysis backlog, the skipped games, and the analysis engines running and sharing their
+network: `scacelith_anticheat_analysis_engines*`), the retention purge (`scacelith_retention_*`),
+process memory and event-loop lag per shard, the stalls of a shard's event loop and the time given
+back to the players for them (`scacelith_game_stall_*`), and the gesture relay
+(`scacelith_gestures_*`).
+`/healthz` answers when the process runs, `/readyz` when it accepts players.
 
 ## Scaling
 
@@ -430,3 +476,13 @@ server at that interval (announced in `Welcome`) for its ping indicator and its 
 server clock, and each ping costs server CPU for every connected player. The default, 10 s, keeps
 it at about half of an idle player's cost; 2 s would make it a third or more of the cost of a
 player in a 3+2 game.
+
+`GESTURE_RATE` is the other one. During a game the client sends its player's live gestures (the
+head, the piece in hand and where it is aimed) whenever they change and at least once a second,
+even while its player sits still, at most that many per second (4 by default, announced in
+`Welcome`), and the server relays each one to the opponent. A gesture costs about as much server
+CPU as a client ping, so with the relay on every player in a game costs at least one relay a
+second, which alone halves the capacity of a server with the default 10 s ping, and a player who
+keeps moving costs several times their moves: [docs/SIZING.md](docs/SIZING.md#gestures) gives the
+capacity for each rate. Lower it to 2 or 1, or to 0 to turn the relay off, when the peak nears
+that capacity.

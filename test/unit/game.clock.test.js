@@ -51,3 +51,15 @@ test('check() is pure; the flag deadline is exactly where a zero-think move flag
     assert.equal(c.remainingAt(1, 2, 13000), 60000);
     assert.equal(c.remainingAt(0, 2, 99999999), 0);
 });
+
+test('a first move has the margin of a flag in its deadline, not in the countdown shown', () => {
+    const c = new GameClock({ baseMs: 60000, incMs: 1000, policy: clockPolicy(CFG), startAt: 1000 });
+    assert.equal(c.firstMoveDeadline(0), 1000 + 30000 + 150);
+    assert.equal(c.deadline(0), c.firstMoveDeadline(0));
+    assert.equal(c.firstMoveLeft(0, 11000), 20000);
+    c.setRtt(1, 700);                               // cap min(quota 2000, 700 + 50, LAG_COMP_MAX_MS 1000)
+    c.apply(0, 60000, 2000, 5000);
+    assert.equal(c.deadline(1), 5000 + 30000 + 750);
+    assert.equal(c.firstMoveLeft(1, 35000), 0);
+    assert.equal(c.firstMoveLeft(2, 5000), 0);
+});

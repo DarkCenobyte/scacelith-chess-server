@@ -128,6 +128,8 @@ Sections:
 | `HEARTBEAT_INTERVAL_MS` | integer (&gt;= 1000) | `10000` | Server ping interval: each connection gets a ping every half interval to one interval (it also measures each player's latency). The game client sends a Ping of its own after 1.5 times this with nothing received (at least 7.5 s, at most 90 s), and considers the connection dead after twice this (at least 10 s, at most 120 s). |
 | `HEARTBEAT_TIMEOUT_MS` | integer (&gt;= 3000) | `30000` | A connection silent for this long is considered dead. |
 | `CLIENT_PING_INTERVAL_MS` | integer (1000-60000) | `10000` | Interval of the game client's own Ping, announced in Welcome (the client measures its round trip for the ping indicator and its estimate of the server clock with it). Lower is a more reactive ping indicator but costs more server CPU for every connected player: at 2000 these pings alone take a third or more of the server CPU of a player in a 3+2 game. After each connection the client sends a few quick pings anyway. |
+| `GESTURE_RATE` | integer (0-60) | `4` | Live gestures (the player's head, the piece in hand and where it is aimed) a client may send per second, sustained, announced in Welcome. The server relays each one to the opponent as it is and never stores it; it costs server CPU for every player in a game (docs/SIZING.md). A client beyond it has its gestures dropped silently, and only a gross excess closes the connection as a flood. 0 turns the relay off (the clients then send none). |
+| `GESTURE_BURST` | integer (1-120) | `8` | Gestures a client may send in a burst above GESTURE_RATE (the size of its own token bucket, apart from WS_MSG_RATE: gestures never delay or rate-limit moves). |
 | `HTTP_BODY_LIMIT` | integer (&gt;= 1024) | `16384` | Largest API request body in bytes. |
 | `HTTP_RATE_PER_IP` | integer (&gt;= 1) | `120` | API requests per minute from one IP address (all endpoints). |
 | `AUTH_RATE_PER_IP` | integer (&gt;= 1) | `20` | Login / register / reset attempts per 10 minutes from one IP address (one IPv6 /64). |
@@ -156,6 +158,9 @@ Sections:
 | `LAG_QUOTA_INITIAL_MS` | integer (&gt;= 0) | `2000` | Lag compensation budget of each player at the start of a game. |
 | `LAG_QUOTA_GAIN_MS` | integer (&gt;= 0) | `100` | Lag compensation budget regained at every move. |
 | `LAG_QUOTA_MAX_MS` | integer (&gt;= 0) | `3000` | Largest lag compensation budget. |
+| `GAME_STALL_MIN_MS` | integer (5-1000) | `30` | A worker whose event loop stopped for longer than this (garbage collection, blocking I/O, CPU steal) counts as stalled: the game requests that waited in its sockets meanwhile (moves, resignations, draw offers and answers, claims, aborts, Resyncs and the closing of a connection) are handled before its timers, as if they had arrived when the stall began, so that a flag or a first-move timeout that fell during the stall does not overtake them; a first-move timeout that fell during it records no no-show against the player. Shorter pauses change nothing. |
+| `GAME_STALL_CREDIT_MAX_MS` | integer (0-60000) | `5000` | Longest stall of a worker that is not charged to the players (see GAME_STALL_MIN_MS): a message handled after a longer stall counts as arrived this long before it was read. It is also the most a player can gain from one stall. 0 charges every stall to the side to move, as a server without this protection would. |
+| `AUTO_PRESS_CLOCK` | boolean (true/false, 1/0, yes/no, on/off) | `true` | The players' robots press the clock by themselves once a move is on the board. When false, a client sends its move only when its player presses the clock, so the mover's clock runs until then. Decided when a game is created (a rematch keeps the value of the game it follows) and kept by the game, restarts included. |
 | `DRAW_OFFERS_PER_GAME` | integer (&gt;= 0) | `3` | Draw offers one player may make in a game. |
 | `CHALLENGE_TTL_MS` | integer (&gt;= 5000) | `60000` | A direct challenge expires after this long. |
 | `PRIVATE_GAME_TTL_MS` | integer (&gt;= 60000) | `900000` | A private game code expires after this long. |
@@ -164,8 +169,8 @@ Sections:
 
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
-| `INITIAL_RATING` | integer (100-3000) | `1500` | Rating of a new player in every category. |
-| `PROVISIONAL_GAMES` | integer (0-100) | `30` | Games in a category during which the rating is provisional (K = 40, shown with "?"). |
+| `INITIAL_RATING` | integer (100-3000) | `1500` | Working rating of a new player in every category: shown and used for pairing until their first rating, which FIDE's rules compute after five counted games (a game lost before the loser's first draw or win counts for neither player: docs/DESIGN.md, ratings), and what an unrated opponent counts for in those games. |
+| `PROVISIONAL_GAMES` | integer (0-100) | `30` | Counted games in a category (those that entered the rating: the five of the unrated phase, then the games against rated opponents) during which the rating is provisional: K = 40, shown with "?" and off the leaderboard (an unrated player is always provisional). FIDE uses 30. |
 | `MATCH_TICK_MS` | integer (50-5000) | `250` | Interval between pairing rounds. |
 | `MATCH_WINDOW_START` | integer (&gt;= 0) | `100` | Largest rating difference accepted right after joining the queue. |
 | `MATCH_WINDOW_STEP` | integer (&gt;= 0) | `50` | Widening of the window at each step. |
@@ -182,13 +187,14 @@ Sections:
 | --- | --- | --- | --- |
 | `AUTO_SANCTION_CERTAIN_CHEATS` | boolean (true/false, 1/0, yes/no, on/off) | `true` | A technically certain cheat (forged protocol, illegal move in a synchronised position, playing out of turn) loses the game, disconnects the player and bans them for BAN_DURATION_HOURS. |
 | `BAN_DURATION_HOURS` | integer (1-87600) | `24` | Length of an automatic ban. |
-| `ANALYSIS_ENGINE_PATH` | path (relative to the working directory) | (empty) | UCI engine (Stockfish) used to analyse rated games after they end. Empty: engine-based statistics are disabled (timing and reports still count). |
-| `ANALYSIS_WORKERS` | integer (0-64) | `1` | Engine processes analysing games (each uses one core, at low priority). |
-| `ANALYSIS_DEPTH_FAST` | integer (4-30) | `10` | Shallow analysis depth (a weak engine's choice). |
-| `ANALYSIS_DEPTH_DEEP` | integer (6-40) | `18` | Deep analysis depth (a strong engine's choice). |
+| `RATING_REFUND_DAYS` | integer (0-3650) | `60` | When a player is banned as a cheater (a certain cheat, or a moderator's integrity confirm), each opponent who lost rating points to them in a rated game that ended within this many days before the ban gets those points back on their current rating (docs/ANTICHEAT.md, rating refunds). A game still in progress at the ban (or not recorded yet) is refunded when it is recorded, while that ban lasts (not after an integrity confirm --no-refund; a user ban refunds nothing). 0: no refunds unless a moderator asks for them (scacelith-admin refunds apply). |
+| `ANALYSIS_ENGINE_PATH` | path (relative to the working directory) | (empty) | UCI engine used to analyse rated games after they end: the official Stockfish 19 release binary for Linux x86-64, the engine the anti-cheat is calibrated for (docs/ANTICHEAT.md, section 3). Empty: engine-based statistics are disabled (timing and reports still count). Another engine or network restarts the statistics (they are kept per analysis profile). |
+| `ANALYSIS_WORKERS` | integer (0-64) | `1` | Engine processes analysing games (each uses one core, at low priority). Stockfish 19 engines share one copy of their network: about 70 MB per engine after the first, 180 MB when /tmp is not writable (docs/SIZING.md). |
+| `ANALYSIS_DEPTH_FAST` | integer (4-30) | `9` | Shallow analysis depth (a weak engine's choice). Changing it restarts the statistics, like ANALYSIS_DEPTH_DEEP. |
+| `ANALYSIS_DEPTH_DEEP` | integer (6-40) | `15` | Deep analysis depth (a strong engine's choice). On a VPS vCore (AVX2), Stockfish 19 at 9/15 costs 14 % less than Stockfish 16 at the former 10/18, and flags engine users earlier than at 9/14, 9/16 or 10/18 in most cases (docs/ANTICHEAT.md, calibration). Changing it restarts the statistics (they are kept per analysis profile: engine, network, depths, hash). |
 | `ANALYSIS_MIN_PLIES` | integer (&gt;= 10) | `30` | Shorter games are not analysed. |
 | `REPORTS_PER_DAY` | integer (&gt;= 1) | `5` | Reports one player may file per day. |
-| `ANALYSIS_HASH_MB` | integer (1-4096) | `32` | Transposition table of each analysis engine, in MB. |
+| `ANALYSIS_HASH_MB` | integer (1-4096) | `32` | Transposition table of each analysis engine, in MB. Changing it restarts the statistics, like ANALYSIS_DEPTH_DEEP. |
 | `ANALYSIS_POSITION_TIMEOUT_MS` | integer (1000-3600000) | `120000` | Longest search of one position; an engine that exceeds it is restarted and the game is marked failed. |
 | `ANALYSIS_POLL_MS` | integer (100-3600000) | `5000` | Interval at which an idle analysis engine looks for new games to analyse. |
 | `ANALYSIS_QUEUE_MAX` | integer (0-100000) | `5000` | Most ordinary games waiting for engine analysis: while this many wait, a newly finished ordinary game is not queued (the engines could not catch up anyway). Games with a report, a suspicion signal (at most 20 waiting per player) or a moderator request are queued anyway and mostly analysed first; one engine claim in four still goes to the oldest ordinary game. 0 analyses only those (and then no game feeds the population statistics). At most 100000: the waiting ordinary games are counted in every commit of finished games, under the database write lock. |

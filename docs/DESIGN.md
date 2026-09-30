@@ -95,11 +95,54 @@ player who waited longer; any shard when it is overloaded), sends it `game.creat
 
 **A move.** Client A (on shard 2) sends `Move{game, ply, move, posHash, thinkMs}` at the moment
 the destination square is chosen (the robot's hand then plays the move and presses the clock:
-animation only). Shard 2 sees the game id's shard is 1 and forwards the raw frame on the bus.
+animation only), or, in a game without `autoPress` (below), when its player presses the clock.
+Shard 2 sees the game id's shard is 1 and forwards the raw frame on the bus.
 The host validates (section 6), updates the canonical state and the clocks, journals the move,
 encodes one `MoveMade` and sends it to both players (local socket or bus). Opponent B's client
 animates the other robot playing it. A's client treats its own `MoveMade` as the confirmation; a
 `MoveRejected` makes it restore the server position from the `GameSnapshot` that follows.
+
+**Clock press.** Whether the robots press the clock by themselves is a setting of each game,
+`GameSnapshot.autoPress`. The primary decides it in `ControlPlane.createGame` for every new game
+(queue, challenge, private code) from `AUTO_PRESS_CLOCK` (true by default); a rematch keeps the
+value of the game it follows (`game.rematch` carries it). The host passes it to the room, which
+writes it in the game's `created` journal record, so a replay, a compaction snapshot and a
+restart keep it whatever the configuration says by then (a `created` record of an older build has
+none: true). A finished game played without it has `RecordFlag.ManualPress` (8) in its record's
+`flags` (5.5); there is no migration. The server's clock rules are the same either way: without
+`autoPress` the client sends the move when its player presses the clock, so the time until the
+press is charged like any thinking time.
+
+**Gestures.** The player's head, the piece in hand, where it is aimed and a move placed before the
+clock press reach the opponent live, as `Gesture` (C2S 0x28), relayed as the server `Gesture`
+(0xA6) and never stored. The router takes a `C_Gesture` before the `WS_MSG_RATE` bucket and
+never touches that bucket or answers `RateLimited` for it: the connection has a bucket of its own
+(`GESTURE_RATE` per second, `GESTURE_BURST`; both announced in `Welcome`, 0 and 0 when
+`GESTURE_RATE=0`), and a gesture beyond it is dropped silently, its seq still counted; more than
+max(50, 10 x `GESTURE_BURST`, `GESTURE_RATE` x (`HEARTBEAT_TIMEOUT_MS` + `HEARTBEAT_INTERVAL_MS` +
+the 250 ms sweeper tick)) drops in 10 s is a flood (4301). The bucket counts arrivals: after a
+stall of the network or of the worker, the gestures of a client pacing them at the rate arrive
+together, and the last term is what it sends during the longest silence that a connection lives
+through (the heartbeat notices a silence at its next visit), so no such burst is a flood. Both
+buckets and their drop windows run on the monotonic clock of `clock.js`: a step of the wall clock
+neither empties them nor holds a drop window open. So does the heartbeat sweep (pings, silence
+timeout, hello deadline): a step neither closes every connection nor holds the pings back. A
+gesture is then decoded and its seq checked like any message (malformed: 4300), and it must name a
+game attached to the connection. The local host gets `host.relayGesture(gameId, userId, frame)`;
+for another shard the raw frame goes over
+the bus as `ToHost` (skipped while that link holds a quarter of its queue), where the router
+recognises it by its type byte and does not decode it again. The host finds the room and the
+sender's colour (not a player: dropped, no anomaly: gestures are not authoritative), and copies
+the frame without its seq into an `S_Gesture` (the two layouts match
+byte for byte: `protocol.codec.test.js`) for the opponent's endpoint, through its
+`sendDroppable`, which skips it when the connection already has a quarter of
+`WS_SEND_BUFFER_LIMIT` unsent or, for another shard, when the bus link has a quarter of its queue
+(that shard's router then checks the connection's own backlog). A gesture can therefore never
+close a slow client. Nothing is journaled, and the room, its clocks, `gseq` and the anti-cheat
+never see it; it is relayed as long as the room exists, the rematch window included. Metrics:
+`scacelith_gestures_relayed_total` and `scacelith_gestures_dropped_total{reason}` (`rate`,
+`not_attached`, `backlog`, `no_game`, `not_player`, `no_opponent`, `malformed`). Its CPU cost is
+in docs/SIZING.md.
 
 **End of game.** The room decides the result (mate, flag, resignation, agreement, claim,
 abandonment, abort...), the host sends `GameEnd` to both, journals it, and queues the game for
@@ -108,14 +151,15 @@ the database. Every `DB_COMMIT_MS` the host commits the queued games in one tran
 (so the database never has a finished game whose `ended` record a crash could still lose, which
 would bring the game back running after the restart). When the anti-cheat still buffers an
 anomaly that is not `info`, it writes the buffer first, so that the analysis-job policy sees it
-(section 6.5); `info` anomalies wait for the anti-cheat's own 1 s timer. That anomaly write is a
-synchronous insert on the main thread's SQLite connection: it waits for the disk
-(`synchronous=FULL`) and, when another process holds the database's write lock, for that lock,
-up to `busy_timeout` (5 s). The transaction holds the game record + both ratings (read and
-written inside the transaction) + analysis job (queue policy: section 6.5). It runs on the
-shard's store writer thread (`src/store/writer.js`, its own SQLite connection), so the event
-loop never waits for the transaction, its disk writes or the write lock it takes. After the
-commit it sends `RatingUpdate` and tells the primary `game.ended`.
+(section 6.5); `info` anomalies wait for the anti-cheat's own 1 s timer. The transaction holds
+the game record + both ratings (read and written inside the transaction, section 6.6) +
+analysis job (queue policy: section 6.5). It runs on the shard's store writer thread
+(`src/store/writer.js`, its own SQLite connection), so the event loop never waits for the
+transaction, its disk writes or the write lock it takes. The anti-cheat writes through the same
+thread (the anomaly rows, the automatic sanction of a certain cheat and its rating refunds), and
+the thread handles its messages one at a time in the order they were sent: the anomalies flushed
+right before a commit are written before it, without the event loop waiting for either. After
+the commit it sends `RatingUpdate` and tells the primary `game.ended`.
 
 When the journal's writes keep failing (a full disk, a read-only or failing `JOURNAL_DIR`
 volume, too many open files), waiting for the journal would keep every finished game out of the
@@ -257,14 +301,19 @@ arrays (use typed-array mailbox, 0x88 or 10x12).
 ```js
 new GameRoom({ id, category /* '3+2' | 'custom' */, baseMs, incMs, rated,
                white: { userId, name, rating, provisional }, black: {...},
-               createdAt, config, rematchOf?, createChessGame /* () => new ChessGame(), injected by the host */ })
-room.onMove(color, { seq, ply, move, posHash, thinkMs, drawOffer }, now)  -> Outcome
-room.onResign(color, now) / onDrawOffer(color, now) / onDrawAnswer(color, accept, now)
-room.onDrawClaim(color, now) / onAbort(color, now) / onRematch(color, accept, now)
-room.onDisconnect(color, now) / onReconnect(color, now) / onRtt(color, rttMs)
-room.forfeit(color, now)            // anti-cheat: loss (EndReason.Forfeit)
+               createdAt, config, rematchOf?, autoPress? /* true */,
+               createChessGame /* () => new ChessGame(), injected by the host */ })
+// recvAt (optional, default now): the arrival the host credits after a stall of its worker (6.1);
+// stalledSince (optional, default Infinity): the start of that stall
+room.onMove(color, { seq, ply, move, posHash, thinkMs, drawOffer }, now, recvAt?, stalledSince?)  -> Outcome
+room.onResign(color, now, seq?, recvAt?, stalledSince?) / onDrawOffer(...) / onDrawAnswer(color, accept, now, seq?, recvAt?, stalledSince?)
+room.onDrawClaim(color, now, seq?, recvAt?, stalledSince?) / onAbort(color, now, seq?, recvAt?, stalledSince?)
+room.onRematch(color, accept, now, seq?, recvAt?, stalledSince?)
+room.onDisconnect(color, now, recvAt?, stalledSince?) / onReconnect(...) / onResync(color, now, recvAt?, stalledSince?)
+room.onRtt(color, rttMs)
+room.forfeit(color, now, recvAt?, stalledSince?)  // anti-cheat: loss (EndReason.Forfeit)
 room.serverAbort(now)                // EndReason.ServerAborted
-room.tick(now) -> Outcome           // flags, first-move timeouts, grace expiries
+room.tick(now, stalledSince?) -> Outcome  // flags, first-move timeouts, grace expiries
 room.nextDeadline() -> ms | Infinity
 room.snapshot(forColor, now) -> object for encode.GameSnapshot
 room.isOver; room.result          // { status, reason, whiteMs, blackMs, endedAt }
@@ -280,27 +329,32 @@ then sends the other player a new `GameSnapshot`, unless the outcome holds a mov
 `GameHost` (one per shard):
 ```js
 new GameHost({ shard, config, store, journal, anticheat, bus, primary, log })
-host.createGame(spec) -> gameId            // spec from the primary (players, tc, rated, colours)
-host.attach(gameId, userId, endpoint)      // endpoint: { send(buf), connId, shard } ; sends the snapshot
+host.createGame(spec) -> gameId            // spec from the primary (players, tc, rated, colours, autoPress)
+host.attach(gameId, userId, endpoint)      // endpoint: { send(buf), sendDroppable?(buf), connId, shard } ; sends the snapshot
 host.detach(gameId, userId, endpoint)      // connection closed
 host.onClientMessage(gameId, userId, msg, endpoint) // decoded C2S game message (Move..Rematch)
+host.relayGesture(gameId, userId, frame) -> bool    // raw C_Gesture frame -> S_Gesture to the opponent (section 3)
+host.heartbeat(t) ; host.stallStart(t) ; host.stallCredit(t) ; host.stallDuring(t0)  // stall detection and credit (6.1)
 host.recover() -> count                    // replays the journal at start-up
 host.compactJournal(now) -> count          // journal snapshots the journal asks for (5.6), from the interval
 host.stats() -> { games, ... }
 host.shutdown()                            // flush journal + pending commits
 ```
 The host owns a timer wheel (10 ms slots) driven by one interval; each room's `nextDeadline()`
-is (re)scheduled after every outcome. It records `anomaly` through `anticheat.recordAnomaly`
+is (re)scheduled after every outcome. Each run of the interval is a beat of the stall detection
+(6.1). It records `anomaly` through `anticheat.recordAnomaly`
 and, for a certain cheat with `AUTO_SANCTION_CERTAIN_CHEATS`, calls `room.forfeit` and
 `anticheat.sanctionCertain` (section 5.8).
 
 ### 5.4 Match (`src/match/`)
 
 ```js
-// elo.js: pure, mirrors src/game/elo.h of the game.
-expectedScore(rating, opponent); kFactor(record /* {rating, games, reachedSenior} */, cfg);
+// elo.js: pure, mirrors src/game/elo.h of the game (FIDE ratings, section 6.6).
+expectedScore(rating, opponent); kFactor(record /* {rating, games, peak, reachedSenior, rated} */, cfg);
 applyGame(white /* record */, black, score /* 1, 0.5, 0 from White's side */, cfg)
-  -> { white: { before, after, record }, black: {...} }   // records updated (games, w/d/l, peak, reachedSenior)
+  -> { white: { before, after, delta, k, expected, games, provisional, record }, black: {...} }
+  // records updated (games, w/d/l, peak, reachedSenior, rated and the unrated-phase sums);
+  // k: the K factor of the change, 0 when the K formula did not apply (unrated phase, unrated opponent)
 // matchmaker.js (primary)
 new Matchmaker({ config, now })
 mm.join({ userId, username, category, rated, rating, provisional, shard, connId, colorBalance, joinedAt }) -> { ok } | { error: ErrorCode }
@@ -340,19 +394,28 @@ store.sessions.byTokenHash(hash) -> { id, userId, createdAt, lastSeenAt, expires
 store.sessions.touch(id, now, idleExpiresAt) ; revoke(id) ; revokeAllForUser(userId, exceptId?) -> [tokenHash] ; listForUser(userId) ; enforceLimit(userId, max)
 store.tokens.create({ kind, tokenHash, userId, data, expiresAt }) ; consume(kind, tokenHash, now) -> row | null (atomic single use) ; get(kind, tokenHash) ; update(kind, tokenHash, data)
 store.sso.find(provider, subject) -> { userId } | null ; link(userId, provider, subject, email)
-store.ratings.get(userId, category) -> { rating, games, wins, draws, losses, peak, reachedSenior }  // defaults when absent
-store.ratings.forUser(userId) -> [{ category, ... }] ; leaderboard(category, limit, minGames)
+store.ratings.get(userId, category) -> { rating, games, wins, draws, losses, peak, reachedSenior, rated, countedGames, unratedGames,
+  unratedOpponents, unratedHalfPoints }  // defaults when absent: unrated at INITIAL_RATING
+store.ratings.forUser(userId) -> [{ category, ..., provisional }] ; leaderboard(category, limit, minGames)  // rated, >= minGames counted games
+store.refunds.applyForCheater({ cheaterId, since, now, sanctionId, source, by }) -> [refund]   // section 6.6, one transaction
+store.refunds.list({ cheaterId, victimId, limit }) ; pendingSince(afterId, limit) ; pendingFor(victimId) ; markNotified(ids, now)
 store.games.finishBatch(records) -> [{ gameId, ratings: null | { white: RatingChange, black: RatingChange } }]
   // One transaction for the batch: inserts each game, applies match/elo.applyGame to rated games
-  // with the ratings read inside the transaction, queues rated games of >= ANALYSIS_MIN_PLIES for analysis
+  // with the ratings read inside the transaction (and stores the K factor of each side's change),
+  // queues rated games of >= ANALYSIS_MIN_PLIES for analysis
   // (section 6.5: a game left out by the policy has analysisSkipped: 'sample' | 'backlog' | 'player' in its entry,
   // and a game that took over waiting jobs past the per-player cap has analysisDisplaced: [gameId]).
   // record: { id, category, rated, baseMs, incMs, whiteId, blackId, whiteName, blackName, whiteRating, blackRating,
   //           startedAt, endedAt, status, reason, moves: Uint16Array, spentMs: Uint32Array, clockMs: Uint32Array,
   //           rematchOf, flags }
+  // flags: 1 rated requested, 2 recovered after a restart, 4 forfeit, 8 manual clock press (autoPress
+  // false; records of older builds never have it)
 store.games.byId(id) ; recentForUser(userId, limit, before?) ; countBetween(a, b, since)
 store.conduct.record(userId, kind, at) ; store.conduct.countSince(userId, since) -> { abandon, abort, noshow } ; store.conduct.cooldown(userId) / setCooldown(userId, until, level)
 store.sanctions.create({ userId, kind /* 'ban'|'mm_block'|'warning' */, reason, source /* 'auto'|'moderator' */, gameId, startsAt, endsAt, createdBy }) -> id
+  // a ban for cheating: source 'auto' and reason 'certain_cheat:<kind>', or source 'moderator' and reason
+  // 'confirmed: <reason>' ('confirmed, no refund: <reason>' with --no-refund); finishBatch refunds the games
+  // recorded during an 'auto' or a 'confirmed: ' ban only (section 6.6)
 store.sanctions.activeBan(userId, now) -> sanction | null ; list(userId) ; lift(id, by, now)
 store.anomalies.insertBatch([{ userId, gameId, kind, severity /* 'info'|'suspicious'|'certain' */, detail, at }]) ; forUser(userId, limit)
 store.security.insertBatch([{ kind, userId, ip, detail, at }]) ; purge(now, cfg)
@@ -471,7 +534,7 @@ Shard -> primary:
 | `presence.claim` | `{ userId, username, shard, connId, ip }` | `{ ok, activeGame: id or 0, kicked: bool }` or `{ error }` (ServerFull, Banned) |
 | `presence.release` | `{ userId, connId }` | - |
 | `conn.ipAcquire` / `conn.ipRelease` | `{ ip }` | `{ ok }` or `{ ok: false, reason }` (`per_ip`: `MAX_CONNECTIONS_PER_IP`; `global`: `MAX_CONNECTIONS` plus `max(16, 2 %)`) |
-| `mm.join` | `{ userId, username, category, rated, rating, provisional, shard, connId }` | `{ ok }` / `{ error }` |
+| `mm.join` | `{ userId, username, category, rated, rating, provisional, shard, connId }` | `{ ok }` / `{ error }` (`Banned`: a ban found in the database, enforced as `sanction.applied`, 6.6) |
 | `mm.leave` | `{ userId }` | `{ ok }` |
 | `challenge.create` / `.accept` / `.decline` / `.cancel` / `.joinCode` | see 5.4 | `{ ok, id?, code? }` / `{ error }` |
 | `game.ended` | `{ gameId, whiteId, blackId, status, reason, rated, category, rematchOffer }` | - |
@@ -480,7 +543,7 @@ Shard -> primary:
 | `ratelimit.take` | `{ key, limit, windowMs, cost }` | `{ allowed, retryAfterMs, count }` |
 | `ratelimit.refund` | `{ key, windowMs, cost, ageMs }` | `{ refunded }` (gives back a take granted `ageMs` ago, in the window that counted it) |
 | `once.consume` | `{ key, ttlMs }` | `{ fresh }` |
-| `sanction.applied` | `{ userId, until, reason }` | - (primary kicks the user everywhere) |
+| `sanction.applied` | `{ userId, until, reason, refunds }` | - (primary kicks the user everywhere; `refunds`: victims refunded, whose notices it looks for at once) |
 | `session.revoked` | `{ userId, tokenHashes }` | - (broadcast to every shard's auth cache) |
 
 Primary -> shard:
@@ -489,7 +552,7 @@ Primary -> shard:
 |---|---|---|
 | `game.create` | `{ spec }` | host creates the room, replies `{ ok, gameId }` |
 | `game.attach` | `{ gameId, userId, connId }` | the shard binds that connection to the game (local or via bus) |
-| `conn.send` | `{ connId, frames: [Buffer] }` | writes encoded S2C frames (QueueStatus, Challenge*, Notice) |
+| `conn.send` | `{ connId, frames: [Buffer] }` | writes encoded S2C frames (QueueStatus, Challenge*, Notice); as a request (refund notices) it replies `{ ok }`, false when the connection is gone or has not had its Welcome yet |
 | `conn.kick` | `{ connId, code, closeCode, frames }` | sends then closes |
 | `auth.invalidate` | `{ userId, tokenHashes }` | drops cached sessions |
 | `metrics.snapshot` | - | replies `registry.snapshot()` |
@@ -508,6 +571,7 @@ class WsConnection {
 // src/cluster/router.js: decodes C2S frames (decode(buf, {dir:'c2s'})), enforces seq, rate limits,
 // handles Ping/Pong, sends Queue*/Challenge* to the primary, game messages to the local GameHost or
 // to the host shard over the bus (raw frame + userId + connId), and bus deliveries back to sockets.
+// C_Gesture has its own bucket and relay path (section 3); endpoints have sendDroppable(buf) for it.
 // src/cluster/bus.js: Unix-socket (Windows: named pipe) mesh between shards; frames
 // [u32 len][u8 kind][u32 connId][u32 userId][payload]; batched writes (setImmediate).
 ```
@@ -660,8 +724,10 @@ change happens on POST (link scanners must not consume tokens).
 * Time is measured on the server only. The client's `thinkMs` never adds time; it only bounds
   lag compensation.
 * Plies 0 and 1 (each side's first move) do not run the clock: each player has
-  `FIRST_MOVE_TIMEOUT_MS` to make it, otherwise the game is aborted (`NoShow`, unrated). No
-  increment is added for them. The clocks start with White's second move.
+  `FIRST_MOVE_TIMEOUT_MS` to make it, otherwise the game is aborted (`NoShow`, unrated). Its
+  deadline has the same margin as a flag, `min(quota, rttEma + 50, LAG_COMP_MAX_MS)`, so that a
+  first move sent in time over a slow link counts; the `firstMoveMs` sent to the clients has no
+  margin. No increment is added for them. The clocks start with White's second move.
 * For every later move: `elapsed = recvTime - turnStart` where `turnStart` is when the server
   sent the opponent's `MoveMade`. `lag = elapsed - clamp(thinkMs, 0, elapsed)`.
   `comp = min(lag, rttEma + 50, LAG_COMP_MAX_MS, quota)`; `quota -= comp`, then
@@ -678,7 +744,37 @@ change happens on POST (link scanners must not consume tokens).
   move (plus 100 ms) is reported.
 * `rttEma` is the server's own measurement (its Ping / the client's Pong), exponential moving
   average, capped at 2000 ms. A client that delays its Pongs only inflates a value that is
-  itself capped by the quota.
+  itself capped by the quota. A Pong whose Ping preceded a stall of the worker (below) is left
+  out: the stall delayed its reading, not the network. `Welcome`, `Ping` and `Pong` carry the
+  same clock as the games (`clock.js now()`), `Welcome`'s read after the session check.
+* Stall credit (`GAME_STALL_MIN_MS`, 30; `GAME_STALL_CREDIT_MAX_MS`, 5000). A worker's event loop
+  can stop for a moment (garbage collection, a synchronous SQLite write, CPU steal), and Node runs
+  its timers before it reads its sockets: without care, a flag that fell during the stall would
+  fire before the move that arrived in time and waited in a socket. Each run of the host's 10 ms
+  interval is a beat; a beat more than `10 + GAME_STALL_MIN_MS` ms after the previous one is a
+  stall (`scacelith_game_stall_ms`), and the timers, commits and compaction of that beat then run
+  from `setImmediate`, after the poll phase has read the sockets. Those timers fire the deadlines
+  due by that beat only: the poll phase reads what the sockets held when it began, and when it
+  lasts (the backlog of a large stall), what reaches a socket meanwhile waits for the next poll
+  phase; a later deadline therefore waits for the next beat, which sees that poll phase as a stall
+  of its own. Until the timers ran, and while a beat is that late before the interval noticed it,
+  a game request (Move, Resign, DrawOffer, DrawAnswer, DrawClaim, Abort, Resync, Rematch), an
+  attach, a detach or a forfeit (`game.forfeit`) counts as arrived when the stall began, at most
+  `GAME_STALL_CREDIT_MAX_MS` before it is handled (`scacelith_game_stall_credit_ms_total`); the
+  forfeit of a certain cheat (6.5) takes the arrival of the request that revealed it. The room
+  checks the deadlines, the flag and the time charged for a move at that arrival (never before the
+  latest move, never after now), a resignation, draw, abort or forfeit takes effect at it, and a
+  disconnection, reconnection or Resync processes the deadlines due at it only; the next turn starts
+  at the real time of the `MoveMade`, so the stall is charged to nobody and uses no quota, and the
+  implausible-`thinkMs` test keeps the real time since the previous move. The room also gets the
+  stall's start, from the timers that run after the stall (`room.tick`) and with each of those
+  requests: a first-move timeout that fell during the stall aborts the game without a `noshow`
+  conduct incident, whichever processes it (a request does when the stall lasted longer than the
+  credit). Nothing of it is journaled (the journal holds the clock values it produced, and a replay
+  uses them), and a player gains at most one stall; no client can cause one.
+  `scacelith_game_timer_late_ms` measures how late the timers fire. The credit covers stalls of the
+  game's host worker only: a move relayed over the bus from another shard that stalled is timed when
+  the host reads it.
 
 ### 6.2 Validation of a Move intent (in this order)
 
@@ -755,7 +851,8 @@ rules before sending, so steps 6 and 7 only happen with a modified client.
   its side to move never came back before the end of the first-move timer records no `noshow`
   conduct incident (the server broke the connection); it is still aborted, unrated. A player who
   came back and then does not move within that whole first-move time gets the incident as
-  usual. Games that cannot be rebuilt end as `ServerAborted` (unrated) and are committed as such.
+  usual. A first-move timeout that fell during a stall of the host's worker (6.1) records no
+  incident either. Games that cannot be rebuilt end as `ServerAborted` (unrated) and are committed as such.
 
 ### 6.5 Anomalies, certain cheats, suspicion
 
@@ -775,7 +872,8 @@ rules before sending, so steps 6 and 7 only happen with a modified client.
 Certain cheat with `AUTO_SANCTION_CERTAIN_CHEATS=true`: the game (if any) ends
 `Forfeit` (a rated game is rated normally: the opponent wins), `Error{CheatDetected, fatal}`,
 close 4302, ban `BAN_DURATION_HOURS` (source `auto`), integrity level `confirmed` with the
-evidence. Everything else is only recorded.
+evidence, and the rating refunds of the player's victims (section 6.6). Everything else is only
+recorded.
 
 Statistical assistance detection never bans automatically. Per player and category the
 analysis process accumulates, over rated games of at least `ANALYSIS_MIN_PLIES`: accuracy
@@ -790,10 +888,10 @@ independent signals agree over >= 10 games and >= 300 non-trivial moves), `confi
 decision via `bin/admin.js`, or a certain protocol cheat). Reports raise the review priority,
 weighted by the reporter's credibility, never the level itself.
 
-**Analysis backlog.** One engine analyses about 1,000 to 12,000 games a day (depth 18, MultiPV 3,
-from ply 16 on), far fewer than a busy server finishes, so the queue is bounded and prioritized
-instead of growing without end. Every job has a priority and the engine takes the highest first,
-then the oldest:
+**Analysis backlog.** One engine analyses about 540 to 1,260 games a day on a VPS vCore (Stockfish
+19 at depths 9/15, MultiPV 3, from ply 16 on), far fewer than a busy server finishes, so the queue
+is bounded and prioritized instead of growing without end. Every job has a priority and the engine
+takes the highest first, then the oldest:
 
 1. `manual`: a moderator asked for the (re-)analysis of a game (`store.analysis.enqueue`);
 2. `report`: a credible player reported the game (category `cheating` or `other`, stored weight
@@ -837,6 +935,84 @@ and `scacelith_anticheat_analysis_queue_priority` show the backlog (each counted
 The policy only decides what is analysed and when: it changes no level and no sanction, and
 statistics never ban.
 
+### 6.6 Ratings
+
+One Elo rating per player and official category (`3+2`, ...; a custom time control is never
+rated), computed as FIDE computes ratings (FIDE Rating Regulations effective from 1 March 2024)
+by `src/match/elo.js`, which mirrors the game's offline rating (`src/game/elo.cpp`) to the last
+point: both are checked against the same vectors (`test/fixtures/elo-vectors.json`).
+
+* **Expected score**: FIDE's table 8.1.2 as published (`PD` for the rating difference `D`, the
+  higher-rated player gets `PD`, the lower `1 - PD`), `D` counted as 400 at most (8.3.1). The
+  table is the normal distribution with a standard deviation of 2000/7 rounded to hundredths,
+  except at six differences where FIDE's rows differ (54, 343, 344, 358, 392, 620); the
+  published table is what FIDE applies, so it is used as published.
+* **Change**: `K x (score - PD)`, rounded to the nearest point (halves away from zero),
+  computed in whole hundredths. `K` is 40 until the player has `PROVISIONAL_GAMES` (30) counted
+  games in the category (below), those of the unrated phase included, then 20, and 10 for good
+  once the player has reached 2400.
+* **Unrated phase and first rating** (8.2): a new record is unrated, with a working rating of
+  `INITIAL_RATING` (1500) that is shown and used for pairing. Its counted games add up the
+  opponents' ratings and the score (see the zero score below); after five, `Ru = Ra + dp(p)` with
+  `Ra = (sum of the opponents' ratings + 2 x 1800) / (n + 2)` and
+  `p = (score + 1) / (n + 2)` rounded to hundredths (two hypothetical draws against
+  1800-rated players), `dp` from FIDE's table 8.1.1, rounded to the nearest point and capped at
+  2200. The peak becomes `Ru`. Five draws against 1500 give 1586, five wins 1895.
+* **Zero score** (8.2.1: FIDE disregards an unrated player's zero score, and their opponents'
+  results against them), one game at a time: a game lost by an unrated player who has not scored
+  yet in the category (no win, no draw) counts for neither player's rating (it counts in the
+  games and wins, draws and losses, not in the five games, the sum or the score of either side).
+  A newcomer who only loses stays unrated instead of getting a first rating from the strength of
+  the players who beat them, and gives no first rating to anyone: an account that only loses
+  cannot rate the accounts that beat it (five wins against it would otherwise give 1895, over
+  and over). Once it has scored, its losses count and it is rated within five counted games,
+  then loses points like anyone.
+* **Unrated opponent**: a rated player's game against an unrated one leaves the rated player's
+  rating unchanged (only games against rated opponents count, 8.3) but counts in their games and
+  wins, draws and losses, not in their counted games.
+* **Counted games**: the games that entered the rating (FIDE's rated games), those of the
+  unrated phase that counted and then those against rated opponents. They set `K` and the
+  provisional mark, and a place on the leaderboard needs `PROVISIONAL_GAMES` of them: a rating
+  tested against rated players, which games against unrated opponents or zero scores never give.
+* **Floor**: a rating never drops below 100 (FIDE's list starts at 1400, which makes no sense
+  for players who range from beginners to weak engine presets rated 800).
+
+Departures from FIDE, needed by a game server: games are rated one by one against the ratings
+before each game (FIDE rates monthly periods with ratings fixed within the period and `K x
+games` capped at 700); a game between two unrated players counts for both, at the other's
+working rating (FIDE ignores it, but a new server could then never rate anyone), unless it is a
+zero score; FIDE's `K = 40` for players under 18 does not apply (no ages here).
+
+On the wire nothing changed: an unrated record is `provisional` (so is a rated one with fewer
+than `PROVISIONAL_GAMES` counted games), its `rating` is the working rating, `games` counts every
+rated game played, and the `RatingChange` of a game of the unrated phase has `before = after`,
+except the fifth counted game, which goes from the working rating to the first rating. The
+records stored before migration 004 (the previous logistic formula, same K factors, start and
+floor) that have games stay rated, and a record stored before the counted games existed counts
+all its games; a record without games starts unrated. The leaderboard lists rated records with
+at least `PROVISIONAL_GAMES` counted games.
+
+**Refunds.** When a player is banned as a cheater (a certain cheat, section 6.5, or a
+moderator's `integrity confirm`), every opponent who lost rating points to them in a rated game
+that ended within `RATING_REFUND_DAYS` (60) before the ban gets exactly those points back, added
+to their current rating in that category (their peak rises with it when it is exceeded).
+Nothing is recomputed: wins against the cheater and every other game stand as played; a draw
+that cost points is refunded like a loss; only a change of the K formula is refunded (the game
+that gave a first rating moved it from a working rating); one refund per game and victim at
+most. A game that is not recorded yet when the ban is given (still in progress, or waiting for
+its commit) is refunded in the transaction that records it, while the player is `confirmed` and
+that ban lasts. A ban for something else (`user ban`) and an `integrity confirm --no-refund`
+refund nothing, not even that game: the store tells them by the ban's source and reason
+(`certain_cheat:<kind>` from the anti-cheat; `confirmed: <reason>`, or
+`confirmed, no refund: <reason>`, from the confirm). A ban given with the admin CLI, which only
+writes the database, reaches the running server when the player next connects or tries to start
+a game (queue, challenge, private code, rematch): the primary then enforces it as it enforces
+`sanction.applied` (kick, queue and challenges dropped), so a banned player starts no game. The
+victim gets `Notice{RatingRestored, arg: points}` out of a game only: at once when connected and
+idle, otherwise after their current game, otherwise right after `Welcome` at their next
+connection (after the game that connection resumes, if any). Moderator options, audit trail and
+the reasons an unban takes nothing back: docs/ANTICHEAT.md, rating refunds.
+
 ## 7. What lives where, and what survives a crash
 
 | Data | Where | Written | After a crash |
@@ -846,6 +1022,7 @@ statistics never ban.
 | Ratings, finished games, analysis queue | SQLite | batched every `DB_COMMIT_MS`, one transaction per batch | kept once committed; games ended but not committed are in the journal and committed at recovery |
 | Games in progress (moves, clocks, offers) | memory of the host shard + journal | journal flushed every `JOURNAL_FLUSH_MS` | replayed; at most `JOURNAL_FLUSH_MS` of moves lost (clients resend: stale ply / resync); both players get `RECOVERY_GRACE_MS` to come back, and the clock of the side to move waits for its player (`RECOVERY_CLOCK_HOLD_MS` at most, 6.4) |
 | Sanctions, anomalies (certain), integrity levels, reports | SQLite | sanctions immediately; anomalies batched (1 s) | kept (a batch in flight may be lost for `info` anomalies) |
+| Rating refunds (6.6) | SQLite | with the ban that triggers them (their own transaction), or with a game recorded during the ban; `notified_at` once the notice is written | kept; the notices not marked are sent again after a restart |
 | Presence, queues, challenges, private codes, rate-limit counters | primary memory | - | lost: clients reconnect and re-queue |
 | Security events (failed logins...) | SQLite | batched (1 s) | kept, purged after `RETENTION_SECURITY_DAYS` |
 

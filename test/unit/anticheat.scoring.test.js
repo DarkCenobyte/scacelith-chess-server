@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Population, scorePlayer, updatePlayerIntegrity, updatePopulationFromGame, bucketOfRating, MODEL, gameZ } from '../../src/anticheat/scoring.js';
 import { priorFor, timeClass, PRIOR_GAMES } from '../../src/anticheat/priors.js';
 import { rng, syntheticHistory, syntheticSide, learnPopulation, gauss } from '../../src/anticheat/testing/synthetic.js';
@@ -28,6 +32,21 @@ test('priors: sensible ordering by rating and time control', () => {
     assert.equal(bucketOfRating(1549), 1500);
     assert.equal(bucketOfRating(99), 500);
     assert.equal(bucketOfRating(3400), 2900);
+});
+
+test('priors: the accuracy row follows the measured accuracy / ACPL relation from the ACPL row', () => {
+    // The relation of priors.js and docs/ANTICHEAT.md section 4: accuracy ~ 100 - 0.28 ACPL up to
+    // an ACPL of 90, and the measured values above it at the ACPL of the two lowest ratings. Both
+    // quality metrics must describe the same player, or honest players look more or less
+    // engine-like on one of them than on the other.
+    const measuredAbove90 = new Map([[110, 71], [150, 65]]);
+    for (const rating of [600, 1000, 1500, 2000, 2500, 2900]) {
+        const acpl = priorFor('acpl', rating).mean, accuracy = priorFor('accuracy', rating).mean;
+        const expected = acpl <= 90 ? 100 - 0.28 * acpl : measuredAbove90.get(acpl);
+        assert.ok(expected !== undefined, `rating ${rating}: no measured accuracy for an ACPL of ${acpl}`);
+        // The table holds whole points.
+        assert.ok(Math.abs(accuracy - expected) <= 0.5, `rating ${rating}: accuracy ${accuracy} for an ACPL of ${acpl}, the relation gives ${expected.toFixed(1)}`);
+    }
 });
 
 test('population: priors blend with Welford data, winsorised, text/array formats accepted', () => {
@@ -73,6 +92,46 @@ test('population statistics reach the real store and survive a restart', () => {
         assert.ok(Math.abs(again.accuracy.mean - pop.raw('3+2', 1500).accuracy.mean) < 1e-9);
     } finally {
         store.close();
+    }
+});
+
+test('population statistics are kept per analysis profile; a player is scored on the games of one profile', () => {
+    const store = createFakeStore();
+    const [a, b] = ['Stockfish 16; nn-5af11540bbfe.nnue; depth 10/18; hash 32; analysis 1', 'Stockfish 19; nn-1a298aa575a0.nnue; depth 9/16; hash 32; analysis 1'];
+    const popA = new Population(store, { profile: a }), popB = new Population(store, { profile: b });
+    const f = features(1, { userId: 1, rating: 1500, n: 30, accuracy: 80, acpl: 50 }, { userId: 2, rating: 1500, n: 30, accuracy: 85, acpl: 40 }, { profile: a });
+    assert.equal(updatePopulationFromGame(popB, f), 0, 'a game of another profile is refused');
+    assert.equal(updatePopulationFromGame(popA, f), 2);
+    assert.equal(store._.population.get(`${a}|5+0|1500|accuracy`).n, 2);
+    assert.equal(new Population(store, { profile: a }).raw('5+0', 1500).accuracy.n, 2, 're-read from the store');
+    assert.deepEqual(popB.raw('5+0', 1500), {}, 'the other profile starts from the priors');
+    const hist = syntheticHistory({ r: rng(8), games: 12, userId: 1, rating: 1500, category: '5+0', engineFrom: 0, engine: 1 })
+        .map((g, i) => ({ ...g, profile: i < 8 ? a : b }));
+    assert.equal(scorePlayer(hist, popA).games, 8);
+    assert.equal(scorePlayer(hist, popB).games, 4);
+    assert.equal(scorePlayer(hist, new Population(null)).games, 0, 'records of a profile are never scored without it');
+});
+
+test('the analysis-profiles migration drops the population statistics written before it', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-profiles-'));
+    const migrations = fileURLToPath(new URL('../../src/store/migrations/', import.meta.url));
+    const profiles = fs.readdirSync(migrations).find((n) => n.endsWith('_analysis_profiles.sql'));
+    const before = path.join(dir, 'migrations');
+    fs.mkdirSync(before);
+    for (const name of fs.readdirSync(migrations).filter((n) => n < profiles)) fs.copyFileSync(path.join(migrations, name), path.join(before, name));
+    const cfg = testConfig({ DB_PATH: path.join(dir, 'x.db') });
+    const store = openStore(cfg);
+    try {
+        migrate(store, { dir: before });
+        store.integrity.updatePopulation([{ key: '5+0|1500|accuracy', value: 80 }, { key: '5+0|1500|acpl', value: 50 }]);
+        assert.equal(migrate(store).applied[0], Number.parseInt(profiles, 10));
+        assert.deepEqual(store.integrity.populationStats('5+0', 1500), {});
+        const pop = new Population(store, { profile: 'Stockfish 19; depth 9/16; analysis 1' });
+        pop.update('5+0', 1500, { accuracy: 90 });
+        assert.equal(new Population(store, { profile: pop.profile }).raw('5+0', 1500).accuracy.n, 1);
+    } finally {
+        store.close();
+        fs.rmSync(dir, { recursive: true, force: true });
     }
 });
 

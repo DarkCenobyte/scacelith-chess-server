@@ -2,9 +2,9 @@
 // presence, real Matchmaker and Challenges, metrics endpoint) forks two real shard processes
 // (startShard: bus over Unix sockets, router, WebSocket server, listeners) whose GameHost and
 // auth service are stubs. Covers: hello, queue, pairing, game placement, attach across the bus,
-// game messages relayed to the host shard, replacement of a connection on another shard, a
-// shard crash and restart (the player gets their game back), metrics aggregation and the
-// graceful shutdown.
+// game messages relayed to the host shard, gestures relayed across the bus in both directions,
+// replacement of a connection on another shard, a shard crash and restart (the player gets their
+// game back), metrics aggregation and the graceful shutdown.
 
 import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
@@ -39,13 +39,14 @@ async function waitFor(pred, ms = 5000) {
 }
 
 // The shard process: startShard with a stub host (attach answers Notice{Motd, gameId}, every game
-// message is answered to all attached players with Notice{Motd, seq}) and a stub auth service
-// (token "user-<id>-..." is user <id>).
+// message is answered to all attached players with Notice{Motd, seq}, a gesture goes to the other
+// attached players as the real host sends it: the C_Gesture bytes without the seq, through
+// sendDroppable) and a stub auth service (token "user-<id>-..." is user <id>).
 const WORKER = `
 import { Ipc } from ${JSON.stringify(url('../../src/cluster/ipc.js'))};
 import { startShard } from ${JSON.stringify(url('../../src/cluster/shard.js'))};
 import { testConfig } from ${JSON.stringify(url('../../src/config.js'))};
-import { encode, enums } from ${JSON.stringify(url('../../src/protocol/index.js'))};
+import { encode, enums, MSG } from ${JSON.stringify(url('../../src/protocol/index.js'))};
 import { GameIdAllocator } from ${JSON.stringify(url('../../src/util/ids.js'))};
 import { Registry } from ${JSON.stringify(url('../../src/metrics.js'))};
 const shard = Number(process.env.SHARD);
@@ -60,6 +61,12 @@ const host = {
     attach(gameId, userId, ep) { const g = games.get(gameId); if (!g) return; g.eps.set(userId, ep); ep.send(motd(gameId)); },
     detach(gameId, userId, ep) { const g = games.get(gameId); if (g && g.eps.get(userId) === ep) g.eps.delete(userId); },
     onClientMessage(gameId, userId, msg) { const g = games.get(gameId); if (!g) return; for (const ep of g.eps.values()) ep.send(motd(msg.seq)); },
+    relayGesture(gameId, userId, frame) {
+        const g = games.get(gameId); if (!g) return false;
+        const out = Buffer.allocUnsafe(frame.length - 4); out[0] = MSG.S_Gesture; frame.copy(out, 1, 5);
+        for (const [u, ep] of g.eps) if (u !== userId) ep.sendDroppable(out);
+        return true;
+    },
     onRtt() {}, forfeitUser() { return false; }, stats() { return { games: games.size }; }, async shutdown() {},
 };
 const auth = {
@@ -103,8 +110,12 @@ describe('cluster end to end (primary + 2 shard processes)', { timeout: 60000 },
         const config = testConfig({ ...base, METRICS_PORT: String(metricsPort), METRICS_BIND: '127.0.0.1' });
         fs.mkdirSync(config.runDir, { recursive: true, mode: 0o700 });
         children = new Map();
+        // Another process's registry served with the shards' (the analysis process's).
+        const analysis = new Registry();
+        analysis.gauge('scacelith_anticheat_analysis_engines_shared', 'Analysis engines sharing their network').set(2);
         primary = await startPrimary({
             config, log: silent, registry: new Registry(),
+            extraMetrics: async () => [{ shard: 'analysis', snapshot: analysis.snapshot() }],
             matchmaker: new Matchmaker({ config }), challenges: new Challenges({ config }),
             fork: (shard) => {
                 const env = { ...base, API_PORT: String(ports[shard]), WS_PORT: String(ports[shard]) };
@@ -151,6 +162,21 @@ describe('cluster end to end (primary + 2 shard processes)', { timeout: 60000 },
         assert.equal((await a.until('Notice', (m) => m.code === N.Motd)).arg, seq);
     });
 
+    it('relays gestures across the bus in both directions', async () => {
+        assert.deepEqual([b.welcome.gestureRate, b.welcome.gestureBurst], [4, 8]);
+        const fields = { game: gameId, ply: 3, touch: 12, aim: 28, placed: 0, flags: 1, yaw: -700, pitch: 250, lean: 40 };
+        const pick = (m) => Object.keys(fields).map((k) => m[k]);
+        b.send('C_Gesture', fields);                          // shard 1 -> host shard 0 (raw ToHost frame)
+        assert.deepEqual(pick(await a.until('S_Gesture')), pick(fields));
+        a.send('C_Gesture', { ...fields, yaw: 700, placed: 1 });   // host shard 0 -> shard 1 (ToConn)
+        const gb = await b.until('S_Gesture');
+        assert.deepEqual([gb.game, gb.yaw, gb.placed], [gameId, 700, 1]);
+        // Both connections stayed in step: a game message afterwards is relayed as before.
+        const seq = b.send('Resign', { game: gameId });
+        assert.equal((await b.until('Notice', (m) => m.code === N.Motd)).arg, seq);
+        assert.equal((await a.until('Notice', (m) => m.code === N.Motd)).arg, seq);
+    });
+
     it('replaces a connection from another shard (4007)', async () => {
         const a2 = await Client.open(ports[1], 1);
         assert.equal(a2.welcome.activeGame, gameId);
@@ -167,6 +193,7 @@ describe('cluster end to end (primary + 2 shard processes)', { timeout: 60000 },
         assert.match(r.body, /scacelith_ws_connections\{shard="0"\} \d+/);
         assert.match(r.body, /scacelith_ws_connections\{shard="1"\} 2/);
         assert.match(r.body, /scacelith_presence_online 2/);
+        assert.match(r.body, /scacelith_anticheat_analysis_engines_shared 2/);
         assert.equal((await get(metricsPort, '/readyz')).status, 200);
     });
 

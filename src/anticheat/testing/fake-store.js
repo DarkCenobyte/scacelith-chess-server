@@ -16,6 +16,7 @@ const PRIORITY = Object.freeze({ ordinary: 0, signal: 1, report: 2, manual: 3 })
 export function createFakeStore({ textColumns = false } = {}) {
     const users = new Map(), sessions = [], ratings = new Map(), games = new Map(), sanctions = [], anomalies = [];
     const security = [], jobs = new Map(), integrity = new Map(), population = new Map(), reports = [], recovery = new Map();
+    const refunds = [];
     let seq = 1;
     const calls = [];
     const bind = (v) => {
@@ -63,6 +64,9 @@ export function createFakeStore({ textColumns = false } = {}) {
             create(s) { const id = seq++; sanctions.push({ id, liftedAt: null, liftedBy: null, ...s }); return id; },
             activeBan(userId, now) {
                 return sanctions.find((s) => s.userId === userId && s.kind === 'ban' && !s.liftedAt && s.startsAt <= now && (!s.endsAt || s.endsAt > now)) || null;
+            },
+            active(userId, now) {
+                return sanctions.filter((s) => s.userId === userId && !s.liftedAt && s.startsAt <= now && (!s.endsAt || s.endsAt > now));
             },
             list(userId) { return sanctions.filter((s) => s.userId === userId); },
             lift(id, by, now) { const s = sanctions.find((x) => x.id === id); if (s) { s.liftedAt = now; s.liftedBy = by; } },
@@ -156,11 +160,52 @@ export function createFakeStore({ textColumns = false } = {}) {
                 return true;
             },
         },
+        // Same contract as the real store (games as store.games.byId returns them, with whiteK /
+        // blackK for the K factor; the games of the ratings are not checked against the records).
+        refunds: {
+            applyForCheater({ cheaterId, since = 0, now = Date.now(), sanctionId = null, source = 'moderator', by = null }) {
+                const out = [];
+                for (const g of [...games.values()].sort((a, b) => a.id - b.id)) {
+                    const side = g.whiteId === cheaterId ? 'black' : g.blackId === cheaterId ? 'white' : null;
+                    if (!side || !g.rated || !g.ratingChanges || (g.endedAt ?? 0) < since) continue;
+                    const victimId = side === 'white' ? g.whiteId : g.blackId;
+                    const points = g.ratingChanges[side].before - g.ratingChanges[side].after;
+                    const rec = ratings.get(`${victimId}|${g.category}`);
+                    if (!(points > 0) || (side === 'white' ? g.whiteK : g.blackK) === 0 || !rec) continue;
+                    if (refunds.some((r) => r.gameId === g.id && r.victimId === victimId)) continue;
+                    rec.rating += points;
+                    rec.peak = Math.max(rec.peak, rec.rating);
+                    const row = { id: seq++, gameId: g.id, victimId, cheaterId, category: g.category, points, createdAt: now, sanctionId, source,
+                        createdBy: by, notifiedAt: null };
+                    refunds.push(row);
+                    out.push({ id: row.id, gameId: g.id, victimId, category: g.category, points, endedAt: g.endedAt });
+                }
+                return out;
+            },
+            list({ cheaterId = null, victimId = null, limit = 100 } = {}) {
+                const name = (id) => users.get(id)?.username ?? null;
+                return refunds.filter((r) => (cheaterId === null || r.cheaterId === cheaterId) && (victimId === null || r.victimId === victimId))
+                    .sort((a, b) => b.id - a.id).slice(0, limit).map((r) => ({ ...r, victimName: name(r.victimId), cheaterName: name(r.cheaterId) }));
+            },
+            pendingSince(afterId = 0, limit = 1000) {
+                return refunds.filter((r) => r.notifiedAt === null && r.id > afterId).slice(0, limit)
+                    .map((r) => ({ id: r.id, victimId: r.victimId, points: r.points }));
+            },
+            pendingFor(victimId) {
+                const rows = refunds.filter((r) => r.victimId === victimId && r.notifiedAt === null);
+                return { ids: rows.map((r) => r.id), points: rows.reduce((n, r) => n + r.points, 0) };
+            },
+            markNotified(ids, now = Date.now()) {
+                let n = 0;
+                for (const r of refunds) if (ids.includes(r.id) && r.notifiedAt === null) { r.notifiedAt = now; n++; }
+                return n;
+            },
+        },
         close() {},
 
         // ---- test helpers (not part of the Store API) ----
         _: {
-            users, sessions, ratings, games, sanctions, anomalies, security, jobs, integrity, population, reports, recovery,
+            users, sessions, ratings, games, sanctions, anomalies, security, jobs, integrity, population, reports, recovery, refunds,
             addUser(username, extra = {}) { const id = store.users.create({ username, email: `${username}@example.test`, passwordHash: 'x', emailVerified: true }); Object.assign(users.get(id), extra); return id; },
             setRating(userId, category, fields) { ratings.set(`${userId}|${category}`, { rating: 1500, games: 0, wins: 0, draws: 0, losses: 0, peak: 1500, reachedSenior: false, ...fields }); },
             addGame(g) { games.set(Number(g.id), g); return g.id; },

@@ -69,18 +69,24 @@ export async function main() {
     cluster.setupPrimary({ exec: WORKER_MAIN, args: [], serialization: 'advanced' });
     const fork = (shard) => cluster.fork({ SHARD: String(shard), SCACELITH_SERVER_ID: serverId });
 
+    let analysis = null;
     const primary = await startPrimary({
         config, log, fork, matchmaker, challenges, conduct,
+        // The analysis process's metrics (it is started below).
+        extraMetrics: async () => {
+            const snapshot = await analysis?.metricsSnapshot?.();
+            return snapshot ? [{ shard: 'analysis', snapshot }] : [];
+        },
         activeBan: (userId, now) => {
             const b = store.sanctions.activeBan(userId, now);
             return b ? { until: b.endsAt ?? b.until ?? now + 86400000 } : null;
         },
         ratingOf: (userId, category) => store.ratings.get(userId, category),
         acceptsChallenges: (userId) => store.users.byId(userId)?.acceptChallenges !== false,
+        refunds: store.refunds,
     });
     log.info('primary ready', { serverId, workers: config.workers, shardBase: config.shardBase, metricsPort: primary.metricsPort });
 
-    let analysis = null;
     if (typeof anticheatModule.startAnalysisProcess === 'function') {
         try {
             analysis = await anticheatModule.startAnalysisProcess(config);

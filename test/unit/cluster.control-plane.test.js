@@ -7,7 +7,7 @@ import { Presence } from '../../src/cluster/presence.js';
 import { testConfig } from '../../src/config.js';
 import { Challenges } from '../../src/match/challenges.js';
 import { Registry } from '../../src/metrics.js';
-import { decode, enums, messageName } from '../../src/protocol/index.js';
+import { CloseCode, decode, enums, messageName } from '../../src/protocol/index.js';
 import { GameIdAllocator, shardOfGameId } from '../../src/util/ids.js';
 
 const E = enums.ErrorCode, N = enums.NoticeCode, QS = enums.QueueState, CS = enums.ChallengeState;
@@ -305,6 +305,34 @@ describe('control plane: challenges', () => {
     });
 });
 
+describe('control plane: clock press', () => {
+    it('gives every new game AUTO_PRESS_CLOCK (queue, challenge, private code); a rematch keeps the finished game\'s', async () => {
+        for (const auto of [true, false]) {
+            const { cp, shards, mm, online } = setup({ config: testConfig({ AUTO_PRESS_CLOCK: String(auto) }) });
+            const u = [1, 2, 3, 4, 5, 6].map((id) => online(id, `user${id}`, id & 1));
+            const entry = (p, joinedAt) => ({ ...p, category: '5+0', rated: false, rating: 1500, joinedAt });
+            mm.pairs.push({ category: '5+0', rated: false, white: entry(u[0], 1), black: entry(u[1], 2) });
+            cp.matchTick();
+            await tick();
+            const ch = cp.challengeCreate({ from: u[2], target: 'user4', baseSec: 180, incSec: 2, rated: false });
+            assert.equal((await cp.challengeAccept({ id: ch.id, by: u[3] })).ok, true);
+            const priv = cp.challengeCreate({ from: u[4], target: '', baseSec: 60, incSec: 0, rated: false });
+            assert.equal((await cp.challengeJoinCode({ code: priv.code, by: u[5] })).ok, true);
+            const specs = () => shards.requests.filter((r) => r.type === 'game.create').map((r) => r.payload.spec);
+            assert.deepEqual(specs().map((s) => s.autoPress), [auto, auto, auto]);
+            // A rematch: the finished game's setting, whatever the configuration says now.
+            const first = cp.activeGames.get(1);
+            const r = await cp.gameRematch({ gameId: first, white: 2, black: 1, baseMs: 300000, incMs: 0, rated: false, autoPress: !auto });
+            assert.equal(r.ok, true);
+            assert.equal(specs().at(-1).autoPress, !auto);
+            cp.gameEnded({ gameId: r.gameId, whiteId: 2, blackId: 1 });
+            const r2 = await cp.gameRematch({ gameId: r.gameId, white: 1, black: 2, baseMs: 300000, incMs: 0, rated: false });
+            assert.equal(r2.ok, true);
+            assert.equal(specs().at(-1).autoPress, auto, 'AUTO_PRESS_CLOCK when the request has none');
+        }
+    });
+});
+
 describe('control plane: games, sanctions, shards', () => {
     it('rematch: the old host shard, colours as given, refused when a player left', async () => {
         const { cp, shards, online } = setup();
@@ -337,6 +365,68 @@ describe('control plane: games, sanctions, shards', () => {
         clock.advance(3600001);
         cp.sweep();
         assert.equal(cp.presenceClaim({ userId: 1, username: 'alice', shard: 0, connId: 11 }, 0).ok, true);
+    });
+
+    it('a ban only in the database (the admin CLI) stops the next game: queue, challenge and rematch refused, the player kicked', async () => {
+        const banned = new Map();
+        const { cp, shards, mm, clock, online } = setup({ activeBan: (u, now) => (banned.get(u) > now ? { until: banned.get(u) } : null) });
+        const [a, b, c, d, e, f] = [[1, 'alice', 0], [2, 'bob', 1], [3, 'carol', 0], [4, 'dave', 1], [5, 'erin', 0], [6, 'frank', 1]]
+            .map(([id, name, shard]) => online(id, name, shard));
+        const until = clock.now() + 3600000;
+        const kicked = () => shards.of('conn.kick').map((k) => [k.payload.connId, k.payload.closeCode]);
+        const creates = () => shards.requests.filter((r) => r.type === 'game.create').length;
+
+        // Alice is banned while she searches and has challenged Bob: paired with Carol, no game;
+        // Alice is kicked, her challenge withdrawn, Carol searches again.
+        assert.deepEqual(cp.mmJoin({ ...a, category: '5+0', rated: true, rating: 1500, joinedAt: clock.now() }, 0), { ok: true });
+        assert.equal(cp.mmJoin({ ...c, category: '5+0', rated: true, rating: 1500, joinedAt: clock.now() }, 0).ok, true);
+        const toBob = cp.challengeCreate({ from: a, target: 'bob', baseSec: 300, incSec: 0, rated: true });
+        banned.set(1, until);
+        mm.pairs.push({ category: '5+0', rated: true, white: { ...mm.q.get(1) }, black: { ...mm.q.get(3) } });
+        mm.q.clear();
+        shards.clear();
+        cp.matchTick();
+        await tick();
+        await tick();
+        assert.equal(creates(), 0);
+        assert.deepEqual(kicked(), [[a.connId, CloseCode.Banned]]);
+        assert.ok(shards.frames().some((x) => x.name === 'Notice' && x.msg.code === N.Banned && x.msg.arg === until));
+        assert.deepEqual([...mm.q.keys()], [3]);
+        assert.deepEqual(await cp.challengeAccept({ id: toBob.id, by: b }), { error: E.ChallengeNotFound });
+
+        // Dave, banned while idle: his next queue join or challenge is refused.
+        banned.set(4, until);
+        shards.clear();
+        assert.deepEqual(cp.mmJoin({ ...d, category: '5+0', rated: true, rating: 1500 }, 1), { error: E.Banned });
+        assert.deepEqual(kicked(), [[d.connId, CloseCode.Banned]]);
+        assert.equal(mm.q.has(4), false);
+        shards.clear();
+        assert.deepEqual(cp.challengeCreate({ from: d, target: 'bob', baseSec: 300, incSec: 0, rated: true }), { error: E.Banned });
+        assert.deepEqual(kicked(), [[d.connId, CloseCode.Banned]]);
+        assert.equal(cp.ch.size, 0);
+
+        // Erin, banned before she accepts Bob's challenge: no game, Bob is told she is unavailable.
+        const toErin = cp.challengeCreate({ from: b, target: 'erin', baseSec: 300, incSec: 0, rated: true });
+        banned.set(5, until);
+        shards.clear();
+        assert.deepEqual(await cp.challengeAccept({ id: toErin.id, by: e }), { error: E.UserUnavailable });
+        assert.equal(creates(), 0);
+        assert.deepEqual(kicked(), [[e.connId, CloseCode.Banned]]);
+        assert.ok(shards.frames().some((x) => x.connId === b.connId && x.name === 'ChallengeStatus' && x.msg.state === CS.Unavailable));
+
+        // Frank, banned after a game: no rematch.
+        const gameId = new GameIdAllocator(1).next();
+        cp.gameActive({ gameId, whiteId: 2, blackId: 6 });
+        cp.gameEnded({ gameId, whiteId: 2, blackId: 6 });
+        banned.set(6, until);
+        shards.clear();
+        assert.deepEqual(await cp.gameRematch({ gameId, white: 6, black: 2, baseMs: 300000, incMs: 0, rated: true }), { error: E.RematchUnavailable });
+        assert.equal(creates(), 0);
+        assert.deepEqual(kicked(), [[f.connId, CloseCode.Banned]]);
+        assert.deepEqual(cp.presenceClaim({ userId: 6, username: 'frank', shard: 1, connId: 61 }, 1), { error: E.Banned, until });
+        // Not cached: an unban in the database counts at once.
+        banned.delete(6);
+        assert.equal(cp.presenceClaim({ userId: 6, username: 'frank', shard: 1, connId: 61 }, 1).ok, true);
     });
 
     it('conduct records push the cooldown notice; session revocations are broadcast', () => {

@@ -157,6 +157,8 @@ export function snapshot(text) {
             bytesIn: sum(m, 'scacelith_ws_bytes_in_total'),
             bytesOut: sum(m, 'scacelith_ws_bytes_out_total'),
             relayed: sum(m, 'scacelith_ws_relayed_total'),
+            gesturesRelayed: sum(m, 'scacelith_gestures_relayed_total'),
+            gesturesDropped: byLabel(m, 'scacelith_gestures_dropped_total', 'reason'),
             busFramesOut: sum(m, 'scacelith_bus_frames_out_total'),
             dropped: byLabel(m, 'scacelith_ws_dropped_total', 'reason'),
             closes: byLabel(m, 'scacelith_ws_closes_total', 'code'),
