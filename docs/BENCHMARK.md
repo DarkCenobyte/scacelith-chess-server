@@ -258,7 +258,8 @@ host, and for half of the gestures a hop between the two workers over the bus. W
 processes) gave 0.158 cores without gestures and 0.601 at 4 Hz (7,824 relayed per second): 57 µs.
 Runs on a machine saturated by other processes (2.5-3.3 cores) are left out: they gave 36-58 µs,
 and at 4 Hz the load generator fell behind. The move round trip stayed at a p99 of 1-7 ms in the
-kept runs, and no gesture was dropped. Capacity with gestures: [SIZING.md](SIZING.md#gestures).
+kept runs, and no gesture was dropped. Capacity with gestures: [SIZING.md](SIZING.md#gestures), and
+for a dedicated machine [below](#capacity-of-a-dedicated-machine).
 
 ## What saturated first
 
@@ -284,19 +285,38 @@ take them as ±30 %):
 | idle connection (10 s server heartbeat + a client Ping every 10 s, the default `CLIENT_PING_INTERVAL_MS`) | about 11 µs of CPU per second (about half without the client Ping) |
 | move (validation, clock, journal, frames to both players, relays) | about 120-160 µs of CPU at a high rate (about 100-120 µs without TLS) |
 | game start and end (challenge through the primary, snapshots, commit, rating update) | about 3 ms of CPU per game (estimated from the staggered run) |
+| relayed gesture (a `Gesture` in from one player and out to the opponent, and a hop over the bus when the two players are on different workers) | 44-65 µs of CPU, about 55 µs |
 | password hash (login, registration, password change; not in the runs above) | 0.5-0.6 s of CPU and 128 MiB (scrypt N=2^17) on a thread-pool thread, at most `PASSWORD_HASH_CONCURRENCY` (1) at once per worker |
 | memory | 55-60 KB per idle connection, 65-85 KB with a game in progress, plus about 350 MB for the processes |
 
 For a dedicated 4-core, 16 GB machine running only the server (Linux, `nofile` raised,
 `WORKERS=4`), keeping the CPU under about 70 % for the latency:
 
-- **About 100,000 connected players with 30,000-40,000 simultaneous blitz games.** 100,000
-  connections cost about 1.1 cores for their heartbeats (about 0.6 if the clients send no Ping of
-  their own); 35,000 games at a 3+2 pace (one ply every 4-5 s per game) are about 7,500 moves/s,
-  i.e. about 1-1.2 cores, and about 90 games end and start per second, about 0.3 core; total about
-  2-2.6 cores of 4. Memory: about 7.5 GB.
-- **The first hard limits beyond that are memory (about 150,000-180,000 TLS connections in 16 GB)
-  and the reconnection storm after a restart**: at 2-2.7 ms per handshake, 4 cores accept about
+- **Without gestures (`GESTURE_RATE=0`): about 100,000 connected players with 30,000-40,000
+  simultaneous blitz games.** 100,000 connections cost about 1.1 cores for their heartbeats (about
+  0.6 if the clients send no Ping of their own); 35,000 games at a 3+2 pace (one ply every 4-5 s
+  per game) are about 7,500 moves/s, i.e. about 1-1.2 cores, and about 90 games end and start per
+  second, about 0.3 core; total about 2-2.6 cores of 4, about 24 µs of CPU per second per connected
+  player. Memory: about 7.5 GB.
+- **With the gesture relay on (the default, `GESTURE_RATE` 4): about 35,000-44,000 connected
+  players with 12,000-15,000 games, or fewer.** The game client sends a gesture at least once a
+  second for the whole game, even while its player sits still, and up to `GESTURE_RATE` per second
+  while the player looks around or moves a piece; the server spends 44-65 µs of CPU relaying each
+  one. Call r the gestures a player in a game sends per second: while the relay is on it lies
+  between about 1 and `GESTURE_RATE`, and only production shows where
+  ([SIZING.md](SIZING.md#gestures)). With 70 % of the players in a game as above, the gestures add
+  0.7 × r × 55 = about 39 × r µs per second per connected player to the 24 µs without them, so the
+  same 2-2.6 cores hold 24 / (24 + 39 × r) of the players: about 38,000 (35,000-44,000 over the
+  measured cost of a gesture) at r = 1, when every player in a game sits still, and about 13,500
+  (12,000-16,000, with 4,000-6,000 games) at r = 4, when every player in a game sends the default
+  rate all the time. At 100,000 players with 35,000 games the gestures alone would take 3-4.5 more
+  cores at r = 1, beyond the machine. SIZING.md's factor for its mix M1 with the 10 s ping,
+  1 / (1 + r), is higher: fewer players in a game (60 %) send gestures, and a player costs more
+  there without them, through moves that cost more at the lower move rate per worker of a small
+  VPS and the fixed costs of the processes (about 23 % of the CPU there).
+- **Without gestures, the first hard limits beyond that are memory (about 150,000-180,000 TLS
+  connections in 16 GB) and the reconnection storm after a restart**: at 2-2.7 ms per
+  handshake, 4 cores accept about
   1,500-2,000 connections/s, so 100,000 players need about a minute to come back, after a graceful
   restart as after a crash. The game client spreads that wave: after a shutdown its first attempt
   waits a random 5 to 35 s, later attempts use full jitter (a random delay between 0.5 s and

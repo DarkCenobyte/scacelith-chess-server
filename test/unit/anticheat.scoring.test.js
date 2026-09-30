@@ -34,6 +34,21 @@ test('priors: sensible ordering by rating and time control', () => {
     assert.equal(bucketOfRating(3400), 2900);
 });
 
+test('priors: the accuracy row follows the measured accuracy / ACPL relation from the ACPL row', () => {
+    // The relation of priors.js and docs/ANTICHEAT.md section 4: accuracy ~ 100 - 0.28 ACPL up to
+    // an ACPL of 90, and the measured values above it at the ACPL of the two lowest ratings. Both
+    // quality metrics must describe the same player, or honest players look more or less
+    // engine-like on one of them than on the other.
+    const measuredAbove90 = new Map([[110, 71], [150, 65]]);
+    for (const rating of [600, 1000, 1500, 2000, 2500, 2900]) {
+        const acpl = priorFor('acpl', rating).mean, accuracy = priorFor('accuracy', rating).mean;
+        const expected = acpl <= 90 ? 100 - 0.28 * acpl : measuredAbove90.get(acpl);
+        assert.ok(expected !== undefined, `rating ${rating}: no measured accuracy for an ACPL of ${acpl}`);
+        // The table holds whole points.
+        assert.ok(Math.abs(accuracy - expected) <= 0.5, `rating ${rating}: accuracy ${accuracy} for an ACPL of ${acpl}, the relation gives ${expected.toFixed(1)}`);
+    }
+});
+
 test('population: priors blend with Welford data, winsorised, text/array formats accepted', () => {
     const store = createFakeStore({ textColumns: true });
     const pop = new Population(store);

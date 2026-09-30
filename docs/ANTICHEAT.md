@@ -282,9 +282,10 @@ own data, **priors** stand in: hard-coded means and per-game standard deviations
 (accuracy, ACPL, T1 by rating from published human data: lichess accuracy/ACPL statistics and
 Regan & Haworth / Guid & Bratko engine-matching studies; accuracy derived from the ACPL row
 through the relation our pipeline measures, accuracy ~ 100 - 0.28 ACPL up to an ACPL of about
-90, flattening above: about 71 at 110, 66 at 140, the same with Stockfish 19 at every depth
-tried and with Stockfish 16), adjusted by time class (bullet, blitz, rapid,
-classical: faster games are less accurate). The prior counts as 40 games and its standard
+90, flattening above: about 71 at 110 and 65 at 150, the ACPL priors at 1000 and 600; the same
+with Stockfish 19 at every depth tried and with Stockfish 16, and a unit test keeps the accuracy
+row on it), adjusted by time class (bullet, blitz, rapid, classical: faster games are less
+accurate). The prior counts as 40 games and its standard
 deviations are inflated by 25%, so a young server is deliberately cautious; the server's own
 data takes over bucket by bucket. Only the games of the random sample feed the population (the
 jobs claimed at ordinary priority, drawn with `ANALYSIS_SAMPLE_RATE`): reported, flagged and
@@ -375,8 +376,8 @@ rows, where `integrity show` reads them.
 
   | Rating, time control | Stockfish 16 10/18 | Stockfish 19 9/14 | **9/15** | 9/16 | 10/18 |
   |---|---|---|---|---|---|
-  | 1000, 5+0 | 8.9 / 14.2 | 10.0 / 16.0 | 8.9 / 14.8 | 10.0 / 15.7 | 10.0 / 15.9 |
-  | 1000, 15+10 | 9.0 / 16.8 | 10.0 / 18.3 | 9.7 / 16.8 | 10.0 / 16.5 | 10.0 / 17.4 |
+  | 1000, 5+0 | 8.6 / 13.8 | 9.7 / 15.3 | 8.9 / 14.1 | 9.2 / 14.9 | 9.1 / 15.0 |
+  | 1000, 15+10 | 9.0 / 15.9 | 10.0 / 17.5 | 9.0 / 16.1 | 10.0 / 15.9 | 10.0 / 16.6 |
   | 1500, 5+0 | 11.0 / 22.9 | 12.0 / 24.2 | 11.0 / 21.6 | 12.0 / 20.6 | 12.0 / 22.4 |
   | 1500, 15+10 | 12.7 / 25.9 | 14.1 / 26.0 | 13.4 / 23.0 | 14.0 / 21.8 | 14.0 / 23.8 |
   | 2000, 5+0 | 14.9 / >30 | 15.4 / >30 | 14.1 / 29.1 | 14.1 / 27.3 | 14.6 / >30 |
@@ -389,10 +390,10 @@ rows, where `integrity show` reads them.
   of honest players improving by one per-game sd within 10 games suspected. Against Stockfish 19's
   assistance, 9/15 flags engine users from 2000 up as early as Stockfish 16 at 10/18 or earlier
   (2.7 and 3.8 games earlier at 2400), and at 1000 and 1500 under a game later (fewer scored moves
-  per game); with priors only it is ahead at 1500 and 0.6 game behind at 1000 blitz. Against weaker
+  per game); with priors only it is ahead at 1500 and 0.2 to 0.4 game behind at 1000. Against weaker
   or older assistance Stockfish 16 at 10/18 stays ahead: against the depth-12 assisted player of
   sets A and B, 9/15 needs up to 1.8 more games with learned statistics at 1000 to 2000 (3 to 5
-  more with priors only), and against Stockfish 16's own depth-20 assistance 1.8 to 4.8 more (an
+  more with priors only), and against Stockfish 16's own depth-20 assistance 1.7 to 4.8 more (an
   analysis engine likely recognises its own moves best). No Stockfish 19 setting matches Stockfish 16 at
   10/18 in every case, and the deeper ones do worse, not better (against Stockfish 16's assistance
   at 2400 rapid, 9/16 and 10/18 need 6.9 and 10.2 more games), while 9/14 loses the lead against
@@ -408,21 +409,21 @@ rows, where `integrity show` reads them.
   0.25; stand-ins: 80.1, 73, 0.28, 0.21, 0.82. With the server's own statistics (the stand-ins'
   games), the assisted player is `none` for the first 11 games and `high_confidence` from the
   12th; the stand-ins are never flagged. On a fresh server (priors only) the same 18 games reach
-  `high_confidence` (Q 3.29, T 1.75). With Stockfish 16 (its own games): assisted 98.3, 6, 0.69,
+  `high_confidence` (Q 3.32, T 1.75). With Stockfish 16 (its own games): assisted 98.3, 6, 0.69,
   -0.04, 0.26, stand-ins 80.4, 67, 0.26, 0.19, 0.87; `suspected` at the 5th game and
   `high_confidence` from the 12th with the server's statistics, and `high_confidence` after 18
-  games on a fresh server (Q 3.33, T 1.86).
+  games on a fresh server (Q 3.36, T 1.86).
 * Production depths (sets A and B, analysed at hash 32 by each setting; set B without its two
   games that blew up a deep search, section 3): with statistics learned from the stand-ins, the
   assisted player reaches `high_confidence` at the 13th game of set A with Stockfish 19 at 9/15,
   9/16 and 10/18 (the 12th at 9/14) and the 14th with Stockfish 16 at 10/18; on set B at the 14th
-  at 9/15, the 15th at 9/14 and 10/18, the 16th at 9/16, and the 13th with Stockfish 16. The
-  stand-ins' scores stay under 0.6 with Stockfish 19 (under 0.93 with Stockfish 16). Effect sizes
+  at 9/15, the 15th at 9/14, 9/16 and 10/18, and the 13th with Stockfish 16. The stand-ins' scores
+  stay under 0.6 with Stockfish 19 (at most 0.95 with Stockfish 16). Effect sizes
   of the assisted player against the stand-ins at 9/15 (accuracy, ACPL, T1, T1 in complex
   positions, time CV): 3.60, -2.74, 3.04, 2.50, -5.06 on set A and 3.79, -4.00, 3.15, 1.86, -4.32
   on set B; with Stockfish 16 at 10/18, 3.83, -2.99, 4.19, 3.81, -4.17 and 3.56, -3.94, 3.51,
   2.79, -5.09. On a fresh server only Stockfish 16 on set A flags the assisted player within its
-  18 games (Q 3.28); the others stay under the thresholds (Q 2.73 to 3.17).
+  18 games (Q 3.31); the others stay under the thresholds (Q 2.76 to 3.20).
 
 Known limits: players using the engine for a minority of their moves (about half or less) look
 like strong humans and are not flagged by statistics within 30 games; top players (2400+) have
