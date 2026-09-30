@@ -8,24 +8,31 @@
 //                   at most 400 points (8.3.1); the higher-rated player gets PD, the lower 1 - PD
 //   change          K x (score - PD), rounded to the nearest point (halves away from zero), computed
 //                   in whole hundredths so that the two languages agree to the last point
-//   K               40 until the player has PROVISIONAL_GAMES (30) games in the category, the games
-//                   of the unrated phase included; 20 afterwards; 10 once the player has reached
-//                   2400 (for good: the peak counts)
+//   K               40 until the player has PROVISIONAL_GAMES (30) counted games in the category
+//                   (below), the counted games of the unrated phase included; 20 afterwards; 10 once
+//                   the player has reached 2400 (for good: the peak counts)
 //   unrated phase   (8.2) a new record is unrated, with a working rating equal to INITIAL_RATING
-//                   (used for pairing and as the opponent value of the other player). Each rated
+//                   (used for pairing and as the opponent value of the other player). Each counted
 //                   game adds the opponent's rating and the score; after UNRATED_GAMES (5) games
 //                   Ru = Ra + dp(p), with Ra = (sum of the opponents' ratings + 2 x 1800) / (n + 2)
 //                   and p = (score + 1) / (n + 2) rounded to hundredths (two hypothetical draws
 //                   against 1800-rated opponents), dp from FIDE's table 8.1.1 (FIDE_DP_TABLE),
 //                   rounded to the nearest point and capped at 2200. The peak becomes Ru.
-//   zero score      FIDE disregards a zero score in a player's first event (8.2.1); here, one
-//                   game at a time: the losses before the player's first half point stay out of
-//                   the unrated phase (they count in the games and the losses, not in the five
-//                   games, the opponents' sum or the score). Five losses to Stockfish at full
-//                   strength would otherwise give a first rating of 2200.
+//   zero score      FIDE disregards an unrated player's zero score, and their opponents' results
+//                   against them (8.2.1); here, one game at a time: a game lost by an unrated player
+//                   who has not scored yet in the category (no win, no draw) counts for neither
+//                   player's rating (it counts in the games and the wins / draws / losses, not in
+//                   the five games, the opponents' sum or the score of either side). Five losses to
+//                   Stockfish at full strength would otherwise give a first rating of 2200, and an
+//                   account that only loses would stay unrated for good while giving a first
+//                   rating to everyone who beats it.
 //   unrated opponent a rated player's game against an unrated opponent does not change the rated
 //                   player's rating (8.3: only games against rated opponents count); it counts in
-//                   the games and the wins / draws / losses
+//                   the games and the wins / draws / losses, not in the counted games
+//   counted games   the games that entered the rating (FIDE's rated games): those of the unrated
+//                   phase that counted, then those against rated opponents. They set K, the
+//                   provisional mark and a place on the leaderboard (PROVISIONAL_GAMES of them: a
+//                   rating tested against rated players), not the games played.
 //   floor           a rating never drops below 100. FIDE's list starts at 1400, which makes no sense
 //                   here: players range from beginners to weak Stockfish presets rated 800.
 //
@@ -34,18 +41,20 @@
 //     periods, with ratings fixed within the period and K x games capped at 700 per period.
 //   * A game between two unrated players counts for both, at the other's working rating. FIDE
 //     ignores it, but then a new server (or two new names in a rated hot-seat game) could never
-//     obtain a rating.
+//     obtain a rating. The zero score still applies: such a game lost by a player who has not
+//     scored yet counts for neither.
 //   * FIDE's K = 40 for players under 18 does not apply (no ages here).
 //
 // A record is kept per player and category:
-//   { rating, games, wins, draws, losses, peak, reachedSenior, rated, unratedGames,
+//   { rating, games, wins, draws, losses, peak, reachedSenior, rated, countedGames, unratedGames,
 //     unratedOpponents, unratedHalfPoints }
 // `reachedSenior` is the persisted form of the C++ `peak >= 2400` test (both are honoured; the
 // working rating of an unrated record is no rating and never counts).
 // `rated` is false during the unrated phase, which accumulates `unratedGames`, the sum of the
 // opponents' ratings `unratedOpponents` and the score in half points `unratedHalfPoints` (the
-// games counted: none before the first half point).
-// A record that has games but no `rated` field (stored before the unrated phase existed) is rated.
+// games counted: no zero score). `countedGames` equals `unratedGames` until the first rating.
+// A record that has games but no `rated` field (stored before the unrated phase existed) is rated;
+// a rated record without `countedGames` (stored before it existed) counts all its games.
 //
 // Categories: the official time controls come from cfg.categories ([{ id: '3+2', baseMs, incMs }]);
 // any other time control is 'custom' and never rated.
@@ -56,7 +65,7 @@ export const SENIOR_RATING = 2400;
 export const MAX_RATING_GAP = 400;
 /** Ratings never drop below this. */
 export const RATING_FLOOR = 100;
-/** Games of the unrated phase before the first rating (FIDE 8.2; leading losses do not count). */
+/** Counted games of the unrated phase before the first rating (FIDE 8.2; a zero score does not count). */
 export const UNRATED_GAMES = 5;
 /** Rating of the two hypothetical opponents drawn with in the first rating (FIDE 8.2). */
 export const HYPOTHETICAL_OPPONENT = 1800;
@@ -100,6 +109,13 @@ function initialRatingOf(cfg) {
 
 function provisionalGamesOf(cfg) {
     return cfg && Number.isFinite(cfg.provisionalGames) ? cfg.provisionalGames : DEFAULT_PROVISIONAL_GAMES;
+}
+
+// The counted games of a possibly partial record: without the field, all the games of a rated
+// record (they were all rated then), those of the unrated phase of an unrated one.
+function countedGamesOf(record) {
+    if (Number.isFinite(record.countedGames)) return record.countedGames;
+    return isUnrated(record) ? record.unratedGames || 0 : record.games || 0;
 }
 
 // Integer division rounded to the nearest integer, halves away from zero (std::lround of a/b).
@@ -172,13 +188,14 @@ export function defaultRecord(cfg) {
     const r = initialRatingOf(cfg);
     return {
         rating: r, games: 0, wins: 0, draws: 0, losses: 0, peak: r, reachedSenior: false,
-        rated: false, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0,
+        rated: false, countedGames: 0, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0,
     };
 }
 
 /**
  * A complete record from a possibly partial one (missing fields take the defaults; the peak is
- * at least the rating; without a `rated` field, a record with games is rated). Returns a new object.
+ * at least the rating; without a `rated` field, a record with games is rated; the counted games
+ * are at most the games, and those of the unrated phase while unrated). Returns a new object.
  * @param {object|null|undefined} rec
  * @param {object} [cfg]
  */
@@ -190,6 +207,7 @@ export function normalizeRecord(rec, cfg) {
     const peak = Math.max(int(rec.peak, rating), rating);
     const games = Math.max(0, int(rec.games, 0));
     const rated = typeof rec.rated === 'boolean' ? rec.rated : games > 0;
+    const unratedGames = rated ? 0 : Math.max(0, int(rec.unratedGames, 0));
     return {
         rating,
         games,
@@ -199,7 +217,8 @@ export function normalizeRecord(rec, cfg) {
         peak,
         reachedSenior: !!rec.reachedSenior || (rated && peak >= SENIOR_RATING),
         rated,
-        unratedGames: rated ? 0 : Math.max(0, int(rec.unratedGames, 0)),
+        countedGames: rated ? Math.min(games, Math.max(0, int(rec.countedGames, games))) : unratedGames,
+        unratedGames,
         unratedOpponents: rated ? 0 : Math.max(0, int(rec.unratedOpponents, 0)),
         unratedHalfPoints: rated ? 0 : Math.max(0, int(rec.unratedHalfPoints, 0)),
     };
@@ -216,24 +235,24 @@ export function isUnrated(record) {
 
 /**
  * Whether the rating is shown as provisional ("1500?"): unrated, or fewer than PROVISIONAL_GAMES
- * games in the category (K = 40).
- * @param {{games:number, rated?:boolean}} record
+ * counted games in the category (K = 40; not on the leaderboard).
+ * @param {{games:number, rated?:boolean, countedGames?:number}} record
  * @param {object} [cfg]
  */
 export function isProvisional(record, cfg) {
-    return isUnrated(record) || (record.games || 0) < provisionalGamesOf(cfg);
+    return isUnrated(record) || countedGamesOf(record) < provisionalGamesOf(cfg);
 }
 
 /**
  * Development coefficient of a rated player's next game: 10 once 2400 has been reached (checked
- * first, as in elo.cpp), else 40 before PROVISIONAL_GAMES games, else 20.
- * @param {{rating:number, games:number, peak?:number, reachedSenior?:boolean}} record
+ * first, as in elo.cpp), else 40 before PROVISIONAL_GAMES counted games, else 20.
+ * @param {{rating:number, games:number, countedGames?:number, peak?:number, reachedSenior?:boolean}} record
  * @param {object} [cfg]
  * @returns {10|20|40}
  */
 export function kFactor(record, cfg) {
     if (record.reachedSenior || (record.peak || 0) >= SENIOR_RATING || record.rating >= SENIOR_RATING) return 10;
-    return record.games < provisionalGamesOf(cfg) ? 40 : 20;
+    return countedGamesOf(record) < provisionalGamesOf(cfg) ? 40 : 20;
 }
 
 /**
@@ -248,6 +267,12 @@ export function ratingDelta(record, opponent, score, cfg) {
     return divRound(kFactor(record, cfg) * (50 * halfPoints(score) - expected100(record.rating, opponent)), 100);
 }
 
+// Whether a record scoring `half` half points in a game makes it a zero score (FIDE 8.2.1): an
+// unrated record that has not scored yet in the category (no win, no draw) loses.
+function zeroScore(rec, half) {
+    return !rec.rated && half === 0 && rec.wins + rec.draws === 0;
+}
+
 // One side of a game (elo::applyResult against a record): returns the change and the updated
 // record (a new object). `opp` is the opponent's record before the game.
 function applySide(rec, opp, score, cfg) {
@@ -258,8 +283,10 @@ function applySide(rec, opp, score, cfg) {
     else record.draws++;
     let k = 0;
     if (!rec.rated) {
-        // The zero-score rule: the losses before the first half point are disregarded.
-        if (half > 0 || rec.unratedHalfPoints > 0) {
+        // The zero-score rule: a zero score is disregarded, and so are the opponent's results
+        // against it (a rated opponent's rating does not move against an unrated player anyway).
+        if (!zeroScore(rec, half) && !zeroScore(opp, 2 - half)) {
+            record.countedGames++;
             record.unratedGames++;
             record.unratedOpponents += opp.rating;
             record.unratedHalfPoints += half;
@@ -271,6 +298,7 @@ function applySide(rec, opp, score, cfg) {
         }
     } else if (opp.rated) {
         k = kFactor(rec, cfg);
+        record.countedGames++;
         record.rating = Math.max(RATING_FLOOR, rec.rating + ratingDelta(rec, opp.rating, score, cfg));
         record.peak = Math.max(rec.peak, record.rating);
     }

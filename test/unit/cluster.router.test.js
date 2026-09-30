@@ -310,7 +310,9 @@ describe('router: ready connections', () => {
 
     it('queues with the stored rating, closes the rematch window, and maps refusals', async () => {
         const lastGame = new GameIdAllocator(0).next();
-        const store = { ratings: { get: (u, cat) => (cat === '5+0' ? { rating: 1777, games: 50 } : null) } };
+        // 3+2: rated after five counted games, then games against unrated opponents only.
+        const stored = { '5+0': { rating: 1777, games: 50 }, '3+2': { rating: 1816, games: 58, countedGames: 5, rated: true } };
+        const store = { ratings: { get: (u, cat) => stored[cat] ?? null } };
         const env = await setup({ store, claim: { ok: true, activeGame: lastGame } });
         const { c } = await env.login();
         c.send('QueueJoin', { category: '5+0', rated: true });
@@ -319,13 +321,17 @@ describe('router: ready connections', () => {
         assert.deepEqual([j.userId, j.username, j.category, j.rated, j.rating, j.provisional, j.shard, j.connId], [1, 'alice', '5+0', true, 1777, false, 0, env.conn().id]);
         const decline = env.host.of('msg')[0];
         assert.deepEqual([decline[1], decline[2], decline[3].type, decline[3].accept, decline[4]], [lastGame, 1, MSG.Rematch, false, null]);
+        c.send('QueueJoin', { category: '3+2', rated: true });
+        assert.equal((await c.until('Ack')).ref, 3);
+        const j2 = env.seen.filter((x) => x.type === 'mm.join')[1].p;
+        assert.deepEqual([j2.rating, j2.provisional], [1816, true], 'provisional by the counted games, not the games played');
         c.send('QueueJoin', { category: '9+9', rated: true });
         const bad = await c.until('Error');
-        assert.deepEqual([bad.ref, bad.code, bad.fatal], [3, E.InvalidCategory, false]);
+        assert.deepEqual([bad.ref, bad.code, bad.fatal], [4, E.InvalidCategory, false]);
         env.primary.on('mm.join', () => ({ error: 'AlreadyInGame' }));
         c.send('QueueJoin', { category: '5+0', rated: false });
         const busy = await c.until('Error');
-        assert.deepEqual([busy.ref, busy.code], [4, E.AlreadyInGame]);
+        assert.deepEqual([busy.ref, busy.code], [5, E.AlreadyInGame]);
     });
 
     it('routes game messages to the local host, over the bus, or refuses them', async () => {

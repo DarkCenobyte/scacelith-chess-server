@@ -14,8 +14,9 @@
 //   games[]      { white, black, score, result: { white, black } }: one rated game between two
 //                records (C++ elo::applyPair, JS applyGame), score from White's side; each side of
 //                the result is { before, after, k, record }. Records hold the fields of the C++
-//                elo::Record: rating, games, wins, draws, losses, peak, rated, unratedGames,
-//                unratedOpponents, unratedHalfPoints (reachedSenior is rated && peak >= 2400).
+//                elo::Record: rating, games, wins, draws, losses, peak, rated, countedGames,
+//                unratedGames, unratedOpponents, unratedHalfPoints (reachedSenior is rated &&
+//                peak >= 2400).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -29,7 +30,8 @@ export const VECTORS_PATH = path.resolve(here, '../test/fixtures/elo-vectors.jso
 
 // The game's constants (elo.h): the C++ records use them, whatever the server's configuration.
 const CFG = { initialRating: DEFAULT_INITIAL_RATING, provisionalGames: 30 };
-const FIELDS = ['rating', 'games', 'wins', 'draws', 'losses', 'peak', 'rated', 'unratedGames', 'unratedOpponents', 'unratedHalfPoints'];
+const FIELDS = ['rating', 'games', 'wins', 'draws', 'losses', 'peak', 'rated', 'countedGames', 'unratedGames', 'unratedOpponents',
+    'unratedHalfPoints'];
 
 function mulberry32(seed) {
     let a = seed >>> 0;
@@ -49,27 +51,39 @@ export function cppRecord(r) {
     return out;
 }
 
-function rated(rating, games, peak = rating) {
-    return { rating, games, wins: 0, draws: 0, losses: 0, peak: Math.max(peak, rating), rated: true, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0 };
+function rated(rating, games, peak = rating, counted = games) {
+    return { rating, games, wins: 0, draws: 0, losses: 0, peak: Math.max(peak, rating), rated: true, countedGames: counted, unratedGames: 0,
+        unratedOpponents: 0, unratedHalfPoints: 0 };
 }
 
+// An unrated record whose `games` counted games scored `halfPoints` (at least one when it has
+// games: a counted game comes after the first half point), as wins, then a draw.
 function unrated(games, opponents, halfPoints, rating = DEFAULT_INITIAL_RATING) {
-    return { rating, games, wins: 0, draws: 0, losses: 0, peak: rating, rated: false, unratedGames: games, unratedOpponents: opponents, unratedHalfPoints: halfPoints };
+    const wins = Math.floor(halfPoints / 2), draws = halfPoints % 2;
+    return { rating, games, wins, draws, losses: games - wins - draws, peak: rating, rated: false, countedGames: games, unratedGames: games,
+        unratedOpponents: opponents, unratedHalfPoints: halfPoints };
 }
 
-// An unrated record whose first `lost` games were losses before any half point (the zero-score
-// rule left them out of the unrated phase).
-function afterLosses(record, lost) {
-    return { ...record, games: record.games + lost, losses: record.losses + lost };
+// The same record after `lost` zero scores (losses before the first half point) and `beaten` wins
+// against zero scores: the zero-score rule left them all out of the unrated phase.
+function afterLosses(record, lost, beaten = 0) {
+    return { ...record, games: record.games + lost + beaten, losses: record.losses + lost, wins: record.wins + beaten };
 }
 
-// Hand-picked games: every branch, the boundaries of K, the 400-point rule, the floor, the
-// establishing game, the cap, the zero-score rule and the unrated / rated combinations.
+// Hand-picked games: every branch, the boundaries of K (counted games), the 400-point rule, the
+// floor, the establishing game, the cap, the zero-score rule (for both players) and the unrated /
+// rated combinations.
 const EDGE_GAMES = [
     [unrated(0, 0, 0), unrated(0, 0, 0), 1],
     [unrated(0, 0, 0), unrated(0, 0, 0), 0.5],
+    [afterLosses(unrated(0, 0, 0), 0, 1), unrated(0, 0, 0), 0],
     [unrated(4, 6000, 4), unrated(4, 6000, 4), 0.5],
     [unrated(4, 6000, 8), unrated(0, 0, 0), 1],
+    [unrated(4, 6000, 8), afterLosses(unrated(0, 0, 0), 12), 1],
+    [unrated(4, 6000, 8), afterLosses(unrated(0, 0, 0), 0, 1), 1],
+    [unrated(4, 6000, 8), afterLosses(unrated(0, 0, 0), 3, 2), 0],
+    [rated(1700, 45), unrated(0, 0, 0), 1],
+    [rated(1700, 45), afterLosses(unrated(0, 0, 0), 2, 1), 1],
     [unrated(4, 14000, 8), rated(3500, 400), 1],
     [unrated(4, 400, 1), rated(100, 60), 0],
     [unrated(0, 0, 0), rated(3500, 400), 0],
@@ -81,6 +95,8 @@ const EDGE_GAMES = [
     [rated(2450, 300), unrated(4, 9000, 7), 1],
     [rated(1500, 29, 1520), rated(1700, 30, 1750), 1],
     [rated(1500, 30, 1520), rated(1700, 30, 1750), 0.5],
+    [rated(1500, 60, 1520, 29), rated(1700, 60, 1750, 30), 1],
+    [rated(1500, 45, 1500, 5), rated(1480, 45, 1500, 45), 0],
     [rated(1800, 100, 1850), rated(1200, 100, 1300), 1],
     [rated(1800, 100, 1850), rated(1200, 100, 1300), 0],
     [rated(1800, 100, 1850), rated(1200, 100, 1300), 0.5],
@@ -110,12 +126,15 @@ function randomRecord(rnd) {
         const n = between(0, UNRATED_GAMES - 1);
         let sum = 0;
         for (let i = 0; i < n; i++) sum += between(100, 3500);
-        // The first game counted scored (the zero-score rule), after 0 to 3 losses left out.
-        return afterLosses(unrated(n, sum, n ? between(1, 2 * n) : 0), between(0, 3));
+        // The first game counted scored (the zero-score rule), after 0 to 3 losses and 0 to 2 wins
+        // left out (zero scores, the player's own or their opponents').
+        return afterLosses(unrated(n, sum, n ? between(1, 2 * n) : 0), between(0, 3), between(0, 2));
     }
     const rating = between(100, 2900);
     const peak = rnd() < 0.5 ? rating : Math.min(3000, rating + between(0, 400));
-    const r = rated(rating, between(1, 120), peak);
+    const games = between(1, 120);
+    // Half of them count all their games (records stored before the counted games existed).
+    const r = rated(rating, games, peak, rnd() < 0.5 ? games : between(Math.min(games, UNRATED_GAMES), games));
     r.wins = between(0, r.games);
     r.losses = between(0, r.games - r.wins);
     r.draws = r.games - r.wins - r.losses;

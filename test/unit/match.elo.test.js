@@ -33,7 +33,8 @@ function phi(z) {
 }
 
 function rated(rating, games, peak = rating) {
-    return { rating, games, wins: 0, draws: 0, losses: 0, peak: Math.max(rating, peak), reachedSenior: Math.max(rating, peak) >= SENIOR_RATING, rated: true };
+    return { rating, games, wins: 0, draws: 0, losses: 0, peak: Math.max(rating, peak), reachedSenior: Math.max(rating, peak) >= SENIOR_RATING, rated: true,
+        countedGames: games };
 }
 
 // A fresh record after the given scores against `opponent` (a record), and the changes seen.
@@ -161,12 +162,13 @@ test('elo: the unrated phase against a rated opponent (Stockfish Novice, 800)', 
     assert.deepEqual(changes.map((c) => [c.before, c.after, c.k, c.opponentAfter]),
         [[1500, 1500, 0, 800], [1500, 1500, 0, 800], [1500, 1500, 0, 800], [1500, 1500, 0, 800], [1500, 1188, 0, 800]]);
     assert.deepEqual({ ...record }, { rating: 1188, games: 5, wins: 3, draws: 1, losses: 1, peak: 1188, reachedSenior: false, rated: true,
-        unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0 });
-    // From then on the K formula applies, K = 40 until 30 games (the unrated ones included):
-    // D 388, PD 0.91: 40 x 0.09 = 3.6 -> +4.
+        countedGames: 5, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0 });
+    // From then on the K formula applies, K = 40 until 30 counted games (the unrated ones
+    // included): D 388, PD 0.91: 40 x 0.09 = 3.6 -> +4.
     const next = applyGame(record, novice, 1, cfg);
     assert.equal(next.white.k, 40);
     assert.equal(next.white.after, 1192);
+    assert.equal(next.white.record.countedGames, 6);
     assert.equal(next.white.provisional, true);
     // Before the fifth game the record is unrated and keeps its sums.
     const four = play([1, 1, 0.5, 0], novice).record;
@@ -176,7 +178,7 @@ test('elo: the unrated phase against a rated opponent (Stockfish Novice, 800)', 
     // five losses to Stockfish Max leave the player unrated instead of giving a first rating of 2200.
     const lost = play([0, 0, 0, 0, 0], rated(3500, 1000));
     assert.deepEqual([lost.record.rated, lost.record.rating, lost.record.games, lost.record.losses, lost.record.unratedGames,
-        lost.record.unratedOpponents], [false, 1500, 5, 5, 0, 0]);
+        lost.record.unratedOpponents, lost.record.countedGames], [false, 1500, 5, 5, 0, 0, 0]);
     assert.ok(lost.changes.every((c) => c.before === 1500 && c.after === 1500 && c.k === 0));
     // Once the player has scored, the losses count: a loss (left out), a draw and four losses
     // against 1500: Ra = 11100 / 7 = 1585.7, p = 1.5 / 7 = 0.21 (dp -230) -> 1356. The peak
@@ -185,10 +187,10 @@ test('elo: the unrated phase against a rated opponent (Stockfish Novice, 800)', 
     assert.deepEqual([scored.rating, scored.peak, scored.rated, scored.games, scored.losses], [1356, 1356, true, 6, 5]);
 });
 
-test('elo: a rated player against an unrated one keeps their rating; the game still counts', () => {
+test('elo: a rated player against an unrated one keeps their rating; the game counts in the games, not the counted games', () => {
     const r = applyGame(rated(1700, 45), defaultRecord(cfg), 0, cfg);
     assert.deepEqual([r.white.before, r.white.after, r.white.k], [1700, 1700, 0]);
-    assert.deepEqual([r.white.record.games, r.white.record.losses], [46, 1]);
+    assert.deepEqual([r.white.record.games, r.white.record.losses, r.white.record.countedGames], [46, 1, 45]);
     // The unrated player's game counts at the rated player's rating.
     assert.deepEqual([r.black.record.unratedGames, r.black.record.unratedOpponents, r.black.record.unratedHalfPoints], [1, 1700, 2]);
     assert.equal(r.black.after, 1500);
@@ -201,10 +203,11 @@ test('elo: a rated player against an unrated one keeps their rating; the game st
 });
 
 test('elo: a game between two unrated players counts for both, at the other\'s working rating', () => {
-    // A first game lost is left out (zero-score rule) for the loser only.
+    // A first game lost is left out for both (the zero-score rule, FIDE 8.2.1: the zero score and
+    // the opponent's result against it), but it counts in the games and results.
     const first = applyGame(defaultRecord(cfg), defaultRecord(cfg), 0, cfg);
     assert.deepEqual([first.white.record.unratedGames, first.white.record.losses, first.black.record.unratedGames,
-        first.black.record.unratedOpponents, first.black.record.unratedHalfPoints], [0, 1, 1, 1500, 2]);
+        first.black.record.unratedOpponents, first.black.record.wins, first.black.record.games], [0, 1, 0, 0, 1, 1]);
     let w = defaultRecord(cfg), b = defaultRecord(cfg);
     for (const s of [0.5, 1, 1, 0]) {
         const r = applyGame(w, b, s, cfg);
@@ -220,22 +223,66 @@ test('elo: a game between two unrated players counts for both, at the other\'s w
     assert.deepEqual([r.white.record.rated, r.black.record.rated, r.white.k, r.black.k], [true, true, 0, 0]);
     // A server whose new players start at 1800 (INITIAL_RATING): the working rating counts.
     const c1800 = testConfig({ INITIAL_RATING: '1800' });
-    const g = applyGame(defaultRecord(c1800), defaultRecord(c1800), 1, c1800);
+    const g = applyGame(defaultRecord(c1800), defaultRecord(c1800), 0.5, c1800);
     assert.equal(g.white.record.unratedOpponents, 1800);
 });
 
-test('elo: K factor: 40 until 30 games (the unrated ones included), 20, 10 once 2400 was reached (for good)', () => {
+test('elo: the zero-score rule closes the unrated booster: an account that only loses gives no one a rating', () => {
+    // FIDE 8.2.1 disregards a zero score and the opponents' results against it. Without the
+    // second half, five wins against an account that only loses gave a first rating of 1895, the
+    // next 25 wins (an unrated opponent: no change) brought the winner to 30 games and onto the
+    // leaderboard, and the loser, never counted, stayed unrated to do the same for the next account.
+    let booster = defaultRecord(cfg);
+    for (let n = 0; n < 3; n++) {
+        let fresh = defaultRecord(cfg);
+        for (let i = 0; i < 30; i++) {
+            const r = applyGame(fresh, booster, 1, cfg);
+            assert.deepEqual([r.white.after, r.white.k, r.black.after], [1500, 0, 1500]);
+            fresh = r.white.record; booster = r.black.record;
+        }
+        assert.deepEqual([fresh.rated, fresh.games, fresh.wins, fresh.countedGames, fresh.unratedOpponents], [false, 30, 30, 0, 0]);
+        assert.equal(isProvisional(fresh, cfg), true);
+    }
+    assert.deepEqual([booster.rated, booster.games, booster.losses, booster.countedGames], [false, 90, 90, 0]);
+    // A loser that has scored once (a draw) counts, and is rated after five counted games, then
+    // loses points under the K formula: a draw and four wins against 1500 give the winner
+    // p = 11 / 14 = 0.79 (dp 230): 1816, and the loser 1356.
+    let a = defaultRecord(cfg), b = defaultRecord(cfg);
+    for (const s of [0.5, 1, 1, 1, 1]) {
+        const r = applyGame(a, b, s, cfg);
+        a = r.white.record; b = r.black.record;
+    }
+    assert.deepEqual([a.rated, a.rating, a.countedGames, b.rated, b.rating, b.countedGames], [true, 1816, 5, true, 1356, 5]);
+    const next = applyGame(a, b, 1, cfg);
+    assert.deepEqual([next.white.k, next.black.k, next.black.after], [40, 40, 1353]);   // D 460 -> 400: 40 x -0.08
+    // Scoring against zero scores only is still scoring: that player's losses count, and so do the
+    // wins against them.
+    const scorer = applyGame(defaultRecord(cfg), defaultRecord(cfg), 1, cfg).white.record;
+    assert.deepEqual([scorer.wins, scorer.countedGames], [1, 0]);
+    const g = applyGame(defaultRecord(cfg), scorer, 1, cfg);
+    assert.deepEqual([g.white.record.countedGames, g.white.record.unratedOpponents, g.black.record.countedGames,
+        g.black.record.unratedHalfPoints], [1, 1500, 1, 0]);
+});
+
+test('elo: K factor: 40 until 30 counted games (the unrated ones included), 20, 10 once 2400 was reached (for good)', () => {
     const r = rated(1500, 5);
     assert.equal(kFactor(r, cfg), 40);
-    assert.equal(kFactor({ ...r, games: 29 }, cfg), 40);
-    assert.equal(kFactor({ ...r, games: 30 }, cfg), 20);
+    assert.equal(kFactor({ ...r, games: 29, countedGames: 29 }, cfg), 40);
+    assert.equal(kFactor({ ...r, games: 30, countedGames: 30 }, cfg), 20);
+    // The counted games set K and the provisional mark, not the games played.
+    assert.equal(kFactor({ ...r, games: 80, countedGames: 29 }, cfg), 40);
+    assert.equal(isProvisional({ ...r, games: 80, countedGames: 29 }, cfg), true);
+    assert.equal(isProvisional({ ...r, games: 80, countedGames: 30 }, cfg), false);
+    // A record without the field (stored before it existed) counts all its games.
+    assert.equal(kFactor({ rating: 1500, games: 30, peak: 1500, rated: true }, cfg), 20);
+    assert.equal(isProvisional({ games: 30, rated: true }, cfg), false);
     assert.equal(kFactor({ ...r, games: 5, rating: 2400, peak: 2400 }, cfg), 10);
     // Fell back under 2400: still 10.
     assert.equal(kFactor({ ...r, games: 80, rating: 2300, peak: 2410 }, cfg), 10);
     assert.equal(kFactor({ ...r, games: 80, rating: 2300, peak: 2300, reachedSenior: true }, cfg), 10);
     // PROVISIONAL_GAMES is configurable.
     const cfg10 = testConfig({ PROVISIONAL_GAMES: '10' });
-    assert.equal(kFactor({ ...r, games: 10 }, cfg10), 20);
+    assert.equal(kFactor({ ...r, games: 10, countedGames: 10 }, cfg10), 20);
     assert.equal(isProvisional({ games: 9, rated: true }, cfg10), true);
     assert.equal(isProvisional({ games: 10, rated: true }, cfg10), false);
     // An unrated record is provisional whatever PROVISIONAL_GAMES says.
@@ -270,11 +317,12 @@ test('elo: floor at 100, peak, results and score validation', () => {
 test('elo: new records start unrated; stored records with games (the previous scheme) stay rated', () => {
     const c1800 = testConfig({ INITIAL_RATING: '1800' });
     assert.deepEqual(defaultRecord(c1800), { rating: 1800, games: 0, wins: 0, draws: 0, losses: 0, peak: 1800, reachedSenior: false,
-        rated: false, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0 });
+        rated: false, countedGames: 0, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0 });
     assert.deepEqual(normalizeRecord(null, cfg), defaultRecord(cfg));
     // A record stored before the unrated phase existed: no `rated` field.
     const old = normalizeRecord({ rating: 1650, games: 3, peak: 1700 }, cfg);
     assert.equal(old.rated, true);
+    assert.equal(old.countedGames, 3, 'all its games were rated');
     assert.equal(isUnrated(old), false);
     const g = applyGame({ rating: 1650, games: 3, peak: 1700 }, rated(1650, 50), 1, cfg);
     assert.deepEqual([g.white.after, g.white.k], [1670, 40]);
@@ -282,8 +330,12 @@ test('elo: new records start unrated; stored records with games (the previous sc
     assert.equal(normalizeRecord({ rating: 1500, games: 0 }, cfg).rated, false);
     assert.equal(isUnrated({ games: 0 }), true);
     assert.equal(isUnrated({ games: 2 }), false);
-    // A rated record carries no unrated sums.
+    // A rated record carries no unrated sums; its counted games are at most its games; an unrated
+    // record's are those of its unrated phase.
     assert.equal(normalizeRecord({ rating: 1500, games: 9, rated: true, unratedGames: 3 }, cfg).unratedGames, 0);
+    assert.equal(normalizeRecord({ rating: 1500, games: 9, rated: true, countedGames: 12 }, cfg).countedGames, 9);
+    assert.equal(normalizeRecord({ rating: 1500, games: 9, rated: true, countedGames: 7 }, cfg).countedGames, 7);
+    assert.equal(normalizeRecord({ rating: 1500, games: 9, rated: false, unratedGames: 2, countedGames: 9 }, cfg).countedGames, 2);
     // Partial records: two fresh players.
     const r = applyGame(null, undefined, 1, cfg);
     assert.deepEqual([r.white.after, r.black.after, r.white.provisional], [1500, 1500, true]);

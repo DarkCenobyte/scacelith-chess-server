@@ -8,7 +8,10 @@
 // is refunded like a loss. Only the change of the K formula is refunded: the game that gave a
 // player their first rating moved them from a working rating, which was no rating to lose. The
 // store gives one refund per game and victim at most (store.refunds.applyForCheater), so a
-// second ban, a moderator's later `refunds apply` or a retry gives nothing twice.
+// second ban, a moderator's later `refunds apply` or a retry gives nothing twice. The games that
+// are not in the database yet when the ban is given (in progress, or ended and waiting for their
+// commit) are refunded by the store as they are recorded (store.games.finishBatch), for as long
+// as the player is 'confirmed' and banned.
 //
 // Audit trail: the rating_refunds rows (game, victim, cheater, category, points, time, the ban
 // or the moderator) and one security event 'rating_refund' per refund. The victims learn of it

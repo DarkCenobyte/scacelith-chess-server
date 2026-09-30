@@ -22,7 +22,7 @@ export const USAGE = `Usage: scacelith-admin <command> [options]
 
 Accounts
   user show <name>                            account, ratings, sanctions, integrity summary
-  user ban <name> --hours N --reason TEXT     ban (applies at the next connection) [--revoke-sessions]
+  user ban <name> --hours N --reason TEXT     ban (applies at the next connection or game) [--revoke-sessions]
   user unban <name>                           lift the active bans
   user reset-mfa <name>                       disable TOTP, delete recovery codes, log out everywhere
   user verify-email <name>                    mark the e-mail address verified
@@ -207,7 +207,7 @@ function userBan(ctx) {
     if (ctx.args.flags['revoke-sessions']) revoked = (ctx.store.sessions.revokeAllForUser(u.id) || []).length;
     audit(ctx, 'ban', u.id, { hours, reason, sanctionId: id, until, revokedSessions: revoked });
     return { data: { sanctionId: id, until, revokedSessions: revoked },
-        text: `Banned ${u.username} until ${iso(until)} (sanction #${id}).${revoked ? ` ${revoked} sessions revoked.` : ''}\nThe running server applies it at the player's next connection (use --revoke-sessions to also log them out).\n` };
+        text: `Banned ${u.username} until ${iso(until)} (sanction #${id}).${revoked ? ` ${revoked} sessions revoked.` : ''}\nThe running server applies it when the player next connects or tries to start a game (use --revoke-sessions to also log them out).\n` };
 }
 
 function userUnban(ctx) {

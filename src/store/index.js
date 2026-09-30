@@ -19,11 +19,16 @@
 //     ratings } with the stored before/after and the player's current game count. Ratings are
 //     applied only to rated games that were played out (status WhiteWins / BlackWins / Draw, not
 //     Aborted) in an official category (not 'custom'); only those are queued for analysis (when
-//     they have >= ANALYSIS_MIN_PLIES plies), under the queue policy below. An invalid record
-//     throws StoreError 'invalid_record' (with .gameId) and the whole batch is rolled back. The
-//     entry of a game left out of the queue carries analysisSkipped: 'sample' | 'backlog' |
-//     'player'; the entry of a game that took over waiting jobs carries analysisDisplaced: [ids of
-//     the games whose job it removed].
+//     they have >= ANALYSIS_MIN_PLIES plies), under the queue policy below. A rated game in which
+//     a player lost points (K formula) to an opponent whose integrity level is 'confirmed' and who
+//     is under an active ban is refunded in the same transaction, with its 'rating_refund'
+//     security event, unless RATING_REFUND_DAYS is 0 (refunds below): a game in progress when the
+//     opponent was banned, or still on its way to the database, which the ban's own refunds could
+//     not see; a 'rating.refund' security log line follows the commit. An invalid record throws
+//     StoreError 'invalid_record' (with .gameId) and the whole batch is rolled back. The entry of
+//     a game left out of the queue carries analysisSkipped: 'sample' | 'backlog' | 'player'; the
+//     entry of a game that took over waiting jobs carries analysisDisplaced: [ids of the games
+//     whose job it removed].
 //   - users.anonymize(id, now?) -> { tokenHashes } (the revoked sessions, for the auth caches):
 //     username becomes 'deleted#<id>' (also in the game records), e-mail, password, MFA,
 //     sessions, tokens, SSO links, recovery codes, integrity record and stored IPs are erased;
@@ -34,21 +39,25 @@
 //   - tokens.consume(kind, hash, now) refuses expired tokens as well as consumed ones.
 //   - sso.link throws StoreError 'sso_taken' when the identity belongs to another account;
 //     sso.forUser(userId) lists an account's identities.
-//   - ratings.leaderboard(category, limit, minGames) leaves out deleted accounts, players whose
-//     integrity level is 'confirmed' and records still in their unrated phase.
+//   - ratings.leaderboard(category, limit, minGames) ranks the records with at least minGames
+//     counted games (below), and leaves out deleted accounts, players whose integrity level is
+//     'confirmed' and records still in their unrated phase.
 //   - ratings: a record carries the FIDE unrated phase of match/elo.js (rated, unratedGames,
-//     unratedOpponents, unratedHalfPoints; migration 004); a missing record is unrated at
-//     INITIAL_RATING. A rating function that returns records without `rated` (tests) rates every
-//     game. `provisional` (forUser, the RatingChange objects) is: unrated, or fewer than
-//     PROVISIONAL_GAMES games. finishBatch also stores the K factor of each side's change
+//     unratedOpponents, unratedHalfPoints; migration 004) and its counted games (countedGames,
+//     the games that entered the rating; a record stored without them counts all its games when
+//     rated, those of its unrated phase otherwise); a missing record is unrated at INITIAL_RATING.
+//     A rating function that returns records without `rated` (tests) rates and counts every game.
+//     `provisional` (forUser, the RatingChange objects) is: unrated, or fewer than
+//     PROVISIONAL_GAMES counted games. finishBatch also stores the K factor of each side's change
 //     (games.white_k / black_k, 0 when the K formula did not apply), which the refunds read.
 //   - refunds (anticheat/refunds.js): applyForCheater({ cheaterId, since, now, sanctionId, source,
 //     by }) gives back, in one transaction, to each opponent of the cheater the rating points they
 //     lost (a K-formula change: k > 0, or NULL for the games finished before migration 004) in a
 //     rated game against them that ended at `since` or later, on the victim's current record of that
 //     category (the peak rises with it); one refund per (game, victim) at most (a second call
-//     skips those already given). Returns the refunds given. list({ cheaterId, victimId, limit }),
-//     pendingSince(afterId, limit) and pendingFor(victimId) (not notified yet), markNotified(ids, now).
+//     skips those already given, at the commit of the game included). Returns the refunds given.
+//     list({ cheaterId, victimId, limit }), pendingSince(afterId, limit) and pendingFor(victimId)
+//     (not notified yet), markNotified(ids, now).
 //   - games.recentForUser returns summaries (no move arrays); games.byId the full record.
 //     games.countBetween(a, b, since, { rated }) counts both colour orders; extra
 //     games.countForUser(userId) (public profile).
@@ -341,6 +350,7 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
     const analysisMinPlies = config.analysisMinPlies ?? 30;
     const analysisQueueMax = config.analysisQueueMax ?? 5000;
     const analysisSampleRate = config.analysisSampleRate ?? 1;
+    const refundWindowMs = Math.max(0, Math.floor(Number(config.ratingRefundDays ?? 60))) * DAY;
 
     // Statement cache: SQL text -> prepared statement.
     const cache = new Map();
@@ -622,29 +632,32 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
 
     // ---- ratings -------------------------------------------------------------------------------
 
-    const RATING_COLS = 'rating, games, wins, draws, losses, peak, reached_senior, rated, unrated_games, unrated_opponents, unrated_half_points';
+    const RATING_COLS = 'rating, games, wins, draws, losses, peak, reached_senior, rated, counted_games, unrated_games, unrated_opponents, '
+        + 'unrated_half_points';
     const defaultRating = () => ({
         rating: initialRating, games: 0, wins: 0, draws: 0, losses: 0, peak: initialRating, reachedSenior: false,
-        rated: false, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0,
+        rated: false, countedGames: 0, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0,
     });
+    // counted_games is NULL in a record stored before it existed (the header).
     const toRating = (r) => ({
         rating: r.rating, games: r.games, wins: r.wins, draws: r.draws, losses: r.losses, peak: r.peak, reachedSenior: !!r.reached_senior,
-        rated: !!r.rated, unratedGames: r.unrated_games, unratedOpponents: r.unrated_opponents, unratedHalfPoints: r.unrated_half_points,
+        rated: !!r.rated, countedGames: r.counted_games ?? (r.rated ? r.games : r.unrated_games), unratedGames: r.unrated_games,
+        unratedOpponents: r.unrated_opponents, unratedHalfPoints: r.unrated_half_points,
     });
-    // Shown as "1500?": unrated, or fewer than PROVISIONAL_GAMES games (K = 40).
-    const provisionalOf = (rec) => !rec.rated || rec.games < provisionalGames;
+    // Shown as "1500?": unrated, or fewer than PROVISIONAL_GAMES counted games (K = 40).
+    const provisionalOf = (rec) => !rec.rated || rec.countedGames < provisionalGames;
     function readRating(userId, category) {
         const r = st(`SELECT ${RATING_COLS} FROM ratings WHERE user_id = ? AND category = ?`).get(userId, category);
         return r ? toRating(r) : defaultRating();
     }
     function writeRating(userId, category, rec, now) {
-        st(`INSERT INTO ratings (user_id, category, ${RATING_COLS}, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        st(`INSERT INTO ratings (user_id, category, ${RATING_COLS}, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (user_id, category) DO UPDATE SET rating = excluded.rating, games = excluded.games, wins = excluded.wins,
             draws = excluded.draws, losses = excluded.losses, peak = excluded.peak, reached_senior = excluded.reached_senior,
-            rated = excluded.rated, unrated_games = excluded.unrated_games, unrated_opponents = excluded.unrated_opponents,
-            unrated_half_points = excluded.unrated_half_points, updated_at = excluded.updated_at`)
+            rated = excluded.rated, counted_games = excluded.counted_games, unrated_games = excluded.unrated_games,
+            unrated_opponents = excluded.unrated_opponents, unrated_half_points = excluded.unrated_half_points, updated_at = excluded.updated_at`)
             .run(userId, category, rec.rating, rec.games, rec.wins, rec.draws, rec.losses, rec.peak, b01(rec.reachedSenior), b01(rec.rated),
-                rec.unratedGames, rec.unratedOpponents, rec.unratedHalfPoints, now);
+                rec.countedGames, rec.unratedGames, rec.unratedOpponents, rec.unratedHalfPoints, now);
     }
 
     const ratings = {
@@ -659,7 +672,7 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         leaderboard(category, limit = 100, minGames = provisionalGames) {
             return st(`SELECT r.user_id, u.username, r.rating, r.games, r.wins, r.draws, r.losses, r.peak
                 FROM ratings r JOIN users u ON u.id = r.user_id LEFT JOIN player_integrity pi ON pi.user_id = r.user_id
-                WHERE r.category = ? AND r.games >= ? AND r.rated = 1 AND u.status = 'active'
+                WHERE r.category = ? AND r.rated = 1 AND coalesce(r.counted_games, r.games) >= ? AND u.status = 'active'
                 AND (pi.level IS NULL OR pi.level <> 'confirmed')
                 ORDER BY r.rating DESC, r.games DESC, r.user_id LIMIT ?`).all(category, minGames, limit)
                 .map((r) => ({ userId: r.user_id, username: r.username, rating: r.rating, games: r.games, wins: r.wins, draws: r.draws,
@@ -703,7 +716,7 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
 
     // The rating record written after a game: applyGame's record, completed from the previous one
     // for any field it does not return (a record without `rated` comes from a rating function
-    // without the unrated phase, which rates every game).
+    // without the unrated phase, which rates and counts every game).
     function nextRecord(prev, side, score) {
         const rec = (side && side.record) || {};
         const after = Math.round(side.after ?? rec.rating);
@@ -717,6 +730,7 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             peak: Math.round(rec.peak ?? Math.max(prev.peak, after)),
             reachedSenior: !!(rec.reachedSenior ?? prev.reachedSenior),
             rated: !!rated,
+            countedGames: Math.floor(rec.countedGames ?? prev.countedGames + 1),
             unratedGames: rated ? 0 : Math.floor(rec.unratedGames ?? 0),
             unratedOpponents: rated ? 0 : Math.floor(rec.unratedOpponents ?? 0),
             unratedHalfPoints: rated ? 0 : Math.floor(rec.unratedHalfPoints ?? 0),
@@ -850,9 +864,36 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                 changes ? changes.black.before : null, changes ? changes.black.after : null, k[0], k[1],
                 r.rematchOf ? r.rematchOf : null, r.flags ?? 0,
                 moves, packArray(r.spentMs, Uint32Array), packArray(r.clockMs, Uint32Array));
+        if (rate) refundAtCommit(r, changes, k, now, batch);
         const entry = { gameId: r.id, ratings: changes };
         if (rate && plies >= analysisMinPlies) queueAnalysis(r, now, batch, entry);
         return entry;
+    }
+
+    // The refund of a rated game recorded while the opponent of the player who lost points is a
+    // confirmed cheater under an active ban (header). A ban's own refunds (applyForCheater, run
+    // when it is given) only see the games already in the table; this gives those of the games in
+    // progress at the ban or still on their way to the database. The ban taken is one whose
+    // refund window (RATING_REFUND_DAYS before its start) covers the game's end. Adds the refunds
+    // to batch.refunds, which finishBatch logs once committed.
+    function refundAtCommit(r, changes, k, now, batch) {
+        if (refundWindowMs <= 0) return;
+        const endedAt = ms(r.endedAt ?? now);
+        const sides = [[r.whiteId, r.blackId, changes.white, k[0]], [r.blackId, r.whiteId, changes.black, k[1]]];
+        for (const [victim, cheaterId, change, kf] of sides) {
+            const points = change.before - change.after;
+            if (!(points > 0) || kf === 0) continue;
+            const ban = st(`SELECT s.id FROM player_integrity pi JOIN sanctions s ON s.user_id = pi.user_id
+                WHERE pi.user_id = ?1 AND pi.level = 'confirmed' AND s.kind = 'ban' AND s.lifted_at IS NULL AND s.starts_at <= ?2
+                AND (s.ends_at IS NULL OR s.ends_at > ?2) AND s.starts_at <= ?3 ORDER BY s.starts_at, s.id LIMIT 1`)
+                .get(cheaterId, now, endedAt + refundWindowMs);
+            if (!ban) continue;
+            const given = giveRefund({ id: r.id, victim, category: r.category, points, ended_at: endedAt }, cheaterId, now, ban.id, 'auto', null);
+            if (!given) continue;
+            st(`INSERT INTO security_events (kind, user_id, ip, at, detail) VALUES ('rating_refund', ?, NULL, ?, ?)`).run(victim, now,
+                toJson({ refundId: given.id, gameId: r.id, cheaterId, category: r.category, points, source: 'auto', sanctionId: ban.id, by: null }));
+            batch.refunds.push({ ...given, cheaterId, sanctionId: ban.id });
+        }
     }
 
     const games = {
@@ -864,8 +905,12 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             if (!Array.isArray(records) || records.length === 0) return [];
             const t0 = performance.now();
             const now = Date.now();
-            const batch = { ordinary: null };
+            const batch = { ordinary: null, refunds: [] };
             const out = tx(() => records.map((r) => commitGame(r, now, batch)));
+            for (const f of batch.refunds) {
+                log.security('rating.refund', { cheaterId: f.cheaterId, source: 'auto', sanctionId: f.sanctionId, gameId: f.gameId,
+                    refunds: 1, victims: 1, points: f.points });
+            }
             mBatchMs.observe(performance.now() - t0);
             mGames.inc(out.reduce((n, x) => n + (x.duplicate ? 0 : 1), 0));
             countSkipped(mAnalysisSkipped, out);
@@ -1261,6 +1306,25 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         victimName: r.victim_name, cheaterName: r.cheater_name,
     });
 
+    // Gives a victim back the points they lost in game g ({ id, victim, category, points,
+    // ended_at }) against a cheater, on their current record of its category (the peak rises
+    // with it). Nothing when the game already has its refund for that victim (UNIQUE (game_id,
+    // victim_id)) or the victim has no record. Returns the refund given, or null.
+    function giveRefund(g, cheaterId, now, sanctionId, source, by) {
+        const rec = st('SELECT rating, peak FROM ratings WHERE user_id = ? AND category = ?').get(g.victim, g.category);
+        if (!rec) return null;
+        const ins = st(`INSERT INTO rating_refunds (game_id, victim_id, cheater_id, category, points, created_at, sanction_id,
+            source, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (game_id, victim_id) DO NOTHING`)
+            .run(g.id, g.victim, cheaterId, g.category, g.points, ms(now), sanctionId || null, source,
+                by === null || by === undefined ? null : String(by));
+        if (Number(ins.changes) !== 1) return null;
+        const rating = rec.rating + g.points;
+        st('UPDATE ratings SET rating = ?, peak = ?, updated_at = ? WHERE user_id = ? AND category = ?')
+            .run(rating, Math.max(rec.peak, rating), ms(now), g.victim, g.category);
+        return { id: Number(ins.lastInsertRowid), gameId: g.id, victimId: g.victim, category: g.category, points: g.points,
+            endedAt: g.ended_at };
+    }
+
     const refunds = {
         /**
          * Refunds the victims of a banned cheater (one transaction; header). The games are the
@@ -1277,18 +1341,8 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                 const out = [];
                 for (const g of games) {
                     if (!(g.points > 0) || g.k === 0 || g.victim === cheaterId) continue;
-                    const rec = st('SELECT rating, peak FROM ratings WHERE user_id = ? AND category = ?').get(g.victim, g.category);
-                    if (!rec) continue;
-                    const ins = st(`INSERT INTO rating_refunds (game_id, victim_id, cheater_id, category, points, created_at, sanction_id,
-                        source, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (game_id, victim_id) DO NOTHING`)
-                        .run(g.id, g.victim, cheaterId, g.category, g.points, ms(now), sanctionId || null, source,
-                            by === null || by === undefined ? null : String(by));
-                    if (Number(ins.changes) !== 1) continue;
-                    const rating = rec.rating + g.points;
-                    st('UPDATE ratings SET rating = ?, peak = ?, updated_at = ? WHERE user_id = ? AND category = ?')
-                        .run(rating, Math.max(rec.peak, rating), ms(now), g.victim, g.category);
-                    out.push({ id: Number(ins.lastInsertRowid), gameId: g.id, victimId: g.victim, category: g.category, points: g.points,
-                        endedAt: g.ended_at });
+                    const given = giveRefund(g, cheaterId, now, sanctionId, source, by);
+                    if (given) out.push(given);
                 }
                 return out;
             });

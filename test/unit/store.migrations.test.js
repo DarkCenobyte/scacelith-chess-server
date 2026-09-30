@@ -21,8 +21,8 @@ test('migrate creates every table from an empty database and records the migrati
     const file = path.join(dir, 'fresh.db');
     const store = openStore(testConfig({ DB_PATH: file }));
     const res = migrate(store);
-    assert.deepEqual(res.applied, [1, 2, 3, 4]);
-    assert.equal(res.version, 4);
+    assert.deepEqual(res.applied, [1, 2, 3, 4, 5]);
+    assert.equal(res.version, 5);
     assert.match(store.meta.get('server_id'), /^[0-9a-f-]{36}$/);
     // Inspect the schema through a second, raw connection (node:sqlite is already loaded by the store).
     const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
@@ -30,7 +30,8 @@ test('migrate creates every table from an empty database and records the migrati
     const names = new Set(raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name));
     for (const t of TABLES) assert.ok(names.has(t), `table ${t}`);
     const mig = raw.prepare('SELECT version, name, applied_at, checksum FROM schema_migrations').all();
-    assert.deepEqual(mig.map((m) => m.name), ['001_initial', '002_analysis_priority', '003_analysis_players', '004_fide_ratings_refunds']);
+    assert.deepEqual(mig.map((m) => m.name), ['001_initial', '002_analysis_priority', '003_analysis_players', '004_fide_ratings_refunds',
+        '005_counted_games']);
     assert.match(mig[0].checksum, /^[0-9a-f]{64}$/);
     assert.equal(raw.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
     raw.close();
@@ -88,11 +89,41 @@ test('migration 004: the records with games stay rated, a record without games s
     raw.close();
 
     store = openStore(cfg);
-    assert.deepEqual(migrate(store).applied, [4]);
+    assert.equal(migrate(store).applied[0], 4);
     assert.deepEqual(store.ratings.get(a, '3+2'), { rating: 1712, games: 3, wins: 3, draws: 0, losses: 0, peak: 1712,
-        reachedSenior: false, rated: true, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0 });
+        reachedSenior: false, rated: true, countedGames: 3, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0 });
     assert.equal(store.ratings.get(b, '3+2').rated, false);
     assert.deepEqual(store.refunds.list(), []);
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('counted games migration: the records stored before it count all their games when rated, those of the unrated phase otherwise', () => {
+    const dir = tmpDir();
+    const migDir = path.join(dir, 'migrations');
+    fs.mkdirSync(migDir);
+    const all = fs.readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort();
+    const counted = all.find((f) => f.endsWith('_counted_games.sql'));
+    for (const f of all.slice(0, all.indexOf(counted))) fs.copyFileSync(path.join(MIGRATIONS, f), path.join(migDir, f));
+    const cfg = testConfig({ DB_PATH: path.join(dir, 'x.db'), PROVISIONAL_GAMES: '30' });
+    let store = openStore(cfg);
+    migrate(store, { dir: migDir });
+    const [a, b] = ['Old', 'New'].map((n) => store.users.create({ username: n, email: `${n}@example.org` }));
+    store.close();
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
+    const raw = new DatabaseSync(cfg.dbPath);
+    raw.prepare(`INSERT INTO ratings (user_id, category, rating, games, wins, peak, rated, updated_at) VALUES (?, '3+2', 1712, 40, 30, 1712, 1, 0)`)
+        .run(a);
+    raw.prepare(`INSERT INTO ratings (user_id, category, rating, games, losses, peak, rated, unrated_games, unrated_opponents, unrated_half_points,
+        updated_at) VALUES (?, '3+2', 1500, 9, 7, 1500, 0, 3, 4500, 2, 0)`).run(b);
+    raw.close();
+
+    store = openStore(cfg);
+    assert.deepEqual(migrate(store).applied, [Number(counted.slice(0, 3))]);
+    assert.equal(store.ratings.get(a, '3+2').countedGames, 40);
+    assert.equal(store.ratings.forUser(a)[0].provisional, false);
+    assert.deepEqual(store.ratings.leaderboard('3+2', 100, 30).map((r) => r.userId), [a]);
+    assert.equal(store.ratings.get(b, '3+2').countedGames, 3);
     store.close();
     fs.rmSync(dir, { recursive: true, force: true });
 });

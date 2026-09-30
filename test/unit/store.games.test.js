@@ -68,15 +68,16 @@ test('finishBatch: game rows, ratings read and written in the transaction, Ratin
     assert.equal(r2.black.games, 2);
     assert.equal(r2.white.after - 1500, 1520 - r2.black.after, 'zero-sum with equal K');
 
-    // This applyGame returns records without the unrated phase: every game is rated.
+    // This applyGame returns records without the unrated phase: every game is rated and counted.
     const rated = { rated: true, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0 };
     const ra = store.ratings.get(a, '3+2');
-    assert.deepEqual({ ...ra }, { rating: r2.black.after, games: 2, wins: 1, draws: 1, losses: 0, peak: 1520, reachedSenior: false, ...rated });
+    assert.deepEqual({ ...ra }, { rating: r2.black.after, games: 2, wins: 1, draws: 1, losses: 0, peak: 1520, reachedSenior: false, ...rated,
+        countedGames: 2 });
     assert.deepEqual(store.ratings.get(b, '3+2'),
-        { rating: 1480, games: 1, wins: 0, draws: 0, losses: 1, peak: 1500, reachedSenior: false, ...rated });
+        { rating: 1480, games: 1, wins: 0, draws: 0, losses: 1, peak: 1500, reachedSenior: false, ...rated, countedGames: 1 });
     // No record yet: unrated, at INITIAL_RATING.
     assert.deepEqual(store.ratings.get(a, '5+0'), { rating: 1500, games: 0, wins: 0, draws: 0, losses: 0, peak: 1500, reachedSenior: false,
-        rated: false, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0 });
+        rated: false, countedGames: 0, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0 });
     const fu = store.ratings.forUser(a);
     assert.equal(fu.length, 1);
     assert.equal(fu[0].category, '3+2');
@@ -207,7 +208,7 @@ test('FIDE ratings through the store: unrated phase, first rating, K factor stor
     const first = store.games.finishBatch([record(a, b, { status: GameStatus.Draw }), record(b, a), record(a, b), record(a, b)]);
     assert.deepEqual(first[0].ratings.white, { before: 1500, after: 1500, games: 1, provisional: true });
     assert.deepEqual(store.ratings.get(a, '3+2'), { rating: 1500, games: 4, wins: 2, draws: 1, losses: 1, peak: 1500,
-        reachedSenior: false, rated: false, unratedGames: 4, unratedOpponents: 6000, unratedHalfPoints: 5 });
+        reachedSenior: false, rated: false, countedGames: 4, unratedGames: 4, unratedOpponents: 6000, unratedHalfPoints: 5 });
     assert.deepEqual(store.ratings.leaderboard('3+2', 100, 0), [], 'unrated records are not ranked');
     // Fifth game (Ann wins): Ann 3.5 / 5, p = 4.5 / 7 = 0.64, dp 102: 1586 + 102 = 1688; Ben 1.5 / 5,
     // p = 2.5 / 7 = 0.36, dp -102: 1484.
@@ -222,6 +223,48 @@ test('FIDE ratings through the store: unrated phase, first rating, K factor stor
     // A rated game, K 40 for both: D 204, PD 0.76 for Ann, so Ben's win is worth 40 x 0.76 = 30.4.
     const next = store.games.finishBatch([record(b, a)])[0].ratings;
     assert.deepEqual([next.white.before, next.white.after, next.black.before, next.black.after], [1484, 1514, 1688, 1658]);
+    store.close();
+});
+
+test('the leaderboard needs PROVISIONAL_GAMES counted games: no rating built on an account that only loses, nor on unrated opponents', () => {
+    const store = openStore(testConfig({ DB_PATH: ':memory:' }), { applyGame: fideApplyGame });
+    migrate(store);
+    const [a, b, c, d, e] = ['Ann', 'Ben', 'Cid', 'Dee', 'Eve'].map((n) => store.users.create({ username: n, email: `${n}@example.org` }));
+    // Ann beats Ben 30 times, Ben never scores: under the previous rules Ann was rated 1895 after
+    // five wins and on the leaderboard after 30 games, Ben still unrated to do the same again.
+    const wins = [];
+    for (let i = 0; i < 30; i++) wins.push(record(a, b));
+    const res = store.games.finishBatch(wins);
+    assert.ok(res.every((x) => x.ratings.white.after === 1500 && x.ratings.black.after === 1500));
+    const ra = store.ratings.get(a, '3+2');
+    assert.deepEqual([ra.rated, ra.games, ra.wins, ra.countedGames], [false, 30, 30, 0]);
+    assert.equal(store.ratings.forUser(a)[0].provisional, true);
+    assert.deepEqual(store.ratings.leaderboard('3+2', 100, 30), []);
+    assert.deepEqual(store.ratings.leaderboard('3+2', 100, 0), [], 'nobody is rated');
+    // A player rated in five counted games (a draw and four wins against Cid) who then plays 23
+    // games against unrated opponents (a newcomer who never scores, Dee, and one who has, Eve)
+    // has 58 games but 5 counted: provisional, off the leaderboard.
+    const start = store.games.finishBatch([record(a, c, { status: GameStatus.Draw }), record(a, c), record(a, c), record(a, c),
+        record(a, c)]);
+    assert.equal(start[4].ratings.white.after, 1816, 'p = 11 / 14 = 0.79 (dp 230) over Ra = 1585.7');
+    const padding = [];
+    for (let i = 0; i < 20; i++) padding.push(record(a, d));
+    padding.push(record(e, d, { status: GameStatus.Draw }));
+    for (let i = 0; i < 3; i++) padding.push(record(a, e));
+    store.games.finishBatch(padding);
+    const padded = store.ratings.get(a, '3+2');
+    assert.deepEqual([padded.rated, padded.rating, padded.games, padded.countedGames], [true, 1816, 58, 5]);
+    assert.deepEqual([store.ratings.get(e, '3+2').rated, store.ratings.get(e, '3+2').countedGames], [false, 4]);
+    assert.deepEqual(store.ratings.leaderboard('3+2', 100, 30), []);
+    assert.equal(store.ratings.forUser(a)[0].provisional, true);
+    // Games against rated opponents count: 25 more against Cid (rated since his fifth game) put
+    // Ann on it, and Cid, whose games all counted.
+    const tested = [];
+    for (let i = 0; i < 25; i++) tested.push(record(i % 2 ? a : c, i % 2 ? c : a, { status: GameStatus.Draw }));
+    store.games.finishBatch(tested);
+    assert.equal(store.ratings.get(a, '3+2').countedGames, 30);
+    assert.deepEqual(store.ratings.leaderboard('3+2', 100, 30).map((r) => r.userId), [a, c]);
+    assert.equal(store.ratings.forUser(a)[0].provisional, false);
     store.close();
 });
 

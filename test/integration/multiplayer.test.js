@@ -48,8 +48,8 @@ test('rated queue: castling, en passant, promotion, resignation; ratings committ
         assert.deepEqual([endW.status, endW.reason], [endB.status, endB.reason]);
         const ru = await g.white.client.waitFor('RatingUpdate', (m) => m.game === g.id, 10000, { since: w });
         assert.equal(ru.category, '3+2');
-        // Two newcomers: the first game of their unrated phase (FIDE) counts, and the working
-        // rating stays until the fifth gives the first rating.
+        // Two newcomers: a game lost by a player who has not scored yet counts for neither rating
+        // (FIDE's zero score), and the working rating stays until a first rating.
         assert.deepEqual([ru.white.before, ru.white.after, ru.white.games, ru.white.provisional], [1500, 1500, 1, true]);
         assert.deepEqual([ru.black.before, ru.black.after, ru.black.games, ru.black.provisional], [1500, 1500, 1, true]);
         await g.black.client.waitFor('RatingUpdate', (m) => m.game === g.id, 10000, { since: bl });

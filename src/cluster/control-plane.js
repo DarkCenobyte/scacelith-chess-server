@@ -7,7 +7,8 @@
 //               broadcast(type, payload), list() -> [shard] }       (the live shard workers)
 //   matchmaker / challenges / conduct   DESIGN 5.4 objects (conduct optional)
 //   activeBan(userId, now) -> { until } | until | null              (store.sanctions.activeBan)
-//   ratingOf(userId, category) -> { rating, games, rated } | null    (store.ratings.get)
+//   ratingOf(userId, category) -> { rating, countedGames, rated } | null    (store.ratings.get; a
+//             record without countedGames counts all its games)
 //   acceptsChallenges(userId) -> bool                                 (store.users.byId().acceptChallenges)
 //   refunds   store.refunds (pendingSince, pendingFor, markNotified): Notice{RatingRestored} of the
 //             rating refunds, out of a game (anticheat/refund-notices.js); none without it
@@ -17,6 +18,15 @@
 // ('shard.load', event-loop p99 above SHARD_OVERLOAD_LAG_MS, or no report for 10 s) the least
 // loaded shard (fewest games, then connections) hosts it. Challenges: the creator's shard.
 // Rematches: the finished game's shard.
+//
+// Bans: a ban reaches the primary with 'sanction.applied' (the automatic ones, given on a shard)
+// or from the database (activeBan): at the player's connection (presence.claim) and at each
+// attempt to start a game (mm.join, challenge.create, createGame for every game: queue,
+// challenges, private codes, rematches). A ban found in the database that the primary was not
+// told of (one given with the admin CLI, which only writes the database) is enforced as
+// sanction.applied enforces one (kick, forfeit, queue and challenges dropped), without being
+// cached: a later unban counts at once. A banned player therefore starts no game on a running
+// server, whoever banned them.
 //
 // Clock press: createGame fixes each game's autoPress (GameSnapshot.autoPress) from
 // AUTO_PRESS_CLOCK, for the queue, the challenges and the private games alike; a rematch keeps the
@@ -227,6 +237,14 @@ export class ControlPlane {
         }
     }
 
+    // Whether a user is banned now (header, bans): a ban found only in the database is enforced.
+    _banned(userId, now) {
+        const until = this._banUntil(userId, now);
+        if (!(until > now)) return false;
+        if (!(this.bans.get(userId) > now)) this._enforceBan(userId, until, 'stored ban');
+        return true;
+    }
+
     _busy(userId) { return this.activeGames.has(userId) || this.starting.has(userId); }
 
     _player(p, category) {
@@ -236,7 +254,7 @@ export class ControlPlane {
             if (category && category !== 'custom' && this.ratingOf) {
                 try {
                     const r = this.ratingOf(p.userId, category);
-                    if (r) { rating = r.rating; provisional = r.rated === false || (r.games ?? 0) < this.config.provisionalGames; }
+                    if (r) { rating = r.rating; provisional = r.rated === false || (r.countedGames ?? r.games ?? 0) < this.config.provisionalGames; }
                 } catch (e) { this.log?.error?.('rating read failed', { err: e }); }
             }
             out.rating = rating;
@@ -280,6 +298,8 @@ export class ControlPlane {
         if (typeof spec.autoPress !== 'boolean') spec = { ...spec, autoPress: this.config.autoPressClock !== false };
         const ids = [spec.white.userId, spec.black.userId];
         if (ids.some((u) => this._busy(u))) return { error: E.AlreadyInGame };
+        const now = this.now();
+        if (ids.filter((u) => this._banned(u, now)).length) return { error: E.UserUnavailable };
         for (const u of ids) this.starting.add(u);
         let r = null;
         const shard = this._chooseShard(preferredShard);
@@ -352,6 +372,7 @@ export class ControlPlane {
         const now = this.now();
         const cur = this.presence.get(p.userId);
         if (!cur || cur.connId !== p.connId) return { error: E.QueueNotAllowed };
+        if (this._banned(p.userId, now)) return { error: E.Banned };
         if (this._busy(p.userId)) return { error: E.AlreadyInGame };
         if (!this.categories.has(p.category)) return { error: E.InvalidCategory };
         if (p.rated && this.conduct) {
@@ -440,7 +461,7 @@ export class ControlPlane {
         // Back to the queue with their original waiting time.
         for (const e of [white, black]) {
             const p = this.presence.get(e.userId);
-            if (!p || p.connId !== e.connId || this._busy(e.userId)) {
+            if (!p || p.connId !== e.connId || this._busy(e.userId) || this._banUntil(e.userId, now) > now) {
                 this._sendUser(e.userId, [encode.QueueStatus({ category, rated: !!rated, state: QS.Left, waitMs: 0, window: 0, queued: 0 })]);
                 continue;
             }
@@ -460,6 +481,7 @@ export class ControlPlane {
 
     challengeCreate({ from, target = '', baseSec, incSec, rated, color }) {
         const now = this.now();
+        if (this._banned(from.userId, now)) return { error: E.Banned };
         let targetUser = null;
         if (target) {
             const tid = this.presence.userIdByName(target);
@@ -601,7 +623,7 @@ export class ControlPlane {
         const norm = (x) => (typeof x === 'number' ? { userId: x } : { ...x, username: x.username ?? x.name });
         const nw = norm(white), nb = norm(black);
         for (const p of [nw, nb]) {
-            if (this._banUntil(p.userId, now) > now) return { error: E.RematchUnavailable };
+            if (this._banned(p.userId, now)) return { error: E.RematchUnavailable };
             if (!this.presence.get(p.userId)) return { error: E.RematchUnavailable };
             const g = this.activeGames.get(p.userId);
             if ((g && g !== gameId) || this.starting.has(p.userId)) return { error: E.RematchUnavailable };
@@ -641,13 +663,19 @@ export class ControlPlane {
     sanctionApplied({ userId, until, reason, refunds = 0 }) {
         const end = +until || this.now() + 86400000;
         this.bans.set(userId, end);
+        this._enforceBan(userId, end, reason);
+        if (refunds > 0) this.refundNotices?.poll();
+        return { ok: true };
+    }
+
+    // A banned player is kicked everywhere, forfeits their running game and leaves the queue and
+    // their challenges.
+    _enforceBan(userId, end, reason) {
         this.log?.security?.('sanction applied', { userId, until: end, reason });
         this._kick(userId, 'banned', E.Banned, CloseCode.Banned, [errorFrame(E.Banned, true), encode.Notice({ code: N.Banned, arg: end })]);
         const gameId = this.activeGames.get(userId);
         if (gameId) this.shards.notify(shardOfGameId(gameId), 'game.forfeit', { userId, gameId });
         this._userGone(userId);
-        if (refunds > 0) this.refundNotices?.poll();
-        return { ok: true };
     }
 
     sessionRevoked({ userId, tokenHashes }) {

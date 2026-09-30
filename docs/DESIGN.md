@@ -392,9 +392,9 @@ store.sessions.byTokenHash(hash) -> { id, userId, createdAt, lastSeenAt, expires
 store.sessions.touch(id, now, idleExpiresAt) ; revoke(id) ; revokeAllForUser(userId, exceptId?) -> [tokenHash] ; listForUser(userId) ; enforceLimit(userId, max)
 store.tokens.create({ kind, tokenHash, userId, data, expiresAt }) ; consume(kind, tokenHash, now) -> row | null (atomic single use) ; get(kind, tokenHash) ; update(kind, tokenHash, data)
 store.sso.find(provider, subject) -> { userId } | null ; link(userId, provider, subject, email)
-store.ratings.get(userId, category) -> { rating, games, wins, draws, losses, peak, reachedSenior, rated, unratedGames,
+store.ratings.get(userId, category) -> { rating, games, wins, draws, losses, peak, reachedSenior, rated, countedGames, unratedGames,
   unratedOpponents, unratedHalfPoints }  // defaults when absent: unrated at INITIAL_RATING
-store.ratings.forUser(userId) -> [{ category, ..., provisional }] ; leaderboard(category, limit, minGames)  // rated records only
+store.ratings.forUser(userId) -> [{ category, ..., provisional }] ; leaderboard(category, limit, minGames)  // rated, >= minGames counted games
 store.refunds.applyForCheater({ cheaterId, since, now, sanctionId, source, by }) -> [refund]   // section 6.6, one transaction
 store.refunds.list({ cheaterId, victimId, limit }) ; pendingSince(afterId, limit) ; pendingFor(victimId) ; markNotified(ids, now)
 store.games.finishBatch(records) -> [{ gameId, ratings: null | { white: RatingChange, black: RatingChange } }]
@@ -529,7 +529,7 @@ Shard -> primary:
 | `presence.claim` | `{ userId, username, shard, connId, ip }` | `{ ok, activeGame: id or 0, kicked: bool }` or `{ error }` (ServerFull, Banned) |
 | `presence.release` | `{ userId, connId }` | - |
 | `conn.ipAcquire` / `conn.ipRelease` | `{ ip }` | `{ ok }` or `{ ok: false, reason }` (`per_ip`: `MAX_CONNECTIONS_PER_IP`; `global`: `MAX_CONNECTIONS` plus `max(16, 2 %)`) |
-| `mm.join` | `{ userId, username, category, rated, rating, provisional, shard, connId }` | `{ ok }` / `{ error }` |
+| `mm.join` | `{ userId, username, category, rated, rating, provisional, shard, connId }` | `{ ok }` / `{ error }` (`Banned`: a ban found in the database, enforced as `sanction.applied`, 6.6) |
 | `mm.leave` | `{ userId }` | `{ ok }` |
 | `challenge.create` / `.accept` / `.decline` / `.cancel` / `.joinCode` | see 5.4 | `{ ok, id?, code? }` / `{ error }` |
 | `game.ended` | `{ gameId, whiteId, blackId, status, reason, rated, category, rematchOffer }` | - |
@@ -942,39 +942,49 @@ point: both are checked against the same vectors (`test/fixtures/elo-vectors.jso
   except at six differences where FIDE's rows differ (54, 343, 344, 358, 392, 620); the
   published table is what FIDE applies, so it is used as published.
 * **Change**: `K x (score - PD)`, rounded to the nearest point (halves away from zero),
-  computed in whole hundredths. `K` is 40 until the player has `PROVISIONAL_GAMES` (30) games in
-  the category, the games of the unrated phase included, then 20, and 10 for good once the
-  player has reached 2400.
+  computed in whole hundredths. `K` is 40 until the player has `PROVISIONAL_GAMES` (30) counted
+  games in the category (below), those of the unrated phase included, then 20, and 10 for good
+  once the player has reached 2400.
 * **Unrated phase and first rating** (8.2): a new record is unrated, with a working rating of
-  `INITIAL_RATING` (1500) that is shown and used for pairing. Its rated games add up the
+  `INITIAL_RATING` (1500) that is shown and used for pairing. Its counted games add up the
   opponents' ratings and the score (see the zero score below); after five, `Ru = Ra + dp(p)` with
   `Ra = (sum of the opponents' ratings + 2 x 1800) / (n + 2)` and
   `p = (score + 1) / (n + 2)` rounded to hundredths (two hypothetical draws against
   1800-rated players), `dp` from FIDE's table 8.1.1, rounded to the nearest point and capped at
   2200. The peak becomes `Ru`. Five draws against 1500 give 1586, five wins 1895.
-* **Zero score** (8.2.1: FIDE disregards a zero score in a player's first event), one game at a
-  time: the losses before the player's first half point stay out of the unrated phase (they
-  count in the games and losses, not in the five games, the sum or the score); a newcomer who
-  only loses stays unrated instead of getting a first rating from the strength of the players
-  who beat them.
+* **Zero score** (8.2.1: FIDE disregards an unrated player's zero score, and their opponents'
+  results against them), one game at a time: a game lost by an unrated player who has not scored
+  yet in the category (no win, no draw) counts for neither player's rating (it counts in the
+  games and wins, draws and losses, not in the five games, the sum or the score of either side).
+  A newcomer who only loses stays unrated instead of getting a first rating from the strength of
+  the players who beat them, and gives no first rating to anyone: an account that only loses
+  cannot rate the accounts that beat it (five wins against it would otherwise give 1895, over
+  and over). Once it has scored, its losses count and it is rated within five counted games,
+  then loses points like anyone.
 * **Unrated opponent**: a rated player's game against an unrated one leaves the rated player's
   rating unchanged (only games against rated opponents count, 8.3) but counts in their games and
-  wins, draws and losses.
+  wins, draws and losses, not in their counted games.
+* **Counted games**: the games that entered the rating (FIDE's rated games), those of the
+  unrated phase that counted and then those against rated opponents. They set `K` and the
+  provisional mark, and a place on the leaderboard needs `PROVISIONAL_GAMES` of them: a rating
+  tested against rated players, which games against unrated opponents or zero scores never give.
 * **Floor**: a rating never drops below 100 (FIDE's list starts at 1400, which makes no sense
   for players who range from beginners to weak engine presets rated 800).
 
 Departures from FIDE, needed by a game server: games are rated one by one against the ratings
 before each game (FIDE rates monthly periods with ratings fixed within the period and `K x
 games` capped at 700); a game between two unrated players counts for both, at the other's
-working rating (FIDE ignores it, but a new server could then never rate anyone); FIDE's `K = 40`
-for players under 18 does not apply (no ages here).
+working rating (FIDE ignores it, but a new server could then never rate anyone), unless it is a
+zero score; FIDE's `K = 40` for players under 18 does not apply (no ages here).
 
 On the wire nothing changed: an unrated record is `provisional` (so is a rated one with fewer
-than `PROVISIONAL_GAMES` games), its `rating` is the working rating, and the `RatingChange` of a
-game of the unrated phase has `before = after`, except the fifth game, which goes from the
-working rating to the first rating. The records stored before migration 004 (the previous
-logistic formula, same K factors, start and floor) that have games stay rated; a record without
-games starts unrated. The leaderboard lists rated records only.
+than `PROVISIONAL_GAMES` counted games), its `rating` is the working rating, `games` counts every
+rated game played, and the `RatingChange` of a game of the unrated phase has `before = after`,
+except the fifth counted game, which goes from the working rating to the first rating. The
+records stored before migration 004 (the previous logistic formula, same K factors, start and
+floor) that have games stay rated, and a record stored before the counted games existed counts
+all its games; a record without games starts unrated. The leaderboard lists rated records with
+at least `PROVISIONAL_GAMES` counted games.
 
 **Refunds.** When a player is banned as a cheater (a certain cheat, section 6.5, or a
 moderator's `integrity confirm`), every opponent who lost rating points to them in a rated game
@@ -983,10 +993,16 @@ to their current rating in that category (their peak rises with it when it is ex
 Nothing is recomputed: wins against the cheater and every other game stand as played; a draw
 that cost points is refunded like a loss; only a change of the K formula is refunded (the game
 that gave a first rating moved it from a working rating); one refund per game and victim at
-most. The victim gets `Notice{RatingRestored, arg: points}` out of a game only: at once when
-connected and idle, otherwise after their current game, otherwise right after `Welcome` at
-their next connection (after the game that connection resumes, if any). Moderator options,
-audit trail and the reasons an unban takes nothing back: docs/ANTICHEAT.md, rating refunds.
+most. A game that is not recorded yet when the ban is given (still in progress, or waiting for
+its commit) is refunded in the transaction that records it, while the player is `confirmed` and
+banned. A ban given with the admin CLI, which only writes the database, reaches the running
+server when the player next connects or tries to start a game (queue, challenge, private code,
+rematch): the primary then enforces it as it enforces `sanction.applied` (kick, queue and
+challenges dropped), so a banned player starts no game. The victim gets
+`Notice{RatingRestored, arg: points}` out of a game only: at once when connected and idle,
+otherwise after their current game, otherwise right after `Welcome` at their next connection
+(after the game that connection resumes, if any). Moderator options, audit trail and the reasons
+an unban takes nothing back: docs/ANTICHEAT.md, rating refunds.
 
 ## 7. What lives where, and what survives a crash
 
@@ -997,7 +1013,7 @@ audit trail and the reasons an unban takes nothing back: docs/ANTICHEAT.md, rati
 | Ratings, finished games, analysis queue | SQLite | batched every `DB_COMMIT_MS`, one transaction per batch | kept once committed; games ended but not committed are in the journal and committed at recovery |
 | Games in progress (moves, clocks, offers) | memory of the host shard + journal | journal flushed every `JOURNAL_FLUSH_MS` | replayed; at most `JOURNAL_FLUSH_MS` of moves lost (clients resend: stale ply / resync); both players get `RECOVERY_GRACE_MS` to come back, and the clock of the side to move waits for its player (`RECOVERY_CLOCK_HOLD_MS` at most, 6.4) |
 | Sanctions, anomalies (certain), integrity levels, reports | SQLite | sanctions immediately; anomalies batched (1 s) | kept (a batch in flight may be lost for `info` anomalies) |
-| Rating refunds (6.6) | SQLite | with the ban that triggers them (their own transaction); `notified_at` once the notice is written | kept; the notices not marked are sent again after a restart |
+| Rating refunds (6.6) | SQLite | with the ban that triggers them (their own transaction), or with a game recorded during the ban; `notified_at` once the notice is written | kept; the notices not marked are sent again after a restart |
 | Presence, queues, challenges, private codes, rate-limit counters | primary memory | - | lost: clients reconnect and re-queue |
 | Security events (failed logins...) | SQLite | batched (1 s) | kept, purged after `RETENTION_SECURITY_DAYS` |
 

@@ -27,8 +27,8 @@ test('GET /account/me: account, ratings, active sanctions, never the integrity l
     t.after(s.close);
     const u = await s.createUser({ username: 'alice', password: PW });
     s.store.ratings._set(u.id, [
-        { category: '3+2', rating: 1612, games: 42, wins: 20, draws: 5, losses: 17, peak: 1650, reachedSenior: false },
-        { category: '10+0', rating: 1500, games: 3, wins: 1, draws: 1, losses: 1, peak: 1510, reachedSenior: false },
+        { category: '3+2', rating: 1612, games: 42, wins: 20, draws: 5, losses: 17, peak: 1650, reachedSenior: false, provisional: false },
+        { category: '10+0', rating: 1500, games: 3, wins: 1, draws: 1, losses: 1, peak: 1510, reachedSenior: false, provisional: true },
     ]);
     s.store.sanctions.create({ userId: u.id, kind: 'mm_block', reason: 'abandons', startsAt: s.now() - 1000, endsAt: s.now() + 60000 });
     s.store.sanctions.create({ userId: u.id, kind: 'warning', reason: 'old', startsAt: s.now() - 9000, endsAt: s.now() - 1000 });

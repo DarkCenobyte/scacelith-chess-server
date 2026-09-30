@@ -2,11 +2,15 @@
 // shards: a player who beat three rated opponents is banned automatically for an illegal move;
 // each opponent gets the points they lost back, and Notice{RatingRestored} out of a game only: at
 // once for the one who is connected and idle, after the game in progress for the one who is
-// playing, right after Welcome for the one who was offline. Needs the openssl command line
-// (skipped without it).
+// playing, right after Welcome for the one who was offline. Then a player confirmed as a cheater
+// with the admin CLI (another process) while playing: the game in progress is refunded when it
+// is recorded, and the player starts no other game. Needs the openssl command line (skipped
+// without it).
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { startServer, haveOpenssl } from './helpers/harness.js';
 import { connect, player, challengeGame, Table, closeAll } from './helpers/players.js';
@@ -55,6 +59,13 @@ async function loseTo(winner, loser) {
     loser.client.resign(g.id);
     const ru = await loser.client.waitFor('RatingUpdate', (x) => x.game === g.id, 10000, { since: m });
     return ru.black.before - ru.black.after;
+}
+
+// The admin CLI (bin/admin.js), a process of its own on the server's database, as on a server host.
+function adminCli(...args) {
+    const bin = fileURLToPath(new URL('../../bin/admin.js', import.meta.url));
+    return new Promise((resolve, reject) => execFile(process.execPath, [bin, ...args], { env: { ...srv.env, SCACELITH_MODERATOR: 'mod' } },
+        (err, stdout, stderr) => (err ? reject(new Error(`${err.message}\n${stderr}`)) : resolve(stdout))));
 }
 
 const restored = (p, since, timeoutMs) => p.client.waitFor('Notice', (m) => m.code === N.RatingRestored, timeoutMs, { since });
@@ -118,4 +129,41 @@ test('a banned cheater\'s victims get their points back and are told out of a ga
         assert.ok(rows.every((r) => r.notified_at > 0), JSON.stringify(rows));
         assert.equal(ratingOf(id.cheat), cheatRating);
     } finally { await closeAll(cheat, idle, busy, away, other, target); }
+});
+
+test('a cheater confirmed with the CLI while playing: the game in progress is refunded when recorded, no other game starts', { skip }, async () => {
+    const cheat = await player(srv, 'clicheat'), vic = await player(srv, 'clivic'), next = await player(srv, 'clinext');
+    try {
+        seedRated(cheat, vic, next);
+        const vicId = vic.client.welcome.userId;
+        // A rated game is in progress when the moderator confirms (the CLI cannot reach the server).
+        const g = await challengeGame(cheat, vic, { baseSec: 180, incSec: 2, rated: true });
+        const t = new Table(g);
+        await t.playAll(['e2e4', 'e7e5']);
+        const conf = JSON.parse(await adminCli('integrity', 'confirm', 'clicheat', '--reason', 'engine', '--json'));
+        assert.deepEqual(conf.refunds, [], 'no game against the cheater recorded yet');
+
+        // The victim resigns: the game keeps its rating change, the points come back as it is
+        // recorded, and the victim is told once out of the game.
+        const m = vic.client.mark();
+        vic.client.resign(g.id);
+        const ru = await vic.client.waitFor('RatingUpdate', (x) => x.game === g.id, 10000, { since: m });
+        const lost = ru.black.before - ru.black.after;
+        assert.ok(lost >= 9 && lost <= 10, `K 20, equal ratings: ${lost}`);
+        assert.equal((await restored(vic, m, 10000)).arg, lost);
+        assert.equal(ratingOf(vicId), 1500);
+        const raw = db();
+        const rows = raw.prepare('SELECT game_id, victim_id, points, source, sanction_id FROM rating_refunds WHERE cheater_id = ?')
+            .all(cheat.client.welcome.userId);
+        raw.close();
+        assert.deepEqual(rows.map((r) => [r.game_id, r.victim_id, r.points, r.source, r.sanction_id]), [[g.id, vicId, lost, 'auto', conf.sanctionId]]);
+
+        // The cheater, still connected, challenges someone else: refused, disconnected as banned.
+        const mNext = next.client.mark();
+        const closed = cheat.client.waitFor('close', null, 5000);
+        cheat.client.challenge(next.name, 180, 2, true, 1);
+        assert.equal((await closed).code, CloseCode.Banned);
+        await sleep(200);
+        await assert.rejects(next.client.waitFor('ChallengeReceived', null, 10, { since: mNext }), 'no challenge reached anyone');
+    } finally { await closeAll(cheat, vic, next); }
 });

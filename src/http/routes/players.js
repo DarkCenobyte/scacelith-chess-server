@@ -122,7 +122,7 @@ export function register(router, { store, config, log, prefix = '/api/v1' }) {
         const ratings = rows.map((r) => {
             wins += r.wins; draws += r.draws; losses += r.losses; rated += r.games;
             return {
-                category: r.category, rating: r.rating, provisional: r.rated === false || r.games < provisionalGames, games: r.games,
+                category: r.category, rating: r.rating, provisional: r.provisional, games: r.games,
                 wins: r.wins, draws: r.draws, losses: r.losses, peak: r.peak,
             };
         });
