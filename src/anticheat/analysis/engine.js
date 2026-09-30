@@ -6,7 +6,9 @@
 // analyses. Every wait has a timeout: an engine that does not answer is killed and restarted,
 // and the caller gets an EngineError it can turn into a failed job.
 //
-// Scores are reported as the engine gives them: from the side to move's point of view.
+// Scores are reported as the engine gives them: from the side to move's point of view. The
+// engine's identity is learnt when it starts: its `id name` and the evaluation network(s) it
+// reports (name, net), which are part of the analysis profile (analyzer.js).
 
 import { spawn } from 'node:child_process';
 import os from 'node:os';
@@ -21,6 +23,11 @@ export class EngineError extends Error {
 }
 
 const SKIP_ONE = new Set(['seldepth', 'nodes', 'nps', 'time', 'hashfull', 'tbhits', 'currmovenumber', 'cpuload', 'currmove', 'sbhits']);
+
+// Stockfish names the network(s) it evaluates with when a search starts, e.g. "info string NNUE
+// evaluation using nn-1a298aa575a0.nnue (109MiB, ...)" (Stockfish 16: "... nn-5af11540bbfe.nnue
+// enabled"; one line per network when it has several).
+const NET_LINE = /^info string NNUE evaluation using (\S+)/;
 
 function toInt(s) {
     const v = Number.parseInt(s, 10);
@@ -121,6 +128,7 @@ export class UciEngine {
         this.log = log;
         this.proc = null;
         this.name = '';
+        this.nets = [];                 // evaluation networks the running engine reported, in order
         this.options = new Map();      // option name -> current value (to avoid resending)
         this.buffer = '';
         this.onLine = null;             // current consumer of output lines
@@ -133,7 +141,13 @@ export class UciEngine {
 
     get alive() { return !!this.proc && this.proc.exitCode === null && !this.proc.killed; }
 
-    /** Starts the process (idempotent) and completes the UCI handshake. */
+    /**
+     * The evaluation network(s) the running engine reported ('+'-joined file names), null before
+     * it started or when it reports none (an engine without NNUE, another engine).
+     */
+    get net() { return this.nets.length ? this.nets.join('+') : null; }
+
+    /** Starts the process (idempotent), completes the UCI handshake and learns its name and network. */
     async start() {
         if (this.closed) throw new EngineError('closed', 'engine closed');
         if (this.alive && !this.starting) return this;
@@ -152,6 +166,7 @@ export class UciEngine {
         this.proc = proc;
         this.buffer = '';
         this.options.clear();
+        this.nets = [];                 // a restarted engine may be another build: it reports anew
         proc.stdout.setEncoding('utf8');
         proc.stdout.on('data', (chunk) => this._onData(chunk));
         proc.stdin.on('error', () => { /* EPIPE when the engine died: reported through 'exit' */ });
@@ -183,6 +198,14 @@ export class UciEngine {
         this._setOption('Threads', this.threads);
         this._setOption('Hash', this.hashMb);
         await this.ready();
+        // The network is only named when a search starts: a one-ply search of the initial
+        // position reports it before any analysis, so every record names its full profile.
+        this._send('position startpos');
+        await this._command('go depth 1', (line) => {
+            const net = NET_LINE.exec(line)?.[1];
+            if (net && !this.nets.includes(net)) this.nets.push(net);
+            return line.startsWith('bestmove') ? true : undefined;
+        }, this.handshakeTimeoutMs);
         return this;
     }
 

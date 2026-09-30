@@ -19,8 +19,9 @@ community server, and players choose the server in the game's Options.
 - A TLS certificate for the server's public name (see [TLS certificates](#tls-certificates)).
 - Linux is the reference platform (Windows works for tests). One CPU core per game shard; the
   default is one shard per core, up to 16.
-- Optional: a Stockfish binary for the anti-cheat analysis (`ANALYSIS_ENGINE_PATH`), and an SMTP
-  account for e-mail confirmation and password resets.
+- Optional: the official Stockfish 19 binary for the anti-cheat analysis (`ANALYSIS_ENGINE_PATH`;
+  download and checksum in [docs/ANTICHEAT.md](docs/ANTICHEAT.md#engine)), and an SMTP account
+  for e-mail confirmation and password resets.
 
 ## Quick start
 
@@ -400,16 +401,18 @@ with the same `.env`. See `node bin/admin.js` for the commands and
 forged server message) forfeit the game and ban for `BAN_DURATION_HOURS` (24) automatically when
 `AUTO_SANCTION_CERTAIN_CHEATS` is on; statistical suspicion never bans by itself.
 
-One analysis engine handles roughly 1,000 to 12,000 games a day, fewer than a busy server
-plays. Moderator requests, games reported by credible players, and games of players already
-under suspicion (integrity level, open credible report) or with a suspicious anomaly are
-analysed first, but one engine claim in four still takes the oldest ordinary game, and at most
-20 flagged games of one player wait at a time (past that, a game with an anomaly of its own
-takes the place of a waiting one that has none). Ordinary games are sampled
-(`ANALYSIS_SAMPLE_RATE`) and skipped while `ANALYSIS_QUEUE_MAX` (5000) of them already wait;
-only they feed the population statistics the players are compared with. If
-`scacelith_anticheat_analysis_queue_ordinary` stays at that cap, add engines
-(`ANALYSIS_WORKERS`), lower `ANALYSIS_DEPTH_DEEP`, or lower the sample rate.
+One analysis engine (Stockfish 19 at the default depths 9/15) handles about 870 games a day on a
+VPS vCore (540 to 1,260 depending on their length), far fewer than a busy server plays. Moderator
+requests, games reported by credible players, and games of players already under suspicion
+(integrity level, open credible report) or with a suspicious anomaly are analysed first, but one
+engine claim in four still takes the oldest ordinary game, and at most 20 flagged games of one
+player wait at a time (past that, a game with an anomaly of its own takes the place of a waiting
+one that has none). Ordinary games are sampled (`ANALYSIS_SAMPLE_RATE`) and skipped while
+`ANALYSIS_QUEUE_MAX` (5000) of them already wait; only they feed the population statistics the
+players are compared with. If `scacelith_anticheat_analysis_queue_ordinary` stays at that cap, add
+engines (`ANALYSIS_WORKERS`) or lower the sample rate. The statistics are kept per analysis
+profile: changing the engine, its network, a depth or `ANALYSIS_HASH_MB` restarts them from the
+priors (docs/ANTICHEAT.md, section 3).
 
 ## Monitoring
 

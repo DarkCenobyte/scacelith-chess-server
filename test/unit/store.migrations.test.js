@@ -21,8 +21,8 @@ test('migrate creates every table from an empty database and records the migrati
     const file = path.join(dir, 'fresh.db');
     const store = openStore(testConfig({ DB_PATH: file }));
     const res = migrate(store);
-    assert.deepEqual(res.applied, [1, 2, 3, 4, 5]);
-    assert.equal(res.version, 5);
+    assert.deepEqual(res.applied, [1, 2, 3, 4, 5, 6]);
+    assert.equal(res.version, 6);
     assert.match(store.meta.get('server_id'), /^[0-9a-f-]{36}$/);
     // Inspect the schema through a second, raw connection (node:sqlite is already loaded by the store).
     const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
@@ -31,7 +31,7 @@ test('migrate creates every table from an empty database and records the migrati
     for (const t of TABLES) assert.ok(names.has(t), `table ${t}`);
     const mig = raw.prepare('SELECT version, name, applied_at, checksum FROM schema_migrations').all();
     assert.deepEqual(mig.map((m) => m.name), ['001_initial', '002_analysis_priority', '003_analysis_players', '004_fide_ratings_refunds',
-        '005_counted_games']);
+        '005_counted_games', '006_analysis_profiles']);
     assert.match(mig[0].checksum, /^[0-9a-f]{64}$/);
     assert.equal(raw.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
     raw.close();
@@ -89,7 +89,7 @@ test('migration 004: the records with games stay rated, a record without games s
     raw.close();
 
     store = openStore(cfg);
-    assert.equal(migrate(store).applied[0], 4);
+    assert.deepEqual(migrate(store).applied, [4, 5, 6]);
     assert.deepEqual(store.ratings.get(a, '3+2'), { rating: 1712, games: 3, wins: 3, draws: 0, losses: 0, peak: 1712,
         reachedSenior: false, rated: true, countedGames: 3, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0 });
     assert.equal(store.ratings.get(b, '3+2').rated, false);
@@ -119,7 +119,7 @@ test('counted games migration: the records stored before it count all their game
     raw.close();
 
     store = openStore(cfg);
-    assert.deepEqual(migrate(store).applied, [Number(counted.slice(0, 3))]);
+    assert.equal(migrate(store).applied[0], Number(counted.slice(0, 3)));
     assert.equal(store.ratings.get(a, '3+2').countedGames, 40);
     assert.equal(store.ratings.forUser(a)[0].provisional, false);
     assert.deepEqual(store.ratings.leaderboard('3+2', 100, 30).map((r) => r.userId), [a]);

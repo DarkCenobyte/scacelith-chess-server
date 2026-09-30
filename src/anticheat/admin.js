@@ -289,6 +289,7 @@ function integrityShow(ctx) {
     t += `  updated ${iso(integ.updatedAt)}${integ.reviewedBy ? `, last reviewed by ${integ.reviewedBy}` : ''}\n`;
     if (st) {
         t += `\nStatistical evidence (model v${st.model}, ${iso(st.computedAt)}): automatic level ${st.level}${st.trigger ? ` (${st.trigger})` : ''}\n`;
+        if (st.profile) t += `  analysis profile: ${st.profile}\n`;
         t += `  groups: Q ${st.groups?.Q} (quality), E ${st.groups?.E} (engine choice), J ${st.groups?.J} (jump), T ${st.groups?.T} (timing)\n`;
         for (const r of st.reasons || []) t += `  - ${r}\n`;
         if (ev.peak && ev.peak.score > st.score) t += `  peak score ${ev.peak.score} on ${iso(ev.peak.at)} (level ${ev.peak.level})\n`;
@@ -300,11 +301,14 @@ function integrityShow(ctx) {
         t += '\nReviews\n' + table(ev.reviews.map((r) => ({ at: iso(r.at), action: r.action, by: r.by, reason: r.reason || '' })), ['at', 'action', 'by', 'reason']);
     }
     const f = (x, d = 1) => (x === null || x === undefined ? '-' : Number(x).toFixed(d));
+    // Games of another analysis profile than the statistics' are not part of the scores.
+    const other = (g) => !!st?.profile && g.profile !== st.profile;
     t += '\nAnalysed games (newest first)\n' + table(games.map((g) => ({
-        game: g.gameId, cat: g.category, rating: g.rating, moves: g.n, acc: f(g.accuracy), acpl: f(g.acpl),
+        game: other(g) ? `${g.gameId}*` : g.gameId, cat: g.category, rating: g.rating, moves: g.n, acc: f(g.accuracy), acpl: f(g.acpl),
         't1%': f(g.t1Deep * 100, 0), 'fast%': f(g.t1Fast * 100, 0), 'cx%': g.t1Complex === null ? '-' : `${f(g.t1Complex * 100, 0)}/${g.nComplex}`,
         'time~cx': f(g.timeCorr, 2), cv: f(g.timeCv, 2),
     })), ['game', 'cat', 'rating', 'moves', 'acc', 'acpl', 't1%', 'fast%', 'cx%', 'time~cx', 'cv']);
+    if (games.some(other)) t += '  * analysed with another profile (engine, network, depths or hash): not in the scores above\n';
     t += '\nAnomalies (latest 50)\n' + table(anomalies.map((a) => ({ at: iso(a.at), kind: a.kind, severity: a.severity, game: a.gameId || '' })), ['at', 'kind', 'severity', 'game']);
     t += '\nReports received\n' + table(reports.map((r) => ({ id: r.id, at: iso(r.at), category: r.category, weight: r.weight, game: r.gameId, outcome: r.outcome ?? r.resolution ?? 'open', comment: String(r.comment || '').slice(0, 60) })), ['id', 'at', 'category', 'weight', 'game', 'outcome', 'comment']);
     t += '\nSanctions\n' + table(sanctions.map((x) => ({ id: x.id, kind: x.kind, source: x.source, until: iso(x.endsAt), reason: x.reason })), ['id', 'kind', 'source', 'until', 'reason']);

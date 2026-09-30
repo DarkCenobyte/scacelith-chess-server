@@ -70,6 +70,10 @@ test('real engine: features separate an assisted player from human stand-ins, sc
         return { record, features: await analyseGame(p.ana, record, { depthFast: DEPTH_FAST, depthDeep: DEPTH_DEEP, extra: { white: { ratingGames: 100 }, black: { ratingGames: 100 } } }) };
     });
     t.diagnostic(`generated and analysed ${jobs.length} games in ${Date.now() - started} ms`);
+    // One engine, one set of depths: one analysis profile, the one the populations below hold.
+    const profile = results[0].features.profile;
+    assert.ok(results.every((r) => r.features.profile === profile), profile);
+    t.diagnostic(`profile: ${profile}`);
 
     const cheat = results.filter((r) => r.record.whiteId === CHEATER || r.record.blackId === CHEATER).map((r) => sideOf(r.features, CHEATER));
     const human = [];
@@ -93,7 +97,7 @@ test('real engine: features separate an assisted player from human stand-ins, sc
     assert.ok(minCheatAcc > medianHumanAcc, `worst assisted game ${minCheatAcc} vs median human ${medianHumanAcc}`);
 
     // 2. Scoring on a fresh server (priors only): the humans are never flagged.
-    const fresh = new Population(null);
+    const fresh = new Population(null, { profile });
     for (const uid of HONEST) {
         const hist = human.filter((s) => s.userId === uid);
         for (let k = 1; k <= hist.length; k++) assert.equal(scorePlayer(hist.slice(0, k), fresh).level, 'none', `human ${uid} after ${k} games`);
@@ -105,7 +109,7 @@ test('real engine: features separate an assisted player from human stand-ins, sc
     //    is flagged, but only once enough games exist; the humans still are not.
     // (Games are only played at one rating here; they stand for the neighbouring buckets too,
     // since z-scores take the most favourable bucket of the rating band.)
-    const pop = new Population(null);
+    const pop = new Population(null, { profile });
     for (const r of results.filter((x) => x.record.id >= 100)) {
         for (const d of [-MODEL.ratingBand.established, 0, MODEL.ratingBand.established]) {
             const f = r.features;
@@ -130,7 +134,10 @@ test('real engine: the worker analyses a queued game end to end', { skip, timeou
     const config = testConfig({ ANALYSIS_ENGINE_PATH: ENGINE, ANALYSIS_DEPTH_FAST: '4', ANALYSIS_DEPTH_DEEP: '8', ANALYSIS_POLL_MS: '100' });
     const gen = new UciEngine({ path: ENGINE });
     let g;
-    try { g = await playGame(gen, { r: rng(5), white: WEAK, black: WEAK, maxPlies: 40 }); } finally { await gen.close(); }
+    // 80 plies: the weak stand-ins' games are often decided early, and the moves of a decided
+    // position are not scored; at 40 plies (at most 12 scored moves per side) a lopsided game
+    // could leave both sides under the population's 10 scored moves.
+    try { g = await playGame(gen, { r: rng(5), white: WEAK, black: WEAK, maxPlies: 80 }); } finally { await gen.close(); }
     const w = store._.addUser('white'), b = store._.addUser('black');
     store._.addGame({ id: 9001, category: '5+0', rated: true, baseMs: 300000, incMs: 0, whiteId: w, blackId: b, whiteRating: 1500, blackRating: 1500,
         endedAt: Date.now(), moves: Buffer.from(Uint16Array.from(g.moves).buffer), spentMs: Buffer.from(Uint32Array.from(g.spentMs).buffer) });
@@ -146,6 +153,7 @@ test('real engine: the worker analyses a queued game end to end', { skip, timeou
     assert.equal(job.status, 'done');
     assert.equal(job.features.plies, g.moves.length);
     assert.ok(job.features.white.n > 0 && job.features.engine.startsWith('Stockfish'));
+    assert.match(job.features.profile, /; nn-[0-9a-f]{12}\.nnue; depth 4\/8; hash 32; analysis 1$/, 'the profile names the network');
     assert.equal(store._.jobs.get(9002).status, 'failed');
     assert.ok(store.integrity.get(w), 'integrity computed for both players');
     assert.equal(store.integrity.get(w).level, 'none');

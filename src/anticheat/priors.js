@@ -9,8 +9,10 @@
 // spend more time on harder decisions. Our metrics exclude opening, forced and decided moves,
 // which lowers accuracy and T1 compared with whole-game figures; the numbers below account for
 // that roughly. Accuracy is derived from the ACPL row through the relation our own pipeline
-// shows on engine-analysed games (accuracy ~ 100 - 0.23 ACPL, checked with Stockfish 16 in
-// test/unit/anticheat.engine.test.js), so both quality metrics describe the same player.
+// shows on engine-analysed games, so both quality metrics describe the same player: accuracy ~
+// 100 - 0.275 ACPL up to an ACPL of about 90, flattening above (about 74 at 110, 70 at 150; the
+// games of test/unit/anticheat.engine.test.js analysed by Stockfish 19 at 9/15, 9/16 and 10/18,
+// 100 - 0.26 ACPL with Stockfish 16 at 10/18).
 // They are deliberately conservative: standard deviations are inflated
 // (SD_INFLATION) so that, before real data exists, z-scores are smaller than they should be.
 
@@ -20,7 +22,7 @@ const RATINGS = [600, 1000, 1500, 2000, 2500, 2900];
 
 // [mean at each rating of RATINGS], [per-game standard deviation at each rating]
 const TABLE = {
-    accuracy:  { mean: [66, 74, 82, 87, 91, 93],               sd: [10, 9, 8, 6.5, 5, 4.5] },
+    accuracy:  { mean: [66, 74, 80, 86, 91, 93],               sd: [10, 9, 8, 6.5, 5, 4.5] },
     acpl:      { mean: [150, 110, 75, 50, 32, 24],             sd: [70, 55, 40, 28, 18, 14] },
     t1Deep:    { mean: [0.30, 0.35, 0.42, 0.49, 0.56, 0.60],   sd: [0.10, 0.10, 0.10, 0.10, 0.09, 0.09] },
     t1Fast:    { mean: [0.30, 0.35, 0.41, 0.47, 0.53, 0.56],   sd: [0.10, 0.10, 0.10, 0.10, 0.09, 0.09] },

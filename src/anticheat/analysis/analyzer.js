@@ -8,7 +8,9 @@
 //     the hash cleared before each search so the answer is really a shallow engine's choice and
 //     does not inherit the deep pass.
 // Single thread + fixed depth + controlled hash make the analysis reproducible: running it again
-// on the same engine build gives the same numbers (evidence a moderator can re-check).
+// with the same engine version and network (any build variant) gives the same numbers (evidence a
+// moderator can re-check). Every record names its analysis profile (analysisProfile below), and
+// only records of the same profile are ever compared or pooled.
 //
 // A move is scored unless:
 //   * it is among the first OPENING_PLIES_PER_SIDE moves of its side (opening theory);
@@ -34,6 +36,26 @@ export const ANALYSIS = Object.freeze({
     minTimedMoves: 8,       // time features need at least this many scored moves with a clock time
     multiPv: 3,
 });
+
+/**
+ * Analysis profile of a record: what must be equal for two games' features to be comparable.
+ * Another engine or version, network, depth, hash size or version of these rules moves the
+ * numbers (on the same games, Stockfish 19 at 9/15 finds the human stand-ins' ACPL 26 % higher
+ * than Stockfish 16 at 10/18, and scores 16 % fewer moves), so the population statistics are
+ * kept per profile and a player is scored on the games of one profile (scoring.js). The CPU does
+ * not matter: one thread at a fixed depth gives the same numbers with every build variant.
+ * @param {{ engine: string, net?: string|null, depthFast: number, depthDeep: number, hashMb?: number|null }} p
+ * @returns {string} e.g. 'Stockfish 19; nn-1a298aa575a0.nnue; depth 9/15; hash 32; analysis 1'
+ */
+export function analysisProfile({ engine, net = null, depthFast, depthDeep, hashMb = null }) {
+    const parts = [String(engine || 'engine')];
+    if (net) parts.push(String(net));
+    parts.push(`depth ${depthFast}/${depthDeep}`);
+    if (hashMb) parts.push(`hash ${hashMb}`);
+    parts.push(`analysis ${ANALYSIS.version}`);
+    // '|' separates the parts of the population statistics' keys.
+    return parts.join('; ').replaceAll('|', '/');
+}
 
 /**
  * Centipawn value of an engine line from the side to move's point of view (mate in n: +/-
@@ -195,7 +217,7 @@ export function normaliseGame(rec) {
 
 /**
  * Analyses a finished game and returns the features record stored by store.analysis.complete.
- * @param {object} engine
+ * @param {object} engine   UciEngine-like (name, and when known net and hashMb: the profile)
  * @param {object} record   game record (store.games.byId or the finishBatch record)
  * @param {{ depthFast: number, depthDeep: number, extra?: { white?: object, black?: object } }} o
  *        extra: per-side context added to the features (rating games count at analysis time...)
@@ -206,6 +228,8 @@ export async function analyseGame(engine, record, { depthFast, depthDeep, extra 
     const started = Date.now();
     const pos = await analysePositions(engine, uci, { depthFast, depthDeep });
     const f = computeFeatures(game, pos);
+    // The engine learnt its name and network when it started (UciEngine.start).
+    const name = engine.name || 'engine', net = engine.net ?? null, hashMb = engine.hashMb ?? null;
     return {
         v: ANALYSIS.version,
         gameId: game.id,
@@ -214,8 +238,9 @@ export async function analyseGame(engine, record, { depthFast, depthDeep, extra 
         incMs: game.incMs,
         plies: game.moves.length,
         endedAt: game.endedAt,
-        engine: engine.name || 'engine',
+        engine: name, net, hashMb,
         depthFast, depthDeep,
+        profile: analysisProfile({ engine: name, net, depthFast, depthDeep, hashMb }),
         analysedAt: Date.now(),
         durationMs: Date.now() - started,
         white: { userId: game.whiteId, rating: game.whiteRating, ...(extra.white || {}), ...f.white },

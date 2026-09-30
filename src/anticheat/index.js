@@ -17,10 +17,12 @@
 //
 // Deviations from / precisions on docs/DESIGN.md (the contracts left these open):
 //   * store.integrity.populationStats(prefix) / updatePopulation(observations, now): statistics are
-//     kept per '<category>|<ratingBucket>|<metric>' (DESIGN only says "ratingBucket"; they must
-//     also be per time control). populationStats('<category>|<ratingBucket>') returns
-//     { <metric>: { n, mean, m2 } }; the analysis process (the only writer) sends one
-//     { key, value } observation per metric and game, which the store merges (Welford).
+//     kept per '<profile>|<category>|<ratingBucket>|<metric>' (DESIGN only says "ratingBucket";
+//     they must also be per time control, and per analysis profile: games analysed by another
+//     engine or at other depths are not comparable). populationStats('<profile>|<category>|
+//     <ratingBucket>') returns { <metric>: { n, mean, m2 } }; the analysis process (the only
+//     writer) sends one { key, value } observation per metric and game, which the store merges
+//     (Welford).
 //   * store.analysis.forUser(userId, limit) must return that player's completed analyses, newest
 //     first, each row carrying the `features` object given to complete() (or being it).
 //   * store.reports.forReporter(reporterId) (not in DESIGN) is used when present to weigh a

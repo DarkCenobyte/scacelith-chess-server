@@ -133,7 +133,17 @@ priority), claims rated games of at least `ANALYSIS_MIN_PLIES` from the queue, a
    per-move table for moderators.
 
 Single thread, fixed depth and controlled hash make the analysis **reproducible** with the same
-engine build: a moderator can re-run it and get the same numbers.
+engine version and network: a moderator can re-run it and get the same numbers. The CPU does not
+matter: the sse41, avx2, bmi2, vnni512 and avx512icl builds of Stockfish 19 and its official
+binary gave identical features on the same games (another hash size did not).
+
+**Analysis profile.** Each engine learns, when it starts, the engine's `id name` and the
+network(s) it reports on a one-ply search (`info string NNUE evaluation using ...`). Every
+analysed game records its profile: engine, network, depths, hash and the version of the rules
+above, for example `Stockfish 19; nn-1a298aa575a0.nnue; depth 9/15; hash 32; analysis 1`.
+Features of different profiles are not comparable (on the same games, Stockfish 19 at 9/15 finds
+the human stand-ins' ACPL 26 % higher than Stockfish 16 at 10/18, and scores 16 % fewer moves), so
+the statistics never mix them (section 4).
 
 **Queue policy** (docs/DESIGN.md 6.5). The engine takes the highest priority first, then the
 oldest job: a moderator request, then a game a credible player reported (`cheating` or `other`,
@@ -158,26 +168,64 @@ a suspicious game wait weeks behind ordinary ones, and the population statistics
 by a steady random sample of ordinary games: only games claimed at ordinary priority feed them
 (section 4). The policy changes no level and no sanction.
 
-Cost (Stockfish 16, one core of the test container): depth 10 MultiPV 3 about 60 ms per
-position, depth 14 about 0.4 s, depth 18 about 2 s. With the defaults (10/18) a 40- to 60-move
-game costs 2 to 4 minutes of one core; raise `ANALYSIS_WORKERS` or lower `ANALYSIS_DEPTH_DEEP`
-(14 is about 5 times cheaper) if `scacelith_anticheat_analysis_queue_ordinary` stays at
-`ANALYSIS_QUEUE_MAX` (ordinary games are then being skipped), or lower `ANALYSIS_SAMPLE_RATE`
-to analyse a smaller, steadier share of them. A job whose engine times out
-(`ANALYSIS_POSITION_TIMEOUT_MS`) or crashes is marked failed and the engine restarted; an engine
-that cannot start makes the worker wait (5 s .. 5 min) without claiming jobs.
+**Cost.** CPU per position analysed (both passes), over the 38 games of the real-engine test
+analysed with the `x86-64-bmi2` build of each engine (the one an OVH vCore runs) on one core of
+the development container: Stockfish 19 takes 830 ms at 9/15, 1.23 s at 9/16 and about 2.4 s at
+10/18 (1.96 times 9/16), Stockfish 16 0.97 s at its former defaults 10/18. On an OVH vCore that is
+about 1.5 s per position at 9/15 (inferred: 1.83 times the container, from the speed factors of
+[SIZING.md](SIZING.md)), so a game of 80 plies (65 positions analysed) takes about 100 s of one
+core: an engine analyses about 870 games a day, 540 to 1,260 for games of 120 to 60 plies
+(inferred). A host with AVX-512 runs a faster build (on the container, 9/16 took 0.90 s instead
+of 1.23 s). Raise `ANALYSIS_WORKERS` if `scacelith_anticheat_analysis_queue_ordinary` stays at
+`ANALYSIS_QUEUE_MAX` (ordinary games are then being skipped), or lower `ANALYSIS_SAMPLE_RATE` to
+analyse a smaller, steadier share of them; lower depths are cheaper too, but restart the
+statistics (below). A job whose engine times out (`ANALYSIS_POSITION_TIMEOUT_MS`) or crashes is
+marked failed and the engine restarted; an engine that cannot start makes the worker wait
+(5 s .. 5 min) without claiming jobs.
+
+### Engine
+
+Install the official **Stockfish 19** release for Linux x86-64: one file that picks the best
+build for the CPU when it starts (on an OVH vCore, a Haswell without AVX-512, the `x86-64-bmi2`
+build) and needs glibc 2.35 or later (Ubuntu 22.04, Debian 12 or later).
+
+```sh
+curl -LO https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+sha256sum stockfish-linux-x86-64-universal.tar.gz
+# 9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f (the archive the calibration used)
+tar xzf stockfish-linux-x86-64-universal.tar.gz
+sudo install -m 755 stockfish/stockfish-linux-x86-64-universal /usr/local/bin/stockfish-19
+stockfish-19 compiler | grep architecture      # the build it picked on this CPU
+```
+
+Compare the checksum with the digest the release page shows next to the asset too. Then set
+`ANALYSIS_ENGINE_PATH=/usr/local/bin/stockfish-19`. An engine takes about 270 MB, 110 MB more
+than Stockfish 16 (its network loaded is 109 MiB); a second one (`ANALYSIS_WORKERS=2`) adds about
+70 MB, because the engines of one user share a single copy of the network through a socket under
+`/tmp` (the unit's `PrivateTmp` keeps it private to the service). The defaults
+(`ANALYSIS_DEPTH_FAST=9`, `ANALYSIS_DEPTH_DEEP=15`) are chosen for it: on an OVH vCore they cost
+14 % less than Stockfish 16 at the former defaults 10/18 (9/16 would cost 27 % more), and they
+separate the assisted player of the real-engine test from the human stand-ins as well as 9/16
+and 10/18 do (section 4, calibration). Stockfish 16 or any other UCI engine still works; the
+statistics are then those of its own profile.
+
+**Changing the engine, its network, a depth or `ANALYSIS_HASH_MB` restarts the statistics**: the
+population of the new profile starts from the priors, and every player is scored on their games
+of the new profile only, keeping the level they had until five of them are analysed. Plan such a
+change; going back to an earlier profile finds its statistics as they were.
 
 ## 4. Statistical model (`scoring.js`, `priors.js`)
 
 ### Population statistics
 
-For every (category, 100-point rating bucket) the analysis process keeps Welford statistics (n,
-mean, M2) of each per-game metric of rated games. Until a bucket has its own data, **priors**
-stand in: hard-coded means and per-game standard deviations by rating (accuracy, ACPL, T1 by
-rating from published human data: lichess accuracy/ACPL statistics and Regan & Haworth /
-Guid & Bratko engine-matching studies; accuracy derived from the ACPL row through the relation
-our pipeline measures, accuracy ~ 100 - 0.23 ACPL), adjusted by time class (bullet, blitz,
-rapid, classical: faster games are less accurate). The prior counts as 40 games and its standard
+For every (analysis profile, category, 100-point rating bucket) the analysis process keeps
+Welford statistics (n, mean, M2) of each per-game metric of rated games. Until a bucket has its
+own data, **priors** stand in: hard-coded means and per-game standard deviations by rating
+(accuracy, ACPL, T1 by rating from published human data: lichess accuracy/ACPL statistics and
+Regan & Haworth / Guid & Bratko engine-matching studies; accuracy derived from the ACPL row
+through the relation our pipeline measures, accuracy ~ 100 - 0.275 ACPL up to an ACPL of about
+90, flattening above: about 74 at 110, 70 at 150), adjusted by time class (bullet, blitz, rapid,
+classical: faster games are less accurate). The prior counts as 40 games and its standard
 deviations are inflated by 25%, so a young server is deliberately cautious; the server's own
 data takes over bucket by bucket. Only the games of the random sample feed the population (the
 jobs claimed at ordinary priority, drawn with `ANALYSIS_SAMPLE_RATE`): reported, flagged and
@@ -185,6 +233,16 @@ moderator-requested games are analysed first and in full, so counting them would
 baseline towards the very players it judges. Values entering the population are winsorised at
 4 sd, and games of players already `high_confidence` or `confirmed` are left out (cheaters must
 not make cheating look normal).
+
+**One profile at a time.** A game joins the population of its own analysis profile (section 3),
+and a player is judged on their games of the profile of the game just analysed, against that
+profile's population: games analysed by another engine, network, depths or hash never enter the
+same statistics or the same score. After a change of profile the new population starts from the
+priors, and a player whose recent games are of the earlier profile keeps their level until five
+games of the new one can be judged (`integrity show` marks the games of another profile). The
+statistics of an earlier profile stay in the database, unused; the migration that introduced
+the profiles (`analysis_profiles`) deleted those written before them, since nothing tells which
+engine produced them.
 
 ### Scores
 
@@ -243,18 +301,32 @@ rows, where `integrity show` reads them.
   population with personal offsets, 1% strongly underrated, personal timing styles): no honest
   player flagged (3000 players with learned statistics, 1500 with priors only, each checked at
   5, 10, 20 and 30 games); honest players improving by one per-game sd within 10 games: about 1%
-  suspected. Full engine users (profile measured with Stockfish): with learned statistics
-  flagged after a median of 10 to 19 games from 1000 to 2400 (2400 rapid: not within 30 games);
-  with priors only (fresh server) after about 20 games at 1000, 28 at 1500 blitz, and mostly not
-  within 30 games above.
-* Real engine (`test/unit/anticheat.engine.test.js`, Stockfish 16): an assisted player (depth 12
-  best move, relayed with 2-5 s delays) against human stand-ins (random plausible moves among
-  the top 4 at low depth, thinking longer on harder moves). Assisted: accuracy 98.3, ACPL 6,
-  T1 0.69, time/complexity correlation -0.04, time CV 0.26; stand-ins: 80.4, 67, 0.26, 0.19,
-  0.87. With the server's own statistics (the stand-ins' games), the assisted player is `none`
-  for the first 4 games, `suspected` around the 5th and `high_confidence` from the 12th; the
-  stand-ins are never flagged. On a fresh server (priors only) the same 18 games stay just
-  under the thresholds (Q 3.08, T 1.86): the intended caution of the inflated priors.
+  suspected. Full engine users (profile measured with Stockfish 19): with learned statistics
+  flagged after a median of 11 to 13 games at 1000 and 1500, 15 (blitz) to 19 (rapid) at 2000
+  and 24 at 2400 blitz (2400 rapid: 5 % within 30 games); with priors only (fresh server) after
+  18 games at 1000, 24 to 26 at 1500, and mostly not within 30 games above.
+* Real engine (`test/unit/anticheat.engine.test.js` with `SCACELITH_TEST_ENGINE` set to the
+  official Stockfish 19 binary, analysis at 6/10): an assisted player (depth 12 best move,
+  relayed with 2-5 s delays) against human stand-ins (random plausible moves among the top 4 at
+  low depth, thinking longer on harder moves). Assisted: accuracy 98.2, ACPL 7, T1 0.69,
+  time/complexity correlation 0.02, time CV 0.25; stand-ins: 80.1, 73, 0.28, 0.21, 0.82. With
+  the server's own statistics (the stand-ins' games), the assisted player is `none` for the
+  first 11 games and `high_confidence` from the 12th; the stand-ins are never flagged. On a
+  fresh server (priors only) the same 18 games stay just under the thresholds (Q 3.17, T 1.75):
+  the intended caution of the inflated priors. With Stockfish 16 (its own games): assisted 98.3,
+  6, 0.69, -0.04, 0.26, stand-ins 80.4, 67, 0.26, 0.19, 0.87; `suspected` at the 5th game and
+  `high_confidence` from the 12th with the server's statistics, and on a fresh server
+  `high_confidence` at the 18th (Q 3.21, T 1.86).
+* Production depths (the real-engine test's 38 games, generated by Stockfish 19, analysed at hash
+  32 by each profile): effect sizes of the assisted player against the stand-ins (accuracy, ACPL,
+  T1, T1 in complex positions, time CV) 3.60, -2.74, 3.04, 2.50, -5.06 for Stockfish 19 at 9/15;
+  3.78, -2.71, 3.06, 2.07, -5.10 at 9/16; 3.85, -2.82, 3.25, 2.24, -4.79 at 10/18; and 3.83,
+  -2.99, 4.19, 3.81, -4.17 for Stockfish 16 at 10/18. With statistics learned from the stand-ins,
+  the assisted player reaches `high_confidence` at the 14th game at 9/15, the 13th at 9/16 and
+  10/18, and the 14th with Stockfish 16; the stand-ins' scores stay under 0.45 with Stockfish 19
+  (under 0.9 with Stockfish 16); on a fresh server all four stay under the thresholds after 18
+  games (Q 2.97 to 3.16). The differences between the depths are within the noise of 18 games,
+  while 9/15 costs a third less than 9/16 (Cost, section 3).
 
 Known limits: players using the engine for a minority of their moves (about half or less) look
 like strong humans and are not flagged by statistics within 30 games; top players (2400+) have
@@ -315,14 +387,16 @@ What to look at in `integrity show`:
    stronger than Q alone).
 2. **The per-game table**: is the high accuracy spread over many games or a few? Do T1 and
    accuracy stay high in complex positions (`cx%`)? Engine users are consistently near-perfect;
-   strong humans have bad games too.
+   strong humans have bad games too. A game marked `*` was analysed with another profile than
+   the evidence (named under it) and is not part of the scores.
 3. **Timing**: humans think longer in complex positions (`time~cx` positive) and vary a lot (CV
    around 1); a relay shows no correlation and a low CV. Bullet and bad connections flatten
    timing too, so timing is only corroboration.
 4. **History and context**: rating trajectory, account age, a jump that coincides with a new
    account or a long break, reports from credible reporters, protocol anomalies.
-5. When in doubt, replay a few games with an engine yourself (the analysis is reproducible) and
-   compare with the player's over-the-board style. `clear` records your review: the automatic
+5. When in doubt, replay a few games with an engine yourself (the analysis is reproducible with
+   the engine, network, depths and hash of its profile) and compare with the player's
+   over-the-board style. `clear` records your review: the automatic
    model does not re-flag on the same evidence.
 
 A ban from the CLI is written to the database only (the CLI has no network access to the
@@ -372,7 +446,7 @@ exits with an error that gives the `refunds apply` to run.
 | Integrity level, score, evidence (statistics, peak, certain cheats, reviews) | `store.integrity` | kept while the account exists |
 | Per-game features of analysed games (numbers, compact per-move table; no positions beyond the game's own moves) | `store.analysis` | kept with the game (the scoring and `integrity show` read a player's latest analysed games, however old) |
 | Failed analysis jobs (no features, an error message) | `store.analysis` | deleted 30 days after the failure by the retention purge |
-| Population statistics (n, mean, M2 per metric, category and rating bucket; no personal data) | `store.integrity` population | kept |
+| Population statistics (n, mean, M2 per metric, analysis profile, category and rating bucket; no personal data) | `store.integrity` population | kept, those of an earlier analysis profile too (unused) |
 | Reports (reporter, reported, game, category, comment, weight, outcome, moderator) | `store.reports` | kept; comments are only shown to moderators |
 | Moderator actions | `store.security` (`moderator_action`) | security retention |
 | Rating refunds (game, victim, cheater, category, points, time, ban or moderator, notified) | `rating_refunds` | kept |
@@ -385,10 +459,10 @@ No IP address is stored by this module (reports and moderator events carry `ip: 
 DESIGN.md names some Store methods without their exact arguments; this module assumes (see the
 header of `src/anticheat/index.js`):
 
-* `integrity.populationStats('<category>|<bucket>')` returns `{ <metric>: { n, mean, m2 } }`,
-  and `integrity.updatePopulation([{ key: '<category>|<bucket>|<metric>', value }], now)` sends
-  one observation per metric and game, which the store merges (Welford); the analysis process
-  is the only writer;
+* `integrity.populationStats('<profile>|<category>|<bucket>')` returns `{ <metric>: { n, mean,
+  m2 } }`, and `integrity.updatePopulation([{ key: '<profile>|<category>|<bucket>|<metric>',
+  value }], now)` sends one observation per metric and game, which the store merges (Welford);
+  the analysis process is the only writer;
 * `analysis.forUser(userId, limit)` returns the player's completed analyses, newest first, each
   row with the `features` given to `complete()`;
 * `reports.forReported(userId)` rows carry `weight` and `at`; the optional

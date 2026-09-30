@@ -201,13 +201,16 @@ key('BAN_DURATION_HOURS', { section: 'anticheat', type: 'int', default: 24, min:
 key('RATING_REFUND_DAYS', { section: 'anticheat', type: 'int', default: 60, min: 0, max: 3650,
     desc: 'When a player is banned as a cheater (a certain cheat, or a moderator\'s integrity confirm), each opponent who lost rating points to them in a rated game that ended within this many days before the ban gets those points back on their current rating (docs/ANTICHEAT.md, rating refunds). A game still in progress at the ban (or not recorded yet) is refunded when it is recorded, while the player is banned. 0: no refunds unless a moderator asks for them (scacelith-admin refunds apply).' });
 key('ANALYSIS_ENGINE_PATH', { section: 'anticheat', type: 'path', default: '',
-    desc: 'UCI engine (Stockfish) used to analyse rated games after they end. Empty: engine-based statistics are disabled (timing and reports still count).' });
+    desc: 'UCI engine used to analyse rated games after they end: the official Stockfish 19 release binary for Linux x86-64 (docs/ANTICHEAT.md, section 3). Empty: engine-based statistics are disabled (timing and reports still count). Another engine or network restarts the statistics (they are kept per analysis profile).' });
 key('ANALYSIS_WORKERS', { section: 'anticheat', type: 'int', default: 1, min: 0, max: 64, desc: 'Engine processes analysing games (each uses one core, at low priority).' });
-key('ANALYSIS_DEPTH_FAST', { section: 'anticheat', type: 'int', default: 10, min: 4, max: 30, desc: 'Shallow analysis depth (a weak engine\'s choice).' });
-key('ANALYSIS_DEPTH_DEEP', { section: 'anticheat', type: 'int', default: 18, min: 6, max: 40, desc: 'Deep analysis depth (a strong engine\'s choice).' });
+key('ANALYSIS_DEPTH_FAST', { section: 'anticheat', type: 'int', default: 9, min: 4, max: 30,
+    desc: 'Shallow analysis depth (a weak engine\'s choice). Changing it restarts the statistics, like ANALYSIS_DEPTH_DEEP.' });
+key('ANALYSIS_DEPTH_DEEP', { section: 'anticheat', type: 'int', default: 15, min: 6, max: 40,
+    desc: 'Deep analysis depth (a strong engine\'s choice). On a VPS vCore (AVX2), Stockfish 19 at 9/15 costs 14 % less than Stockfish 16 at the former 10/18 and separates engine users from humans as well as 9/16 or 10/18 (docs/ANTICHEAT.md, calibration). Changing it restarts the statistics (they are kept per analysis profile: engine, network, depths, hash).' });
 key('ANALYSIS_MIN_PLIES', { section: 'anticheat', type: 'int', default: 30, min: 10, desc: 'Shorter games are not analysed.' });
 key('REPORTS_PER_DAY', { section: 'anticheat', type: 'int', default: 5, min: 1, desc: 'Reports one player may file per day.' });
-key('ANALYSIS_HASH_MB', { section: 'anticheat', type: 'int', default: 32, min: 1, max: 4096, desc: 'Transposition table of each analysis engine, in MB.' });
+key('ANALYSIS_HASH_MB', { section: 'anticheat', type: 'int', default: 32, min: 1, max: 4096,
+    desc: 'Transposition table of each analysis engine, in MB. Changing it restarts the statistics, like ANALYSIS_DEPTH_DEEP.' });
 key('ANALYSIS_POSITION_TIMEOUT_MS', { section: 'anticheat', type: 'int', default: 120000, min: 1000, max: 3600000,
     desc: 'Longest search of one position; an engine that exceeds it is restarted and the game is marked failed.' });
 key('ANALYSIS_POLL_MS', { section: 'anticheat', type: 'int', default: 5000, min: 100, max: 3600000, desc: 'Interval at which an idle analysis engine looks for new games to analyse.' });

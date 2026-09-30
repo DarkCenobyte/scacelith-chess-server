@@ -882,10 +882,10 @@ independent signals agree over >= 10 games and >= 300 non-trivial moves), `confi
 decision via `bin/admin.js`, or a certain protocol cheat). Reports raise the review priority,
 weighted by the reporter's credibility, never the level itself.
 
-**Analysis backlog.** One engine analyses about 1,000 to 12,000 games a day (depth 18, MultiPV 3,
-from ply 16 on), far fewer than a busy server finishes, so the queue is bounded and prioritized
-instead of growing without end. Every job has a priority and the engine takes the highest first,
-then the oldest:
+**Analysis backlog.** One engine analyses about 540 to 1,260 games a day on a VPS vCore (Stockfish
+19 at depths 9/15, MultiPV 3, from ply 16 on), far fewer than a busy server finishes, so the queue
+is bounded and prioritized instead of growing without end. Every job has a priority and the engine
+takes the highest first, then the oldest:
 
 1. `manual`: a moderator asked for the (re-)analysis of a game (`store.analysis.enqueue`);
 2. `report`: a credible player reported the game (category `cheating` or `other`, stored weight

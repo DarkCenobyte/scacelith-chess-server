@@ -5,6 +5,7 @@ import { createAnalysisWorker } from '../../src/anticheat/analysis/worker.js';
 import { EngineError } from '../../src/anticheat/analysis/engine.js';
 import { createFakeStore } from '../../src/anticheat/testing/fake-store.js';
 import { AnalysisPriority } from '../../src/store/index.js';
+import { MODEL } from '../../src/anticheat/scoring.js';
 
 const config = testConfig({ ANALYSIS_ENGINE_PATH: '/fake/engine', ANALYSIS_DEPTH_FAST: '4', ANALYSIS_DEPTH_DEEP: '8', ANALYSIS_POLL_MS: '100' });
 
@@ -24,8 +25,8 @@ function fakeEngine(uciOf) {
     };
 }
 
-function addGame(store, id, plies = 40, priority = AnalysisPriority.ordinary) {
-    const w = store._.addUser(`w${id}`), b = store._.addUser(`b${id}`);
+function addGame(store, id, plies = 40, priority = AnalysisPriority.ordinary, players = {}) {
+    const w = players.w ?? store._.addUser(`w${id}`), b = players.b ?? store._.addUser(`b${id}`);
     const moves = Array.from({ length: plies }, (_, i) => (i % 64) | (((i + 9) % 64) << 6));
     store._.addGame({ id, category: '5+0', rated: true, baseMs: 300000, incMs: 0, whiteId: w, blackId: b, whiteRating: 1500, blackRating: 1500,
         endedAt: 1_800_000_000_000 + id, moves: Uint16Array.from(moves), spentMs: Uint32Array.from(moves.map((_, i) => 1000 + (i * 37) % 900)) });
@@ -48,7 +49,9 @@ test('processJob: features stored, both players scored, population updated', asy
     assert.equal(store._.jobs.get(11).status, 'done');
     assert.equal(store.integrity.get(w).level, 'none');
     assert.equal(store.integrity.get(b).evidence.statistics.games, 1);
-    assert.equal(store._.population.get('5+0|1500|accuracy').n, 2);
+    assert.equal(f.profile, 'fake; depth 4/8; analysis 1');
+    assert.equal(store.integrity.get(b).evidence.statistics.profile, f.profile);
+    assert.equal(store._.population.get(`${f.profile}|5+0|1500|accuracy`).n, 2);
     assert.equal(worker.stats.analysed, 1);
 });
 
@@ -78,8 +81,32 @@ test('only games claimed at ordinary priority (the random sample) feed the popul
     addGame(store, 45);
     const job = store.analysis.next(1, 't', Date.now())[0];
     assert.deepEqual([job.gameId, job.priority], [45, P.ordinary]);
-    await worker.processJob(engine, job);
-    assert.equal(store._.population.get('5+0|1500|accuracy').n, 2);
+    const f = await worker.processJob(engine, job);
+    assert.equal(store._.population.get(`${f.profile}|5+0|1500|accuracy`).n, 2);
+});
+
+test('another engine restarts the statistics: its own population, players scored on its games, levels kept until judged', async () => {
+    const store = createFakeStore();
+    const first = addGame(store, 61);
+    const players = { w: first.w, b: first.b };
+    const { moveToUci } = await import('../../src/anticheat/analysis/moves.js');
+    const best = (ply) => (ply < first.moves.length ? moveToUci(first.moves[ply]) : null);
+    const before = fakeEngine(best);
+    const after = { ...fakeEngine(best), name: 'fake 2' };
+    const worker = createAnalysisWorker({ config, store, engineFactory: () => before, workerId: 't' });
+    const old = await worker.processJob(before, store.analysis.next(1, 't', Date.now())[0]);
+    // A level reached with the earlier engine (the model would not flag these few games).
+    store.integrity.set(first.w, { level: 'suspected', score: 3.6, evidence: {} });
+    for (let i = 1; i <= MODEL.suspected.minGames; i++) {
+        addGame(store, 61 + i, 40, AnalysisPriority.ordinary, players);
+        const f = await worker.processJob(after, store.analysis.next(1, 't', Date.now())[0]);
+        assert.notEqual(f.profile, old.profile);
+        const st = store.integrity.get(first.w).evidence.statistics;
+        assert.deepEqual([st.profile, st.games], [f.profile, i], 'scored on the games of the new profile only');
+        assert.equal(store.integrity.get(first.w).level, i < MODEL.suspected.minGames ? 'suspected' : 'none', `after ${i} games of the new profile`);
+        assert.equal(store._.population.get(`${f.profile}|5+0|1500|accuracy`).n, 2 * i);
+    }
+    assert.equal(store._.population.get(`${old.profile}|5+0|1500|accuracy`).n, 2, 'the earlier population is left as it was');
 });
 
 test('a job whose game is missing, or whose engine crashes, is marked failed', async () => {

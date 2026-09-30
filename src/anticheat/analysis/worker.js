@@ -1,7 +1,8 @@
 // Analysis worker: claims finished rated games from the analysis queue, runs the engine over
 // them, stores the features and updates both players' integrity level and, for the games of the
 // ordinary random sample only, the population statistics. One loop per engine (ANALYSIS_WORKERS
-// engines, one core each).
+// engines, one core each). Everything statistical is per analysis profile (analyzer.js): a game
+// joins, and its players are judged against, the population of the profile it was analysed with.
 
 import os from 'node:os';
 import { metrics } from '../../metrics.js';
@@ -38,7 +39,7 @@ export function createAnalysisWorker({ config, store, log = null, engineFactory 
         path: config.analysisEnginePath, threads: 1, hashMb: config.analysisHashMb || 32,
         timeoutMs: config.analysisPositionTimeoutMs || 60000, log,
     }));
-    const population = new Population(store, { now });
+    const populations = new Map();     // analysis profile -> Population
     const stats = { analysed: 0, failed: 0, running: 0 };
     let stopping = false;
     const sleepers = new Set();
@@ -54,6 +55,16 @@ export function createAnalysisWorker({ config, store, log = null, engineFactory 
     function claim() {
         const jobs = store.analysis.next(1, workerId, now());
         return Array.isArray(jobs) && jobs.length ? jobs[0] : null;
+    }
+
+    function populationOf(profile) {
+        let pop = populations.get(profile);
+        if (!pop) {
+            pop = new Population(store, { profile, now });
+            populations.set(profile, pop);
+            log?.info('analysis profile', { profile });
+        }
+        return pop;
     }
 
     function ratingGames(userId, category) {
@@ -79,6 +90,7 @@ export function createAnalysisWorker({ config, store, log = null, engineFactory 
             const features = await analyseGame(engine, record, { depthFast: config.analysisDepthFast, depthDeep: config.analysisDepthDeep, extra });
             features.gameId = features.gameId ?? gameId;
             writeStructured((f) => store.analysis.complete(gameId, f), features);
+            const population = populationOf(features.profile);
             // Score the players first (their new game is judged against the population as it
             // was), then let the game join the population, but only a game claimed at ordinary
             // priority: those are the random sample of the rated games (ANALYSIS_SAMPLE_RATE).
@@ -142,7 +154,6 @@ export function createAnalysisWorker({ config, store, log = null, engineFactory 
     return {
         stats,
         processJob,
-        population,
         run() {
             if (!running) {
                 log?.info('analysis worker started', { engines: count, depthFast: config.analysisDepthFast, depthDeep: config.analysisDepthDeep, workerId });
