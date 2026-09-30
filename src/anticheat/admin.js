@@ -12,7 +12,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from 'node:sqlite';
 import { readIntegrity, writeIntegrity, writeStructured, parseMaybeJson, levelRank, LEVELS, HOUR_MS, DAY_MS } from './util.js';
-import { refundVictims, refundWindowStart, victimTotals } from './refunds.js';
+import { CheatBanReason, isCheatingBan, refundVictims, refundWindowStart, victimTotals } from './refunds.js';
 import { reviewPriority, recentReportWeight } from './reports.js';
 import { sideOf } from './scoring.js';
 
@@ -22,7 +22,8 @@ export const USAGE = `Usage: scacelith-admin <command> [options]
 
 Accounts
   user show <name>                            account, ratings, sanctions, integrity summary
-  user ban <name> --hours N --reason TEXT     ban (applies at the next connection or game) [--revoke-sessions]
+  user ban <name> --hours N --reason TEXT     ban for anything but cheating, no refunds (applies at the
+                                              next connection or game) [--revoke-sessions]
   user unban <name>                           lift the active bans
   user reset-mfa <name>                       disable TOTP, delete recovery codes, log out everywhere
   user verify-email <name>                    mark the e-mail address verified
@@ -34,13 +35,14 @@ Integrity
   integrity confirm <name> --reason TEXT [--hours N] [--keep-reports] [--refund-since DATE | --no-refund]
                                               level confirmed + ban (open cheating reports -> actioned) +
                                               rating refunds of the games since DATE (default:
-                                              RATING_REFUND_DAYS before now)
+                                              RATING_REFUND_DAYS before now) and of those recorded
+                                              during the ban; --no-refund: none of them
   integrity clear <name> [--reason TEXT] [--dismiss-reports]
 
 Rating refunds (the points the victims of a confirmed cheater lost to them, given back)
   refunds apply <name> [--since DATE]         refunds of a confirmed cheater's games since DATE (default:
-                                              RATING_REFUND_DAYS before their latest ban); those
-                                              already given are skipped
+                                              RATING_REFUND_DAYS before their latest ban for
+                                              cheating); those already given are skipped
   refunds list [<name>] [--victim NAME] [--limit N]
                                               refunds of a cheater's games, received by a victim, or all
 
@@ -201,6 +203,12 @@ function userBan(ctx) {
     const u = requireUser(ctx, ctx.args.positional[2]);
     const hours = intFlag(ctx, 'hours', { min: 1, max: 87600 });
     const reason = textFlag(ctx, 'reason', { required: true });
+    // The reason of a ban tells whether it was given for cheating (refunds.js CheatBanReason):
+    // this ban is not, and refunds nothing.
+    if (isCheatingBan({ kind: 'ban', source: 'moderator', reason })) {
+        throw new AdminError(`a reason starting with "${CheatBanReason.confirmed}" or "${CheatBanReason.confirmedNoRefund}" marks a ban for cheating: `
+            + 'use integrity confirm for one, or word the reason differently');
+    }
     const now = ctx.now(), until = now + hours * HOUR_MS;
     const id = ctx.store.sanctions.create({ userId: u.id, kind: 'ban', reason, source: 'moderator', gameId: null, startsAt: now, endsAt: until, createdBy: ctx.moderator });
     let revoked = 0;
@@ -329,7 +337,10 @@ function integrityConfirm(ctx) {
     ev.review = { ...(ev.review || {}), confirmedAt: now, by: ctx.moderator };
     writeIntegrity(ctx.store, u.id, { level: 'confirmed', score: prev.score, evidence: ev, updatedAt: now, reviewedBy: ctx.moderator });
     const until = now + hours * HOUR_MS;
-    const id = ctx.store.sanctions.create({ userId: u.id, kind: 'ban', reason: `confirmed: ${reason}`, source: 'moderator', gameId: null, startsAt: now, endsAt: until, createdBy: ctx.moderator });
+    // The reason tells the store whether the games recorded during the ban are refunded
+    // (refunds.js banRefunds): not after --no-refund.
+    const banReason = `${noRefund ? CheatBanReason.confirmedNoRefund : CheatBanReason.confirmed}${reason}`;
+    const id = ctx.store.sanctions.create({ userId: u.id, kind: 'ban', reason: banReason, source: 'moderator', gameId: null, startsAt: now, endsAt: until, createdBy: ctx.moderator });
     const resolved = ctx.args.flags['keep-reports'] ? 0 : resolveOpenCheatingReports(ctx, u.id, 'actioned');
     const from = noRefund ? null : since ?? refundWindowStart(ctx.config, now);
     // The ban stands whatever happens to the refunds (one transaction of their own): a failure is
@@ -457,7 +468,9 @@ function refundsApply(ctx) {
         throw new AdminError(`${u.username} is not a confirmed cheater (integrity confirm first)`);
     }
     const now = ctx.now();
-    const bans = safe(() => ctx.store.sanctions.list(u.id), []).filter((x) => x.kind === 'ban' && (x.startsAt ?? 0) <= now)
+    // The window counts back from the latest ban for cheating, not from a later ban for something
+    // else (`user ban`).
+    const bans = safe(() => ctx.store.sanctions.list(u.id), []).filter((x) => isCheatingBan(x) && (x.startsAt ?? 0) <= now)
         .sort((a, b) => (b.startsAt ?? 0) - (a.startsAt ?? 0));
     const ban = bans[0] || null;
     const since = dateFlag(ctx, 'since') ?? refundWindowStart(ctx.config, ban ? ban.startsAt : now);

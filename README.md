@@ -435,7 +435,10 @@ with the same `.env`. See `node bin/admin.js` for the commands and
 [docs/ANTICHEAT.md](docs/ANTICHEAT.md) for how suspicion levels are computed. Certain cheats
 (a move for someone else's game, out of turn or illegal in a position both sides agree on, a
 forged server message) forfeit the game and ban for `BAN_DURATION_HOURS` (24) automatically when
-`AUTO_SANCTION_CERTAIN_CHEATS` is on; statistical suspicion never bans by itself.
+`AUTO_SANCTION_CERTAIN_CHEATS` is on; statistical suspicion never bans by itself. A ban for
+cheating (that automatic one, or `integrity confirm` unless `--no-refund`) gives the cheater's
+victims back the rating points they lost to them, games still in progress at the ban included; a
+`user ban` is for anything else and refunds nothing (docs/ANTICHEAT.md, rating refunds).
 
 One analysis engine (Stockfish 19 at the default depths 9/15) handles about 870 games a day on a
 VPS vCore (540 to 1,260 depending on their length), far fewer than a busy server plays. Moderator

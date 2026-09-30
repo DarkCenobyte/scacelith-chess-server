@@ -413,6 +413,9 @@ store.games.finishBatch(records) -> [{ gameId, ratings: null | { white: RatingCh
 store.games.byId(id) ; recentForUser(userId, limit, before?) ; countBetween(a, b, since)
 store.conduct.record(userId, kind, at) ; store.conduct.countSince(userId, since) -> { abandon, abort, noshow } ; store.conduct.cooldown(userId) / setCooldown(userId, until, level)
 store.sanctions.create({ userId, kind /* 'ban'|'mm_block'|'warning' */, reason, source /* 'auto'|'moderator' */, gameId, startsAt, endsAt, createdBy }) -> id
+  // a ban for cheating: source 'auto' and reason 'certain_cheat:<kind>', or source 'moderator' and reason
+  // 'confirmed: <reason>' ('confirmed, no refund: <reason>' with --no-refund); finishBatch refunds the games
+  // recorded during an 'auto' or a 'confirmed: ' ban only (section 6.6)
 store.sanctions.activeBan(userId, now) -> sanction | null ; list(userId) ; lift(id, by, now)
 store.anomalies.insertBatch([{ userId, gameId, kind, severity /* 'info'|'suspicious'|'certain' */, detail, at }]) ; forUser(userId, limit)
 store.security.insertBatch([{ kind, userId, ip, detail, at }]) ; purge(now, cfg)
@@ -757,7 +760,8 @@ change happens on POST (link scanners must not consume tokens).
   of its own. Until the timers ran, and while a beat is that late before the interval noticed it,
   a game request (Move, Resign, DrawOffer, DrawAnswer, DrawClaim, Abort, Resync, Rematch), an
   attach, a detach or a forfeit (`game.forfeit`) counts as arrived when the stall began, at most
-  `GAME_STALL_CREDIT_MAX_MS` before it is handled (`scacelith_game_stall_credit_ms_total`). The room
+  `GAME_STALL_CREDIT_MAX_MS` before it is handled (`scacelith_game_stall_credit_ms_total`); the
+  forfeit of a certain cheat (6.5) takes the arrival of the request that revealed it. The room
   checks the deadlines, the flag and the time charged for a move at that arrival (never before the
   latest move, never after now), a resignation, draw, abort or forfeit takes effect at it, and a
   disconnection, reconnection or Resync processes the deadlines due at it only; the next turn starts
@@ -997,14 +1001,17 @@ that cost points is refunded like a loss; only a change of the K formula is refu
 that gave a first rating moved it from a working rating); one refund per game and victim at
 most. A game that is not recorded yet when the ban is given (still in progress, or waiting for
 its commit) is refunded in the transaction that records it, while the player is `confirmed` and
-banned. A ban given with the admin CLI, which only writes the database, reaches the running
-server when the player next connects or tries to start a game (queue, challenge, private code,
-rematch): the primary then enforces it as it enforces `sanction.applied` (kick, queue and
-challenges dropped), so a banned player starts no game. The victim gets
-`Notice{RatingRestored, arg: points}` out of a game only: at once when connected and idle,
-otherwise after their current game, otherwise right after `Welcome` at their next connection
-(after the game that connection resumes, if any). Moderator options, audit trail and the reasons
-an unban takes nothing back: docs/ANTICHEAT.md, rating refunds.
+that ban lasts. A ban for something else (`user ban`) and an `integrity confirm --no-refund`
+refund nothing, not even that game: the store tells them by the ban's source and reason
+(`certain_cheat:<kind>` from the anti-cheat; `confirmed: <reason>`, or
+`confirmed, no refund: <reason>`, from the confirm). A ban given with the admin CLI, which only
+writes the database, reaches the running server when the player next connects or tries to start
+a game (queue, challenge, private code, rematch): the primary then enforces it as it enforces
+`sanction.applied` (kick, queue and challenges dropped), so a banned player starts no game. The
+victim gets `Notice{RatingRestored, arg: points}` out of a game only: at once when connected and
+idle, otherwise after their current game, otherwise right after `Welcome` at their next
+connection (after the game that connection resumes, if any). Moderator options, audit trail and
+the reasons an unban takes nothing back: docs/ANTICHEAT.md, rating refunds.
 
 ## 7. What lives where, and what survives a crash
 

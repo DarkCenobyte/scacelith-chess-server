@@ -188,7 +188,7 @@ test('moderator: integrity confirm refunds the window, --refund-since widens it,
     assert.equal(noRefund.json.refundSince, null);
     assert.deepEqual(store.refunds.list(), []);
 
-    // refunds apply: a confirmed cheater only; the window counts back from the latest ban.
+    // refunds apply: a confirmed cheater only; the window counts back from the latest ban for cheating.
     assert.equal((await admin(store, config, ['refunds', 'apply', 'Vic'])).code, 1, 'Vic is not a confirmed cheater');
     assert.equal((await admin(store, config, ['refunds', 'apply', 'Cheat', '--since', '2099-01-01'])).code, 1, 'a date in the future');
     assert.equal((await admin(store, config, ['refunds', 'apply', 'Cheat', '--since', 'yesterday'])).code, 1);
@@ -335,4 +335,61 @@ test('no refund as a game is recorded without both a confirmed level and an acti
     off.store.games.finishBatch([game(off.id.Cheat, off.id.Vic, W, now)]);
     assert.deepEqual(off.store.refunds.list(), []);
     assert.equal(rating(off.store, off.id.Vic).rating, 1490);
+});
+
+test('no refund as a game is recorded under a ban for something else, nor after integrity confirm --no-refund', async (t) => {
+    const { config, store, id } = world({}, t);
+    const now = Date.now();
+    const lossTo = (victim) => store.games.finishBatch([game(id.Cheat, victim, W, now)]);
+    // Confirmed with refunds ten days ago: that ban (24 h) is over, the level stays 'confirmed'.
+    assert.equal((await admin(store, config, ['integrity', 'confirm', 'Cheat', '--reason', 'engine'], now - 10 * DAY)).code, 0);
+    assert.equal(store.sanctions.activeBan(id.Cheat, now), null);
+    // A `user ban` cannot pass for a ban for cheating.
+    for (const reason of ['confirmed: engine', 'confirmed, no refund: engine']) {
+        const refused = await admin(store, config, ['user', 'ban', 'Cheat', '--hours', '24', '--reason', reason], now);
+        assert.equal(refused.code, 1, reason);
+        assert.match(refused.err, /marks a ban for cheating: use integrity confirm/);
+    }
+    assert.equal(store.sanctions.activeBan(id.Cheat, now), null, 'a refused command writes nothing');
+    // A ban for something else: the game in progress at it, recorded during it, stands.
+    assert.equal((await admin(store, config, ['user', 'ban', 'Cheat', '--hours', '24', '--reason', 'abusive chat'], now)).code, 0);
+    lossTo(id.Vic);
+    // A new confirm with --no-refund: not even the game in progress at it is refunded.
+    const conf = await admin(store, config, ['integrity', 'confirm', 'Cheat', '--reason', 'engine again', '--no-refund', '--json'], now);
+    assert.equal(conf.code, 0, conf.err);
+    assert.equal(store.sanctions.list(id.Cheat).find((s) => s.id === conf.json.sanctionId).reason, 'confirmed, no refund: engine again');
+    lossTo(id.Vera);
+    assert.deepEqual(store.refunds.list(), []);
+    assert.equal(rating(store, id.Vic).rating, 1490);
+    assert.ok(rating(store, id.Vera).rating < 1500);
+});
+
+test('a certain cheat under a ban that does not refund gets a ban of its own, and the games recorded during it are refunded', async (t) => {
+    const others = [['user', 'ban', 'Cheat', '--hours', '240', '--reason', 'abusive chat'],
+        ['integrity', 'confirm', 'Cheat', '--reason', 'engine', '--hours', '240', '--no-refund']];
+    for (const other of others) {
+        const { config, store, id } = world({}, t);
+        const now = Date.now();
+        assert.equal((await admin(store, config, other, now)).code, 0);
+        const ac = createAnticheat({ config, store, log: quiet, now: () => now });
+        assert.equal(ac.sanctionCertain({ userId: id.Cheat, gameId: 5, kind: 'illegal_move' }).applied, true, other[0]);
+        const auto = store.sanctions.list(id.Cheat).find((s) => s.source === 'auto');
+        assert.equal(auto.reason, 'certain_cheat:illegal_move');
+        store.games.finishBatch([game(id.Cheat, id.Vic, W, now)]);     // on its way to the database at the ban
+        assert.deepEqual(store.refunds.list().map((x) => [x.victimName, x.points, x.sanctionId]), [['Vic', 10, auto.id]], other[0]);
+        ac.close();
+    }
+});
+
+test('refunds apply counts its window back from the latest ban for cheating, not from a later ban for something else', async (t) => {
+    const { config, store, id } = world({}, t);
+    const g = play(store, id);
+    const conf = await admin(store, config, ['integrity', 'confirm', 'Cheat', '--reason', 'engine', '--no-refund', '--json']);
+    assert.equal(conf.code, 0, conf.err);
+    const later = NOW + 100 * DAY;
+    assert.equal((await admin(store, config, ['user', 'ban', 'Cheat', '--hours', '24', '--reason', 'abusive chat'], later)).code, 0);
+    const apply = await admin(store, config, ['refunds', 'apply', 'Cheat', '--json'], later);
+    assert.equal(apply.code, 0, apply.err);
+    assert.deepEqual([apply.json.since, apply.json.sanctionId], [NOW - 60 * DAY, conf.json.sanctionId]);
+    assert.deepEqual(apply.json.refunds.map((r) => r.gameId).sort(), [g.vicLoss.id, g.valDraw.id].sort());
 });

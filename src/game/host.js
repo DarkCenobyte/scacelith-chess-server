@@ -80,9 +80,12 @@
 //     included), an attach, a detach or a forfeit counts as arrived when the stall began,
 //     GAME_STALL_CREDIT_MAX_MS earlier than it is handled at most (stallCredit(): the room's
 //     recvAt), so that a flag or a first-move timeout that fell during the stall overtakes neither
-//     a move nor a request queued behind the opponent's closed connection. The start of the stall
-//     (stallStart()) goes to the room with it, and the timers that run after the stall pass it to
-//     room.tick(), so that a first-move timeout that fell during the stall records no no-show
+//     a move nor a request queued behind the opponent's closed connection. The forfeit of a
+//     certain cheat takes the arrival of the game message that revealed it (or, when the
+//     anti-cheat answers later, is credited like forfeitUser when that answer comes), so that the
+//     victim's deadline that fell during the stall does not end the game first. The start of the
+//     stall (stallStart()) goes to the room with it, and the timers that run after the stall pass
+//     it to room.tick(), so that a first-move timeout that fell during the stall records no no-show
 //     whichever of them processes it (a request does after a stall longer than the credit).
 //     Nothing of it is journaled: the journal holds the clock values it produced, and a replay
 //     uses them. Without the interval (autoStart false) there is no beat and no credit unless a
@@ -393,7 +396,7 @@ export class GameHost {
             this._reschedule(entry);
             return;
         }
-        this._process(entry, out, endpoint, color, seq);
+        this._process(entry, out, endpoint, color, seq, te, from);
         if (credit > 0 && msg.type !== MSG.Resync && msg.type !== MSG.Rematch) this.m.stallCredit.inc(credit);
         if (msg.type === MSG.Move) {
             if (out.moved) { this.m.moves.inc(); this.counts.moves++; }
@@ -737,8 +740,10 @@ export class GameHost {
         }
     }
 
-    // Delivers an outcome and applies its side effects. `ep` / `color` / `seq`: the sender.
-    _process(entry, out, ep, color, seq) {
+    // Delivers an outcome and applies its side effects. `ep` / `color` / `seq`: the sender;
+    // `recvAt` / `stalledSince`: the arrival the room gave the sender's request (stall credit,
+    // see the header), which the forfeit of a certain cheat it revealed keeps (_maybeSanction).
+    _process(entry, out, ep, color, seq, recvAt, stalledSince = Infinity) {
         const room = entry.room;
         const e0 = entry.ep[0], e1 = entry.ep[1];
         const b = out.broadcast;
@@ -761,11 +766,12 @@ export class GameHost {
         if (out.anomaly) {
             const a = out.anomaly;
             const aep = a.color === color ? ep : entry.ep[a.color];
-            this._handleAnomaly(entry, a.color, room.playerOf(a.color).userId, room.id, a, aep, a.color === color ? seq : 0);
+            this._handleAnomaly(entry, a.color, room.playerOf(a.color).userId, room.id, a, aep, a.color === color ? seq : 0, recvAt, stalledSince);
         }
     }
 
-    _handleAnomaly(entry, color, userId, gameId, a, ep, seq) {
+    // `recvAt` / `stalledSince`: see _process.
+    _handleAnomaly(entry, color, userId, gameId, a, ep, seq, recvAt, stalledSince = Infinity) {
         let res = null;
         if (this.anticheat && typeof this.anticheat.recordAnomaly === 'function') {
             try {
@@ -774,16 +780,29 @@ export class GameHost {
                 this.log.warn('anticheat.recordAnomaly failed', { err, kind: a.kind });
             }
         }
-        const act = (r) => this._maybeSanction(r, entry, color, userId, gameId, a.kind, ep, seq);
-        if (res && typeof res.then === 'function') res.then(act, (err) => { this.log.warn('anticheat.recordAnomaly failed', { err }); act(null); });
-        else act(res);
+        if (res && typeof res.then === 'function') {
+            // An answer that comes later is a new event: like a sanction from elsewhere
+            // (forfeitUser), its forfeit counts as arrived when a stall it waited through began.
+            const later = (r) => {
+                const t = this.now(), from = this.stallStart(t);
+                this._maybeSanction(r, entry, color, userId, gameId, a.kind, ep, seq, t - this.stallCredit(t, from), from);
+            };
+            res.then(later, (err) => { this.log.warn('anticheat.recordAnomaly failed', { err }); later(null); });
+        } else {
+            this._maybeSanction(res, entry, color, userId, gameId, a.kind, ep, seq, recvAt, stalledSince);
+        }
     }
 
-    _maybeSanction(res, entry, color, userId, gameId, kind, ep, seq) {
+    // `recvAt` / `stalledSince`: the arrival of the forfeit (see _process); without `recvAt`, now
+    // (room.forfeit's default).
+    _maybeSanction(res, entry, color, userId, gameId, kind, ep, seq, recvAt, stalledSince = Infinity) {
         const certain = res && typeof res.certain === 'boolean' ? res.certain : CERTAIN_KINDS.has(kind);
         if (!certain || !this.autoSanction) return;
         if (entry && color >= 0 && !entry.removed && !entry.room.isOver) {
-            this._process(entry, entry.room.forfeit(color, this.now()), null, -1, 0);
+            // The forfeit is part of the handling of the request that revealed the cheat: it takes
+            // effect at that request's arrival, so a deadline that fell during a stall the request
+            // waited through (the victim's flag or first-move timeout) cannot end the game first.
+            this._process(entry, entry.room.forfeit(color, this.now(), recvAt, stalledSince), null, -1, 0);
         }
         this._send(ep, encode.Error({ ref: seq >>> 0, code: EC.CheatDetected, fatal: true, game: gameId }));
         if (this.anticheat && typeof this.anticheat.sanctionCertain === 'function') {

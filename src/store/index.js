@@ -21,14 +21,15 @@
 //     Aborted) in an official category (not 'custom'); only those are queued for analysis (when
 //     they have >= ANALYSIS_MIN_PLIES plies), under the queue policy below. A rated game in which
 //     a player lost points (K formula) to an opponent whose integrity level is 'confirmed' and who
-//     is under an active ban is refunded in the same transaction, with its 'rating_refund'
-//     security event, unless RATING_REFUND_DAYS is 0 (refunds below): a game in progress when the
-//     opponent was banned, or still on its way to the database, which the ban's own refunds could
-//     not see; a 'rating.refund' security log line follows the commit. An invalid record throws
-//     StoreError 'invalid_record' (with .gameId) and the whole batch is rolled back. The entry of
-//     a game left out of the queue carries analysisSkipped: 'sample' | 'backlog' | 'player'; the
-//     entry of a game that took over waiting jobs carries analysisDisplaced: [ids of the games
-//     whose job it removed].
+//     is under an active ban for cheating that refunds (an automatic ban of a certain cheat, or an
+//     integrity confirm without --no-refund; refundAtCommit) is refunded in the same transaction,
+//     with its 'rating_refund' security event, unless RATING_REFUND_DAYS is 0 (refunds below): a
+//     game in progress when the opponent was banned, or still on its way to the database, which
+//     the ban's own refunds could not see; a 'rating.refund' security log line follows the
+//     commit. An invalid record throws StoreError 'invalid_record' (with .gameId) and the whole
+//     batch is rolled back. The entry of a game left out of the queue carries analysisSkipped:
+//     'sample' | 'backlog' | 'player'; the entry of a game that took over waiting jobs carries
+//     analysisDisplaced: [ids of the games whose job it removed].
 //   - users.anonymize(id, now?) -> { tokenHashes } (the revoked sessions, for the auth caches):
 //     username becomes 'deleted#<id>' (also in the game records), e-mail, password, MFA,
 //     sessions, tokens, SSO links, recovery codes, integrity record and stored IPs are erased;
@@ -871,11 +872,16 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
     }
 
     // The refund of a rated game recorded while the opponent of the player who lost points is a
-    // confirmed cheater under an active ban (header). A ban's own refunds (applyForCheater, run
-    // when it is given) only see the games already in the table; this gives those of the games in
-    // progress at the ban or still on their way to the database. The ban taken is one whose
-    // refund window (RATING_REFUND_DAYS before its start) covers the game's end. Adds the refunds
-    // to batch.refunds, which finishBatch logs once committed.
+    // confirmed cheater under an active ban for cheating that refunds (header). A ban's own
+    // refunds (applyForCheater, run when it is given) only see the games already in the table;
+    // this gives those of the games in progress at the ban or still on their way to the database.
+    // The ban taken is one whose refund window (RATING_REFUND_DAYS before its start) covers the
+    // game's end. A ban that refunds is told by its source and reason, as anticheat/refunds.js
+    // banRefunds does (not imported: the store does not depend on the anti-cheat): an automatic
+    // ban of a certain cheat ('certain_cheat:<kind>'), or a moderator's integrity confirm without
+    // --no-refund ('confirmed: <reason>'). Neither a `user ban` nor a confirm with --no-refund
+    // ('confirmed, no refund: <reason>') refunds, whatever the player's integrity level. Adds the
+    // refunds to batch.refunds, which finishBatch logs once committed.
     function refundAtCommit(r, changes, k, now, batch) {
         if (refundWindowMs <= 0) return;
         const endedAt = ms(r.endedAt ?? now);
@@ -885,7 +891,9 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             if (!(points > 0) || kf === 0) continue;
             const ban = st(`SELECT s.id FROM player_integrity pi JOIN sanctions s ON s.user_id = pi.user_id
                 WHERE pi.user_id = ?1 AND pi.level = 'confirmed' AND s.kind = 'ban' AND s.lifted_at IS NULL AND s.starts_at <= ?2
-                AND (s.ends_at IS NULL OR s.ends_at > ?2) AND s.starts_at <= ?3 ORDER BY s.starts_at, s.id LIMIT 1`)
+                AND (s.ends_at IS NULL OR s.ends_at > ?2) AND s.starts_at <= ?3
+                AND ((s.source = 'auto' AND instr(s.reason, 'certain_cheat:') = 1) OR (s.source = 'moderator' AND instr(s.reason, 'confirmed: ') = 1))
+                ORDER BY s.starts_at, s.id LIMIT 1`)
                 .get(cheaterId, now, endedAt + refundWindowMs);
             if (!ban) continue;
             const given = giveRefund({ id: r.id, victim, category: r.category, points, ended_at: endedAt }, cheaterId, now, ban.id, 'auto', null);

@@ -55,6 +55,7 @@ import { fileURLToPath } from 'node:url';
 import { Ipc } from '../cluster/ipc.js';
 import { logger as rootLogger } from '../log.js';
 import { metrics } from '../metrics.js';
+import { CheatBanReason } from './refunds.js';
 import { applyCertainSanction } from './sanction.js';
 import { writeStructured, HOUR_MS } from './util.js';
 
@@ -227,7 +228,7 @@ export function createAnticheat({ config, store, primary = null, log = null, now
                 lg.security('sanction.auto', { userId, gameId, kind, until: r.until, refunds: r.refunds.length });
                 if (primary?.request) {
                     Promise.resolve()
-                        .then(() => primary.request('sanction.applied', { userId, until: r.until, reason: `certain_cheat:${kind}`, refunds: r.refunds.length }))
+                        .then(() => primary.request('sanction.applied', { userId, until: r.until, reason: `${CheatBanReason.certain}${kind}`, refunds: r.refunds.length }))
                         .catch((e) => lg.warn('sanction.applied not delivered', { err: e, userId }));
                 }
             }

@@ -65,6 +65,9 @@ export function createFakeStore({ textColumns = false } = {}) {
             activeBan(userId, now) {
                 return sanctions.find((s) => s.userId === userId && s.kind === 'ban' && !s.liftedAt && s.startsAt <= now && (!s.endsAt || s.endsAt > now)) || null;
             },
+            active(userId, now) {
+                return sanctions.filter((s) => s.userId === userId && !s.liftedAt && s.startsAt <= now && (!s.endsAt || s.endsAt > now));
+            },
             list(userId) { return sanctions.filter((s) => s.userId === userId); },
             lift(id, by, now) { const s = sanctions.find((x) => x.id === id); if (s) { s.liftedAt = now; s.liftedBy = by; } },
         },

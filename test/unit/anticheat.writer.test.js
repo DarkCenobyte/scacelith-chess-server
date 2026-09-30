@@ -32,7 +32,7 @@ function record(white, black, extra = {}) {
 // The shard's own store must not be written by the anti-cheat when it has a writer.
 function readOnlyView(store) {
     const refuse = () => { throw new Error('written on the event loop\'s connection'); };
-    return { ...store, anomalies: { insertBatch: refuse }, sanctions: { create: refuse, activeBan: refuse }, integrity: { get: refuse, set: refuse } };
+    return { ...store, anomalies: { insertBatch: refuse }, sanctions: { create: refuse, activeBan: refuse, active: refuse }, integrity: { get: refuse, set: refuse } };
 }
 
 function setup(t) {

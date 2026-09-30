@@ -62,6 +62,20 @@ test('idempotency across processes: an existing ban of the same game is reused',
     assert.equal(store.integrity.get(9).evidence.certain.length, 3, 'every sanction call adds evidence');
 });
 
+test('a longer ban stands for the automatic one only when it is a ban for cheating that refunds', () => {
+    const t = 1_800_000_000_000;
+    const long = { kind: 'ban', source: 'moderator', gameId: null, startsAt: t - 1000, endsAt: t + 30 * 24 * 3600000, createdBy: 'mod' };
+    for (const [reason, reused] of [['confirmed: engine', true], ['confirmed, no refund: engine', false], ['abusive chat', false]]) {
+        const store = createFakeStore();
+        store.sanctions.create({ userId: 3, reason, ...long });
+        const ac = createAnticheat({ config: testConfig(), store, log: quiet, now: () => t });
+        const r = ac.sanctionCertain({ userId: 3, gameId: 8, kind: 'illegal_move' });
+        assert.deepEqual([r.applied, store._.sanctions.length], reused ? [false, 1] : [true, 2], reason);
+        assert.equal(r.banUntil, reused ? long.endsAt : t + 24 * 3600000, reason);
+        ac.close();
+    }
+});
+
 test('a new game after the ban expired gets a new ban', () => {
     const store = createFakeStore();
     let t = 1_800_000_000_000;

@@ -778,6 +778,37 @@ test('stall credit: a move that reached its socket while the backlog of a stall 
     }
 });
 
+test('stall credit: the forfeit of a certain cheat read after a stall takes the arrival of the request that revealed it', async () => {
+    // An anti-cheat that answers later (a promise): the forfeit is then a new event, credited the same.
+    class LaterAnticheat extends FakeAnticheat {
+        recordAnomaly(a) { return Promise.resolve(super.recordAnomaly(a)); }
+    }
+    for (const answer of ['now', 'later']) {
+        for (const plies of [2, 0]) {
+            const anticheat = answer === 'now' ? new FakeAnticheat() : new LaterAnticheat();
+            const { host, clock, primary } = mkHost({ anticheat });
+            const id = newGame(host);
+            const ew = new FakeEndpoint(10), eb = new FakeEndpoint(20);
+            host.attach(id, 1, ew); host.attach(id, 2, eb);
+            for (let i = 0; i < plies; i++) play(host, id, clock);
+            const dl = host.wheel.deadlineOf(host.rooms.get(id));    // White's flag or first-move deadline
+            host.heartbeat(dl - 1000);
+            clock.t = dl + 2000;                                     // a 3 s stall, the deadline 1 s into it
+            host.heartbeat(clock.t);
+            const arrival = host.stallStart(clock.t);
+            // Black's out-of-turn move waited in its socket from before White's deadline.
+            host.onClientMessage(id, 2, moveMsg(host.room(id), { seq: 31 }), eb);
+            await Promise.resolve();                                 // the later answer, before the timers run
+            const r = host.room(id).result, what = `${answer} after ${plies} plies`;
+            assert.deepEqual([r.status, r.reason, r.endedAt], [GS.WhiteWins, ER.Forfeit, arrival], what);
+            assert.deepEqual(anticheat.sanctions.map((x) => [x.userId, x.kind]), [[2, 'out_of_turn']], what);
+            assert.equal(eb.closed.code, CloseCode.CheatDetected, what);
+            await drain();
+            assert.deepEqual(primary.of('conduct.record'), [], what);
+        }
+    }
+});
+
 test('stall credit: a first-move timeout that fell during a stall longer than the credit records no no-show when a request finds it', async () => {
     for (const first of ['resync', 'move', 'close', 'attach', 'rematch', 'forfeit']) {
         const { host, clock, primary } = mkHost();

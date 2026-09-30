@@ -51,7 +51,10 @@ Suspicious and certain anomalies are logged with `log.security('anomaly', ...)`.
 With `AUTO_SANCTION_CERTAIN_CHEATS=true` the host ends the game (`Forfeit`) and calls
 `ac.sanctionCertain({ userId, gameId, kind })`, which:
 
-* creates a ban of `BAN_DURATION_HOURS` (`source: 'auto'`, reason `certain_cheat:<kind>`, the game id);
+* creates a ban of `BAN_DURATION_HOURS` (`source: 'auto'`, reason `certain_cheat:<kind>`, the game id),
+  unless an active ban for cheating that refunds (automatic, or `integrity confirm` without
+  `--no-refund`) is of the same game or lasts as long: a player under a `user ban` or an
+  `integrity confirm --no-refund` gets a ban of their own, which refunds (below);
 * sets the integrity level to `confirmed` and appends `{ kind, gameId, at, banUntil }` to
   `evidence.certain` (existing statistical evidence is kept);
 * writes a `sanction_auto` security event and asks the primary to kick the player everywhere
@@ -68,11 +71,17 @@ When a player is banned as a cheater, the rating points their opponents lost to 
 back (`refunds.js`, the store's `refunds`, table `rating_refunds`):
 
 * **When**: an automatic ban for a certain cheat (also when the player was already banned: the
-  refunds are idempotent), and a moderator's `integrity confirm` (unless `--no-refund`). A
-  `user ban` is not about cheating and refunds nothing. A game that is not in the database yet
-  when the ban is given (still in progress, or ended and waiting for its commit) is refunded in
-  the transaction that records it, as long as the player is `confirmed` and banned (the store's
-  `games.finishBatch`; not with `RATING_REFUND_DAYS=0`).
+  refunds are idempotent), and a moderator's `integrity confirm` (unless `--no-refund`). A game
+  that is not in the database yet when such a ban is given (still in progress, or ended and
+  waiting for its commit) is refunded in the transaction that records it, as long as the player
+  is `confirmed` and that ban lasts (the store's `games.finishBatch`; not with
+  `RATING_REFUND_DAYS=0`). A `user ban` is not about cheating and refunds nothing, even for a
+  player confirmed earlier; `--no-refund` refunds no game at all, the one in progress at the
+  confirm included.
+* **Which bans**: a ban tells by its source and reason what it was given for (`refunds.js`
+  `banRefunds`): an automatic ban has the source `auto` and the reason `certain_cheat:<kind>`;
+  `integrity confirm` writes the reason `confirmed: <reason>`, or `confirmed, no refund: <reason>`
+  with `--no-refund`; `user ban` refuses a reason that starts like either.
 * **Which games**: the cheater's rated games that ended within `RATING_REFUND_DAYS` (default 60;
   0 turns the automatic refunds off) before the ban, or since the moderator's `--refund-since`.
 * **What**: each opponent who lost points in such a game gets exactly those points back, added
@@ -106,7 +115,7 @@ back (`refunds.js`, the store's `refunds`, table `rating_refunds`):
 
 A game that ended on another shard in the last few tens of milliseconds before an automatic ban
 may not be in the database yet (its commit waits up to `DB_COMMIT_MS`): it is refunded when it
-is recorded, the player being `confirmed` and banned by then.
+is recorded, the player being `confirmed` and under the automatic ban by then.
 
 ## 3. Engine analysis
 
@@ -463,7 +472,7 @@ scacelith-admin integrity show <name>        # evidence, per-game features, anom
 scacelith-admin integrity confirm <name> --reason TEXT [--hours N] [--refund-since DATE | --no-refund]
                                              # confirmed + ban + rating refunds, cheating reports -> actioned
 scacelith-admin integrity clear <name> [--reason TEXT] [--dismiss-reports]
-scacelith-admin refunds apply <name> [--since DATE]   # refunds of a confirmed cheater (window: from the latest ban)
+scacelith-admin refunds apply <name> [--since DATE]   # refunds of a confirmed cheater (window: from the latest ban for cheating)
 scacelith-admin refunds list [<name>] [--victim NAME] [--limit N]
 scacelith-admin reports list | reports resolve <id> actioned|dismissed
 scacelith-admin anomalies <name> | user show|ban|unban|reset-mfa|verify-email|revoke-sessions <name> | stats
@@ -490,21 +499,25 @@ What to look at in `integrity show`:
 A ban from the CLI is written to the database only (the CLI has no network access to the
 running server): the server applies it (disconnection, close 4004) when the player next connects
 or tries to start a game (queue, challenge, private code, rematch), so a banned player starts no
-game; a game in progress at the ban plays on, and after an `integrity confirm` the points its
-opponent loses in it are refunded when it is recorded. `--revoke-sessions` also logs them out
+game; a game in progress at the ban plays on, and after an `integrity confirm` without
+`--no-refund` the points its opponent loses in it are refunded when it is recorded (never after a
+`user ban`, which is not about cheating). `--revoke-sessions` also logs them out
 (shards drop cached sessions within 30 s). Its rating refunds are in the database at once; the
 running server tells the victims within 5 s (or later, out of a game).
 
 Refunds: `integrity confirm` refunds the games of the last `RATING_REFUND_DAYS` by default;
 `--refund-since DATE` (`YYYY-MM-DD`, UTC, or an ISO 8601 time with its offset) sets another
-start, for a player who cheated longer; `--no-refund` gives none (for example when the evidence
-covers only some games: refund them later with `refunds apply --since`). Both options choose
-among the games already recorded: a game recorded after the confirm while the player is banned
-(one that was in progress) is refunded when it is recorded. `refunds apply` works on a
-`confirmed` player only. DATE cannot be in the future. The options are checked before anything
-is written; the refunds run in their own transaction after the ban, and if they fail
-(a database error) the ban stands, its `moderator_action` records the error, and the command
-exits with an error that gives the `refunds apply` to run.
+start, for a player who cheated longer, among the games already recorded; a game recorded after
+the confirm while that ban lasts (one that was in progress) is refunded when it is recorded.
+`--no-refund` gives none, that game included (for example when the evidence covers only some
+games: refund them later with `refunds apply --since`); the ban's reason records the choice
+(`confirmed: <reason>` or `confirmed, no refund: <reason>`), and a `user ban` cannot use either
+prefix. `refunds apply` works on a `confirmed` player only, and its default window counts back
+from the latest ban for cheating (automatic or `integrity confirm`), not from a later `user ban`.
+DATE cannot be in the future. The options are checked before anything is written; the refunds
+run in their own transaction after the ban, and if they fail (a database error) the ban stands,
+its `moderator_action` records the error, and the command exits with an error that gives the
+`refunds apply` to run.
 
 ## 7. False positives: what the model does about them
 

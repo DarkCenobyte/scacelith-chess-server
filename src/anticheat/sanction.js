@@ -3,17 +3,18 @@
 // connection when there is no writer (tools, tests). It only uses the store, so the thread does
 // not load the rest of the anti-cheat module.
 
-import { refundVictims, refundWindowStart, victimTotals } from './refunds.js';
+import { banRefunds, CheatBanReason, refundVictims, refundWindowStart, victimTotals } from './refunds.js';
 import { readIntegrity, writeIntegrity, writeStructured, HOUR_MS } from './util.js';
 
 const MAX_EVIDENCE_ITEMS = 50;
 
 /**
  * Bans a player for a certain cheat: ban BAN_DURATION_HOURS (source 'auto') unless an active ban
- * of the same game, or one lasting at least as long, exists (another shard, an earlier anomaly);
- * integrity level 'confirmed' with the evidence appended; security event 'sanction_auto'; the
- * rating refunds of the player's victims (refunds.js; they are idempotent, so they also run when
- * the ban existed). Each step's failure is logged, not thrown.
+ * for cheating that refunds (refunds.js banRefunds) exists for the same game or lasts at least as
+ * long (another shard, an earlier anomaly, a moderator's integrity confirm); integrity level
+ * 'confirmed' with the evidence appended; security event 'sanction_auto'; the rating refunds of
+ * the player's victims (refunds.js; they are idempotent, so they also run when the ban existed).
+ * Each step's failure is logged, not thrown.
  * @param {object} store
  * @param {object} config   loadConfig() result (banDurationHours, ratingRefundDays)
  * @param {{ userId: number, gameId?: number, kind: string, at: number }} s
@@ -22,18 +23,23 @@ const MAX_EVIDENCE_ITEMS = 50;
  *          refunds: the points given back now, per victim
  */
 export function applyCertainSanction(store, config, { userId, gameId = 0, kind, at }, log = null) {
-    const reason = `certain_cheat:${kind}`;
+    const reason = `${CheatBanReason.certain}${kind}`;
     let until = at + config.banDurationHours * HOUR_MS;
     let created = false;
     let sanctionId = null;
-    let active = null;
-    try { active = store.sanctions.activeBan(userId, at); } catch { active = null; }
+    // Only a ban that refunds can stand for this one: under a ban for something else (`user ban`)
+    // or an integrity confirm with --no-refund, the games recorded later would not be refunded
+    // (store.games.finishBatch).
+    let bans = [];
+    try { bans = store.sanctions.active(userId, at).filter(banRefunds); } catch { bans = []; }
     // A ban without an end (permanent) counts as ending in 100 years.
-    const activeEnd = active ? Number(active.endsAt ?? active.ends_at ?? 0) || at + 100 * 365 * 24 * HOUR_MS : 0;
-    const sameGame = active && gameId && Number(active.gameId ?? active.game_id) === Number(gameId);
-    if (active && (sameGame || activeEnd >= until)) {
-        // Already banned (another shard, or an earlier anomaly of this game): no second ban.
-        until = activeEnd;
+    const endOf = (b) => Number(b.endsAt ?? b.ends_at ?? 0) || at + 100 * 365 * 24 * HOUR_MS;
+    const sameGame = (b) => gameId && Number(b.gameId ?? b.game_id) === Number(gameId);
+    const active = bans.find(sameGame) ?? bans.reduce((a, b) => (a && endOf(a) >= endOf(b) ? a : b), null);
+    if (active && (sameGame(active) || endOf(active) >= until)) {
+        // Already banned for cheating (another shard, an earlier anomaly of this game, a longer
+        // ban): no second ban.
+        until = endOf(active);
         sanctionId = active.id ?? null;
     } else {
         try {
