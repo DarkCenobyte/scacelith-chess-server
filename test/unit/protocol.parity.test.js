@@ -129,6 +129,7 @@ const synthetic = {
         Solo: { Only: 9 },
     },
     MoveFlag: { One: 1 },
+    GestureFlag: { Two: 2 },
     CloseCode: { Normal: 1000 },
     structs: {
         Fixed: [['a', 'u8', { min: 1, max: 9 }], ['b', 'f64'], ['c', 'bool'], ['d', 'enum:Offset']],

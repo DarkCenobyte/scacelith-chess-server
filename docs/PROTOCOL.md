@@ -16,7 +16,7 @@ the generator. The HTTPS account API is described in `docs/DESIGN.md` section 5.
 | Messages | 19 client->server, 16 server->client |
 
 Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibility) · [Connection](#connection-lifecycle) ·
-[Game flow](#game-flow) · [Clocks](#clocks) · [Replay protection](#duplicates-and-replay-protection) ·
+[Game flow](#game-flow) · [Clocks](#clocks) · [Gestures](#gesture-relay) · [Replay protection](#duplicates-and-replay-protection) ·
 [Rate limits](#rate-limits) · [Errors](#error-handling) · [Messages](#messages) · [Structs](#structs) ·
 [Enums](#enums) · [Moves](#move-encoding) · [posHash](#position-digest-poshash) · [Close codes](#websocket-close-codes) ·
 [Codec performance](#codec-performance)
@@ -95,8 +95,11 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
    beyond `MAX_CONNECTIONS`; a player whose game is in progress is admitted), claims the account's
    presence (an older connection of the same account receives `Error{Replaced, fatal}` + close
    4007) and answers `Welcome{proto, serverTime, userId, username, serverName, heartbeatMs,
-   clientPingMs, maxMsgPerSec, activeGame}`. `serverTime` gives the client a first estimate of
-   the server clock offset; `clientPingMs` is the interval of the client's own `Ping` (below).
+   clientPingMs, maxMsgPerSec, activeGame, gestureRate, gestureBurst}`. `serverTime` gives the
+   client a first estimate of the server clock offset (it is read once the session is accepted, on
+   the clock of the game hosts: [Clocks](#clocks)); `clientPingMs` is the interval of the client's
+   own `Ping` (below); `gestureRate` and `gestureBurst` announce the
+   [gesture relay](#gesture-relay) (0 and 0: no relay, send no `Gesture`).
 4. **Game in progress.** When `activeGame != 0` the host of that game sends a `GameSnapshot` right
    after `Welcome`; the client rebuilds the board and the clocks from it.
 5. **Heartbeats.** The server sends `Ping{nonce, serverTime}` about every `heartbeatMs`
@@ -159,10 +162,15 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
   animation of its own move.
 * **Start.** A game starts with `GameSnapshot` (sent to both players when the matchmaker, a challenge
   or a rematch creates it). `you` is the receiver's colour, `firstMoveMs` the time left for the next
-  player's first move.
+  player's first move. `autoPress` says who presses the clock in this game (below): the server
+  decides it when it creates the game (`AUTO_PRESS_CLOCK`, true by default; a rematch keeps the
+  value of the game it follows) and the game keeps it to the end, across a server restart too.
 * **Moves.** The client validates the move with the same rules as the server, then sends
-  `Move{seq, game, ply, move, posHash, thinkMs, drawOffer}` at once, when the destination square is
-  chosen (the robot's hand then plays the move: animation only). `ply` is the index of the move in
+  `Move{seq, game, ply, move, posHash, thinkMs, drawOffer}`. With `autoPress` it sends it at once,
+  when the destination square is chosen (the robot's hand then plays the move and presses the clock:
+  animation only). Without it, the move placed on the board is not sent until the player presses
+  the clock (`Gesture.placed` shows it to the opponent meanwhile), so the clock runs until the press,
+  as over the board, and `thinkMs` runs until the press too. `ply` is the index of the move in
   the game (0 = White's first move), `posHash` the digest of the position the move is played in,
   `thinkMs` the locally measured time since the turn began.
 * **Confirmation.** The server validates (order below), updates the position and the clocks and
@@ -201,14 +209,20 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
   `GameSnapshot` / `MoveMade` / `GameEnd` and its estimate of the server clock
   (`serverNow = localNow + offset`, offset from `Welcome.serverTime` and the Ping/Pong exchanges):
   `shown(running side) = xMs - (serverNow - serverTime)`; the other side's clock is `xMs` as sent.
-* `whiteMs` / `blackMs` are the remaining times **at `serverTime`** (server wall clock, epoch ms).
+* `whiteMs` / `blackMs` are the remaining times **at `serverTime`** (server clock, epoch ms). Every
+  `serverTime` (`Welcome`, `Ping`, `Pong`, `GameSnapshot`, `MoveMade`, `GameEnd`) is read from
+  the monotonic epoch clock of a server worker, so the offset measured with one applies to the
+  others (to a few milliseconds when the connection and the game are on different workers).
   `running` is the colour whose clock is running from that instant (`None` before the clocks start,
   after the end, while waiting for a first move, or while the clock of a game restored after a
   restart waits for its player, `RECOVERY_CLOCK_HOLD_MS` at most: lifecycle step 6). In
   `MoveMade` the clock of the side to move runs from `serverTime` unless `firstMoveMs > 0`.
 * Plies 0 and 1 (each side's first move) do not run the clock: each player has `firstMoveMs`
-  (`FIRST_MOVE_TIMEOUT_MS`) to make it, otherwise the game is aborted (`NoShow`, unrated). No
-  increment for them. The clocks start with White's second move.
+  (`FIRST_MOVE_TIMEOUT_MS`) to make it, otherwise the game is aborted (`NoShow`, unrated). The
+  server accepts a first move that arrives within that time plus the margin a flag has (the
+  player's largest lag compensation, below), so that a first move sent in time over a slow link
+  counts; `firstMoveMs`, the countdown shown, has no margin. No increment for them. The clocks
+  start with White's second move.
 * For every later move the server charges `elapsed - compensation`, where `elapsed` runs from the
   moment it sent the opponent's `MoveMade` to the moment it received the move, and the lag
   compensation is bounded by the client's `thinkMs`, the server-measured round trip (+50 ms),
@@ -219,6 +233,45 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
 * A flag falls on the server (timer at the latest instant a move could still arrive in time):
   `GameEnd{Timeout}` (or `TimeoutVsInsufficient`, a draw, when the opponent cannot mate). A move
   arriving after that is refused with `FlagFell`. The client never ends a game on its own clock.
+* **Server stalls.** When the server process hosting a game stops for a moment (more than
+  `GAME_STALL_MIN_MS`, 30 ms by default: garbage collection, disk I/O, CPU steal), what waited in
+  its sockets meanwhile is handled before its timers, as if it had arrived when the stall began
+  (at most `GAME_STALL_CREDIT_MAX_MS`, 5 s, before it was read): a move, a resignation, a draw
+  agreement or claim, an abort, a `Resync` or a closed connection is never overtaken by a flag or
+  a first-move timeout that fell during the stall. Such a move is charged the time until the stall
+  began, and the next player's clock starts when its `MoveMade` is sent, so the stall is charged
+  to nobody. A first-move timeout that fell during a stall still aborts the game, without counting
+  a no-show against the player, and a `Pong` whose `Ping` preceded a stall is left out of the
+  round-trip average.
+
+## Gesture relay
+
+* **What.** `Gesture` carries a player's live, cosmetic state to the opponent, whose robot mirrors it:
+  the head (`yaw` and `pitch` of the look in milliradians, seat-relative, and `lean`; `GestureFlag`
+  tells a glance and a look at the table beside the board, the scoresheet included), the piece in
+  hand (`touch`) and where it is aimed (`aim`), and the move placed on the board before the clock
+  press (`placed`, in games without `autoPress`). It is never authoritative: only `Move` plays a
+  move, and the server does not look inside a gesture beyond checking that it decodes.
+* **Sending.** The client sends `Gesture{seq, game, ply, ...}` for its game in progress when its
+  state changes, the whole state every time (a lost gesture heals with the next one), at most
+  `Welcome.gestureRate` per second sustained with bursts of `Welcome.gestureBurst`
+  (`GESTURE_RATE`, 4, and `GESTURE_BURST`, 8, by default). When `gestureRate` is 0 the server
+  relays nothing and the client sends none. A gesture takes the next `seq` like any message.
+* **Relay.** The server forwards it to the opponent's connection as the server `Gesture`: the client
+  message without `seq`, byte for byte. It never goes back to the sender, and it is never stored
+  (not in the game's journal, not in the finished game) nor seen by the game's clocks, `gseq` or
+  the anti-cheat. It is relayed while the game exists, the rematch window included. A gesture may
+  reach the opponent after the `MoveMade` that followed it (the players may be on different
+  server workers): a client ignores a gesture whose `ply` is older than its position.
+* **Silent drops.** Gestures have a token bucket of their own: they never spend or wait for the
+  `WS_MSG_RATE` tokens of moves and requests, and a gesture beyond `gestureRate` is dropped with no
+  `Error{RateLimited}` (its `seq` still counts, so the next message is in sequence). Only a gross
+  excess, more than max(50, 10 x `gestureBurst`) dropped in 10 s, closes the connection as a flood
+  (`Error{Flood, fatal}`, 4301). A gesture for a game the connection does not play, for an
+  opponent who is not connected, or towards a connection or a link between the server's workers
+  that already holds a backlog of unsent data (a quarter of its limit) is dropped as well: a slow
+  link loses gestures first, and a gesture never closes a slow client. A gesture that does not
+  decode is a protocol violation like any message (4300).
 
 ## Duplicates and replay protection
 
@@ -243,6 +296,8 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
   exceeded bucket answers `Error{RateLimited}`; repeated excess is `Error{Flood, fatal}` + close 4301.
 * Client `Ping`: at most one per second (a faster one gets no `Pong`); the interval the server wants
   is `Welcome.clientPingMs`.
+* `Gesture`: a bucket of its own (`Welcome.gestureRate` / `gestureBurst`) that never touches the one
+  above; beyond it gestures are dropped silently ([Gesture relay](#gesture-relay)).
 * Per IP address: `MAX_CONNECTIONS_PER_IP` simultaneous connections (IPv6 per /64); whole server:
   `MAX_CONNECTIONS` players (`Error{ServerFull}` at `Hello` beyond it, except for a player whose
   game is in progress). The upgrade itself is refused (HTTP 503) only `max(16, 2 %)` connections

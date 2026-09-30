@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createAnticheat } from '../../src/anticheat/index.js';
 import { GameHost } from '../../src/game/host.js';
-import { GameRoom, JournalKind, REMATCH_WINDOW_MS } from '../../src/game/room.js';
+import { GameRoom, JournalKind, RecordFlag, REMATCH_WINDOW_MS } from '../../src/game/room.js';
 import { FakeChessGame, fakeMove, MemoryJournal, FakeStore, FakeAnticheat, FakePrimary, FakeEndpoint, silentLog } from '../../src/game/testing.js';
-import { decode, enums, MSG, CloseCode } from '../../src/protocol/index.js';
+import { decode, encode, enums, MSG, CloseCode } from '../../src/protocol/index.js';
 import { Registry } from '../../src/metrics.js';
 import { shardOfGameId } from '../../src/util/ids.js';
 import { testConfig } from '../../src/config.js';
@@ -86,7 +86,7 @@ test('create, attach (snapshot), moves broadcast as one buffer, journal appends,
     assert.equal(metricValue(registry, 'scacelith_game_move_processing_us'), 1);
     assert.equal(metricValue(registry, 'scacelith_games_active'), 1);
     assert.equal(host.stats().active, 1);
-    assert.equal(host.wheel.deadlineOf(host.rooms.get(id)), clock.t + 30000);
+    assert.equal(host.wheel.deadlineOf(host.rooms.get(id)), clock.t + 30000 + 150);
 });
 
 test('unknown game and unroutable messages: Error{NotInGame}', () => {
@@ -203,11 +203,11 @@ test('timer wheel under 10k rooms: every deadline fires once, never early', (t) 
         if (kind === 0) {                          // both first moves: White's clock runs out
             play(host, id, clock, 1); play(host, id, clock, 1);
             expected.set(id, [clock.t + 15000 + (i % 7) * 1000 + 150, ER.Timeout]);
-        } else if (kind === 1) {                   // White never moves
-            expected.set(id, [clock.t + 30000, ER.NoShow]);
+        } else if (kind === 1) {                   // White never moves (first-move margin: 150)
+            expected.set(id, [clock.t + 30000 + 150, ER.NoShow]);
         } else {                                   // Black never moves
             play(host, id, clock, 1);
-            expected.set(id, [clock.t + 30000, ER.NoShow]);
+            expected.set(id, [clock.t + 30000 + 150, ER.NoShow]);
         }
     }
     assert.equal(host.wheel.size, N);
@@ -515,4 +515,238 @@ test('one bad record does not block the batch: the others are committed one by o
     assert.ok(journal.done.has(ids[0]) && journal.done.has(ids[2]));
     assert.equal(journal.done.has(ids[1]), false, 'the bad game stays in the journal');
     assert.equal(host.stats().pendingCommits, 1);
+});
+
+// ---- gesture relay ----------------------------------------------------------------------------------
+
+/** An endpoint with the router's droppable send; `full` makes it refuse (a backlog). */
+class DroppableEndpoint extends FakeEndpoint {
+    constructor(connId, shard) { super(connId, shard); this.full = false; this.droppable = 0; }
+    sendDroppable(buf) {
+        if (this.full) return false;
+        this.droppable++;
+        this.sent.push(buf);
+        return true;
+    }
+}
+
+const GESTURE = { ply: 2, touch: 12, aim: 28, placed: 0, flags: 5, yaw: -1234, pitch: 321, lean: 40 };
+
+test('gestures go to the opponent only, as droppable S_Gesture frames; nothing is journaled or timed', () => {
+    const { host, clock, journal, registry, anticheat } = mkHost();
+    const id = newGame(host);
+    const ew = new FakeEndpoint(10), eb = new DroppableEndpoint(20, 1);   // Black on another shard
+    host.attach(id, 1, ew); host.attach(id, 2, eb);
+    play(host, id, clock); play(host, id, clock);
+    const entry = host.rooms.get(id), room = host.room(id);
+    const before = { records: journal.games.get(id).length, gseq: room.gseq, deadline: host.wheel.deadlineOf(entry), snap: room.snapshot(W, clock.t) };
+    ew.clear(); eb.clear();
+    const frame = encode.C_Gesture({ seq: 41, game: id, ...GESTURE });
+    assert.equal(host.relayGesture(id, 1, frame), true);
+    assert.equal(ew.sent.length, 0, 'never back to the sender');
+    assert.equal(eb.droppable, 1);
+    assert.deepEqual(frames(eb), [{ type: MSG.S_Gesture, game: id, ...GESTURE }]);
+    // Black's gesture to White's endpoint, which has no droppable send.
+    assert.equal(host.relayGesture(id, 2, encode.C_Gesture({ seq: 42, game: id, ...GESTURE, yaw: 7 })), true);
+    assert.equal(last(ew).yaw, 7);
+    assert.deepEqual(
+        { records: journal.games.get(id).length, gseq: room.gseq, deadline: host.wheel.deadlineOf(entry), snap: room.snapshot(W, clock.t) },
+        before);
+    assert.equal(anticheat.anomalies.length, 0);
+    assert.equal(metricValue(registry, 'scacelith_gestures_relayed_total'), 2);
+    assert.equal(host.stats().gestures, 2);
+});
+
+test('gestures are dropped without an anomaly when they cannot be relayed, and relayed through the rematch window', () => {
+    const { host, clock, registry, anticheat } = mkHost();
+    const id = newGame(host);
+    const ew = new FakeEndpoint(10), eb = new DroppableEndpoint(20);
+    host.attach(id, 1, ew); host.attach(id, 2, eb);
+    const g = (userId, extra = {}) => host.relayGesture(id, userId, encode.C_Gesture({ seq: 5, game: id, ...GESTURE, ...extra }));
+    const dropped = (reason) => metricValue(registry, 'scacelith_gestures_dropped_total', reason);
+    assert.equal(g(99), false);
+    assert.equal(dropped('not_player'), 1);
+    eb.full = true;
+    assert.equal(g(1), false);
+    assert.equal(dropped('backlog'), 1);
+    eb.full = false;
+    assert.equal(host.relayGesture(id, 1, encode.C_Gesture({ seq: 5, game: id, ...GESTURE }).subarray(0, 20)), false);
+    assert.equal(dropped('malformed'), 1);
+    assert.equal(host.relayGesture(id + 1, 1, encode.C_Gesture({ seq: 5, game: id + 1, ...GESTURE })), false);
+    assert.equal(dropped('no_game'), 1);
+    clock.t += 1000;
+    host.onClientMessage(id, 1, { type: MSG.Resign, seq: 3, game: id }, ew);
+    assert.equal(host.room(id).isOver, true);
+    assert.equal(g(1), true, 'the room still exists: the rematch window');
+    host.detach(id, 2, eb);
+    assert.equal(g(1), false);
+    assert.equal(dropped('no_opponent'), 1);
+    assert.equal(anticheat.anomalies.length, 0);
+});
+
+// ---- clock press ------------------------------------------------------------------------------------
+
+test('autoPress: AUTO_PRESS_CLOCK unless the spec sets it; snapshot, created record, rematch and record flag', async () => {
+    const created = (journal, id) => JSON.parse(journal.games.get(id)[0].payload.toString('utf8'));
+    let { host, journal } = mkHost();
+    let id = newGame(host);
+    let ep = new FakeEndpoint(1);
+    host.attach(id, 1, ep);
+    assert.equal(last(ep).autoPress, true);
+    assert.equal(created(journal, id).autoPress, true);
+    id = host.createGame({ white: player(3), black: player(4), rated: true, baseMs: 180000, incMs: 2000, autoPress: false });
+    assert.equal(host.room(id).autoPress, false);
+
+    ({ host, journal } = mkHost({ config: testConfig({ AUTO_PRESS_CLOCK: 'false' }) }));
+    id = newGame(host);
+    ep = new FakeEndpoint(1);
+    host.attach(id, 1, ep);
+    assert.equal(last(ep).autoPress, false);
+    assert.equal(created(journal, id).autoPress, false);
+    assert.equal(host.room(host.createGame({ white: player(3), black: player(4), rated: false, baseMs: 60000, incMs: 0, autoPress: true })).autoPress, true);
+
+    const m = mkHost({ config: testConfig({ AUTO_PRESS_CLOCK: 'false' }), handlers: { 'game.rematch': () => ({ ok: true }) } });
+    id = newGame(m.host, 1, 2);
+    const ew = new FakeEndpoint(1), eb = new FakeEndpoint(2);
+    m.host.attach(id, 1, ew); m.host.attach(id, 2, eb);
+    play(m.host, id, m.clock); play(m.host, id, m.clock);
+    m.host.onClientMessage(id, 1, { type: MSG.Resign, seq: 3, game: id }, ew);
+    m.host.onClientMessage(id, 2, { type: MSG.Rematch, seq: 4, game: id, accept: true }, eb);
+    m.host.onClientMessage(id, 1, { type: MSG.Rematch, seq: 5, game: id, accept: true }, ew);
+    assert.equal(m.primary.of('game.rematch')[0].autoPress, false);
+    m.clock.t += 100;
+    m.host.pollCommits(m.clock.t);
+    await new Promise((r) => setImmediate(r));
+    const rec = m.store.batches.flat().find((r) => r.id === id);
+    assert.equal(rec.flags & RecordFlag.ManualPress, RecordFlag.ManualPress);
+});
+
+// ---- stall credit -----------------------------------------------------------------------------------
+
+test('configuration: AUTO_PRESS_CLOCK, GAME_STALL_MIN_MS and GAME_STALL_CREDIT_MAX_MS', () => {
+    assert.deepEqual([CFG.autoPressClock, CFG.gameStallMinMs, CFG.gameStallCreditMaxMs], [true, 30, 5000]);
+    assert.equal(testConfig({ AUTO_PRESS_CLOCK: 'false' }).autoPressClock, false);
+    assert.throws(() => testConfig({ GAME_STALL_MIN_MS: '4' }), /GAME_STALL_MIN_MS: at least 5/);
+    assert.throws(() => testConfig({ GAME_STALL_CREDIT_MAX_MS: '60001' }), /GAME_STALL_CREDIT_MAX_MS: at most 60000/);
+    const { host } = mkHost({ config: testConfig({ GAME_STALL_MIN_MS: '100', GAME_STALL_CREDIT_MAX_MS: '0' }) });
+    host.heartbeat(T0);
+    assert.equal(host.stallCredit(T0 + 105), 0, 'under 10 + 100 ms: not a stall');
+    assert.equal(host.stallCredit(T0 + 2000), 0, 'GAME_STALL_CREDIT_MAX_MS=0 gives nothing back');
+});
+
+// A game where White's clock runs (both first moves played), and its flag deadline.
+function running(o = {}) {
+    const h = mkHost(o);
+    const id = newGame(h.host);
+    const ew = new FakeEndpoint(10), eb = new FakeEndpoint(20);
+    h.host.attach(id, 1, ew); h.host.attach(id, 2, eb);
+    play(h.host, id, h.clock); play(h.host, id, h.clock);
+    const deadline = h.host.wheel.deadlineOf(h.host.rooms.get(id));
+    return { ...h, id, ew, eb, deadline };
+}
+const drain = () => new Promise((r) => setImmediate(r));
+
+test('stall credit: a move read after a stall beats the flag that fell during it', async () => {
+    const { host, clock, registry, id, ew, eb, deadline } = running();
+    clock.t = deadline - 1000;
+    assert.equal(host.heartbeat(clock.t), false);             // the last beat before the stall
+    clock.t = deadline + 2000;                                // 3 s without a beat
+    assert.equal(host.heartbeat(clock.t), true);              // detected: the timers wait for the sockets
+    assert.equal(host.room(id).isOver, false);
+    host.onClientMessage(id, 1, moveMsg(host.room(id)), ew);
+    const m = last(eb);
+    assert.equal(m.type, MSG.MoveMade);
+    assert.equal(m.serverTime, clock.t);
+    await drain();                                            // the timers run after the stall
+    assert.equal(host.room(id).isOver, false);
+    assert.equal(host.wheel.deadlineOf(host.rooms.get(id)), clock.t + 180000 + 150, 'Black\'s clock starts at the MoveMade');
+    assert.equal(metricValue(registry, 'scacelith_game_stall_ms'), 1);
+    assert.equal(metricValue(registry, 'scacelith_game_stall_credit_ms_total'), clock.t - (deadline - 1000 + 10));
+    assert.equal(host.stallCredit(clock.t + 5), 0, 'no credit once the timers ran');
+    assert.equal(host.stallDuring(deadline - 1500), true);
+    assert.equal(host.stallDuring(clock.t + 1, clock.t + 5), false);
+});
+
+test('stall credit: without a move the flag falls when the timers run after the stall; without a stall at once', async () => {
+    let s = running();
+    s.clock.t = s.deadline - 1000;
+    s.host.heartbeat(s.clock.t);
+    s.clock.t = s.deadline + 2000;
+    s.host.heartbeat(s.clock.t);
+    assert.equal(s.host.room(s.id).isOver, false);
+    await drain();
+    assert.deepEqual([s.host.room(s.id).result.reason, s.host.room(s.id).result.endedAt], [ER.Timeout, s.deadline + 2000]);
+    // The control case: the same move without a detected stall flags.
+    s = running();
+    s.clock.t = s.deadline + 2000;
+    s.host.onClientMessage(s.id, 1, moveMsg(s.host.room(s.id)), s.ew);
+    assert.equal(s.host.room(s.id).result.reason, ER.Timeout);
+    assert.ok(frames(s.ew).some((f) => f.type === MSG.MoveRejected && f.code === EC.FlagFell));
+});
+
+test('stall credit: none for a gap under GAME_STALL_MIN_MS, capped at GAME_STALL_CREDIT_MAX_MS, and from a late beat', async () => {
+    let s = running();
+    const t0 = s.deadline - 1000;
+    s.host.heartbeat(t0);
+    assert.equal(s.host.heartbeat(t0 + 10 + 20), false);        // 20 ms late: no stall
+    assert.equal(s.host.stallCredit(t0 + 30), 0);
+    s.host.heartbeat(t0 + 40);
+    assert.equal(s.host.heartbeat(t0 + 40 + 10 + 31), true);
+    assert.equal(s.host.stallCredit(t0 + 81), 81 - 50);
+    await drain();
+
+    s = running({ config: testConfig({ GAME_STALL_CREDIT_MAX_MS: '1000' }) });
+    s.host.heartbeat(s.deadline - 3000);
+    s.clock.t = s.deadline + 1500;
+    s.host.heartbeat(s.clock.t);
+    assert.equal(s.host.stallCredit(s.clock.t), 1000);
+    s.host.onClientMessage(s.id, 1, moveMsg(s.host.room(s.id)), s.ew);
+    assert.equal(s.host.room(s.id).result.reason, ER.Timeout, 'a stall longer than the cap is not all given back');
+    await drain();
+
+    // The interval has not noticed yet: a message handled while the beat is late gets the credit.
+    s = running();
+    s.host.heartbeat(s.deadline - 200);
+    s.clock.t = s.deadline + 300;
+    assert.equal(s.host.stallCredit(s.clock.t), 490);
+    s.host.onClientMessage(s.id, 1, moveMsg(s.host.room(s.id)), s.ew);
+    assert.equal(last(s.eb).type, MSG.MoveMade);
+});
+
+test('stall credit: the opponent\'s close or Resync read in the same drain does not flag a queued move', async () => {
+    const { host, clock, id, ew, eb, deadline } = running();
+    clock.t = deadline - 1000;
+    host.heartbeat(clock.t);
+    clock.t = deadline + 2000;
+    host.heartbeat(clock.t);
+    host.onClientMessage(id, 2, { type: MSG.Resync, seq: 7, game: id }, eb);
+    assert.equal(last(eb).status, GS.Ongoing);
+    host.detach(id, 2, eb);
+    assert.equal(host.room(id).isOver, false);
+    host.onClientMessage(id, 1, moveMsg(host.room(id)), ew);
+    assert.equal(host.room(id).ply, 3);
+    const ew2 = new FakeEndpoint(11);
+    host.attach(id, 2, ew2);
+    assert.equal(last(ew2).type, MSG.GameSnapshot);
+    await drain();
+    assert.equal(host.room(id).isOver, false);
+});
+
+test('stall credit: a first-move timeout that fell during a stall aborts without a no-show; timer lateness is measured', async () => {
+    const { host, clock, primary, registry } = mkHost();
+    const id = newGame(host);
+    host.attach(id, 1, new FakeEndpoint(1));
+    host.heartbeat(T0 + 29000);
+    clock.t = T0 + 30000 + 150 + 1000;
+    host.heartbeat(clock.t);
+    await drain();
+    assert.deepEqual([host.room(id).result.status, host.room(id).result.reason], [GS.Aborted, ER.NoShow]);
+    assert.deepEqual(primary.of('conduct.record'), []);
+    assert.equal(metricValue(registry, 'scacelith_game_timer_late_ms'), 1);
+    // Without a stall the no-show is recorded.
+    const h = mkHost();
+    const id2 = newGame(h.host);
+    h.host.runTimers(T0 + 30000 + 150);
+    assert.equal(h.host.room(id2).result.reason, ER.NoShow);
+    assert.deepEqual(h.primary.of('conduct.record'), [{ userId: 1, kind: 'noshow' }]);
 });

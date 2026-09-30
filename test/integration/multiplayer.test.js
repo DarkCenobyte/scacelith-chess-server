@@ -1,12 +1,13 @@
 // End-to-end multiplayer scenarios against the real server (bin/scacelith-server.js with two
 // shards, TLS, SQLite), driven through the Node SDK: pairing, special moves, duplicates, out of
 // turn, illegal moves, cheat sanction, reconnection, resignation, time out, clock tampering,
-// simultaneous results, protocol abuse. Needs the openssl command line (skipped without it).
+// simultaneous results, protocol abuse, gesture relay, the clock press across a restart. Needs the
+// openssl command line (skipped without it).
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { startServer, haveOpenssl } from './helpers/harness.js';
 import { account, connect, player, challengeGame, queueGame, Table, closeAll } from './helpers/players.js';
-import { enums, CloseCode, MoveFlag as MF, uciToMove } from '../../src/protocol/index.js';
+import { enums, CloseCode, GestureFlag, MoveFlag as MF, uciToMove } from '../../src/protocol/index.js';
 
 const { GameStatus: GS, EndReason: ER, ErrorCode: EC, GameEventKind: EV } = enums;
 const skip = !haveOpenssl() && 'openssl not available';
@@ -272,6 +273,59 @@ test('wrong protocol schema and bad token are refused at Hello', { skip }, async
         await assert.rejects(connect(srv, acc.token, { schema: 1 }), (e) => e.errorCode === EC.UnsupportedProtocol || e.closeCode === CloseCode.UnsupportedProtocol);
         await assert.rejects(connect(srv, 'sct_' + 'A'.repeat(43)), (e) => e.errorCode === EC.Unauthorized || e.closeCode === CloseCode.Unauthorized);
     } finally { await closeAll(acc); }
+});
+
+test('gestures are relayed live to the opponent only, never echoed, and moves stay in step', { skip }, async () => {
+    const a = await player(srv, uniq('gus')), b = await player(srv, uniq('ida'));
+    try {
+        assert.deepEqual([a.client.welcome.gestureRate, a.client.welcome.gestureBurst], [4, 8]);
+        const g = await challengeGame(a, b);
+        assert.equal(a.client.games.get(g.id).autoPress, true, 'AUTO_PRESS_CLOCK default');
+        const t = new Table(g);
+        const ma = a.client.mark(), mb = b.client.mark();
+        a.client.gesture(g.id, { ply: 0, touch: 12, aim: 28, yaw: -300, pitch: 100, lean: 20, flags: GestureFlag.Glance });
+        const got = await b.client.waitFor('Gesture', (m) => m.game === g.id, 5000, { since: mb });
+        assert.deepEqual([got.ply, got.touch, got.aim, got.placed, got.flags, got.yaw, got.pitch, got.lean], [0, 12, 28, 0, 1, -300, 100, 20]);
+        b.client.gesture(g.id, { ply: 0, yaw: 450, flags: GestureFlag.Side });
+        const back = await a.client.waitFor('Gesture', (m) => m.game === g.id, 5000, { since: ma });
+        assert.deepEqual([back.yaw, back.flags, back.touch], [450, GestureFlag.Side, 64]);
+        await t.playAll(['e2e4', 'e7e5']);
+        await assert.rejects(a.client.waitFor('Gesture', (m) => m.yaw === -300, 300, { since: ma }), /timeout/, 'never echoed to the sender');
+        assert.equal(a.client.state, 'ready');
+        assert.equal(b.client.state, 'ready');
+    } finally { await closeAll(a, b); }
+});
+
+test('a restored game keeps its clock press when AUTO_PRESS_CLOCK changed across the restart', { skip }, async () => {
+    const own = await startServer({ workers: 2, keep: true, env: { AUTO_PRESS_CLOCK: 'false' } });
+    let s2 = null, c = null, d = null;
+    const a = await player(own, uniq('jon')), b = await player(own, uniq('kim'));
+    try {
+        const g = await challengeGame(a, b);
+        assert.equal(a.client.games.get(g.id).autoPress, false);
+        const t = new Table(g);
+        await t.playAll(['d2d4', 'd7d5']);
+        await new Promise((r) => setTimeout(r, 200));      // > JOURNAL_FLUSH_MS
+        await own.stop();
+        s2 = await startServer({ workers: 2, dataDir: own.dir, env: { AUTO_PRESS_CLOCK: 'true' } });
+        const ca = await connect(s2, a.token), cb = await connect(s2, b.token);
+        const snap = await ca.waitFor('GameSnapshot', (m) => m.game === g.id, 5000, { since: 0 });
+        assert.deepEqual([snap.moves.length, snap.autoPress], [2, false], 'the journaled setting wins');
+        a.client = ca; b.client = cb;
+        await cb.waitFor('GameSnapshot', (m) => m.game === g.id, 5000, { since: 0 });
+        const m = ca.mark();
+        ca.resign(g.id);
+        await ca.waitFor('GameEnd', (e) => e.game === g.id, 5000, { since: m });
+        // A new game follows the new setting.
+        c = await player(s2, uniq('lea')); d = await player(s2, uniq('max'));
+        const g2 = await challengeGame(c, d);
+        assert.equal(c.client.games.get(g2.id).autoPress, true);
+    } finally {
+        await closeAll(a, b, c, d);
+        if (s2) await s2.stop();
+        const fs = await import('node:fs');
+        fs.rmSync(own.dir, { recursive: true, force: true });
+    }
 });
 
 test('server crash (SIGKILL) mid-game: after the restart both players get the game back', { skip }, async () => {

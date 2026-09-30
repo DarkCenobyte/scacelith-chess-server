@@ -65,6 +65,29 @@
 //     'game.recovered' { gameId, whiteId, blackId, shard } (not in the DESIGN 5.7 catalog: the
 //     primary needs it to give the players their active game back after a full restart).
 //   * the endpoint's `rttMs` (when a number) feeds room.onRtt before each message.
+//   * stall credit (GAME_STALL_MIN_MS, GAME_STALL_CREDIT_MAX_MS; DESIGN 6.1): each run of the 10 ms
+//     interval is a beat (heartbeat()). A beat that comes more than SLOT_MS + GAME_STALL_MIN_MS
+//     after the previous one means the worker's event loop stopped meanwhile (garbage collection,
+//     blocking I/O, CPU steal): the beat then runs the timers, commits and compaction from
+//     setImmediate, once the poll phase has read what the sockets received during the stall,
+//     since Node runs its timers before it reads sockets. Until then (and while a beat is that
+//     late, before the interval has noticed) a game message, an attach or a detach counts as
+//     arrived when the stall began, GAME_STALL_CREDIT_MAX_MS earlier than it is handled at most
+//     (stallCredit(): the room's recvAt), so that a flag or a first-move timeout that fell during
+//     the stall overtakes neither a move nor a request queued behind the opponent's closed
+//     connection; the timers that run after the stall pass its start to room.tick(), so that a
+//     first-move timeout that fell during it records no no-show. Nothing of it is journaled: the
+//     journal holds the clock values it produced, and a replay uses them. Without the
+//     interval (autoStart false) there is no beat and no credit unless a test calls heartbeat().
+//     stallDuring(t0) tells the router whether a stall overlaps a round trip it measured.
+//   * gesture relay (GESTURE_RATE): relayGesture(gameId, userId, frame) copies a player's
+//     C_Gesture frame, without its seq, into an S_Gesture for the opponent's endpoint (the two
+//     messages have the same fields after seq: protocol.codec.test.js), through the endpoint's
+//     sendDroppable (which skips it when that connection, or the bus link to it, already holds a
+//     backlog) when it has one. Cosmetic: nothing is journaled, the room, its clocks, gseq and the
+//     anti-cheat never see it; it is dropped when the sender plays no colour (no anomaly: it is not
+//     authoritative) or the opponent is not attached, and relayed as long as the room exists,
+//     the rematch window included.
 //   * journal compaction (JOURNAL_COMPACT_SEGMENTS, src/store/journal.js): compactJournal(now),
 //     called by the 10 ms interval after the timers and the commits, appends a snapshot record
 //     (room.journalSnapshot) of each game the journal asks for (journal.compactionCandidates():
@@ -78,16 +101,17 @@
 // Payloads this module produces or expects:
 //   createGame(spec): { white, black: { userId, name, rating, provisional }, baseMs, incMs (ms),
 //     rated, category? (derived from config.categories when absent; 'custom' is never rated),
-//     rematchOf?, id? (pre-allocated id of this shard) }
+//     rematchOf?, id? (pre-allocated id of this shard), autoPress? (AUTO_PRESS_CLOCK when absent) }
 //   primary 'game.ended': { gameId, whiteId, blackId, status, reason, rated (false for aborted
 //     results), category, rematchOffer (colour of a pending rematch offer, 2 = none) }
 //   primary 'game.rematch': { gameId, white, black (colours already swapped), category, baseMs,
-//     incMs, rated }; a reply { error } or ok:false sends Error{RematchUnavailable} to both.
+//     incMs, rated, autoPress (the finished game's) }; a reply { error } or ok:false sends
+//     Error{RematchUnavailable} to both.
 //   primary 'conduct.record': { userId, kind: 'abandon' | 'abort' | 'noshow' }
 //   anticheat.recordAnomaly: { userId, gameId, kind, detail (short text), posMatched }; its
 //     `certain` decides the sanction (the 6.5 table is the fallback when it answers nothing).
 // Complexity: a message costs O(1) besides the rules; a timer (re)schedule is O(1); one 10 ms
-// interval visits one wheel slot per call.
+// interval visits one wheel slot per call; a relayed gesture is one lookup and one 25-byte copy.
 
 import { performance } from 'node:perf_hooks';
 import { encode, enums, MSG, CloseCode } from '../protocol/index.js';
@@ -106,6 +130,10 @@ const MAX_BACKOFF_MS = 10000;
 export const JOURNAL_GATE_TRIES = 3;
 /** Journal snapshots built per 10 ms interval at most (compaction stays off the move path). */
 const SNAPSHOTS_PER_TICK = 2;
+/** Sizes of the fixed-size gesture frames; S_Gesture is C_Gesture without its seq (bytes 1-4). */
+const GESTURE_FIELDS = { game: 1, ply: 0, touch: 64, aim: 64, placed: 0, flags: 0, yaw: 0, pitch: 0, lean: 0 };
+const C_GESTURE_BYTES = encode.C_Gesture({ seq: 0, ...GESTURE_FIELDS }).length;
+const S_GESTURE_BYTES = encode.S_Gesture(GESTURE_FIELDS).length;
 
 const ERROR_NAMES = Object.fromEntries(Object.entries(EC).map(([k, v]) => [v, k]));
 const REASON_NAMES = Object.fromEntries(Object.entries(ER).map(([k, v]) => [v, k]));
@@ -173,6 +201,12 @@ export class GameHost {
         this.commitMs = Number.isFinite(config.dbCommitMs) ? config.dbCommitMs : 50;
         this.commitBatchMax = commitBatchMax;
         this.autoSanction = config.autoSanctionCertainCheats !== false;
+        this.stallMinMs = Number.isFinite(config.gameStallMinMs) ? config.gameStallMinMs : 30;
+        this.stallCreditMaxMs = Number.isFinite(config.gameStallCreditMaxMs) ? config.gameStallCreditMaxMs : 5000;
+        this._beat = NaN;                // time of the last beat (NaN: none yet, no stall detection)
+        this._stallFrom = NaN;           // start of the stall the last beat detected, until its timers ran
+        this._firingStall = Infinity;    // stall start passed to room.tick() by the timers that run after it
+        this.lastStallEnd = -Infinity;   // time of the beat that detected the last stall
 
         this.rooms = new Map();          // gameId -> RoomEntry
         this.byUser = new Map();         // userId -> gameId of the running game on this shard
@@ -183,7 +217,7 @@ export class GameHost {
         this.nextCommitAt = Infinity;
         this.backoffMs = 0;
         this.commitInFlight = null;
-        this.counts = { created: 0, moves: 0, ended: 0, committed: 0, recovered: 0, requeued: 0, aborted: 0, snapshots: 0 };
+        this.counts = { created: 0, moves: 0, ended: 0, committed: 0, recovered: 0, requeued: 0, aborted: 0, snapshots: 0, stalls: 0, gestures: 0 };
         this.closed = false;
 
         const m = metrics;
@@ -199,23 +233,41 @@ export class GameHost {
             commitErrors: m.counter('scacelith_game_commit_errors_total', 'Failed commits of finished games (retried)'),
             unjournaled: m.counter('scacelith_game_commit_unjournaled_total',
                 'Finished games committed to the database without waiting for the journal, whose writes kept failing'),
+            stallMs: m.histogram('scacelith_game_stall_ms', 'Stalls of the worker\'s event loop detected by the game timers (ms, longer than GAME_STALL_MIN_MS)',
+                [25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000]),
+            stallCredit: m.counter('scacelith_game_stall_credit_ms_total', 'Time given back to game requests handled after a stall of the worker (ms)'),
+            timerLate: m.histogram('scacelith_game_timer_late_ms', 'Lateness of the game deadlines (flags, first-move timeouts, graces) when their timer fired (ms)',
+                [1, 5, 10, 25, 50, 100, 250, 1000, 5000]),
+            gestures: m.counter('scacelith_gestures_relayed_total', 'Gestures relayed to the opponent'),
         };
+        const gestureDrops = m.counter('scacelith_gestures_dropped_total', 'Gestures not relayed, by reason', ['reason']);
+        this._gNoGame = gestureDrops.labels('no_game');
+        this._gNotPlayer = gestureDrops.labels('not_player');
+        this._gNoOpponent = gestureDrops.labels('no_opponent');
+        this._gBacklog = gestureDrops.labels('backlog');
+        this._gMalformed = gestureDrops.labels('malformed');
         this._rejectChildren = new Map();
         this._endedChildren = new Map();
 
         this._fire = (entry, t) => {
             if (entry.removed) return;
+            this.m.timerLate.observe(Math.max(0, t - entry._twDeadline));
             try {
-                this._process(entry, entry.room.tick(t), null, -1, 0);
+                this._process(entry, entry.room.tick(t, this._firingStall), null, -1, 0);
             } catch (err) {
                 // A bug must not leave the game without a timer: log and try again in a second.
                 this.log.error('game tick failed', { err, gameId: entry.room.id });
                 this.wheel.schedule(entry, t + 1000);
             }
         };
+        this._afterStall = () => {
+            const from = this._stallFrom;
+            this._stallFrom = NaN;
+            if (!this.closed) this._tick(this.now(), from);
+        };
         this.interval = null;
         if (autoStart) {
-            this.interval = setInterval(() => this._onInterval(), SLOT_MS);
+            this.interval = setInterval(() => this.heartbeat(), SLOT_MS);
             if (typeof this.interval.unref === 'function') this.interval.unref();
         }
     }
@@ -224,7 +276,7 @@ export class GameHost {
 
     /**
      * Creates a game from the primary's spec.
-     * @param {{white:object, black:object, baseMs:number, incMs:number, rated:boolean, category?:string, rematchOf?:number, id?:number}} spec
+     * @param {{white:object, black:object, baseMs:number, incMs:number, rated:boolean, category?:string, rematchOf?:number, id?:number, autoPress?:boolean}} spec
      * @returns {number} gameId
      */
     createGame(spec) {
@@ -237,6 +289,7 @@ export class GameHost {
             id, category, baseMs, incMs, rated: !!spec.rated && category !== 'custom',
             white: spec.white, black: spec.black, createdAt: t, config: this.config,
             rematchOf: spec.rematchOf || 0, createChessGame: this.createChessGame,
+            autoPress: typeof spec.autoPress === 'boolean' ? spec.autoPress : this.config.autoPressClock !== false,
         });
         const entry = new RoomEntry(room);
         this.rooms.set(id, entry);
@@ -276,7 +329,8 @@ export class GameHost {
         const cur = entry.ep[color];
         if (cur && endpoint && !sameEndpoint(cur, endpoint)) return false;
         entry.ep[color] = null;
-        this._process(entry, entry.room.onDisconnect(color, this.now()), null, -1, 0);
+        const t = this.now();
+        this._process(entry, entry.room.onDisconnect(color, t, t - this.stallCredit(t)), null, -1, 0);
         return true;
     }
 
@@ -300,19 +354,22 @@ export class GameHost {
             this._handleAnomaly(entry, -1, userId, gameId, { kind: 'foreign_game', detail: `message type ${msg && msg.type}`, posMatched: false }, endpoint, seq);
             return;
         }
-        if (endpoint && !entry.ep[color]) this._bind(entry, color, endpoint, false);
-        else if (endpoint && typeof endpoint.rttMs === 'number' && endpoint.rttMs > 0) room.onRtt(color, endpoint.rttMs);
         const t = this.now();
+        // Arrival of a request that waited in a socket during a stall of this worker (header).
+        const credit = this.stallCredit(t);
+        const te = t - credit;
+        if (endpoint && !entry.ep[color]) this._bind(entry, color, endpoint, false, t, te);
+        else if (endpoint && typeof endpoint.rttMs === 'number' && endpoint.rttMs > 0) room.onRtt(color, endpoint.rttMs);
         let out;
         try {
             switch (msg.type) {
-                case MSG.Move: out = room.onMove(color, msg, t); break;
-                case MSG.Resign: out = room.onResign(color, t, seq); break;
-                case MSG.DrawOffer: out = room.onDrawOffer(color, t, seq); break;
-                case MSG.DrawAnswer: out = room.onDrawAnswer(color, !!msg.accept, t, seq); break;
-                case MSG.DrawClaim: out = room.onDrawClaim(color, t, seq); break;
-                case MSG.Abort: out = room.onAbort(color, t, seq); break;
-                case MSG.Resync: out = room.onResync(color, t); break;
+                case MSG.Move: out = room.onMove(color, msg, t, te); break;
+                case MSG.Resign: out = room.onResign(color, t, seq, te); break;
+                case MSG.DrawOffer: out = room.onDrawOffer(color, t, seq, te); break;
+                case MSG.DrawAnswer: out = room.onDrawAnswer(color, !!msg.accept, t, seq, te); break;
+                case MSG.DrawClaim: out = room.onDrawClaim(color, t, seq, te); break;
+                case MSG.Abort: out = room.onAbort(color, t, seq, te); break;
+                case MSG.Resync: out = room.onResync(color, t, te); break;
                 case MSG.Rematch: out = room.onRematch(color, !!msg.accept, t, seq); break;
                 default:
                     this._reject(endpoint, EC.NotInGame, seq, gameId);
@@ -325,10 +382,43 @@ export class GameHost {
             return;
         }
         this._process(entry, out, endpoint, color, seq);
+        if (credit > 0 && msg.type !== MSG.Resync && msg.type !== MSG.Rematch) this.m.stallCredit.inc(credit);
         if (msg.type === MSG.Move) {
             if (out.moved) { this.m.moves.inc(); this.counts.moves++; }
             this.m.moveUs.observe((performance.now() - t0) * 1000);
         }
+    }
+
+    /**
+     * Relays a player's gesture (the raw C_Gesture frame, validated by the router of its
+     * connection) to the opponent as an S_Gesture (see the header). Returns whether it was sent.
+     * @param {number} gameId
+     * @param {number} userId the sender
+     * @param {Buffer} frame
+     * @returns {boolean}
+     */
+    relayGesture(gameId, userId, frame) {
+        const entry = this.rooms.get(gameId);
+        if (!entry || entry.removed) { this._gNoGame.inc(); return false; }
+        const color = entry.room.colorOf(userId);
+        if (color < 0) { this._gNotPlayer.inc(); return false; }
+        const ep = entry.ep[color ^ 1];
+        if (!ep) { this._gNoOpponent.inc(); return false; }
+        if (frame.length !== C_GESTURE_BYTES) { this._gMalformed.inc(); return false; }
+        const out = Buffer.allocUnsafe(S_GESTURE_BYTES);
+        out[0] = MSG.S_Gesture;
+        frame.copy(out, 1, 5);
+        let sent;
+        try {
+            sent = typeof ep.sendDroppable === 'function' ? ep.sendDroppable(out) : ep.send(out) !== false;
+        } catch (err) {
+            this.log.warn('gesture not delivered', { err, connId: ep.connId });
+            sent = false;
+        }
+        if (!sent) { this._gBacklog.inc(); return false; }
+        this.m.gestures.inc();
+        this.counts.gestures++;
+        return true;
     }
 
     /** A server round-trip measurement of a player (for connections relayed over the bus). */
@@ -373,8 +463,68 @@ export class GameHost {
 
     // ---- time ----------------------------------------------------------------------------------
 
-    /** Fires the rooms whose deadline is due at `t` (the interval calls it every 10 ms). */
-    runTimers(t = this.now()) { return this.wheel.advance(t, this._fire); }
+    /**
+     * Fires the rooms whose deadline is due at `t` (the interval calls it every 10 ms).
+     * `stalledSince`: start of the stall these timers ran late for (room.tick()).
+     */
+    runTimers(t = this.now(), stalledSince = Infinity) {
+        this._firingStall = stalledSince;
+        try {
+            return this.wheel.advance(t, this._fire);
+        } finally {
+            this._firingStall = Infinity;
+        }
+    }
+
+    /**
+     * One beat of the 10 ms interval (see the header): the timers, commits and compaction, at
+     * once, or from setImmediate after a stall. Returns whether this beat detected a stall.
+     * @param {number} [t]
+     * @returns {boolean}
+     */
+    heartbeat(t = this.now()) {
+        const prev = this._beat;
+        this._beat = t;
+        if (t - prev > SLOT_MS + this.stallMinMs) {
+            this.m.stallMs.observe(t - prev - SLOT_MS);
+            this.counts.stalls++;
+            this.lastStallEnd = t;
+            if (Number.isNaN(this._stallFrom)) {
+                this._stallFrom = prev + SLOT_MS;
+                setImmediate(this._afterStall);
+            }
+            return true;
+        }
+        if (Number.isNaN(this._stallFrom)) this._tick(t);
+        return false;
+    }
+
+    /**
+     * Time given back to a game request handled at `t` (ms, 0 without a stall): from the start of
+     * the stall the last beat detected, until the timers ran after it, or from the moment the
+     * next beat was due when it is already GAME_STALL_MIN_MS late; GAME_STALL_CREDIT_MAX_MS at most.
+     * @param {number} t
+     * @returns {number}
+     */
+    stallCredit(t) {
+        let from = this._stallFrom;
+        if (Number.isNaN(from)) {
+            if (!(t - this._beat > SLOT_MS + this.stallMinMs)) return 0;
+            from = this._beat + SLOT_MS;
+        }
+        return Math.max(0, Math.min(this.stallCreditMaxMs, t - from));
+    }
+
+    /**
+     * Whether a stall of this worker overlaps the time since `t0` (a round trip measured over it
+     * includes the stall: router.js leaves it out of the player's average).
+     * @param {number} t0 clock.js time
+     * @param {number} [t]
+     * @returns {boolean}
+     */
+    stallDuring(t0, t = this.now()) {
+        return this.lastStallEnd > t0 || this.stallCredit(t) > 0;
+    }
 
     /** Starts a commit when one is due at `t` (the interval calls it every 10 ms). */
     pollCommits(t = this.now()) {
@@ -407,9 +557,8 @@ export class GameHost {
         return n;
     }
 
-    _onInterval() {
-        const t = this.now();
-        try { this.runTimers(t); } catch (err) { this.log.error('game timers failed', { err }); }
+    _tick(t, stalledSince = Infinity) {
+        try { this.runTimers(t, stalledSince); } catch (err) { this.log.error('game timers failed', { err }); }
         try { this.pollCommits(t); } catch (err) { this.log.error('game commit poll failed', { err }); }
         try { this.compactJournal(t); } catch (err) { this.log.error('journal compaction failed', { err }); }
     }
@@ -488,6 +637,7 @@ export class GameHost {
     async shutdown() {
         if (this.interval) { clearInterval(this.interval); this.interval = null; }
         this.closed = true;
+        this._beat = NaN;
         for (let i = 0; i < 5 && (this.pending.size || this.commitInFlight); i++) {
             let ok;
             try {
@@ -515,12 +665,11 @@ export class GameHost {
         return 'custom';
     }
 
-    _bind(entry, color, endpoint, sendSnapshot) {
+    _bind(entry, color, endpoint, sendSnapshot, t = this.now(), te = t - this.stallCredit(t)) {
         const room = entry.room;
         entry.ep[color] = endpoint;
         if (endpoint && typeof endpoint.rttMs === 'number' && endpoint.rttMs > 0) room.onRtt(color, endpoint.rttMs);
-        const t = this.now();
-        const out = room.isConnected(color) ? room.tick(t) : room.onReconnect(color, t);
+        const out = room.isConnected(color) ? room.tick(te) : room.onReconnect(color, t, te);
         this._process(entry, out, endpoint, color, 0);
         if (sendSnapshot && !entry.removed) this._send(endpoint, room.snapshotBuffer(color, t));
     }

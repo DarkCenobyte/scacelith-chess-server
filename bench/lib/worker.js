@@ -1,13 +1,14 @@
 // One load process of bench/loadgen.js. It owns a slice of the accounts, opens their WSS
 // connections (raw RFC 6455 over node:tls, one shared SecureContext, a precomputed upgrade
 // request), answers the server heartbeat, and in the game scenarios plays legal random moves with
-// the correct posHash. Everything it measures goes to the coordinator once a second as deltas
+// the correct posHash (and, with --gesture-hz, sends head gestures while in a game). Everything it
+// measures goes to the coordinator once a second as deltas
 // (counters, sparse histograms, gauges); the coordinator merges the processes.
 //
 // Lean on purpose, so that the load generator is not the bottleneck:
 //   - shared handler functions (no closure per socket), one fixed-shape object per client;
-//   - hot messages (Move, Pong, MoveMade, Ping) through the fixed-offset fast path of wire.js,
-//     everything else through the generated codec;
+//   - hot messages (Move, Pong, Gesture, MoveMade, Ping) through the fixed-offset fast path of
+//     wire.js, everything else through the generated codec (a relayed S_Gesture is only counted);
 //   - think times on one timing wheel (5 ms slots) instead of a timer per move; with no think time
 //     (burst) the replies of one event-loop turn are sent together from one setImmediate;
 //   - both players of a direct-challenge game live in the same process and share one Position.
@@ -22,7 +23,7 @@ import { Position } from '../../src/chess/index.js';
 import { Hist } from './hist.js';
 import {
     T, encode, decode, enums, SCHEMA_HASH, PROTOCOL_VERSION, WS_SUBPROTOCOL,
-    clientFrame, closeFrame, moveFrame, pongFrame, pingFrame, readMoveMade, readNonce, selfCheck,
+    clientFrame, closeFrame, moveFrame, pongFrame, pingFrame, gestureFrame, readMoveMade, readNonce, selfCheck,
 } from './wire.js';
 
 const E = enums.ErrorCode;
@@ -37,7 +38,7 @@ const P_IDLE = 0, P_WAIT = 1, P_CHALLENGING = 2, P_PLAYING = 3, P_DEAD = 4;
 // Request kinds (Ack / Error correlation).
 const R_CREATE = 1, R_ACCEPT = 2, R_QUEUE = 3, R_CANCEL = 4, R_OTHER = 5;
 // Timer kinds.
-const K_MOVE = 1, K_PING = 2, K_START = 3, K_ACCEPT = 4, K_QUEUE = 5;
+const K_MOVE = 1, K_PING = 2, K_START = 3, K_ACCEPT = 4, K_QUEUE = 5, K_GESTURE = 6;
 
 let cfg = null;
 let secureContext = null;
@@ -60,7 +61,7 @@ const newCounters = () => ({
     movesSent: 0, movesOk: 0, movesRejected: 0, resigns: 0, plies: 0, strayMoves: 0, resyncs: 0,
     gamesStarted: 0, gamesEnded: 0, snapshots: 0, challenges: 0, challengeRetries: 0, accepts: 0, queueJoins: 0,
     pingsSent: 0, pongs: 0, serverPings: 0, errors: 0, notices: 0, ratingUpdates: 0, writesBlocked: 0, decodeErrors: 0,
-    gameEvents: 0, unexpected: 0, tlsResumed: 0,
+    gameEvents: 0, unexpected: 0, tlsResumed: 0, gesturesSent: 0, gesturesIn: 0,
 });
 let cnt = newCounters();
 let maps = { fail: {}, rejected: {}, errors: {}, closes: {}, ends: {}, notices: {} };
@@ -149,6 +150,7 @@ function fire(c, kind, gen) {
         case K_START: if (c.pair && c.pair.gen === gen) pairStart(c.pair); return;
         case K_ACCEPT: if (c.pair && c.pair.gen === gen) accept(c, c.pair.challengeId); return;
         case K_QUEUE: if (c.gen2 === gen) queueJoin(c); return;
+        case K_GESTURE: doGesture(c); return;
         default:
     }
 }
@@ -355,6 +357,7 @@ function message(c, b, p, len) {
         if (c.pingAt && nonce === c.pingNonce) { hist.hb.add((now() - c.pingAt) * 1000); c.pingAt = 0; cnt.pongs++; }
         return;
     }
+    if (type === T.S_Gesture) { cnt.gesturesIn++; return; }
     let m;
     try {
         m = decode(b.subarray(p, p + len), { dir: 's2c' });
@@ -390,6 +393,7 @@ function onWelcome(c, m) {
     lastWelcomeAt = Date.now();
     c.pingEveryMs = cfg.pingIntervalMs >= 0 ? cfg.pingIntervalMs : clientPingMs(m.clientPingMs);
     if (c.pingEveryMs > 0) schedule(now() + Math.random() * c.pingEveryMs, c, K_PING, 0);
+    if (cfg.gestureHz > 0) schedule(now() + Math.random() * 1000 / cfg.gestureHz, c, K_GESTURE, 0);
     pumpRamp();
 }
 
@@ -439,6 +443,19 @@ function doPing(c) {
     send(c, pingFrame(++c.seq, c.pingNonce, c.mask));
     cnt.pingsSent++;
     schedule(now() + c.pingEveryMs, c, K_PING, 0);
+}
+
+// --gesture-hz: every connection has one periodic gesture timer from its Welcome on; it sends a
+// head look (a slow sweep, like a player looking around) only while the player is in a game.
+function doGesture(c) {
+    if (c.state !== S_READY || closing) return;
+    const g = c.game;
+    if (g && !g.over && !stopping) {
+        const a = now() / 1000 + c.i;
+        send(c, gestureFrame(++c.seq, g.id, g.ply, Math.round(900 * Math.sin(a)), Math.round(300 * Math.sin(a * 0.7)), c.mask));
+        cnt.gesturesSent++;
+    }
+    schedule(now() + 1000 / cfg.gestureHz, c, K_GESTURE, 0);
 }
 
 // The interval the game client uses for Welcome.clientPingMs: 0 = 10 s, else within 1 s..60 s.

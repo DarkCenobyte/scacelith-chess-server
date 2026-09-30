@@ -305,6 +305,34 @@ describe('control plane: challenges', () => {
     });
 });
 
+describe('control plane: clock press', () => {
+    it('gives every new game AUTO_PRESS_CLOCK (queue, challenge, private code); a rematch keeps the finished game\'s', async () => {
+        for (const auto of [true, false]) {
+            const { cp, shards, mm, online } = setup({ config: testConfig({ AUTO_PRESS_CLOCK: String(auto) }) });
+            const u = [1, 2, 3, 4, 5, 6].map((id) => online(id, `user${id}`, id & 1));
+            const entry = (p, joinedAt) => ({ ...p, category: '5+0', rated: false, rating: 1500, joinedAt });
+            mm.pairs.push({ category: '5+0', rated: false, white: entry(u[0], 1), black: entry(u[1], 2) });
+            cp.matchTick();
+            await tick();
+            const ch = cp.challengeCreate({ from: u[2], target: 'user4', baseSec: 180, incSec: 2, rated: false });
+            assert.equal((await cp.challengeAccept({ id: ch.id, by: u[3] })).ok, true);
+            const priv = cp.challengeCreate({ from: u[4], target: '', baseSec: 60, incSec: 0, rated: false });
+            assert.equal((await cp.challengeJoinCode({ code: priv.code, by: u[5] })).ok, true);
+            const specs = () => shards.requests.filter((r) => r.type === 'game.create').map((r) => r.payload.spec);
+            assert.deepEqual(specs().map((s) => s.autoPress), [auto, auto, auto]);
+            // A rematch: the finished game's setting, whatever the configuration says now.
+            const first = cp.activeGames.get(1);
+            const r = await cp.gameRematch({ gameId: first, white: 2, black: 1, baseMs: 300000, incMs: 0, rated: false, autoPress: !auto });
+            assert.equal(r.ok, true);
+            assert.equal(specs().at(-1).autoPress, !auto);
+            cp.gameEnded({ gameId: r.gameId, whiteId: 2, blackId: 1 });
+            const r2 = await cp.gameRematch({ gameId: r.gameId, white: 1, black: 2, baseMs: 300000, incMs: 0, rated: false });
+            assert.equal(r2.ok, true);
+            assert.equal(specs().at(-1).autoPress, auto, 'AUTO_PRESS_CLOCK when the request has none');
+        }
+    });
+});
+
 describe('control plane: games, sanctions, shards', () => {
     it('rematch: the old host shard, colours as given, refused when a player left', async () => {
         const { cp, shards, online } = setup();

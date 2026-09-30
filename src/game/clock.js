@@ -6,7 +6,9 @@
 //
 // Rules implemented:
 //   * plies 0 and 1 (each side's first move) run no clock and add no increment; each has
-//     FIRST_MOVE_TIMEOUT_MS from its turn start (NoShow otherwise);
+//     FIRST_MOVE_TIMEOUT_MS from its turn start (NoShow otherwise), and its deadline has the same
+//     margin as a flag, min(quota, rttEma + 50, LAG_COMP_MAX_MS), so that a first move sent in
+//     time over a slow link still counts;
 //   * later moves: elapsed = recvTime - turnStart, lag = elapsed - clamp(thinkMs, 0, elapsed),
 //     comp = min(lag, rttEma + 50, LAG_COMP_MAX_MS, quota), charged = elapsed - comp; the move
 //     flags when remaining - charged <= 0, otherwise remaining -= charged then += incMs;
@@ -134,18 +136,18 @@ export class GameClock {
         return Math.min(this.quota[color], this.rtt[color] + RTT_EXTRA_MS, this.policy.lagCompMaxMs);
     }
 
-    /** Deadline of a first move (plies 0 and 1). */
-    firstMoveDeadline() { return this.turnStart + this.policy.firstMoveMs; }
+    /** Deadline of a first move (plies 0 and 1) of `color`: FIRST_MOVE_TIMEOUT_MS plus compCap(color). */
+    firstMoveDeadline(color) { return this.turnStart + this.policy.firstMoveMs + this.compCap(color); }
 
     /** Flag deadline of `color` when its clock runs. */
     flagDeadline(color) { return this.turnStart + this.ms[color] + this.compCap(color); }
 
     /** The deadline of the move expected at `ply` (first-move timer or flag). */
-    deadline(ply) { return ply < 2 ? this.firstMoveDeadline() : this.flagDeadline(ply & 1); }
+    deadline(ply) { return ply < 2 ? this.firstMoveDeadline(ply & 1) : this.flagDeadline(ply & 1); }
 
-    /** First-move time left at `now` for the move of `ply` (0 when the clocks run). */
+    /** First-move time left at `now` for the move of `ply` (0 when the clocks run; no margin, like remainingAt). */
     firstMoveLeft(ply, nowMs) {
-        return ply < 2 ? Math.max(0, this.firstMoveDeadline() - nowMs) : 0;
+        return ply < 2 ? Math.max(0, this.turnStart + this.policy.firstMoveMs - nowMs) : 0;
     }
 
     /**

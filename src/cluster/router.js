@@ -17,6 +17,17 @@
 //          C_Ping -> S_Pong (1/s), C_Pong -> RTT (EMA, capped at 2 s) fed to the game hosts,
 //          queue/challenge requests -> primary IPC -> Ack / Error, game messages -> the local
 //          GameHost or the host shard over the bus (raw frame, no re-encoding).
+//          C_Gesture has a token bucket of its own (GESTURE_RATE / GESTURE_BURST, announced in
+//          Welcome; rate 0 drops them all) and never spends or waits for a WS_MSG token: over it
+//          a gesture is dropped silently (no RateLimited; the seq stays in step as above), and
+//          more than max(50, 10 x burst) drops in 10 s is a flood (anomaly + close 4301). It is
+//          then decoded (malformed: 4300) and checked for seq like any message, and relayed only
+//          for a game attached to the connection: host.relayGesture(gameId, userId, frame) on
+//          the host shard (the raw frame over the bus, recognised by its type byte there and
+//          never decoded again; skipped while that bus link holds a quarter of its queue). The
+//          S_Gesture coming back is dropped when the connection already holds a quarter of
+//          WS_SEND_BUFFER_LIMIT unsent (a gesture must never close a slow client as a slow
+//          consumer).
 //   close  presence.release (the primary also leaves the queue and drops the user's pending
 //          challenges when the release matches the live connection), host.detach (local or bus).
 //
@@ -27,9 +38,17 @@
 // HEARTBEAT_TIMEOUT_MS of silence. Hello deadlines are a FIFO checked every tick (connections are
 // queued in arrival order, so the head is the oldest).
 //
+// Server times: Welcome, S_Ping and S_Pong carry clock.js now(), the clock of the game hosts
+// (MoveMade.serverTime), read when the frame is built (after the Hello's awaits). A round trip
+// that overlaps a stall of this worker detected by its GameHost (host.stallDuring) is left out of
+// the RTT: it measured the stall, not the network.
+//
 // Deviations from DESIGN 5.3/5.7, documented for the integrators:
-//   - Endpoints given to the GameHost: { send(buf), close(code, reason), connId, shard, userId,
-//     rttMs } (local: the socket; remote: relayed over the bus, close included). RTT: `rttMs` is
+//   - Endpoints given to the GameHost: { send(buf), sendDroppable(buf), close(code, reason),
+//     connId, shard, userId, rttMs } (local: the socket; remote: relayed over the bus, close
+//     included). sendDroppable skips the frame (returns false) when the connection holds a
+//     quarter of WS_SEND_BUFFER_LIMIT unsent, or the bus link to its shard a quarter of its
+//     queue. RTT: `rttMs` is
 //     the live EMA (local) or the last value relayed (remote), and host.onRtt(gameId, userId,
 //     rttMs) is called on every measurement.
 //   - forged_type with AUTO_SANCTION_CERTAIN_CHEATS: host.forfeitUser(userId) on the host shard of
@@ -58,6 +77,7 @@ import { metrics as defaultRegistry } from '../metrics.js';
 import {
     MSG, encode, decode, ProtocolError, PROTOCOL_VERSION, PROTOCOL_MIN, SCHEMA_HASH, enums, CloseCode, isClientType,
 } from '../protocol/index.js';
+import { now as clockNow } from '../game/clock.js';
 import { isGameId, shardOfGameId } from '../util/ids.js';
 import { BusKind, BusOp } from './bus.js';
 
@@ -70,6 +90,8 @@ const MAX_PENDING_HELLO = 8;
 export const FULL_HOLD_MS = 5000;
 const MAX_GAMES_PER_CONN = 8;
 const RTT_CAP_MS = 2000;
+/** Gestures dropped in 10 s past which a connection is closed as a flood: max(this, 10 x burst). */
+const GESTURE_FLOOD_MIN = 50;
 const VALID_ERRORS = new Set(Object.values(E));
 
 /** Name of each message type, by type byte (metric labels). */
@@ -98,10 +120,14 @@ export function toErrorCode(e) {
 
 /** The endpoint through which a GameHost reaches a local connection. */
 class LocalEndpoint {
-    constructor(conn, shard) { this.conn = conn; this.connId = conn.id; this.shard = shard; this.local = true; }
+    constructor(conn, shard, backlog) {
+        this.conn = conn; this.connId = conn.id; this.shard = shard; this.local = true; this.backlog = backlog;
+    }
     get userId() { return this.conn.userId; }
     get rttMs() { return this.conn.rttMs; }
     send(buf) { return this.conn.sendFrame(buf); }
+    /** Sends a frame that may be lost (a gesture): skipped when the socket holds a backlog. */
+    sendDroppable(buf) { return this.conn.bufferedBytes <= this.backlog && this.conn.sendFrame(buf); }
     close(code, reason) { this.conn.close(code, reason || ''); }
 }
 
@@ -112,6 +138,13 @@ class RemoteEndpoint {
         this.rttMs = 0; this.local = false; this.games = new Set();
     }
     send(buf) { return this.bus.send(this.shard, BusKind.ToConn, this.connId, this.userId, 0, buf); }
+    /**
+     * Sends a frame that may be lost (a gesture): skipped when the link to the shard holds a
+     * quarter of its queue (the connection's own backlog is checked there, router _onBus).
+     */
+    sendDroppable(buf) {
+        return this.bus.queuedBytes(this.shard) <= this.bus.maxQueueBytes / 4 && this.send(buf);
+    }
     close(code) {
         const b = Buffer.allocUnsafe(2);
         b.writeUInt16LE(code & 0xffff, 0);
@@ -128,6 +161,11 @@ class ConnCtx {
         this.drops = 0;
         this.dropWindowAt = now;
         this.lastRateErrorAt = 0;
+        // Gesture bucket (GESTURE_RATE / GESTURE_BURST), apart from the one above.
+        this.gTokens = router.gRate > 0 ? router.gBurst : 0;
+        this.gTokenAt = now;
+        this.gDrops = 0;
+        this.gDropWindowAt = now;
         this.helloStarted = false;
         this.pending = null;
         this.claimed = false;
@@ -136,7 +174,7 @@ class ConnCtx {
         this.pingAt = now;
         this.lastClientPingAt = 0;
         this.games = null;
-        this.endpoint = new LocalEndpoint(conn, router.shard);
+        this.endpoint = new LocalEndpoint(conn, router.shard, router.gestureBacklog);
         this.tokenHash = null;
         this.sessionId = 0;
         this.badSeqReported = false;
@@ -176,6 +214,10 @@ export class Router {
         this.rate = config.wsMsgRate;
         this.burst = config.wsMsgBurst;
         this.floodDrops = Math.max(10, config.wsMsgBurst);
+        this.gRate = Number.isFinite(config.gestureRate) ? config.gestureRate : 0;
+        this.gBurst = Number.isFinite(config.gestureBurst) ? config.gestureBurst : 1;
+        this.gFloodDrops = Math.max(GESTURE_FLOOD_MIN, 10 * this.gBurst);
+        this.gestureBacklog = (config.wsSendBufferLimit || 262144) / 4;
         const lo = config.shardBase, hi = config.shardBase + config.workers;
         this.isShard = isShard || ((s) => s >= lo && s < hi);
         this.categories = new Map(config.categories.map((c) => [c.id, c]));
@@ -206,6 +248,12 @@ export class Router {
         this._dropPing = dropped.labels('ping_limit');
         this._anomalies = r.counter('scacelith_ws_anomalies_total', 'Protocol anomalies seen by the router', ['kind']);
         this._relayed = r.counter('scacelith_ws_relayed_total', 'Game messages relayed to another shard');
+        // Shared with the GameHost, which counts the other reasons (same registry, same metric).
+        const gDropped = r.counter('scacelith_gestures_dropped_total', 'Gestures not relayed, by reason', ['reason']);
+        this._gDropRate = gDropped.labels('rate');
+        this._gDropNotAttached = gDropped.labels('not_attached');
+        this._gDropBacklog = gDropped.labels('backlog');
+        this._gDropNoGame = gDropped.labels('no_game');
 
         // Server-full signal for the admission before TLS (isFull): the last answers of the
         // primary's global check (MAX_CONNECTIONS plus its reserve, not MAX_CONNECTIONS alone), and
@@ -359,6 +407,8 @@ export class Router {
             return;
         }
         const now = Date.now();
+        const type = buf.length ? buf[0] : 0;
+        if (type === MSG.C_Gesture) { this._gesture(conn, c, buf, now); return; }
         // Token bucket.
         let t = c.tokens + (now - c.tokenAt) * this.rate / 1000;
         if (t > this.burst) t = this.burst;
@@ -366,7 +416,6 @@ export class Router {
         if (t < 1) { c.tokens = t; this._rateLimited(conn, c, buf, now); return; }
         c.tokens = t - 1;
 
-        const type = buf.length ? buf[0] : 0;
         if (S2C_TYPES.has(type)) { this._forged(conn, c, type); return; }
         let msg;
         try {
@@ -385,7 +434,7 @@ export class Router {
             case MSG.C_Ping:
                 if (now - c.lastClientPingAt >= 950) {
                     c.lastClientPingAt = now;
-                    conn.sendFrame(encode.S_Pong({ nonce: msg.nonce, serverTime: now }));
+                    conn.sendFrame(encode.S_Pong({ nonce: msg.nonce, serverTime: clockNow() }));
                 } else this._dropPing.inc();
                 return;
             case MSG.C_Pong:
@@ -487,10 +536,61 @@ export class Router {
         this.bus.send(hs, BusKind.ToHost, conn.id, conn.userId, g, buf);
     }
 
+    // A gesture (see the header): its own bucket, then the checks of any message, then the relay.
+    _gesture(conn, c, buf, now) {
+        let t = c.gTokens + (now - c.gTokenAt) * this.gRate / 1000;
+        if (t > this.gBurst) t = this.gBurst;
+        c.gTokenAt = now;
+        if (t < 1) {
+            c.gTokens = t;
+            this._gDropRate.inc();
+            const seq = buf.length >= 5 ? buf.readUInt32LE(1) : 0;
+            if (seq === c.lastSeq + 1) c.lastSeq = seq;       // the client counted it: stay in step
+            if (now - c.gDropWindowAt > 10000) { c.gDropWindowAt = now; c.gDrops = 0; }
+            if (++c.gDrops > this.gFloodDrops) {
+                this._anomaly(conn, 'flood', { gestureDrops: c.gDrops }, 0);
+                this._fatal(conn, seq, E.Flood, CloseCode.Flood);
+            }
+            return;
+        }
+        c.gTokens = t - 1;
+        let msg;
+        try {
+            msg = decode(buf, DIR_C2S);
+        } catch (e) {
+            if (!(e instanceof ProtocolError)) throw e;
+            this._anomaly(conn, 'malformed', { reason: e.reason, type: MSG.C_Gesture }, 0);
+            this._fatal(conn, 0, E.Malformed, CloseCode.ProtocolViolation);
+            return;
+        }
+        if (msg.seq !== c.lastSeq + 1) { this._badSeq(conn, c, msg.seq); return; }
+        c.lastSeq = msg.seq;
+        this._countIn(MSG.C_Gesture);
+        const g = msg.game;
+        // Only for a game of the connection (attached since its start or the reconnection).
+        if (!c.games || !c.games.has(g)) { this._gDropNotAttached.inc(); return; }
+        const hs = shardOfGameId(g);
+        if (hs === this.shard) {
+            try {
+                this.host.relayGesture(g, conn.userId, buf);
+            } catch (e) {
+                this.log?.error?.('host.relayGesture failed', { gameId: g, err: e });
+            }
+            return;
+        }
+        if (!this.bus || !this.isShard(hs)) { this._gDropNoGame.inc(); return; }
+        // Like S_Gesture frames, skipped while the link to the host's shard holds a backlog.
+        if (this.bus.queuedBytes(hs) > this.bus.maxQueueBytes / 4) { this._gDropBacklog.inc(); return; }
+        this.bus.send(hs, BusKind.ToHost, conn.id, conn.userId, g, buf);
+    }
+
     _onPong(conn, c, nonce) {
         if (!c.pingSentAt || nonce !== c.pingNonce) return;
-        const rtt = performance.now() - c.pingSentAt;
+        const sentAt = c.pingSentAt;
         c.pingSentAt = 0;
+        // A stall of this worker since the ping delays the Pong's reading, not the network.
+        if (typeof this.host.stallDuring === 'function' && this.host.stallDuring(sentAt)) return;
+        const rtt = clockNow() - sentAt;
         this._rtt.observe(rtt);
         const sample = Math.min(RTT_CAP_MS, rtt);
         conn.rttMs = conn.rttMs ? Math.min(RTT_CAP_MS, conn.rttMs * 0.8 + sample * 0.2) : sample;
@@ -654,9 +754,9 @@ export class Router {
         if (conn.state !== 'hello') return;
         if (session === undefined) { this._hello.labels('internal').inc(); this._fatal(conn, 1, E.Internal, CloseCode.Internal); return; }
         if (!session) { this._hello.labels('unauthorized').inc(); this._fatal(conn, 1, E.Unauthorized, CloseCode.Unauthorized); return; }
-        const now = Date.now();
+        const nowWall = Date.now();
         const banUntil = session.bannedUntil || session.banUntil || 0;
-        if (banUntil > now) { this._banned(conn, banUntil); return; }
+        if (banUntil > nowWall) { this._banned(conn, banUntil); return; }
         if (this.config.requireEmailVerification && !session.emailVerified) {
             this._hello.labels('email_unverified').inc();
             this._fatal(conn, 1, E.EmailUnverified, CloseCode.Unauthorized);
@@ -698,12 +798,13 @@ export class Router {
         }
         const activeGame = isGameId(r.activeGame) ? r.activeGame : 0;
         conn.sendFrame(encode.Welcome({
-            proto: msg.proto, serverTime: now, userId: conn.userId, username: conn.username,
+            proto: msg.proto, serverTime: clockNow(), userId: conn.userId, username: conn.username,
             serverName: this.config.serverName, heartbeatMs: this.config.heartbeatIntervalMs,
             clientPingMs: this.config.clientPingIntervalMs, maxMsgPerSec: Math.min(65535, this.rate), activeGame,
+            gestureRate: this.gRate, gestureBurst: this.gRate > 0 ? this.gBurst : 0,
         }));
         this._hello.labels('ok').inc();
-        this._helloMs.observe(now - conn.openedAt);
+        this._helloMs.observe(Date.now() - conn.openedAt);
         if (activeGame) this.attach(activeGame, conn.userId, conn.id);
         const pending = c.pending;
         c.pending = null;
@@ -760,10 +861,18 @@ export class Router {
         switch (kind) {
             case BusKind.ToConn: {
                 const conn = this.conns.get(connId);
-                if (conn && conn.userId === userId && conn.state === 'ready') conn.sendFrame(payload);
+                if (!conn || conn.userId !== userId || conn.state !== 'ready') return;
+                // A gesture from a host shard is sent the way LocalEndpoint.sendDroppable does.
+                if (payload[0] === MSG.S_Gesture && conn.bufferedBytes > this.gestureBacklog) { this._gDropBacklog.inc(); return; }
+                conn.sendFrame(payload);
                 return;
             }
             case BusKind.ToHost: {
+                if (payload[0] === MSG.C_Gesture) {
+                    // Validated by the source shard; relayed from its raw bytes, never decoded.
+                    try { this.host.relayGesture(gameId, userId, payload); } catch (e) { this.log?.error?.('host.relayGesture failed', { gameId, err: e }); }
+                    return;
+                }
                 let msg;
                 try { msg = decode(payload, DIR_C2S); } catch { return; }      // validated by the source shard
                 const ep = this.remote.get(this._remoteKey(from, connId)) || new RemoteEndpoint(this.bus, from, connId, userId);
@@ -930,8 +1039,8 @@ export class Router {
             if (conn.state === 'ready' && now - c.pingAt >= interval / 2) {
                 c.pingAt = now;
                 c.pingNonce = (c.pingNonce + 1) >>> 0 || 1;
-                c.pingSentAt = performance.now();
-                conn.sendFrame(encode.S_Ping({ nonce: c.pingNonce, serverTime: now }));
+                c.pingSentAt = clockNow();
+                conn.sendFrame(encode.S_Ping({ nonce: c.pingNonce, serverTime: c.pingSentAt }));
             }
         }
     }

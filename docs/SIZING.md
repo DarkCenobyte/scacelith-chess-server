@@ -12,6 +12,7 @@ Terms used throughout:
 
 - Storage is SQLite in WAL mode through Node's built-in `node:sqlite`: one file on local disk, no database server.
 - CPU limits capacity first: the per-shard event loop. With the default client ping of 10 s (`CLIENT_PING_INTERVAL_MS`), a vCore with `s` = 0.65 holds about 7,000 connected players comfortably (mix M1). With a 2 s ping it holds about 3,750.
+- Gestures come on top: the live head and hand movements that the server relays between the two players of a game (`GESTURE_RATE`, at most 4 per player per second by default) cost about 100 µs of an OVH vCore each (inferred from a measurement), so a player in a game who keeps moving costs more than their moves. With the 10 s ping, capacity is divided by 1 + r, where r is the average number of gestures a player in a game sends per second: by 2 at one per second, by 5 if every player in a game sent the full default rate all the time. See [Gestures](#gestures).
 - Memory comes next, near 70 KB per connection: about 24,000-29,000 connections on 4 GB and 51,000-62,000 on 8 GB with the settings below (inferred), at or just after the p99 limit of the CPU with a 10 s ping.
 - Network bandwidth and disk I/O are not limits on a typical VPS. Disk space is: finished games take about 85 MB per day per 1,000 average connected players, and nothing archives old games.
 - Restarts need one setting near the comfortable load: after a crash or a graceful restart alike, every player is back within about 60 s with the 10 s ping, inside the default `RECOVERY_GRACE_MS` of 90 s, but the last players with a game in progress may need about 30 s, more than the default `RECOVERY_CLOCK_HOLD_MS` of 20 s (inferred). See [Restarts](#restarts).
@@ -32,6 +33,7 @@ Server CPU on the test vCPU. Divide by `s` for another host.
 | First connection of a session, or a newcomer's attempt at a full server (the client reads `GET /info` first, which can take a TLS connection of its own) | about 4 ms (inferred: 2.3 ms for the WebSocket, 1.5-2 ms for `/info`) |
 | Password login or registration | 0.50-0.55 s with scrypt (Node 22), 0.35 s with Argon2id (Node 24.7 or later) |
 | Fixed cost per shard with traffic, per process at idle | about 0.05 core, about 0.013 core |
+| Relayed gesture (a `Gesture` in from one player and out to the opponent, TLS included; with 2 workers half of them also cross the bus between the workers) | about 65 µs (52-77; inferred: measured on the development container and scaled, see [Gestures](#gestures)) |
 
 Where the CPU goes at the comfortable point with a 10 s ping (inferred from the model): moves about half, client pings about 20 %, fixed process costs about 23 %, game ends and reconnections the rest. With a 2 s ping, pings and heartbeats take 43 % (the client ping alone about 33 %).
 
@@ -83,6 +85,26 @@ With a 10 s ping, memory caps VPS-1 at 24,000-29,000 connections and VPS-2 at 51
 
 A 2-vCore VPS is enough to start. Move to 4 vCores when the peak regularly exceeds about 10,000 connected players, when peak CPU passes 55 %, when the database approaches 10 GB, or when you want engine-based anti-cheat analysis (one engine takes a whole vCore).
 
+These figures leave out the gestures, which the next section adds.
+
+### Gestures
+
+During a game the client sends its player's live gestures (the head, the piece in hand and where it is aimed, a move placed before the clock press) whenever they change, at most `GESTURE_RATE` per second (4 by default, in bursts of `GESTURE_BURST`, 8), and the server relays each one to the opponent without storing it. A player who looks around or moves a piece sends up to that rate, and one who sits still sends none. Call r the average number of gestures a player in a game sends per second. It depends on how the players play, so it is known only in production: `scacelith_gestures_relayed_total` per second divided by the players in a game (twice `scacelith_games_active`).
+
+**Cost of one gesture.** The relay was measured on the development container, a 4-vCPU Intel Xeon at 2.10 GHz shared with other jobs, with the load generator on the same machine: the same 1,000 games (2,000 players, one move per 5 s per player, no game ending) on 2 workers, with every player sending 0, 2 or 4 gestures per second, used 0.13-0.15, 0.35-0.41 and 0.49-0.55 server cores ([BENCHMARK.md](BENCHMARK.md#gesture-relay)). That is 44-65 µs per relayed gesture, about 55 µs in the middle: the TLS record in and the one out, the router and the host, and for half of the gestures the hop between the workers over the bus (with 4 workers, where three quarters of them cross it, one run on a busy machine gave about the same, 57 µs). That container's vCPU did the scrypt reference of [Validating on the real machine](#validating-on-the-real-machine) in 0.42 s (0.41-0.43) against 0.50 s for the test vCPU, so a gesture costs about 65 µs (52-77) of the test vCPU and about 100 µs (80-120) of an OVH vCore at `s` = 0.65 (inferred). That is about as much as a client ping exchange (62 µs of the test vCPU, from the unit costs above) and a sixth of a move.
+
+**Capacity.** For mix M1 at the comfortable point, a connected player costs about 39 µs per second of the test vCPU with the 10 s ping, and about 73 µs with the 2 s ping, besides the fixed process costs (inferred from the model above). Gestures add 0.6 × r × 65 = 39 × r µs per second, so the comfortable capacity is multiplied by 1 / (1 + r) with the 10 s ping and by 73 / (73 + 39 × r) with the 2 s ping (inferred; the uncertainty of the cost of a gesture moves these factors by about ±10 % at r = 1 and ±15 % at r = 4). Connected players at the comfortable point, mix M1, `s` = 0.65:
+
+| r (gestures per second per player in a game) | Factor, 10 s ping (default) | VPS-1 | VPS-2 | Factor, 2 s ping | VPS-1 | VPS-2 |
+|---|---|---|---|---|---|---|
+| 0 (`GESTURE_RATE=0`, or nobody moves) | 1 | 14,000 | 28,400 | 1 | 7,500 | 15,300 |
+| 0.5 | 0.67 | 9,300 | 18,900 | 0.79 | 5,900 | 12,100 |
+| 1 | 0.50 | 7,000 | 14,200 | 0.65 | 4,900 | 9,900 |
+| 2 (every player in a game moving all the time at `GESTURE_RATE=2`) | 0.33 | 4,700 | 9,500 | 0.48 | 3,600 | 7,300 |
+| 4 (the same at the default rate) | 0.20 | 2,800 | 5,700 | 0.32 | 2,400 | 4,900 |
+
+r can never exceed `GESTURE_RATE`, so the row of the configured rate is the worst case, and a real player in a game sends less (inferred). A gesture is small, about 110 bytes in and 100 bytes out at the IP level, one packet each way: in the worst case above a VPS-1 relays about 6,700 gestures per second, about 6 Mbit/s each way, so the network stays out of the way. `GESTURE_RATE` is announced in `Welcome`, so a change applies to the players who connect after the restart; 0 turns the relay off.
+
 ## Memory
 
 Per connection: 55-62 KB of server RSS when idle, 58-84 KB in a game, plus about 3.7 KB of kernel socket memory. Budget about 70 KB.
@@ -108,7 +130,7 @@ Fixed costs to subtract from the visible RAM before dividing by the cost of a co
 
 ## Network
 
-Bandwidth is not a limit. With a 2 s ping a connected player sends about 85 B/s and receives about 59 B/s at the IP level (1.2 and 0.7 packets per second); a move is about 210 B in and 238 B out. At the comfortable point of a 2-vCore VPS with a 2 s ping that is about 6 Mbit/s in, 4.5 Mbit/s out and 10,000 packets per second in; at its hard CPU limit about 15 Mbit/s in and 11 Mbit/s out, 26,000 packets per second in: 3 % of a 500 Mbit/s link (inferred by scaling the model). A 10 s ping reduces the traffic per player further, and a 4-vCore VPS does twice as much on a 1 Gbit/s link. Watch packets per second rather than bandwidth: providers rarely publish a limit, and a virtio-net interface handles about 100,000 packets per second (inferred). A reconnection costs 4-7.5 KB per client, which is 10-60 Mbit/s at 300-1,000 reconnections per second, after a crash or a graceful restart alike, since the client reuses its `/info` answer in both cases.
+Bandwidth is not a limit, gestures included (see [Gestures](#gestures)). With a 2 s ping a connected player sends about 85 B/s and receives about 59 B/s at the IP level (1.2 and 0.7 packets per second); a move is about 210 B in and 238 B out. At the comfortable point of a 2-vCore VPS with a 2 s ping that is about 6 Mbit/s in, 4.5 Mbit/s out and 10,000 packets per second in; at its hard CPU limit about 15 Mbit/s in and 11 Mbit/s out, 26,000 packets per second in: 3 % of a 500 Mbit/s link (inferred by scaling the model). A 10 s ping reduces the traffic per player further, and a 4-vCore VPS does twice as much on a 1 Gbit/s link. Watch packets per second rather than bandwidth: providers rarely publish a limit, and a virtio-net interface handles about 100,000 packets per second (inferred). A reconnection costs 4-7.5 KB per client, which is 10-60 Mbit/s at 300-1,000 reconnections per second, after a crash or a graceful restart alike, since the client reuses its `/info` answer in both cases.
 
 ## Database and disk
 
@@ -252,6 +274,7 @@ Restart at quiet hours, keep `SHUTDOWN_GRACE_MS` so clients receive the notice, 
 | Setting | 2 vCores, 4 GB | 4 vCores, 8 GB | Why |
 |---|---|---|---|
 | `CLIENT_PING_INTERVAL_MS` | 10000 (default) | 10000 | 2000 gives a livelier ping display but costs a factor of 1.87 in capacity |
+| `GESTURE_RATE` | 4 (default) while the peak stays under about 2,800 connected players, then 2 (up to about 4,700), then 1 (up to about 7,000) | 4 up to about 5,700, then 2 (up to about 9,500), then 1 (up to about 14,000) | the opponent's live gestures cost CPU for every player in a game; these limits hold even if every player in a game moved all the time (inferred, [Gestures](#gestures)); once `scacelith_gestures_relayed_total` shows the real rate r, use the row of r instead |
 | `WORKERS` | auto | auto | one shard per vCore |
 | `LISTEN_REUSE_PORT` | true | true | each worker accepts its own connections; halves the primary's cost per connection |
 | `SHARD_OVERLOAD_LAG_MS` | 500 | 500 | the default 250 moves games for lag spikes already seen at 63-77 % CPU |
@@ -359,6 +382,8 @@ for i in 1 2 3 4 5; do node -e "const c=require('crypto');const t=process.cpuUsa
 | `scacelith_anticheat_analysis_queue_ordinary`, `scacelith_anticheat_analysis_queue_priority`, `scacelith_anticheat_analysis_skipped_total{reason}` | the ordinary queue held at `ANALYSIS_QUEUE_MAX`, a growing priority queue; `displaced` counts waiting games replaced by a game with a suspicious (not `info`) anomaly of its own |
 | `scacelith_journal_disk_bytes` (per shard) | more than about (`JOURNAL_COMPACT_SEGMENTS` + 1) × 16 MB |
 | `scacelith_journal_errors_total`, `scacelith_game_commit_unjournaled_total` | any increase: the journal cannot be written, and finished games are committed without it; fix the disk before a restart |
+| `scacelith_gestures_relayed_total`, `scacelith_gestures_dropped_total{reason}` | the relayed rate divided by the players in a game is r of [Gestures](#gestures); `backlog` drops mean slow players or an overloaded worker, `rate` drops a client that exceeds `GESTURE_RATE` |
+| `scacelith_game_stall_ms`, `scacelith_game_timer_late_ms` | stalls of a worker's event loop (the games do not charge them to the players, up to `GAME_STALL_CREDIT_MAX_MS`); frequent ones of 100 ms or more mean an overloaded machine, CPU steal or a slow disk |
 
 ## Risks, largest first
 
@@ -367,5 +392,5 @@ for i in 1 2 3 4 5; do node -e "const c=require('crypto');const t=process.cpuUsa
 3. **Disk space.** Nothing archives finished games: a 2-vCore VPS that is full every evening fills a 40 GB disk in about 2 months (inferred), in 1 month if backup copies are written locally.
 4. **Restarts.** Near the comfortable load with the 10 s ping, a crash or a graceful restart takes about 60 s to bring every player back (inferred), inside the default recovery grace, but the players to move keep their whole clock only with the `RECOVERY_CLOCK_HOLD_MS` setting above. This has not been tested with a real multi-machine reconnection wave.
 5. **Admission limits and journal compaction are tested, not measured under load.** The TLS gate, the password-hash cap, the upgrade reserve and compaction came after the load measurements, and only the retention purge has a measured cost. Run the load tests above again on the real machine.
-6. **Player mix.** Between a bullet-heavy mix and a slow one, capacity changes by more than a factor of two. Production metrics will tell which one your players resemble.
+6. **Player mix.** Between a bullet-heavy mix and a slow one, capacity changes by more than a factor of two, and between players who sit still and players who keep looking around (the gesture rate r) by as much again. Production metrics will tell which one your players resemble.
 7. **Small items.** One SQLite writer for about 12 to 23 game ends per second is ample, the primary stays under 0.25 core, and one analysis engine follows only a small share of the games at full load.

@@ -106,7 +106,8 @@ event-loop stalls with their stacks.
 ## Test machine and conditions
 
 - A 4 vCPU virtual machine (Intel Xeon; the host CPU changed with a container restart: 2.10 GHz for
-  the connect 10k/50k/100k runs of 2026-09-28, 2.80 GHz for all the others), 15.7 GB of memory, no
+  the connect 10k/50k/100k runs of 2026-09-28 and the gesture relay runs of 2026-09-30, 2.80 GHz
+  for all the others), 15.7 GB of memory, no
   swap, Linux 6.18, Node 22.22.2, `nofile` 20,000 (hard), `somaxconn` 4096.
 - **The load generator runs on the same 4 cores as the server** and used 25 to 50 % of the CPU in
   the saturated runs (TLS handshakes and records cost the client about as much as the server). The server figures are
@@ -231,6 +232,33 @@ milliseconds between a game's end and its commit (the load generator retries).
   shard's event loop (`synchronous=FULL`, and a wait on the database write lock held by another
   process, up to `busy_timeout` 5 s), with a p99 of 24-45 ms in most runs and 180-214 ms in two of
   them; GC pauses of 40-50 ms in the profiled run.
+
+### Gesture relay
+
+The cost of the live gestures the server relays between the two players of a game (`Gesture`,
+[PROTOCOL.md](PROTOCOL.md#gesture-relay)): `--scenario games --games 1000 --tc 10+5
+--move-interval-ms 5000 --max-plies 0 --workers 2 --start-rate 100 --warmup-s 30 --duration-s 150
+--gesture-hz N`. That is 2,000 connections, 200 moves/s, no game ending in the window (no churn),
+and every player sending a head gesture (a slow look around) N times per second while in its
+game; the default `GESTURE_RATE` of 4 relays them all. Runs of 2026-09-30 on the 2.10 GHz host
+(the scrypt reference of SIZING.md took 0.42 s there), interleaved, keeping those in which the
+other processes of the machine used about one core or less:
+
+| gestures per player per second | relayed per second | server cores | load generator cores | other processes, cores | server CPU per relayed gesture |
+|---|---|---|---|---|---|
+| 0 | 0 | 0.140 / 0.128 / 0.145 | 0.08-0.09 | 1.08 / 0.71 / 1.21 | |
+| 2 | 3,995 / 3,994 / 3,993 | 0.373 / 0.347 / 0.405 | 0.20-0.24 | 0.45 / 0.23 / 0.72 | 60 / 53 / 65 µs |
+| 4 | 7,976 / 7,973 | 0.546 / 0.487 | 0.28-0.32 | 0.34 / 0.52 | 52 / 44 µs |
+
+The cost per gesture is the server CPU above the runs without gestures of the same series
+(0.134 cores for the first two columns, 0.145 for the third), divided by the gestures relayed per
+second: 44-65 µs, about 55 µs on average, for one small TLS record in, one out, the router, the
+host, and for half of the gestures a hop between the two workers over the bus. With 4 workers
+(three quarters of the gestures cross the bus) one run on a busy machine (3 cores of other
+processes) gave 0.158 cores without gestures and 0.601 at 4 Hz (7,824 relayed per second): 57 µs.
+Runs on a machine saturated by other processes (2.5-3.3 cores) are left out: they gave 36-58 µs,
+and at 4 Hz the load generator fell behind. The move round trip stayed at a p99 of 1-7 ms in the
+kept runs, and no gesture was dropped. Capacity with gestures: [SIZING.md](SIZING.md#gestures).
 
 ## What saturated first
 

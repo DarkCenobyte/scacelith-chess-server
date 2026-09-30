@@ -177,6 +177,7 @@ test('the recovery record keeps the grace; checkpoints carry it; old records and
 // ---- Clock hold after a recovery (RECOVERY_CLOCK_HOLD_MS) ----------------------------------------
 
 const HOLD = 20000;
+const CAP = 150;              // compCap with the default round trip: the margin of a flag or a first-move deadline
 const pl = (id) => ({ userId: id, name: `user${id}`, rating: 1500, provisional: false });
 
 // Everything a replay must rebuild, and what the players see at `t`.
@@ -310,26 +311,28 @@ test('a restored game at ply 1: no conduct incident when its player never came b
     assert.equal(a.nextDeadline(), R + HOLD);
     assert.equal(a.snapshot(W, R + 1000).firstMoveMs, HOLD - 1000 + 30000);
     a.tick(R + HOLD);
-    assert.equal(a.nextDeadline(), R + HOLD + 30000);
-    const out = a.tick(R + HOLD + 30000);
+    assert.equal(a.nextDeadline(), R + HOLD + 30000 + CAP);
+    const out = a.tick(R + HOLD + 30000 + CAP);
     assert.deepEqual([a.result.status, a.result.reason], [GS.Aborted, ER.NoShow]);
     assert.deepEqual(out.conduct, [], 'the server broke the connection, not the player');
     assert.equal(a.record().rated, false);
     // Black is back (its first-move time starts then) and does not move: that is a no-show.
     const b = restart(log, R).room;
     b.onReconnect(B, R + 5000);
-    assert.equal(b.nextDeadline(), R + 5000 + 30000);
-    const out2 = b.tick(R + 35000);
+    assert.equal(b.nextDeadline(), R + 5000 + 30000 + CAP);
+    const out2 = b.tick(R + 35000 + CAP);
     assert.deepEqual([b.result.status, b.result.reason], [GS.Aborted, ER.NoShow]);
     assert.deepEqual(out2.conduct, [{ userId: 4, kind: 'noshow' }]);
     // A game that was never restored keeps its conduct incident.
     const c = GameRoom.fromJournal(log, opts());
-    assert.deepEqual(c.tick(T0 + 2000 + 30000).conduct, [{ userId: 4, kind: 'noshow' }]);
+    assert.deepEqual(c.tick(T0 + 2000 + 30000 + CAP).conduct, [{ userId: 4, kind: 'noshow' }]);
 });
 
 // ---- First-move timer of a game restored before its second ply -------------------------------------
 
 const FIRST = CFG.firstMoveTimeoutMs;
+// The deadline of a first move: FIRST plus the margin of a flag (compCap with the default round trip).
+const FM = FIRST + CAP;
 
 // A 3+2 game at ply 1 (Black to move), and its journal.
 function atPly1(id = 626262) {
@@ -350,26 +353,26 @@ test('a restored game at ply 1: back after the hold, the side to move gets its w
     assert.deepEqual(room.awaySinceRecovery, [false, true]);
     // The hold ends without Black: its first-move timer runs from then on.
     assert.equal(run(room.tick(R + HOLD)).clockStarted, B);
-    assert.equal(room.nextDeadline(), R + HOLD + FIRST);
+    assert.equal(room.nextDeadline(), R + HOLD + FM);
     // Black is back 2 s before that deadline, within its recovery grace.
     const back = R + HOLD + FIRST - 2000;
     const o = run(room.onReconnect(B, back));
     assert.equal(o.clockStarted, B, 'the host sends White a snapshot with the new timer');
-    assert.deepEqual([room.clock.turnStart, room.nextDeadline()], [back, back + FIRST]);
+    assert.deepEqual([room.clock.turnStart, room.nextDeadline()], [back, back + FM]);
     assert.equal(room.snapshot(B, back).firstMoveMs, FIRST);
     assert.equal(room.snapshot(W, back + 1000).firstMoveMs, FIRST - 1000);
     assert.deepEqual(fp(GameRoom.fromJournal(log, opts()), back), fp(room, back), 'the journal replays to the same room');
-    assert.equal(run(room.tick(R + HOLD + FIRST)).ended, false, 'still running at the deadline it had before');
+    assert.equal(run(room.tick(R + HOLD + FM)).ended, false, 'still running at the deadline it had before');
     // Leaving and coming back again does not restart it a second time.
     run(room.onDisconnect(B, back + 5000));
     const again = run(room.onReconnect(B, back + 10000));
     assert.equal(again.clockStarted, 2);
-    assert.deepEqual([room.clock.turnStart, room.nextDeadline()], [back, back + FIRST]);
+    assert.deepEqual([room.clock.turnStart, room.nextDeadline()], [back, back + FM]);
     assert.equal(room.snapshot(B, back + 10000).firstMoveMs, FIRST - 10000);
     assert.deepEqual(fp(GameRoom.fromJournal(log, opts()), back + 10000), fp(room, back + 10000));
     // Back with its whole first-move time and no move: a no-show.
-    assert.equal(run(room.tick(back + FIRST - 1)).ended, false);
-    const end = run(room.tick(back + FIRST));
+    assert.equal(run(room.tick(back + FM - 1)).ended, false);
+    const end = run(room.tick(back + FM));
     assert.deepEqual([room.result.status, room.result.reason], [GS.Aborted, ER.NoShow]);
     assert.deepEqual(end.conduct, [{ userId: 4, kind: 'noshow' }]);
 });
@@ -383,16 +386,16 @@ test('a restored game at ply 0: the first reconnection restarts the timer of the
     // White (to move) is back 25 s after the hold: 30 s from then.
     const wBack = R + HOLD + 25000;
     assert.equal(run(room.onReconnect(W, wBack)).clockStarted, W);
-    assert.equal(room.nextDeadline(), wBack + FIRST);
+    assert.equal(room.nextDeadline(), wBack + FM);
     // White moves; Black, still away since the recovery, has its first-move time from that move...
     const wMove = wBack + 1000;
     assert.equal(run(room.onMove(W, moveOf(room), wMove)).moved, true);
-    assert.equal(room.nextDeadline(), wMove + FIRST);
+    assert.equal(room.nextDeadline(), wMove + FM);
     // ...and the whole of it again from its first reconnection (before its recovery grace ends).
     const bBack = wMove + 25000;
     assert.ok(bBack < R + 90000);
     assert.equal(run(room.onReconnect(B, bBack)).clockStarted, B);
-    assert.equal(room.nextDeadline(), bBack + FIRST);
+    assert.equal(room.nextDeadline(), bBack + FM);
     assert.deepEqual(fp(GameRoom.fromJournal(log, opts()), bBack), fp(room, bBack));
     assert.equal(run(room.onMove(B, moveOf(room), bBack + 29000)).moved, true);
     assert.deepEqual(room.awaySinceRecovery, [false, false]);
@@ -427,7 +430,7 @@ test('the first-move restart survives journalState, a journal snapshot and a rep
         assert.deepEqual(fp(copy, S), fp(ref.room, S), label);
         const a = ref.run(ref.room.onReconnect(B, S + 10000)), b = copy.onReconnect(B, S + 10000);
         assert.deepEqual(b.journal.map((r) => [r.kind, r.at, r.payload]), a.journal.map((r) => [r.kind, r.at, r.payload]), label);
-        assert.deepEqual([b.clockStarted, copy.nextDeadline()], [B, S + 10000 + FIRST], label);
+        assert.deepEqual([b.clockStarted, copy.nextDeadline()], [B, S + 10000 + FM], label);
         assert.deepEqual(fp(copy, S + 10000), fp(ref.room, S + 10000), label);
     }
     // Restored at ply 0, both still away at the snapshot: both bits, and White (to move) gets the restart.
@@ -439,7 +442,7 @@ test('the first-move restart survives journalState, a journal snapshot and a rep
     assert.equal(zcp.payload[2] & 0x18, 0x18);
     const zc = GameRoom.fromJournal([zs], opts());
     assert.deepEqual(zc.awaySinceRecovery, [true, true]);
-    assert.deepEqual([zc.onReconnect(W, S + 1000).clockStarted, zc.nextDeadline()], [W, S + 1000 + FIRST]);
+    assert.deepEqual([zc.onReconnect(W, S + 1000).clockStarted, zc.nextDeadline()], [W, S + 1000 + FM]);
     // Black came back and left again before the snapshot: no restart after it either.
     const h = live();
     h.run(h.room.onReconnect(B, S));
@@ -447,14 +450,14 @@ test('the first-move restart survives journalState, a journal snapshot and a rep
     const snap = h.room.journalSnapshot(S + 3000);
     const copy = GameRoom.fromJournal([snap], opts());
     assert.deepEqual(copy.awaySinceRecovery, [false, false]);
-    assert.deepEqual([copy.onReconnect(B, S + 4000).clockStarted, copy.nextDeadline()], [2, S + FIRST]);
+    assert.deepEqual([copy.onReconnect(B, S + 4000).clockStarted, copy.nextDeadline()], [2, S + FM]);
     // A second crash: the new recovery gives both players their first reconnection again.
     const R2 = S + 20000;
     const second = restart([snap], R2);
     assert.deepEqual(second.room.awaySinceRecovery, [true, true]);
     second.room.tick(R2 + HOLD);
     assert.equal(second.room.onReconnect(B, R2 + HOLD + 10000).clockStarted, B);
-    assert.equal(second.room.nextDeadline(), R2 + HOLD + 10000 + FIRST);
+    assert.equal(second.room.nextDeadline(), R2 + HOLD + 10000 + FM);
 });
 
 test('journals of older builds replay without the first-move restart: no flag in the recovered record, no away bit in checkpoints', () => {
@@ -478,7 +481,7 @@ test('journals of older builds replay without the first-move restart: no flag in
     // An older build: the release checkpoint of the hold has no away bit, the recovery no flag.
     for (const [label, old] of [['both', edit(log, (r, p) => { noFlag(r, p); noBits(r, p); })], ['checkpoint', edit(log, noBits)]]) {
         const a = GameRoom.fromJournal(old, opts());
-        assert.deepEqual([a.clock.turnStart, a.nextDeadline(), a.awaySinceRecovery], [R + HOLD, R + HOLD + FIRST, [false, false]], label);
+        assert.deepEqual([a.clock.turnStart, a.nextDeadline(), a.awaySinceRecovery], [R + HOLD, R + HOLD + FM, [false, false]], label);
     }
     // No hold (RECOVERY_CLOCK_HOLD_MS=0, or a 12-byte record of an older build): no checkpoint in
     // between, so the recovered record alone decides.
@@ -518,7 +521,7 @@ test('GameHost with a real journal: a compaction snapshot and a crash keep the f
         h1.attach(id, 1, ew);
         clock.t = R1 + HOLD;
         h1.runTimers(clock.t + 10);
-        assert.equal(room.nextDeadline(), R1 + HOLD + FIRST);
+        assert.equal(room.nextDeadline(), R1 + HOLD + FM);
         await j1.flush();
         clock.t = R1 + HOLD + 1000;
         assert.equal(h1.compactJournal(clock.t), 1, 'the journal asked for a snapshot of the game');
@@ -543,7 +546,7 @@ test('GameHost with a real journal: a compaction snapshot and a crash keep the f
         assert.deepEqual(ew.msgs().map((x) => [x.type, x.kind, x.firstMoveMs]),
             [[MSG.GameEvent, EV.PlayerReconnected, undefined], [MSG.GameSnapshot, undefined, FIRST]]);
         assert.equal(eb.msgs().at(-1).firstMoveMs, FIRST);
-        assert.equal(room.nextDeadline(), clock.t + FIRST);
+        assert.equal(room.nextDeadline(), clock.t + FM);
 
         // 5. The second restart, from the copy at R2: Black's first reconnection after the new hold
         //    gives it the whole first-move time again.
@@ -559,7 +562,7 @@ test('GameHost with a real journal: a compaction snapshot and a crash keep the f
         const eb2 = new FakeEndpoint(2);
         h2.attach(id, 2, eb2);
         assert.equal(eb2.msgs().at(-1).firstMoveMs, FIRST);
-        assert.equal(r2.nextDeadline(), clock.t + FIRST);
+        assert.equal(r2.nextDeadline(), clock.t + FM);
         await j2.close();
         await j1.close();
     } finally {

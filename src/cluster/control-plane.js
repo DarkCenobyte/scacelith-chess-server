@@ -16,6 +16,10 @@
 // loaded shard (fewest games, then connections) hosts it. Challenges: the creator's shard.
 // Rematches: the finished game's shard.
 //
+// Clock press: createGame fixes each game's autoPress (GameSnapshot.autoPress) from
+// AUTO_PRESS_CLOCK, for the queue, the challenges and the private games alike; a rematch keeps the
+// value of the game it follows, so a change of the setting applies to the games created after it.
+//
 // Notifications (QueueStatus, ChallengeReceived, ChallengeStatus, Notice) are encoded here and
 // written by the shard of the user's live connection ('conn.send'); waiting players get a fresh
 // QueueStatus every 3 s.
@@ -31,7 +35,8 @@
 //                     'game.forfeit' { userId, gameId }   (sanction.applied: the host shard of the
 //                     user's running game ends it Forfeit with host.forfeitUser)
 //   game.rematch: white/black are already swapped by the room (the new game's colours); the
-//   players' ratings are read again (the finished game changed them).
+//   players' ratings are read again (the finished game changed them); autoPress is the finished
+//   game's.
 //   presence.release of the live connection also leaves the queue and withdraws the user's
 //   pending challenges (so the router does not need a separate mm.leave that could race with a
 //   newer connection's QueueJoin).
@@ -245,6 +250,7 @@ export class ControlPlane {
      * @returns {Promise<{ok:true, gameId:number}|{error:number}>}
      */
     async createGame(spec, preferredShard, source) {
+        if (typeof spec.autoPress !== 'boolean') spec = { ...spec, autoPress: this.config.autoPressClock !== false };
         const ids = [spec.white.userId, spec.black.userId];
         if (ids.some((u) => this._busy(u))) return { error: E.AlreadyInGame };
         for (const u of ids) this.starting.add(u);
@@ -557,9 +563,10 @@ export class ControlPlane {
 
     /**
      * Both players asked for a rematch of gameId. white/black are the new game's players, colours
-     * already swapped by the room ({ userId, name|username, rating?, provisional? } or user ids).
+     * already swapped by the room ({ userId, name|username, rating?, provisional? } or user ids);
+     * autoPress is the finished game's (AUTO_PRESS_CLOCK when absent).
      */
-    async gameRematch({ gameId, white, black, category, baseMs, incMs, rated }) {
+    async gameRematch({ gameId, white, black, category, baseMs, incMs, rated, autoPress }) {
         const now = this.now();
         const norm = (x) => (typeof x === 'number' ? { userId: x } : { ...x, username: x.username ?? x.name });
         const nw = norm(white), nb = norm(black);
@@ -580,7 +587,7 @@ export class ControlPlane {
             category: cat, baseMs, incMs, rated: !!rated && cat !== 'custom',
             white: this._info(this._player({ ...nw, rating: undefined }, cat)),
             black: this._info(this._player({ ...nb, rating: undefined }, cat)),
-            createdAt: now, rematchOf: gameId,
+            createdAt: now, rematchOf: gameId, autoPress,
         };
         const r = await this.createGame(spec, shardOfGameId(gameId), 'rematch');
         return r.ok ? { ok: true, gameId: r.gameId } : { error: r.error === E.AlreadyInGame ? E.RematchUnavailable : r.error };

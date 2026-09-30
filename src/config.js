@@ -128,6 +128,10 @@ key('HEARTBEAT_INTERVAL_MS', { section: 'limits', type: 'int', default: 10000, m
 key('HEARTBEAT_TIMEOUT_MS', { section: 'limits', type: 'int', default: 30000, min: 3000, desc: 'A connection silent for this long is considered dead.' });
 key('CLIENT_PING_INTERVAL_MS', { section: 'limits', type: 'int', default: 10000, min: 1000, max: 60000,
     desc: 'Interval of the game client\'s own Ping, announced in Welcome (the client measures its round trip for the ping indicator and its estimate of the server clock with it). Lower is a more reactive ping indicator but costs more server CPU for every connected player: at 2000 these pings alone take a third or more of the server CPU of a player in a 3+2 game. After each connection the client sends a few quick pings anyway.' });
+key('GESTURE_RATE', { section: 'limits', type: 'int', default: 4, min: 0, max: 60,
+    desc: 'Live gestures (the player\'s head, the piece in hand and where it is aimed) a client may send per second, sustained, announced in Welcome. The server relays each one to the opponent as it is and never stores it; it costs server CPU for every player in a game (docs/SIZING.md). A client beyond it has its gestures dropped silently, and only a gross excess closes the connection as a flood. 0 turns the relay off (the clients then send none).' });
+key('GESTURE_BURST', { section: 'limits', type: 'int', default: 8, min: 1, max: 120,
+    desc: 'Gestures a client may send in a burst above GESTURE_RATE (the size of its own token bucket, apart from WS_MSG_RATE: gestures never delay or rate-limit moves).' });
 key('HTTP_BODY_LIMIT', { section: 'limits', type: 'int', default: 16384, min: 1024, desc: 'Largest API request body in bytes.' });
 key('HTTP_RATE_PER_IP', { section: 'limits', type: 'int', default: 120, min: 1, desc: 'API requests per minute from one IP address (all endpoints).' });
 key('AUTH_RATE_PER_IP', { section: 'limits', type: 'int', default: 20, min: 1, desc: 'Login / register / reset attempts per 10 minutes from one IP address (one IPv6 /64).' });
@@ -163,6 +167,12 @@ key('LAG_COMP_MAX_MS', { section: 'games', type: 'int', default: 1000, min: 0, m
 key('LAG_QUOTA_INITIAL_MS', { section: 'games', type: 'int', default: 2000, min: 0, desc: 'Lag compensation budget of each player at the start of a game.' });
 key('LAG_QUOTA_GAIN_MS', { section: 'games', type: 'int', default: 100, min: 0, desc: 'Lag compensation budget regained at every move.' });
 key('LAG_QUOTA_MAX_MS', { section: 'games', type: 'int', default: 3000, min: 0, desc: 'Largest lag compensation budget.' });
+key('GAME_STALL_MIN_MS', { section: 'games', type: 'int', default: 30, min: 5, max: 1000,
+    desc: 'A worker whose event loop stopped for longer than this (garbage collection, blocking I/O, CPU steal) counts as stalled: the game requests that waited in its sockets meanwhile (moves, resignations, draw offers and answers, claims, aborts, Resyncs and the closing of a connection) are handled before its timers, as if they had arrived when the stall began, so that a flag or a first-move timeout that fell during the stall does not overtake them; a first-move timeout that fell during it records no no-show against the player. Shorter pauses change nothing.' });
+key('GAME_STALL_CREDIT_MAX_MS', { section: 'games', type: 'int', default: 5000, min: 0, max: 60000,
+    desc: 'Longest stall of a worker that is not charged to the players (see GAME_STALL_MIN_MS): a message handled after a longer stall counts as arrived this long before it was read. It is also the most a player can gain from one stall. 0 charges every stall to the side to move, as a server without this protection would.' });
+key('AUTO_PRESS_CLOCK', { section: 'games', type: 'bool', default: true,
+    desc: 'The players\' robots press the clock by themselves once a move is on the board. When false, a client sends its move only when its player presses the clock, so the mover\'s clock runs until then. Decided when a game is created (a rematch keeps the value of the game it follows) and kept by the game, restarts included.' });
 key('DRAW_OFFERS_PER_GAME', { section: 'games', type: 'int', default: 3, min: 0, desc: 'Draw offers one player may make in a game.' });
 key('CHALLENGE_TTL_MS', { section: 'games', type: 'int', default: 60000, min: 5000, desc: 'A direct challenge expires after this long.' });
 key('PRIVATE_GAME_TTL_MS', { section: 'games', type: 'int', default: 900000, min: 60000, desc: 'A private game code expires after this long.' });

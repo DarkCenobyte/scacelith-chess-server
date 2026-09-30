@@ -59,6 +59,9 @@ Games
   --move-interval-ms N   think time per move (+-jitter)                     [1000 games, 0 burst]
   --jitter F             think time spread, 0..1 (uniform +-F)              [0.5]
   --max-plies N          resign at this ply (0 = play to the natural end)   [80]
+  --gesture-hz N         Gesture messages per second per player in a game, 0 = none [0]
+                         (the server relays GESTURE_RATE per second at most: raise it with
+                         --server-env GESTURE_RATE=N above 4)
   --between-games-ms N   pause before the next game of a pair               [1000 games, 100 burst]
   --start-rate N         games started per second, all processes (0 = no limit) [1000]
   --warmup-s S           after the games started, before measuring          [10 games, 5 burst]
@@ -128,6 +131,7 @@ function options(raw) {
         moveIntervalMs: num(raw.moveIntervalMs, burst ? 0 : 1000),
         jitter: num(raw.jitter, 0.5),
         maxPlies: num(raw.maxPlies, 80),
+        gestureHz: num(raw.gestureHz, 0),
         betweenGamesMs: num(raw.betweenGamesMs, burst ? 100 : 1000),
         startRate: num(raw.startRate, 1000),
         warmupS: num(raw.warmupS, burst ? 5 : 10),
@@ -158,6 +162,7 @@ function options(raw) {
     if (o.url && o.plain) throw new Error('--plain only with the server started by the tool');
     o.clients = scenario === 'connect' ? o.conns : o.games * 2;
     if (o.jitter < 0 || o.jitter > 1) throw new Error('--jitter 0..1');
+    if (!(o.gestureHz >= 0 && o.gestureHz <= 100)) throw new Error('--gesture-hz 0..100');
     return o;
 }
 
@@ -301,6 +306,7 @@ async function main() {
                     rate: o.rate > 0 ? o.rate / procList.length : 0, inflight: o.inflight, connectTimeoutMs: o.connectTimeoutMs,
                     pingIntervalMs: o.pingIntervalMs, via: o.via, tc: o.tcSec, rated: o.rated,
                     moveIntervalMs: o.moveIntervalMs, jitter: o.jitter, maxPlies: o.maxPlies, betweenGamesMs: o.betweenGamesMs,
+                    gestureHz: o.scenario === 'connect' ? 0 : o.gestureHz,
                     startRate: o.startRate > 0 ? o.startRate / procList.length * (o.via === 'queue' ? 2 : 1) : 0,
                     clientName: 'scacelith-bench/1',
                 },
@@ -492,7 +498,8 @@ async function main() {
             };
         } else {
             // ---- games --------------------------------------------------------------------------------
-            say(`games: starting ${o.games} games via ${o.via} (${o.startRate || 'unlimited'}/s), ${o.moveIntervalMs} ms per move, resign at ply ${o.maxPlies || 'never'}`);
+            say(`games: starting ${o.games} games via ${o.via} (${o.startRate || 'unlimited'}/s), ${o.moveIntervalMs} ms per move, resign at ply ${o.maxPlies || 'never'}`
+                + `${o.gestureHz > 0 ? `, ${o.gestureHz} gestures/s per player` : ''}`);
             m0 = await startPhase('start');
             bcast({ cmd: 'games' });
             let lastG = -1, lastGAt = Date.now();
@@ -535,6 +542,10 @@ async function main() {
                 gamesPerMinute: Math.round((phase.c.gamesEnded || 0) / secs * 60),
                 endReasons: phase.m.ends || {}, rejected: phase.m.rejected || {}, errors: phase.m.errors || {},
                 dropped: phase.c.dropped || 0, resyncs: phase.c.resyncs || 0,
+                gesturesSentPerSec: Math.round((phase.c.gesturesSent || 0) / secs),
+                gesturesReceivedPerSec: Math.round((phase.c.gesturesIn || 0) / secs),
+                serverGesturesRelayedPerSec: ms.server?.gesturesRelayedPerSec ?? null,
+                serverGesturesDropped: ms.server?.gesturesDropped || null,
                 gameStartMs: st.latencyMs.start || null,
                 serverCores: ms.cpu.serverCores, loadgenCores: ms.cpu.loadgenCores, machineBusy: ms.cpu.machine?.busyRatio ?? null,
                 serverShards: ms.server?.shards || null,
@@ -637,6 +648,9 @@ function serverPhase(prom, m0, m1, samples) {
         movesPerSec: +(d('moves') / secs).toFixed(1),
         gamesCreated: d('gamesCreated'), gamesEnded: d('gamesEnded'), gamesCommitted: d('gamesCommitted'), rejects: d('rejects'),
         relayedPerSec: +(d('relayed') / secs).toFixed(1),
+        gesturesRelayedPerSec: +(d('gesturesRelayed') / secs).toFixed(1),
+        gesturesDropped: Object.fromEntries(Object.entries(b.totals.gesturesDropped)
+            .map(([k, v]) => [k, v - (a.totals.gesturesDropped[k] || 0)]).filter(([, v]) => v > 0)),
         bytesInPerSec: Math.round(d('bytesIn') / secs), bytesOutPerSec: Math.round(d('bytesOut') / secs),
         slowConsumers: d('slowConsumers'), handshakesRejected: d('handshakesRejected'),
         moveUs: prom.histSummary(prom.histDelta(a.hist.moveUs, b.hist.moveUs)),
@@ -708,6 +722,7 @@ function printSummary(r) {
         if (g.serverMoveProcessingUs?.n) L.push(`  server move processing us (bucketed): p50 ${g.serverMoveProcessingUs.p50} p99 ${g.serverMoveProcessingUs.p99}`);
         if (g.gameStartMs) L.push(`  game start (challenge -> both snapshots) ms: p50 ${g.gameStartMs.p50} p99 ${g.gameStartMs.p99}`);
         L.push(`  rejected: ${JSON.stringify(g.rejected)} errors: ${JSON.stringify(g.errors)} dropped: ${g.dropped}`);
+        if (g.gesturesSentPerSec) L.push(`  gestures/s: sent ${g.gesturesSentPerSec}, relayed ${g.serverGesturesRelayedPerSec ?? '-'} (server), received ${g.gesturesReceivedPerSec}; dropped by the server: ${JSON.stringify(g.serverGesturesDropped || {})}`);
         L.push(`  CPU: server ${g.serverCores} cores, load generator ${g.loadgenCores} cores, machine busy ${g.machineBusy !== null ? Math.round(g.machineBusy * 100) : '-'}%`);
         for (const [k, s] of Object.entries(g.serverShards || {})) L.push(`    ${k.padEnd(8)} cpu mean ${s.cpuMean} max ${s.cpuMax}  lag p99 mean ${s.lagP99MeanMs} max ${s.lagP99MaxMs} ms  rss ${s.rssMB} MB  conns ${s.conns ?? '-'} games ${s.games ?? '-'}`);
     }

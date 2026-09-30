@@ -11,7 +11,7 @@
 //     anomaly: null | { color, kind, detail, posMatched }, ended: bool, journal: [{kind, at, payload}],
 //     // additions to the DESIGN 5.3 contract:
 //     conduct: [{ userId, kind: 'abandon'|'abort'|'noshow' }],  // forwarded as conduct.record
-//     rematch: null | { gameId, white, black, category, baseMs, incMs, rated },  // both accepted: game.rematch
+//     rematch: null | { gameId, white, black, category, baseMs, incMs, rated, autoPress },  // both accepted: game.rematch
 //     rejected: 0 | ErrorCode,   // the request was refused with this code (metrics)
 //     moved: bool,               // a move was accepted
 //     duplicate: bool,           // an already played move was resent (idempotent reply)
@@ -27,6 +27,19 @@
 // Deviations from the DESIGN 5.3 signatures (compatible additions):
 //   * onResign / onDrawOffer / onDrawAnswer / onDrawClaim / onAbort / onRematch take an optional
 //     trailing `seq` (the client message's seq) so that a refusal can be an Error{ref: seq}.
+//   * Stall credit (DESIGN 6.1): onMove, onResign, onDrawOffer, onDrawAnswer, onDrawClaim and
+//     onAbort take an optional `recvAt`, the moment the host counts the request as arrived when
+//     its worker stalled while the request waited in a socket (host.js). The deadlines, the flag
+//     check and the time charged for a move use it (never before the latest move, never after
+//     `now`); the next turn starts at `now` all the same, so the stall is charged to nobody, and
+//     the implausible-thinkMs test of a move keeps the real time since the previous move. A
+//     resignation, a draw agreement or claim and an abort take effect at that arrival.
+//     onDisconnect, onReconnect and onResync take it too, for the deadlines they process first
+//     only (the event itself happens at `now`): what waited in the sockets during a stall, a
+//     connection's close included, never lets a deadline that fell during the stall overtake a
+//     request that waited with it. The host's timers process those deadlines once the stall is
+//     over: tick(now, stalledSince) gets the start of the stall, and a first-move timeout that
+//     fell during it aborts the game without a 'noshow' conduct incident.
 //   * onResync(color, now) returns the snapshot as a reply (after processing due deadlines).
 //   * GameRoom.fromJournal(records, { config, createChessGame, strict }) needs the injected rules
 //     and configuration; room.recover(now) applies the restart semantics of DESIGN 6.4 separately
@@ -62,7 +75,9 @@
 //     compaction snapshot while the commit is pending).
 //
 // Journal payloads (little-endian; records are { kind, at, payload } as in DESIGN 5.6):
-//   1 created  JSON { v, id, category, baseMs, incMs, rated, white, black, createdAt, rematchOf }
+//   1 created  JSON { v, id, category, baseMs, incMs, rated, white, black, createdAt, rematchOf,
+//              autoPress } (autoPress is absent from the records of older builds: their games
+//              were played with the robots pressing the clock, and restore so)
 //   2 move     32 bytes: u16 ply | u16 move | u8 flags | u8 bits (1 = draw offer made with the move,
 //              2 = the move declined the opponent's offer) | u16 0 | u32 spentMs | u32 clockAfter |
 //              u32 quotaAfter | u32 gseq (of its MoveMade) | f64 recvTime
@@ -94,8 +109,12 @@ const WHITE = 0, BLACK = 1, NONE = 2;
 export const JournalKind = Object.freeze({ Created: 1, Move: 2, Event: 3, Ended: 4, Committed: 5, Snapshot: 6 });
 /** Kinds of the `event` journal records. */
 export const JournalEvent = Object.freeze({ DrawOffer: 1, DrawDecline: 2, Disconnect: 3, Reconnect: 4, Desync: 5, Recovered: 6, Checkpoint: 7 });
-/** Bits of `record().flags` (finished game record, DESIGN 5.5). */
-export const RecordFlag = Object.freeze({ RatedRequested: 1, Recovered: 2, Forfeit: 4 });
+/**
+ * Bits of `record().flags` (finished game record, DESIGN 5.5). ManualPress: the game was played
+ * with autoPress false (the players pressed the clock themselves); older records never have it,
+ * and their games were played with the robots pressing the clock.
+ */
+export const RecordFlag = Object.freeze({ RatedRequested: 1, Recovered: 2, Forfeit: 4, ManualPress: 8 });
 /** Anomaly kinds that are certain cheats when the position was synchronised (DESIGN 6.5). */
 export const CERTAIN_KINDS = new Set(['foreign_game', 'out_of_turn', 'illegal_move']);
 
@@ -225,9 +244,10 @@ export class GameRoom {
      * @param {number} opts.createdAt start of the game (epoch ms); White's first-move timer starts here
      * @param {object} opts.config frozen configuration
      * @param {number} [opts.rematchOf] id of the game this one is a rematch of
+     * @param {boolean} [opts.autoPress=true] the robots press the clock by themselves (GameSnapshot.autoPress)
      * @param {() => object} opts.createChessGame rules factory (() => new ChessGame())
      */
-    constructor({ id, category, baseMs, incMs, rated, white, black, createdAt, config = {}, rematchOf = 0, createChessGame }) {
+    constructor({ id, category, baseMs, incMs, rated, white, black, createdAt, config = {}, rematchOf = 0, autoPress = true, createChessGame }) {
         if (typeof createChessGame !== 'function') throw new TypeError('GameRoom: createChessGame is required');
         if (!Number.isSafeInteger(id) || id <= 0) throw new TypeError('GameRoom: invalid game id');
         this.id = id;
@@ -240,6 +260,8 @@ export class GameRoom {
         this.createdAt = Math.floor(+createdAt || 0);
         this.config = config;
         this.rematchOf = Number.isSafeInteger(rematchOf) && rematchOf > 0 ? rematchOf : 0;
+        // Kept apart from `flags`, which a checkpoint replay overwrites (record() adds its bit).
+        this.autoPress = autoPress !== false;
         this.createChessGame = createChessGame;
         this.policy = clockPolicy(config);
         this.graceMs = graceFor(this.baseMs, config);
@@ -315,15 +337,17 @@ export class GameRoom {
      * @param {number} color
      * @param {{seq:number, ply:number, move:number, posHash:number, thinkMs:number, drawOffer:boolean}} msg
      * @param {number} now
+     * @param {number} [recvAt] arrival credited by the host after a stall (see the header)
      * @returns {Outcome}
      */
-    onMove(color, msg, now) {
+    onMove(color, msg, now, recvAt = now) {
         checkColor(color);
         now = Math.floor(now);
+        const at = this._arrival(now, recvAt);
         const out = new Outcome();
         const ply = msg.ply | 0, move = msg.move & 0xffff;
         const wasOver = this._over;
-        this._advance(now, out);
+        this._advance(at, out);
         // 2. Game over (a flag that fell at this very moment for the sender is FlagFell).
         if (this._over) {
             const r = this.result.reason;
@@ -351,17 +375,19 @@ export class GameRoom {
         if ((this.ply & 1) !== color) return this._rejectMove(out, color, ply, move, EC.NotYourTurn, now, 'out_of_turn', true);
         // 7. Illegal move in the synchronised position.
         if (!this.game.position.isLegal(move)) return this._rejectMove(out, color, ply, move, EC.IllegalMove, now, 'illegal_move', true);
-        // 8. Clock, then play.
+        // 8. Clock, then play. The time charged runs to the credited arrival; the next turn starts
+        // now, when the MoveMade goes out.
         const idx = this.ply;
-        const c = this.clock.check(color, idx, now, msg.thinkMs);
+        const c = this.clock.check(color, idx, at, msg.thinkMs);
         // The client counts its thinking time from the previous move. After a restart the turn
-        // starts later than that: only a thinkMs longer than the time since that move is impossible.
+        // starts later than that: only a thinkMs longer than the time since that move is impossible
+        // (the real time: a stall credit shortens the elapsed time the clock sees, not the thinking).
         const sincePrev = now - (idx ? this.recvTime[idx - 1] : this.createdAt);
         if (c.implausible && Math.floor(+msg.thinkMs || 0) > sincePrev + IMPLAUSIBLE_MARGIN_MS) {
             out.anomaly = { color, kind: 'clock_implausible', detail: `ply ${idx} thinkMs ${msg.thinkMs >>> 0} elapsed ${c.elapsed}`, posMatched: true };
         }
         if (c.flagged) {
-            this._flag(color, now, out);
+            this._flag(color, at, out);
             return this._rejectMove(out, color, ply, move, EC.FlagFell, now, null, true);
         }
         const spent = c.charged, clockAfter = c.clockAfter, quotaAfter = c.quotaAfter;
@@ -393,9 +419,9 @@ export class GameRoom {
     }
 
     /** Resignation (any time while the game runs). */
-    onResign(color, now, seq = 0) {
+    onResign(color, now, seq = 0, recvAt = now) {
         checkColor(color);
-        now = Math.floor(now);
+        now = this._arrival(Math.floor(now), recvAt);
         const out = new Outcome();
         this._advance(now, out);
         if (this._over) return this._refuse(out, EC.GameOver, seq);
@@ -404,9 +430,9 @@ export class GameRoom {
     }
 
     /** Draw offer without a move (DESIGN 6.3). */
-    onDrawOffer(color, now, seq = 0) {
+    onDrawOffer(color, now, seq = 0, recvAt = now) {
         checkColor(color);
-        now = Math.floor(now);
+        now = this._arrival(Math.floor(now), recvAt);
         const out = new Outcome();
         this._advance(now, out);
         if (this._over) return this._refuse(out, EC.GameOver, seq);
@@ -424,9 +450,9 @@ export class GameRoom {
     }
 
     /** Answer to the opponent's pending draw offer. */
-    onDrawAnswer(color, accept, now, seq = 0) {
+    onDrawAnswer(color, accept, now, seq = 0, recvAt = now) {
         checkColor(color);
-        now = Math.floor(now);
+        now = this._arrival(Math.floor(now), recvAt);
         const out = new Outcome();
         this._advance(now, out);
         if (this._over) return this._refuse(out, EC.GameOver, seq);
@@ -443,9 +469,9 @@ export class GameRoom {
     }
 
     /** Draw claim: threefold repetition or fifty-move rule in the current position. */
-    onDrawClaim(color, now, seq = 0) {
+    onDrawClaim(color, now, seq = 0, recvAt = now) {
         checkColor(color);
-        now = Math.floor(now);
+        now = this._arrival(Math.floor(now), recvAt);
         const out = new Outcome();
         this._advance(now, out);
         if (this._over) return this._refuse(out, EC.GameOver, seq);
@@ -463,9 +489,9 @@ export class GameRoom {
     }
 
     /** Abort: only before the sender's own first move (conduct counter 'abort'). */
-    onAbort(color, now, seq = 0) {
+    onAbort(color, now, seq = 0, recvAt = now) {
         checkColor(color);
-        now = Math.floor(now);
+        now = this._arrival(Math.floor(now), recvAt);
         const out = new Outcome();
         this._advance(now, out);
         if (this._over) return this._refuse(out, EC.GameOver, seq);
@@ -494,7 +520,7 @@ export class GameRoom {
             this.rematchBy = NONE;
             out.rematch = {
                 gameId: this.id, white: this.black, black: this.white, category: this.category,
-                baseMs: this.baseMs, incMs: this.incMs, rated: this.rated,
+                baseMs: this.baseMs, incMs: this.incMs, rated: this.rated, autoPress: this.autoPress,
             };
             return out;
         }
@@ -505,12 +531,15 @@ export class GameRoom {
         return out;
     }
 
-    /** The player's connection is gone (DESIGN 6.4). After the end it only closes the rematch window. */
-    onDisconnect(color, now) {
+    /**
+     * The player's connection is gone (DESIGN 6.4). After the end it only closes the rematch window.
+     * `recvAt`: see the header (stall credit).
+     */
+    onDisconnect(color, now, recvAt = now) {
         checkColor(color);
         now = Math.floor(now);
         const out = new Outcome();
-        this._advance(now, out);
+        this._advance(this._arrival(now, recvAt), out);
         if (this._over) {
             this.connected[color] = false;
             this._closeRematch(out, color);
@@ -524,12 +553,12 @@ export class GameRoom {
         return out;
     }
 
-    /** The player is back (the host sends the snapshot). */
-    onReconnect(color, now) {
+    /** The player is back (the host sends the snapshot). `recvAt`: see the header (stall credit). */
+    onReconnect(color, now, recvAt = now) {
         checkColor(color);
         now = Math.floor(now);
         const out = new Outcome();
-        this._advance(now, out);
+        this._advance(this._arrival(now, recvAt), out);
         if (this._over) {
             this.connected[color] = true;
             return out;
@@ -550,11 +579,11 @@ export class GameRoom {
         this.clock.setRtt(color, rttMs);
     }
 
-    /** Full snapshot for the sender (after processing due deadlines). */
-    onResync(color, now) {
+    /** Full snapshot for the sender (after processing due deadlines). `recvAt`: see the header. */
+    onResync(color, now, recvAt = now) {
         now = Math.floor(now);
         const out = new Outcome();
-        this._advance(now, out);
+        this._advance(this._arrival(now, recvAt), out);
         out.reply.push(this.snapshotBuffer(color, now));
         return out;
     }
@@ -579,11 +608,14 @@ export class GameRoom {
         return out;
     }
 
-    /** Processes every deadline due at `now` (flags, first-move timeouts, grace, rematch window). */
-    tick(now) {
+    /**
+     * Processes every deadline due at `now` (flags, first-move timeouts, grace, rematch window).
+     * `stalledSince`: start of a stall of the host's worker that ended just before (see the header).
+     */
+    tick(now, stalledSince = Infinity) {
         now = Math.floor(now);
         const out = new Outcome();
-        this._advance(now, out);
+        this._advance(now, out, stalledSince);
         return out;
     }
 
@@ -655,6 +687,7 @@ export class GameRoom {
             firstMoveMs: over ? 0 : this.clock.firstMoveLeft(n, now),
             startedAt: this.createdAt,
             rematch: this.rematchState === RM_OPEN ? this.rematchBy : NONE,
+            autoPress: this.autoPress,
         };
     }
 
@@ -685,7 +718,7 @@ export class GameRoom {
             spentMs: this.spent.slice(0, n),
             clockMs: this.clockAfter.slice(0, n),
             rematchOf: this.rematchOf,
-            flags: this.flags,
+            flags: this.flags | (this.autoPress ? 0 : RecordFlag.ManualPress),
         };
     }
 
@@ -695,7 +728,7 @@ export class GameRoom {
     createdRecord() {
         const spec = {
             v: 1, id: this.id, category: this.category, baseMs: this.baseMs, incMs: this.incMs, rated: this.rated,
-            white: this.white, black: this.black, createdAt: this.createdAt, rematchOf: this.rematchOf,
+            white: this.white, black: this.black, createdAt: this.createdAt, rematchOf: this.rematchOf, autoPress: this.autoPress,
         };
         return { kind: JournalKind.Created, at: this.createdAt, payload: Buffer.from(JSON.stringify(spec), 'utf8') };
     }
@@ -763,7 +796,7 @@ export class GameRoom {
         const room = new GameRoom({
             id: spec.id, category: spec.category, baseMs: spec.baseMs, incMs: spec.incMs, rated: spec.rated,
             white: spec.white, black: spec.black, createdAt: spec.createdAt, rematchOf: spec.rematchOf,
-            config, createChessGame,
+            autoPress: spec.autoPress !== false, config, createChessGame,
         });
         for (let i = 1; i < records.length; i++) {
             const rec = records[i];
@@ -919,6 +952,16 @@ export class GameRoom {
         return p && typeof p.canColorMate === 'function' ? !!p.canColorMate(color) : true;
     }
 
+    // The moment a request counts as arrived: `recvAt` (floored) when the host credited a stall,
+    // but never before the latest move, whose MoveMade the request may answer, and never after `now`
+    // (so the time a room sees never goes back).
+    _arrival(now, recvAt) {
+        const r = Math.floor(recvAt);
+        if (!(r < now)) return now;
+        const last = this.ply ? this.recvTime[this.ply - 1] : this.createdAt;
+        return r > last ? r : Math.min(last, now);
+    }
+
     _mayOffer(color, plyNow) {
         return this.drawOffersUsed[color] < this.drawOfferLimit && plyNow >= this.drawDeclinedAt[color] + DRAW_REOFFER_PLIES;
     }
@@ -961,7 +1004,7 @@ export class GameRoom {
         return d === Infinity ? 0 : clampInt(d - now, 0, 0xffffffff);
     }
 
-    _advance(now, out) {
+    _advance(now, out, stalledSince = Infinity) {
         if (!this._over) {
             if (this.clockHeld && now >= this.clock.turnStart) {
                 // The hold after a recovery is over and the side to move is still away: its clock
@@ -972,7 +1015,7 @@ export class GameRoom {
             }
             const tm = this.clock.deadline(this.ply);
             const tg = this._graceDeadline();
-            if (tm <= now && tm <= tg) this._onTimeDeadline(now, out);
+            if (tm <= now && tm <= tg) this._onTimeDeadline(now, out, tm >= stalledSince);
             else if (tg <= now) this._onGraceExpired(now, out);
         }
         if (this._over && this.rematchState === RM_OPEN && now >= this.result.endedAt + REMATCH_WINDOW_MS) {
@@ -980,13 +1023,15 @@ export class GameRoom {
         }
     }
 
-    _onTimeDeadline(now, out) {
+    // `inStall`: the deadline fell during a stall of the host's worker.
+    _onTimeDeadline(now, out, inStall) {
         const side = this.ply & 1;
         if (this.ply < 2) {
             this._end(GS.Aborted, ER.NoShow, now, out, side, NONE);
             // A restored game whose side to move is still away: the server broke the connection,
-            // not the player (the game is aborted all the same, unrated).
-            if (!(this.flags & RecordFlag.Recovered) || this.connected[side]) {
+            // not the player (the game is aborted all the same, unrated). Nor is a first-move time
+            // that ran out while the server was not answering held against the player.
+            if (!inStall && (!(this.flags & RecordFlag.Recovered) || this.connected[side])) {
                 out.conduct.push({ userId: this.playerOf(side).userId, kind: 'noshow' });
             }
         } else {

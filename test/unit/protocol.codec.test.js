@@ -12,7 +12,7 @@ const isPE = (reason) => (e) => e instanceof P.ProtocolError && (reason === unde
 const GAME = 123456789012345;
 
 test('exports exactly the documented API', () => {
-    assert.deepEqual(Object.keys(gen).sort(), ['CloseCode', 'MSG', 'MoveFlag', 'PROTOCOL_MIN', 'PROTOCOL_VERSION', 'ProtocolError',
+    assert.deepEqual(Object.keys(gen).sort(), ['CloseCode', 'GestureFlag', 'MSG', 'MoveFlag', 'PROTOCOL_MIN', 'PROTOCOL_VERSION', 'ProtocolError',
         'SCHEMA_HASH', 'WS_SUBPROTOCOL', 'decode', 'encode', 'enums', 'isClientType', 'messageName'].sort());
     for (const k of ['encodeMove', 'decodeMove', 'fnv1a32', 'fenDigest', 'moveToUci', 'uciToMove', 'peekType', 'DECODE_C2S', 'DECODE_S2C']) {
         assert.ok(k in P, `index.js exports ${k}`);
@@ -26,6 +26,7 @@ test('constants come from the schema', () => {
     assert.equal(P.SCHEMA_HASH, computeSchemaHash());
     assert.deepEqual(P.enums, schema.enums);
     assert.deepEqual(P.MoveFlag, schema.MoveFlag);
+    assert.deepEqual(P.GestureFlag, schema.GestureFlag);
     assert.deepEqual(P.CloseCode, schema.CloseCode);
     assert.ok(Object.isFrozen(P.enums) && Object.isFrozen(P.enums.ErrorCode) && Object.isFrozen(P.MSG) && Object.isFrozen(P.encode));
 });
@@ -38,7 +39,7 @@ test('MSG ids, shared names and messageName', () => {
     assert.equal(P.MSG.S_Pong, 0x83);
     assert.equal(P.MSG.Ping, undefined);
     for (const m of schema.messages) {
-        const key = ['Ping', 'Pong'].includes(m.name) ? (m.dir === 'c2s' ? 'C_' : 'S_') + m.name : m.name;
+        const key = ['Ping', 'Pong', 'Gesture'].includes(m.name) ? (m.dir === 'c2s' ? 'C_' : 'S_') + m.name : m.name;
         assert.equal(P.MSG[key], m.id);
         assert.equal(P.messageName(m.id), key);
         assert.equal(typeof P.encode[key], 'function');
@@ -88,7 +89,7 @@ test('encode validates ranges, bounds, enums, strings and lists', () => {
     assert.throws(() => P.encode.QueueJoin({ seq: 1, category: '12345678', rated: true }), isPE('category bad length'));
     assert.throws(() => P.encode.QueueJoin({ seq: 1, category: 'ab\0c', rated: true }), isPE('category contains NUL'));
     assert.throws(() => P.encode.QueueJoin({ seq: 1, category: 32, rated: true }), isPE('category not a string'));
-    assert.throws(() => P.encode.Welcome({ proto: 1, serverTime: 0, userId: 1, username: 'ユキユキユキユキa', serverName: '', heartbeatMs: 1, clientPingMs: 1, maxMsgPerSec: 1, activeGame: 0 }), isPE('username bad length'));
+    assert.throws(() => P.encode.Welcome({ proto: 1, serverTime: 0, userId: 1, username: 'ユキユキユキユキa', serverName: '', heartbeatMs: 1, clientPingMs: 1, maxMsgPerSec: 1, activeGame: 0, gestureRate: 0, gestureBurst: 0 }), isPE('username bad length'));
     assert.throws(() => P.encode.S_Ping({ nonce: 1, serverTime: Infinity }), isPE('serverTime not finite'));
     assert.throws(() => P.encode.Notice({ code: 1, arg: -Infinity }), isPE('arg not finite'));
     const snap = { game: 1, gseq: 1, category: '3+2', baseMs: 1, incMs: 0, rated: false, white: { userId: 1, name: 'a', rating: 1, provisional: false },
@@ -121,7 +122,7 @@ test('encode keeps the placeholder defaults for omitted bool, f64, id53, string 
 
 test('strings: UTF-8 round trip, BOM kept, lone surrogates become U+FFFD', () => {
     for (const s of ['Łukasz', 'ユキ', 'مُحَمَّد', '🐴♞', '﻿bom', 'aÿb']) {
-        const b = P.encode.Welcome({ proto: 1, serverTime: 0, userId: 1, username: s, serverName: s, heartbeatMs: 1, clientPingMs: 1, maxMsgPerSec: 1, activeGame: 0 });
+        const b = P.encode.Welcome({ proto: 1, serverTime: 0, userId: 1, username: s, serverName: s, heartbeatMs: 1, clientPingMs: 1, maxMsgPerSec: 1, activeGame: 0, gestureRate: 0, gestureBurst: 0 });
         const m = P.decode(b);
         assert.equal(m.username, s);
         assert.equal(m.serverName, s);
@@ -193,4 +194,25 @@ test('helpers: moves, UCI, FNV-1a, FEN digest, peekType', () => {
     assert.equal(P.fenDigest('  ' + start.replace(/ /g, '   ') + ' 0 1 '), P.fnv1a32(start));
     assert.equal(P.peekType(P.encode.Ack({ ref: 1 })), P.MSG.Ack);
     assert.equal(P.peekType(Buffer.alloc(0)), -1);
+});
+
+test('S_Gesture is C_Gesture without its seq, byte for byte (the game host relays it by copying)', () => {
+    const c = schema.messages.find((m) => m.name === 'Gesture' && m.dir === 'c2s');
+    const s = schema.messages.find((m) => m.name === 'Gesture' && m.dir === 's2c');
+    assert.deepEqual(c.fields[0], ['seq', 'u32']);
+    assert.deepEqual(s.fields, c.fields.slice(1));
+    const copy = (frame) => { const out = Buffer.allocUnsafe(frame.length - 4); out[0] = P.MSG.S_Gesture; frame.copy(out, 1, 5); return out; };
+    const cases = [
+        { game: GAME, ply: 1199, touch: 64, aim: 64, placed: 0x7fff, flags: 7, yaw: -3142, pitch: 1571, lean: 100 },
+        { game: 1, ply: 0, touch: 0, aim: 63, placed: 0, flags: 0, yaw: 3142, pitch: -1571, lean: 0 },
+    ];
+    for (let i = 0; i < 200; i++) {
+        const r = (n) => Math.floor(Math.random() * n);
+        cases.push({ game: 1 + r(2 ** 40), ply: r(1200), touch: r(65), aim: r(65), placed: r(0x8000), flags: r(8), yaw: r(6285) - 3142, pitch: r(3143) - 1571, lean: r(101) });
+    }
+    for (const g of cases) {
+        const relayed = copy(P.encode.C_Gesture({ seq: 0xfedcba98, ...g }));
+        assert.ok(relayed.equals(P.encode.S_Gesture(g)), JSON.stringify(g));
+        assert.deepEqual(P.decode(relayed), { type: P.MSG.S_Gesture, ...g });
+    }
 });

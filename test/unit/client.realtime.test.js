@@ -438,7 +438,7 @@ async function fakeServer(script = {}) {
             if (m.type === P.MSG.Hello) {
                 if (script.hello) script.hello(s, m);
                 else if (m.token !== TOKEN) { s.send('Error', { ref: m.seq, code: P.enums.ErrorCode.Unauthorized, fatal: true, game: 0 }); peer.close(4003, 'unauthorized'); }
-                else s.send('Welcome', { proto: 1, serverTime: Date.now(), userId: 17, username: 'alice', serverName: 'Fake', heartbeatMs: 10000, clientPingMs: 10000, maxMsgPerSec: 20, activeGame: 0 });
+                else s.send('Welcome', { proto: 1, serverTime: Date.now(), userId: 17, username: 'alice', serverName: 'Fake', heartbeatMs: 10000, clientPingMs: 10000, maxMsgPerSec: 20, activeGame: 0, gestureRate: 4, gestureBurst: 8 });
             } else if (m.type === P.MSG.C_Ping) {
                 s.send('S_Pong', { nonce: m.nonce, serverTime: Date.now() + (script.clockAhead ?? 0) });
             } else if (script.onMessage) script.onMessage(s, m);
@@ -592,6 +592,39 @@ describe('ScacelithClient', () => {
         assert.equal(g.reason, 2);
         assert.equal(g.running, 2);
         assert.equal(g.ratings.white.after, 1516);
+        await c.close();
+        await fake.close();
+    });
+
+    test('gestures: gesture() sends C_Gesture in the seq order, S_Gesture is an event and the game\'s last gesture; autoPress', async () => {
+        const { fake, c, s, welcome } = await connected();
+        assert.deepEqual([welcome.gestureRate, welcome.gestureBurst], [4, 8]);
+        const player = (userId, name) => ({ userId, name, rating: 1500, provisional: false });
+        s.send('GameSnapshot', {
+            game: GAME, gseq: 1, category: '3+2', baseMs: 180000, incMs: 2000, rated: true, white: player(17, 'alice'), black: player(18, 'bob'), you: 0,
+            moves: [], running: 0, whiteMs: 180000, blackMs: 180000, serverTime: Date.now(), drawOffer: 2, status: 0, reason: 0,
+            whiteConnected: true, blackConnected: true, graceMs: 18000, firstMoveMs: 30000, startedAt: Date.now(), rematch: 2, autoPress: false,
+        });
+        await c.waitFor('GameSnapshot');
+        const g = c.games.get(GAME);
+        assert.equal(g.autoPress, false);
+        assert.equal(c.gesture(GAME, { ply: 0, touch: 12, aim: 28, yaw: -300, pitch: 120, lean: 30, flags: P.GestureFlag.Glance }), 2);
+        assert.equal(c.gesture(GAME), 3);
+        assert.equal(c.resign(GAME), 4);
+        await s.peer.until(() => s.received.length === 4);
+        assert.equal(s.badSeq, 0);
+        assert.deepEqual(s.received.slice(1, 3).map(({ type, seq, ...f }) => [P.messageName(type), seq, f]), [
+            ['C_Gesture', 2, { game: GAME, ply: 0, touch: 12, aim: 28, placed: 0, flags: 1, yaw: -300, pitch: 120, lean: 30 }],
+            ['C_Gesture', 3, { game: GAME, ply: 0, touch: 64, aim: 64, placed: 0, flags: 0, yaw: 0, pitch: 0, lean: 0 }],
+        ]);
+        const seen = [];
+        c.on('Gesture', (m) => seen.push(m));
+        const og = { game: GAME, ply: 0, touch: 52, aim: 36, placed: 0, flags: P.GestureFlag.Side, yaw: 900, pitch: -40, lean: 5 };
+        s.send('S_Gesture', og);
+        const got = await c.waitFor('Gesture');
+        assert.deepEqual({ ...got, type: undefined }, { ...og, type: undefined });
+        assert.equal(seen.length, 1);
+        assert.equal(g.gesture.yaw, 900);
         await c.close();
         await fake.close();
     });

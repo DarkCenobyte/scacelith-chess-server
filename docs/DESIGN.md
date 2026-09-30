@@ -95,11 +95,46 @@ player who waited longer; any shard when it is overloaded), sends it `game.creat
 
 **A move.** Client A (on shard 2) sends `Move{game, ply, move, posHash, thinkMs}` at the moment
 the destination square is chosen (the robot's hand then plays the move and presses the clock:
-animation only). Shard 2 sees the game id's shard is 1 and forwards the raw frame on the bus.
+animation only), or, in a game without `autoPress` (below), when its player presses the clock.
+Shard 2 sees the game id's shard is 1 and forwards the raw frame on the bus.
 The host validates (section 6), updates the canonical state and the clocks, journals the move,
 encodes one `MoveMade` and sends it to both players (local socket or bus). Opponent B's client
 animates the other robot playing it. A's client treats its own `MoveMade` as the confirmation; a
 `MoveRejected` makes it restore the server position from the `GameSnapshot` that follows.
+
+**Clock press.** Whether the robots press the clock by themselves is a setting of each game,
+`GameSnapshot.autoPress`. The primary decides it in `ControlPlane.createGame` for every new game
+(queue, challenge, private code) from `AUTO_PRESS_CLOCK` (true by default); a rematch keeps the
+value of the game it follows (`game.rematch` carries it). The host passes it to the room, which
+writes it in the game's `created` journal record, so a replay, a compaction snapshot and a
+restart keep it whatever the configuration says by then (a `created` record of an older build has
+none: true). A finished game played without it has `RecordFlag.ManualPress` (8) in its record's
+`flags` (5.5); there is no migration. The server's clock rules are the same either way: without
+`autoPress` the client sends the move when its player presses the clock, so the time until the
+press is charged like any thinking time.
+
+**Gestures.** The player's head, the piece in hand, where it is aimed and a move placed before the
+clock press reach the opponent live, as `Gesture` (C2S 0x28), relayed as the server `Gesture`
+(0xA6) and never stored. The router takes a `C_Gesture` before the `WS_MSG_RATE` bucket and
+never touches that bucket or answers `RateLimited` for it: the connection has a bucket of its own
+(`GESTURE_RATE` per second, `GESTURE_BURST`; both announced in `Welcome`, 0 and 0 when
+`GESTURE_RATE=0`), and a gesture beyond it is dropped silently, its seq still counted; more than
+max(50, 10 x `GESTURE_BURST`) drops in 10 s is a flood (4301). A gesture is then decoded and its
+seq checked like any message (malformed: 4300), and it must name a game attached to the
+connection. The local host gets `host.relayGesture(gameId, userId, frame)`; for another shard the
+raw frame goes over the bus as `ToHost` (skipped while that link holds a quarter of its queue),
+where the router recognises it by its type byte and does not decode it again. The host finds the
+room and the sender's colour (not a player: dropped, no anomaly: gestures are not
+authoritative), and copies the frame without its seq into an `S_Gesture` (the two layouts match
+byte for byte: `protocol.codec.test.js`) for the opponent's endpoint, through its
+`sendDroppable`, which skips it when the connection already has a quarter of
+`WS_SEND_BUFFER_LIMIT` unsent or, for another shard, when the bus link has a quarter of its queue
+(that shard's router then checks the connection's own backlog). A gesture can therefore never
+close a slow client. Nothing is journaled, and the room, its clocks, `gseq` and the anti-cheat
+never see it; it is relayed as long as the room exists, the rematch window included. Metrics:
+`scacelith_gestures_relayed_total` and `scacelith_gestures_dropped_total{reason}` (`rate`,
+`not_attached`, `backlog`, `no_game`, `not_player`, `no_opponent`, `malformed`). Its CPU cost is
+in docs/SIZING.md.
 
 **End of game.** The room decides the result (mate, flag, resignation, agreement, claim,
 abandonment, abort...), the host sends `GameEnd` to both, journals it, and queues the game for
@@ -257,14 +292,17 @@ arrays (use typed-array mailbox, 0x88 or 10x12).
 ```js
 new GameRoom({ id, category /* '3+2' | 'custom' */, baseMs, incMs, rated,
                white: { userId, name, rating, provisional }, black: {...},
-               createdAt, config, rematchOf?, createChessGame /* () => new ChessGame(), injected by the host */ })
-room.onMove(color, { seq, ply, move, posHash, thinkMs, drawOffer }, now)  -> Outcome
-room.onResign(color, now) / onDrawOffer(color, now) / onDrawAnswer(color, accept, now)
-room.onDrawClaim(color, now) / onAbort(color, now) / onRematch(color, accept, now)
-room.onDisconnect(color, now) / onReconnect(color, now) / onRtt(color, rttMs)
+               createdAt, config, rematchOf?, autoPress? /* true */,
+               createChessGame /* () => new ChessGame(), injected by the host */ })
+// recvAt (optional, default now): the arrival the host credits after a stall of its worker (6.1)
+room.onMove(color, { seq, ply, move, posHash, thinkMs, drawOffer }, now, recvAt?)  -> Outcome
+room.onResign(color, now, seq?, recvAt?) / onDrawOffer(...) / onDrawAnswer(color, accept, now, seq?, recvAt?)
+room.onDrawClaim(color, now, seq?, recvAt?) / onAbort(color, now, seq?, recvAt?) / onRematch(color, accept, now)
+room.onDisconnect(color, now, recvAt?) / onReconnect(color, now, recvAt?) / onResync(color, now, recvAt?)
+room.onRtt(color, rttMs)
 room.forfeit(color, now)            // anti-cheat: loss (EndReason.Forfeit)
 room.serverAbort(now)                // EndReason.ServerAborted
-room.tick(now) -> Outcome           // flags, first-move timeouts, grace expiries
+room.tick(now, stalledSince?) -> Outcome  // flags, first-move timeouts, grace expiries
 room.nextDeadline() -> ms | Infinity
 room.snapshot(forColor, now) -> object for encode.GameSnapshot
 room.isOver; room.result          // { status, reason, whiteMs, blackMs, endedAt }
@@ -280,17 +318,20 @@ then sends the other player a new `GameSnapshot`, unless the outcome holds a mov
 `GameHost` (one per shard):
 ```js
 new GameHost({ shard, config, store, journal, anticheat, bus, primary, log })
-host.createGame(spec) -> gameId            // spec from the primary (players, tc, rated, colours)
-host.attach(gameId, userId, endpoint)      // endpoint: { send(buf), connId, shard } ; sends the snapshot
+host.createGame(spec) -> gameId            // spec from the primary (players, tc, rated, colours, autoPress)
+host.attach(gameId, userId, endpoint)      // endpoint: { send(buf), sendDroppable?(buf), connId, shard } ; sends the snapshot
 host.detach(gameId, userId, endpoint)      // connection closed
 host.onClientMessage(gameId, userId, msg, endpoint) // decoded C2S game message (Move..Rematch)
+host.relayGesture(gameId, userId, frame) -> bool    // raw C_Gesture frame -> S_Gesture to the opponent (section 3)
+host.heartbeat(t) ; host.stallCredit(t) ; host.stallDuring(t0)  // stall detection and credit (6.1)
 host.recover() -> count                    // replays the journal at start-up
 host.compactJournal(now) -> count          // journal snapshots the journal asks for (5.6), from the interval
 host.stats() -> { games, ... }
 host.shutdown()                            // flush journal + pending commits
 ```
 The host owns a timer wheel (10 ms slots) driven by one interval; each room's `nextDeadline()`
-is (re)scheduled after every outcome. It records `anomaly` through `anticheat.recordAnomaly`
+is (re)scheduled after every outcome. Each run of the interval is a beat of the stall detection
+(6.1). It records `anomaly` through `anticheat.recordAnomaly`
 and, for a certain cheat with `AUTO_SANCTION_CERTAIN_CHEATS`, calls `room.forfeit` and
 `anticheat.sanctionCertain` (section 5.8).
 
@@ -350,6 +391,8 @@ store.games.finishBatch(records) -> [{ gameId, ratings: null | { white: RatingCh
   // record: { id, category, rated, baseMs, incMs, whiteId, blackId, whiteName, blackName, whiteRating, blackRating,
   //           startedAt, endedAt, status, reason, moves: Uint16Array, spentMs: Uint32Array, clockMs: Uint32Array,
   //           rematchOf, flags }
+  // flags: 1 rated requested, 2 recovered after a restart, 4 forfeit, 8 manual clock press (autoPress
+  // false; records of older builds never have it)
 store.games.byId(id) ; recentForUser(userId, limit, before?) ; countBetween(a, b, since)
 store.conduct.record(userId, kind, at) ; store.conduct.countSince(userId, since) -> { abandon, abort, noshow } ; store.conduct.cooldown(userId) / setCooldown(userId, until, level)
 store.sanctions.create({ userId, kind /* 'ban'|'mm_block'|'warning' */, reason, source /* 'auto'|'moderator' */, gameId, startsAt, endsAt, createdBy }) -> id
@@ -508,6 +551,7 @@ class WsConnection {
 // src/cluster/router.js: decodes C2S frames (decode(buf, {dir:'c2s'})), enforces seq, rate limits,
 // handles Ping/Pong, sends Queue*/Challenge* to the primary, game messages to the local GameHost or
 // to the host shard over the bus (raw frame + userId + connId), and bus deliveries back to sockets.
+// C_Gesture has its own bucket and relay path (section 3); endpoints have sendDroppable(buf) for it.
 // src/cluster/bus.js: Unix-socket (Windows: named pipe) mesh between shards; frames
 // [u32 len][u8 kind][u32 connId][u32 userId][payload]; batched writes (setImmediate).
 ```
@@ -660,8 +704,10 @@ change happens on POST (link scanners must not consume tokens).
 * Time is measured on the server only. The client's `thinkMs` never adds time; it only bounds
   lag compensation.
 * Plies 0 and 1 (each side's first move) do not run the clock: each player has
-  `FIRST_MOVE_TIMEOUT_MS` to make it, otherwise the game is aborted (`NoShow`, unrated). No
-  increment is added for them. The clocks start with White's second move.
+  `FIRST_MOVE_TIMEOUT_MS` to make it, otherwise the game is aborted (`NoShow`, unrated). Its
+  deadline has the same margin as a flag, `min(quota, rttEma + 50, LAG_COMP_MAX_MS)`, so that a
+  first move sent in time over a slow link counts; the `firstMoveMs` sent to the clients has no
+  margin. No increment is added for them. The clocks start with White's second move.
 * For every later move: `elapsed = recvTime - turnStart` where `turnStart` is when the server
   sent the opponent's `MoveMade`. `lag = elapsed - clamp(thinkMs, 0, elapsed)`.
   `comp = min(lag, rttEma + 50, LAG_COMP_MAX_MS, quota)`; `quota -= comp`, then
@@ -678,7 +724,30 @@ change happens on POST (link scanners must not consume tokens).
   move (plus 100 ms) is reported.
 * `rttEma` is the server's own measurement (its Ping / the client's Pong), exponential moving
   average, capped at 2000 ms. A client that delays its Pongs only inflates a value that is
-  itself capped by the quota.
+  itself capped by the quota. A Pong whose Ping preceded a stall of the worker (below) is left
+  out: the stall delayed its reading, not the network. `Welcome`, `Ping` and `Pong` carry the
+  same clock as the games (`clock.js now()`), `Welcome`'s read after the session check.
+* Stall credit (`GAME_STALL_MIN_MS`, 30; `GAME_STALL_CREDIT_MAX_MS`, 5000). A worker's event loop
+  can stop for a moment (garbage collection, a synchronous SQLite write, CPU steal), and Node runs
+  its timers before it reads its sockets: without care, a flag that fell during the stall would
+  fire before the move that arrived in time and waited in a socket. Each run of the host's 10 ms
+  interval is a beat; a beat more than `10 + GAME_STALL_MIN_MS` ms after the previous one is a
+  stall (`scacelith_game_stall_ms`), and the timers, commits and compaction of that beat then run
+  from `setImmediate`, after the poll phase has read the sockets. Until then, and while a beat is
+  that late before the interval noticed it, a game request (Move, Resign, DrawOffer, DrawAnswer,
+  DrawClaim, Abort, Resync), an attach or a detach counts as arrived when the stall began, at
+  most `GAME_STALL_CREDIT_MAX_MS` before it is handled (`scacelith_game_stall_credit_ms_total`).
+  The room checks the deadlines, the flag and the time charged for a move at that arrival (never
+  before the latest move, never after now), a resignation, draw or abort takes effect at it, and
+  a disconnection, reconnection or Resync processes the deadlines due at it only; the next turn
+  starts at the real time of the `MoveMade`, so the stall is charged to nobody and uses no quota,
+  and the implausible-`thinkMs` test keeps the real time since the previous move. The timers that
+  run after the stall pass its start to `room.tick`: a first-move timeout that fell during it
+  aborts the game without a `noshow` conduct incident. Nothing of it is journaled (the journal
+  holds the clock values it produced, and a replay uses them), and a player gains at most one
+  stall; no client can cause one. `scacelith_game_timer_late_ms` measures how late the timers
+  fire. The credit covers stalls of the game's host worker only: a move relayed over the bus from
+  another shard that stalled is timed when the host reads it.
 
 ### 6.2 Validation of a Move intent (in this order)
 
@@ -755,7 +824,8 @@ rules before sending, so steps 6 and 7 only happen with a modified client.
   its side to move never came back before the end of the first-move timer records no `noshow`
   conduct incident (the server broke the connection); it is still aborted, unrated. A player who
   came back and then does not move within that whole first-move time gets the incident as
-  usual. Games that cannot be rebuilt end as `ServerAborted` (unrated) and are committed as such.
+  usual. A first-move timeout that fell during a stall of the host's worker (6.1) records no
+  incident either. Games that cannot be rebuilt end as `ServerAborted` (unrated) and are committed as such.
 
 ### 6.5 Anomalies, certain cheats, suspicion
 

@@ -1,10 +1,11 @@
 # Scacelith dedicated server
 
 The online multiplayer server of Scacelith: accounts, rated matchmaking, challenges and private
-games, authoritative games with server clocks, one Elo per official time control, anti-cheat and
-reports. It is a plain Node.js program with no npm dependency. The game (the Windows binary) is
-only a client of it; anyone can run a community server, and players choose the server in the
-game's Options.
+games, authoritative games with server clocks (the robots press the clock by themselves unless
+`AUTO_PRESS_CLOCK=false`), the opponent's live gestures (head, hand) relayed without being
+stored, one Elo per official time control, anti-cheat and reports. It is a plain Node.js program
+with no npm dependency. The game (the Windows binary) is only a client of it; anyone can run a
+community server, and players choose the server in the game's Options.
 
 - Official server: `caissa.scacelith.com`, TCP port `44664` (HTTPS API and WSS on the same port).
 - Design and contracts: [docs/DESIGN.md](docs/DESIGN.md). Every setting: [docs/CONFIG.md](docs/CONFIG.md).
@@ -415,8 +416,9 @@ only they feed the population statistics the players are compared with. If
 `http://127.0.0.1:9464/metrics` (Prometheus text format; `METRICS_TOKEN` adds a bearer token):
 connections, messages, games, move latency, commits, journal, rate limits, anti-cheat (including
 the analysis backlog and the skipped games), the retention purge (`scacelith_retention_*`), process
-memory and event-loop lag per shard. `/healthz` answers when the process runs, `/readyz` when it
-accepts players.
+memory and event-loop lag per shard, the stalls of a shard's event loop and the time given back to
+the players for them (`scacelith_game_stall_*`), and the gesture relay (`scacelith_gestures_*`).
+`/healthz` answers when the process runs, `/readyz` when it accepts players.
 
 ## Scaling
 
@@ -430,3 +432,10 @@ server at that interval (announced in `Welcome`) for its ping indicator and its 
 server clock, and each ping costs server CPU for every connected player. The default, 10 s, keeps
 it at about half of an idle player's cost; 2 s would make it a third or more of the cost of a
 player in a 3+2 game.
+
+`GESTURE_RATE` is the other one. During a game the client sends its player's live gestures (the
+head, the piece in hand and where it is aimed) whenever they change, at most that many per second
+(4 by default, announced in `Welcome`), and the server relays each one to the opponent. A gesture
+costs about as much server CPU as a client ping, so a player who keeps moving costs several times
+their moves: [docs/SIZING.md](docs/SIZING.md#gestures) gives the capacity for each rate. Lower
+it to 2, or to 0 to turn the relay off, when the peak nears that capacity.

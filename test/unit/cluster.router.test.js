@@ -6,6 +6,7 @@ import { BusKind, BusOp } from '../../src/cluster/bus.js';
 import { Ipc, channelPair } from '../../src/cluster/ipc.js';
 import { Router } from '../../src/cluster/router.js';
 import { testConfig } from '../../src/config.js';
+import { now as clockNow } from '../../src/game/clock.js';
 import { Registry } from '../../src/metrics.js';
 import { WsServer } from '../../src/net/ws.js';
 import { connectWs } from '../../src/net/ws-raw-client.js';
@@ -31,19 +32,22 @@ const SESSIONS = {
 };
 
 class FakeHost {
-    constructor() { this.calls = []; this.games = 0; }
+    constructor() { this.calls = []; this.games = 0; this.stalled = false; }
     createGame(spec) { this.calls.push(['createGame', spec]); return new GameIdAllocator(0).next(); }
     attach(gameId, userId, ep) { this.calls.push(['attach', gameId, userId, ep]); }
     detach(gameId, userId, ep) { this.calls.push(['detach', gameId, userId, ep]); }
     onClientMessage(gameId, userId, msg, ep) { this.calls.push(['msg', gameId, userId, msg, ep]); }
     onRtt(gameId, userId, ms) { this.calls.push(['rtt', gameId, userId, ms]); }
+    relayGesture(gameId, userId, frame) { this.calls.push(['gesture', gameId, userId, Buffer.from(frame)]); return true; }
+    stallDuring() { return this.stalled; }
     forfeitUser(userId) { this.calls.push(['forfeit', userId]); return true; }
     stats() { return { games: this.games }; }
     of(kind) { return this.calls.filter((c) => c[0] === kind); }
 }
 
 class FakeBus {
-    constructor() { this.sent = []; }
+    constructor() { this.sent = []; this.queued = 0; this.maxQueueBytes = 8 << 20; }
+    queuedBytes() { return this.queued; }
     send(peer, kind, connId, userId, gameId, payload) { this.sent.push({ peer, kind, connId, userId, gameId, payload: Buffer.from(payload) }); return true; }
     control(peer, op, connId, userId, gameId, extra = null) { this.sent.push({ peer, kind: BusKind.Control, op, connId, userId, gameId, extra }); return true; }
 }
@@ -438,6 +442,160 @@ describe('router: primary and bus', () => {
         await waitFor(() => env.seen.some((x) => x.type === 'shard.load'));
         const l = env.seen.find((x) => x.type === 'shard.load').p;
         assert.deepEqual([l.shard, l.games, l.lagP99, l.overloaded], [0, 3, 300, true]);
+    });
+});
+
+describe('router: gestures', () => {
+    const G = { ply: 3, touch: 12, aim: 28, placed: 0, flags: 1, yaw: -700, pitch: 250, lean: 40 };
+    const value = (env, name, ...labels) => env.registry.metrics.get(name)?.children.get(labels.join('\u0001'))?.value ?? 0;
+    const dropped = (env, reason) => value(env, 'scacelith_gestures_dropped_total', reason);
+    const inGame = async (config = {}) => {
+        const gameId = new GameIdAllocator(0).next();
+        const env = await setup({ config, claim: { ok: true, activeGame: gameId } });
+        const { c, w } = await env.login();
+        return { env, c, w, gameId };
+    };
+
+    it('announces the relay in Welcome with the server clock (0/0 when GESTURE_RATE is 0)', async () => {
+        const { env, w } = await inGame();
+        assert.deepEqual([w.gestureRate, w.gestureBurst], [4, 8]);       // GESTURE_RATE, GESTURE_BURST defaults
+        assert.ok(Math.abs(w.serverTime - clockNow()) < 1000, 'Welcome.serverTime is the clock of the game hosts');
+        assert.equal(env.cfg.gestureRate, 4);
+        const off = await setup({ config: { GESTURE_RATE: '0', GESTURE_BURST: '20' } });
+        const { w: w0 } = await off.login();
+        assert.deepEqual([w0.gestureRate, w0.gestureBurst], [0, 0]);
+        assert.throws(() => testConfig({ GESTURE_RATE: '61' }), /GESTURE_RATE: at most 60/);
+        assert.throws(() => testConfig({ GESTURE_BURST: '0' }), /GESTURE_BURST: at least 1/);
+    });
+
+    it('relays the raw frame to the local host, drops the excess silently and keeps the seq in step', async () => {
+        const { env, c, gameId } = await inGame({ GESTURE_RATE: '1', GESTURE_BURST: '3' });
+        const frames = [];
+        for (let i = 0; i < 6; i++) { frames.push(encode.C_Gesture({ seq: ++c.seq, game: gameId, ...G, yaw: i })); c.ws.send(frames[i]); }
+        c.send('Resign', { game: gameId });
+        await waitFor(() => env.host.of('msg').length === 1);
+        const got = env.host.of('gesture');
+        assert.deepEqual(got.map((x) => [x[1], x[2]]), [[gameId, 1], [gameId, 1], [gameId, 1]]);
+        assert.ok(got.every((x, i) => x[3].equals(frames[i])), 'the burst is relayed byte for byte');
+        assert.equal(env.host.of('msg')[0][3].seq, 8);                   // accepted after 3 dropped gestures
+        assert.equal(dropped(env, 'rate'), 3);
+        assert.deepEqual(env.anomalies, []);
+        await assert.rejects(c.recv(150));                               // no RateLimited, no Error
+        assert.equal(env.conn().state, 'ready');
+    });
+
+    it('spends no WS_MSG token: requests stay within their own bucket', async () => {
+        const { env, c, gameId } = await inGame({ WS_MSG_RATE: '1', WS_MSG_BURST: '3', GESTURE_RATE: '60', GESTURE_BURST: '120' });
+        for (let i = 0; i < 40; i++) c.send('C_Gesture', { game: gameId, ...G });
+        for (let i = 0; i < 3; i++) c.send('QueueLeave');
+        const acks = [await c.recv(), await c.recv(), await c.recv()];
+        assert.deepEqual(acks.map((m) => [m.name, m.ref]), [['Ack', 42], ['Ack', 43], ['Ack', 44]]);
+        assert.equal(env.host.of('gesture').length, 40);
+        await assert.rejects(c.recv(150));
+    });
+
+    it('drops every gesture when GESTURE_RATE is 0, and a gesture for a game not attached to the connection', async () => {
+        const { env, c, gameId } = await inGame({ GESTURE_RATE: '0' });
+        for (let i = 0; i < 5; i++) c.send('C_Gesture', { game: gameId, ...G });
+        c.send('QueueLeave');
+        assert.equal((await c.until('Ack')).ref, 7);
+        assert.equal(dropped(env, 'rate'), 5);
+        const { env: env2, c: c2 } = await inGame();
+        c2.send('C_Gesture', { game: new GameIdAllocator(1).next(), ...G });
+        c2.send('QueueLeave');
+        assert.equal((await c2.until('Ack')).ref, 3);
+        assert.equal(dropped(env2, 'not_attached'), 1);
+        assert.equal(env.host.of('gesture').length + env2.host.of('gesture').length, 0);
+        assert.deepEqual([...env.anomalies, ...env2.anomalies], []);
+    });
+
+    it('closes a gross flood 4301 and a malformed gesture 4300', async () => {
+        const { env, c, gameId } = await inGame({ GESTURE_RATE: '1', GESTURE_BURST: '2' });
+        for (let i = 0; i < 60; i++) c.send('C_Gesture', { game: gameId, ...G });   // max(50, 10 x 2) drops allowed
+        const m = await c.until('Error');
+        assert.deepEqual([m.code, m.fatal], [E.Flood, true]);
+        assert.equal(await c.closed(), 4301);
+        assert.deepEqual(env.anomalies.map((a) => [a.kind, a.detail.gestureDrops]), [['flood', 51]]);
+        assert.equal(env.host.of('gesture').length, 2);
+        const { env: env2, c: c2, gameId: g2 } = await inGame();
+        const bad = encode.C_Gesture({ seq: 2, game: g2, ...G });
+        bad[bad.length - 10] = 0xff;                                     // flags above the GestureFlag bits
+        c2.ws.send(bad);
+        assert.equal((await c2.until('Error')).code, E.Malformed);
+        assert.equal(await c2.closed(), 4300);
+        assert.ok(env2.anomalies.some((a) => a.kind === 'malformed'));
+    });
+
+    it('forwards to the host shard over the bus, unless its link holds a backlog', async () => {
+        const bus = new FakeBus();
+        const env = await setup({ bus });
+        const { c } = await env.login();
+        const remote = new GameIdAllocator(2).next();
+        assert.deepEqual(await env.primary.request('game.attach', { gameId: remote, userId: 1, connId: env.conn().id }), { ok: true });
+        const f = encode.C_Gesture({ seq: ++c.seq, game: remote, ...G });
+        c.ws.send(f);
+        await waitFor(() => bus.sent.some((x) => x.kind === BusKind.ToHost));
+        const out = bus.sent.find((x) => x.kind === BusKind.ToHost);
+        assert.deepEqual([out.peer, out.connId, out.userId, out.gameId], [2, env.conn().id, 1, remote]);
+        assert.ok(out.payload.equals(f), 'the raw client frame');
+        bus.queued = bus.maxQueueBytes / 4 + 1;
+        c.send('C_Gesture', { game: remote, ...G });
+        c.send('QueueLeave');
+        await c.until('Ack');
+        assert.equal(bus.sent.filter((x) => x.kind === BusKind.ToHost).length, 1);
+        assert.equal(dropped(env, 'backlog'), 1);
+    });
+
+    it('relays a gesture from another shard without decoding it, and sends gestures as droppable frames', async () => {
+        const bus = new FakeBus();
+        const env = await setup({ bus });
+        const { c } = await env.login();
+        const gameId = new GameIdAllocator(0).next();
+        const raw = encode.C_Gesture({ seq: 77, game: gameId, ...G });
+        env.router.onBus(BusKind.ToHost, 2, 55, 7, gameId, raw);
+        assert.equal(env.host.of('msg').length, 0);
+        const [, g, u, frame] = env.host.of('gesture')[0];
+        assert.deepEqual([g, u], [gameId, 7]);
+        assert.ok(frame.equals(raw));
+        // Towards a connection of this shard: skipped while it holds a quarter of WS_SEND_BUFFER_LIMIT.
+        const conn = env.conn();
+        const out = encode.S_Gesture({ game: gameId, ...G });
+        assert.equal(conn.ctx.endpoint.sendDroppable(out), true);
+        assert.equal((await c.recv()).name, 'S_Gesture');
+        Object.defineProperty(conn, 'bufferedBytes', { value: env.cfg.wsSendBufferLimit / 4 + 1, configurable: true });
+        assert.equal(conn.ctx.endpoint.sendDroppable(out), false);
+        env.router.onBus(BusKind.ToConn, 2, conn.id, 1, 0, out);
+        env.router.onBus(BusKind.ToConn, 2, conn.id, 1, 0, encode.Notice({ code: N.Motd, arg: 5 }));
+        const next = await c.recv();
+        assert.deepEqual([next.name, next.arg], ['Notice', 5]);         // the gesture was dropped, the notice was not
+        assert.equal(dropped(env, 'backlog'), 1);
+        // Towards another shard: skipped while the bus link holds a quarter of its queue.
+        env.router.onBus(BusKind.Control, 2, 55, 7, gameId, Buffer.from([BusOp.Attach]));
+        const ep = env.host.of('attach').at(-1)[3];
+        assert.equal(ep.sendDroppable(out), true);
+        bus.queued = bus.maxQueueBytes / 4 + 1;
+        assert.equal(ep.sendDroppable(out), false);
+        assert.equal(bus.sent.filter((x) => x.kind === BusKind.ToConn).length, 1);
+    });
+
+    it('leaves out of the round-trip average a Pong whose Ping preceded a stall', async () => {
+        const gameId = new GameIdAllocator(0).next();
+        const env = await setup({ claim: { ok: true, activeGame: gameId } });
+        const { c } = await env.login();
+        env.host.stalled = true;
+        env.router.sweep(Date.now() + 1000);
+        const p1 = await c.until('S_Ping');
+        assert.ok(Math.abs(p1.serverTime - clockNow()) < 1000);
+        c.send('C_Pong', { nonce: p1.nonce });
+        c.send('C_Ping', { nonce: 5 });
+        const pong = await c.until('S_Pong');
+        assert.ok(Math.abs(pong.serverTime - clockNow()) < 1000);
+        assert.equal(env.host.of('rtt').length, 0);
+        env.host.stalled = false;
+        env.router.sweep(Date.now() + 2000);
+        const p2 = await c.until('S_Ping');
+        c.send('C_Pong', { nonce: p2.nonce });
+        await waitFor(() => env.host.of('rtt').length === 1);
     });
 });
 

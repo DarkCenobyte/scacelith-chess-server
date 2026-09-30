@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { GameRoom, REMATCH_WINDOW_MS, CERTAIN_KINDS, MAX_PLIES } from '../../src/game/room.js';
+import { GameRoom, REMATCH_WINDOW_MS, CERTAIN_KINDS, MAX_PLIES, RecordFlag } from '../../src/game/room.js';
 import { FakeChessGame, fakeMove } from '../../src/game/testing.js';
 import { decode, enums, MSG, MoveFlag } from '../../src/protocol/index.js';
 import { testConfig } from '../../src/config.js';
@@ -12,19 +12,19 @@ const T0 = 1_800_000_000_000;
 const GRACE = 18000;          // 3+2: clamp(180000 / 10, 15000, 60000)
 const CAP0 = 150;             // min(quota 2000, default rtt 100 + 50, LAG_COMP_MAX_MS 1000)
 
-function mkRoom({ script = {}, config = CFG, baseMs = 180000, incMs = 2000, rated = true } = {}) {
+function mkRoom({ script = {}, config = CFG, baseMs = 180000, incMs = 2000, rated = true, autoPress } = {}) {
     return new GameRoom({
-        id: 123456789, category: '3+2', baseMs, incMs, rated,
+        id: 123456789, category: '3+2', baseMs, incMs, rated, autoPress,
         white: { userId: 11, name: 'alice', rating: 1500, provisional: false },
         black: { userId: 22, name: 'bob', rating: 1612, provisional: true },
         createdAt: T0, config, createChessGame: () => new FakeChessGame(script),
     });
 }
 
-function mv(room, color, now, extra = {}) {
+function mv(room, color, now, extra = {}, recvAt = now) {
     return room.onMove(color, {
         seq: 7, ply: room.ply, move: fakeMove(room.ply), posHash: room.game.position.digest(), thinkMs: 0, drawOffer: false, ...extra,
-    }, now);
+    }, now, recvAt);
 }
 
 const dec = (bufs) => bufs.map((b) => decode(b));
@@ -160,10 +160,12 @@ test('flag against a lone king is a draw (TimeoutVsInsufficient)', () => {
 });
 
 test('first-move timeout: no-show abort, conduct noshow, unrated record', () => {
+    // The deadline has the margin of a flag (CAP0); the countdown shown to the players does not.
     let room = mkRoom();
-    assert.equal(room.nextDeadline(), T0 + 30000);
-    assert.equal(room.tick(T0 + 29999).ended, false);
-    let o = room.tick(T0 + 30000);
+    assert.equal(room.nextDeadline(), T0 + 30000 + CAP0);
+    assert.equal(room.snapshot(W, T0 + 10000).firstMoveMs, 20000);
+    assert.equal(room.tick(T0 + 30000 + CAP0 - 1).ended, false);
+    let o = room.tick(T0 + 30000 + CAP0);
     assert.equal(o.ended, true);
     assert.deepEqual([room.result.status, room.result.reason], [GS.Aborted, ER.NoShow]);
     assert.deepEqual(o.conduct, [{ userId: 11, kind: 'noshow' }]);
@@ -171,13 +173,22 @@ test('first-move timeout: no-show abort, conduct noshow, unrated record', () => 
 
     room = mkRoom();
     mv(room, W, T0 + 4000);
-    assert.equal(room.nextDeadline(), T0 + 4000 + 30000);
-    o = room.tick(T0 + 34000);
+    assert.equal(room.nextDeadline(), T0 + 4000 + 30000 + CAP0);
+    o = room.tick(T0 + 34000 + CAP0);
     assert.deepEqual(o.conduct, [{ userId: 22, kind: 'noshow' }]);
     assert.equal(room.result.reason, ER.NoShow);
     // A late first move finds the game over.
-    const late = mv(room, B, T0 + 34001);
+    const late = mv(room, B, T0 + 34001 + CAP0);
     assert.equal(dec(late.reply)[0].code, EC.GameOver);
+});
+
+test('a first move sent in time over a slow link is accepted within the margin, which follows the round trip', () => {
+    const room = mkRoom();
+    const o = mv(room, W, T0 + 30000 + CAP0 - 1, { thinkMs: 29900 });
+    assert.equal(o.moved, true);
+    assert.equal(room.nextDeadline(), T0 + 30000 + CAP0 - 1 + 30000 + CAP0);
+    room.onRtt(B, 400);                              // cap: min(quota 2000, 400 + 50, 1000)
+    assert.equal(room.nextDeadline(), T0 + 30000 + CAP0 - 1 + 30000 + 450);
 });
 
 test('double moves, duplicates and stale plies', () => {
@@ -442,7 +453,7 @@ test('rematch: offer and agreement (colours swapped), decline, expiry, leaving',
     o = room.onRematch(W, true, T0 + 5000);
     assert.equal(o.broadcast.length, 0);
     assert.deepEqual(o.rematch, {
-        gameId: room.id, white: room.black, black: room.white, category: '3+2', baseMs: 180000, incMs: 2000, rated: true,
+        gameId: room.id, white: room.black, black: room.white, category: '3+2', baseMs: 180000, incMs: 2000, rated: true, autoPress: true,
     });
     assert.equal(room.nextDeadline(), Infinity);
     assert.equal(dec(room.onRematch(W, true, T0 + 5100, 2).reply)[0].code, EC.RematchUnavailable);
@@ -528,4 +539,99 @@ test('record() matches the finished-game record of DESIGN 5.5', () => {
         [r.id, r.category, r.rated, r.baseMs, r.incMs, r.whiteId, r.blackId, r.whiteName, r.blackName, r.whiteRating, r.blackRating, r.startedAt, r.endedAt, r.status, r.reason, r.rematchOf, r.flags],
         [123456789, '3+2', true, 180000, 2000, 11, 22, 'alice', 'bob', 1500, 1612, T0, T0 + 5000, GS.WhiteWins, ER.Resignation, 0, 1]);
     assert.throws(() => mkRoom().record());
+});
+
+test('autoPress: in the snapshot, the created record and the rematch; ManualPress in the record flags', () => {
+    let room = opened();
+    assert.equal(room.autoPress, true);
+    assert.equal(room.snapshot(W, T0 + 3000).autoPress, true);
+    room.onResign(B, T0 + 5000);
+    assert.equal(room.record().flags & RecordFlag.ManualPress, 0);
+
+    room = opened({ autoPress: false });
+    assert.equal(room.snapshot(B, T0 + 3000).autoPress, false);
+    assert.equal(decode(room.snapshotBuffer(W, T0 + 3000)).autoPress, false);
+    assert.equal(JSON.parse(room.createdRecord().payload.toString('utf8')).autoPress, false);
+    room.onResign(B, T0 + 5000);
+    assert.equal(room.record().flags, RecordFlag.RatedRequested | RecordFlag.ManualPress);
+    room.onRematch(W, true, T0 + 6000);
+    const o = room.onRematch(B, true, T0 + 7000);
+    assert.equal(o.rematch.autoPress, false, 'a rematch keeps the finished game\'s setting');
+});
+
+test('stall credit: a move that waited in a socket is timed from its credited arrival, the next turn starts at once', () => {
+    const deadline = T0 + 2000 + 180000 + CAP0;
+    const now = deadline + 2000, recvAt = deadline - 500;
+    let room = opened();
+    const o = mv(room, W, now, { thinkMs: 0 }, recvAt);
+    assert.equal(o.moved, true);
+    const m = decode(o.broadcast[0]);
+    // elapsed 179650 from the credited arrival, all of it lag: compensation = the cap (150).
+    assert.deepEqual([m.spentMs, m.whiteMs, m.serverTime], [179500, 180000 - 179500 + 2000, now]);
+    assert.deepEqual([room.recvTime[2], room.clock.turnStart], [now, now], 'the stall is charged to nobody');
+    assert.equal(room.clock.quota[W], 2000 - CAP0 + 100);
+    assert.equal(room.nextDeadline(), now + 180000 + CAP0);
+    // Without the credit, the same move flags.
+    room = opened();
+    assert.equal(dec(mv(room, W, now, { thinkMs: 0 }).reply)[0].code, EC.FlagFell);
+    // The arrival is never taken before the latest move (nor after `now`).
+    room = opened();
+    const early = mv(room, W, T0 + 2500, { thinkMs: 0 }, T0 - 5000);
+    assert.equal(decode(early.broadcast[0]).spentMs, 0);
+});
+
+test('stall credit: the implausible-thinkMs test keeps the real elapsed time', () => {
+    const room = opened();
+    // White thinks 6 s; the move waits in a socket from T0 + 5000 (the stall's start, 3 s into the turn) to T0 + 9000.
+    const o = mv(room, W, T0 + 9000, { thinkMs: 6000 }, T0 + 5000);
+    assert.equal(o.anomaly, null);
+    assert.equal(decode(o.broadcast[0]).spentMs, 3000, 'thinkMs is clamped to the credited elapsed time');
+    // A thinkMs longer than the real elapsed time is still implausible.
+    const o2 = mv(room, B, T0 + 12000, { thinkMs: 5000 }, T0 + 10000);
+    assert.equal(o2.anomaly.kind, 'clock_implausible');
+});
+
+test('stall credit: a resignation, a draw agreement or an abort that waited beats the flag', () => {
+    const deadline = T0 + 2000 + 180000 + CAP0;
+    let room = opened();
+    let o = room.onResign(B, deadline + 4, 0, deadline - 100);
+    assert.deepEqual([room.result.status, room.result.reason, room.result.endedAt], [GS.WhiteWins, ER.Resignation, deadline - 100]);
+    assert.equal(o.ended, true);
+
+    room = opened();
+    room.onDrawOffer(W, T0 + 3000);
+    room.onDrawAnswer(B, true, deadline + 1000, 0, deadline - 1000);
+    assert.deepEqual([room.result.status, room.result.reason], [GS.Draw, ER.Agreement]);
+
+    room = mkRoom();
+    room.onAbort(W, T0 + 30000 + CAP0 + 500, 0, T0 + 29000);
+    assert.deepEqual([room.result.status, room.result.reason], [GS.Aborted, ER.Aborted]);
+    // A first move that waited is accepted too.
+    room = mkRoom();
+    assert.equal(mv(room, W, T0 + 30000 + CAP0 + 2000, { thinkMs: 29000 }, T0 + 29500).moved, true);
+});
+
+test('stall credit: a disconnection read after a stall does not let the opponent\'s deadline overtake it', () => {
+    const deadline = T0 + 2000 + 180000 + CAP0;
+    const room = opened();
+    const o = room.onDisconnect(B, deadline + 1000, deadline - 1000);
+    assert.equal(o.ended, false);
+    assert.equal(decode(o.broadcast[0]).kind, EV.PlayerDisconnected);
+    // White's move waited in the same drain: accepted.
+    assert.equal(mv(room, W, deadline + 1001, { thinkMs: 0 }, deadline - 1000).moved, true);
+    // Resync and reconnection process the deadlines due at the credited arrival only.
+    const r = opened();
+    assert.equal(r.onResync(B, deadline + 1000, deadline - 1).ended, false);
+    assert.equal(r.onResync(B, deadline + 1000).ended, true);
+});
+
+test('stall credit: a first-move timeout that fell during a stall aborts without a no-show', () => {
+    let room = mkRoom();
+    let o = room.tick(T0 + 30000 + CAP0 + 2000, T0 + 30000);
+    assert.deepEqual([room.result.status, room.result.reason], [GS.Aborted, ER.NoShow]);
+    assert.deepEqual(o.conduct, []);
+    // A stall that began after the deadline changes nothing.
+    room = mkRoom();
+    o = room.tick(T0 + 30000 + CAP0 + 2000, T0 + 30000 + CAP0 + 1);
+    assert.deepEqual(o.conduct, [{ userId: 11, kind: 'noshow' }]);
 });
