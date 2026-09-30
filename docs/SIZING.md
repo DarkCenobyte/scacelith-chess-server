@@ -381,7 +381,7 @@ for i in 1 2 3 4 5; do node -e "const c=require('crypto');const t=process.cpuUsa
 | `scacelith_anticheat_analysis_queue_ordinary`, `scacelith_anticheat_analysis_queue_priority`, `scacelith_anticheat_analysis_skipped_total{reason}` | the ordinary queue held at `ANALYSIS_QUEUE_MAX`, a growing priority queue; `displaced` counts waiting games replaced by a game with a suspicious (not `info`) anomaly of its own |
 | `scacelith_journal_disk_bytes` (per shard) | more than about (`JOURNAL_COMPACT_SEGMENTS` + 1) × 16 MB |
 | `scacelith_journal_errors_total`, `scacelith_game_commit_unjournaled_total` | any increase: the journal cannot be written, and finished games are committed without it; fix the disk before a restart |
-| `scacelith_gestures_relayed_total`, `scacelith_gestures_dropped_total{reason}` | the relayed rate divided by the players in a game is r of [Gestures](#gestures); `backlog` drops mean slow players or an overloaded worker, `rate` drops a client that exceeds `GESTURE_RATE` |
+| `scacelith_gestures_relayed_total`, `scacelith_gestures_dropped_total{reason}` | the relayed rate divided by the players in a game is r of [Gestures](#gestures); `backlog` drops mean slow players or an overloaded worker, `rate` drops a client that exceeds `GESTURE_RATE`, or a player's link that stalled and then delivered more than `GESTURE_BURST` gestures at once (a few now and then are normal) |
 | `scacelith_game_stall_ms`, `scacelith_game_timer_late_ms` | stalls of a worker's event loop (the games do not charge them to the players, up to `GAME_STALL_CREDIT_MAX_MS`); frequent ones of 100 ms or more mean an overloaded machine, CPU steal or a slow disk |
 
 ## Risks, largest first
