@@ -110,8 +110,8 @@ password inline only to stay short.
   `retryAfter` (seconds) is present only on refusals that end with time. Some errors add fields:
   `field` (invalid input), `reason` (`weak_password`, `pow_required`), `pow` (`pow_required`) and
   `until` (`banned`). Answers that have `retryAfter` also carry a `Retry-After` header with the
-  same value. The one exception is the 503 `busy` of the game and player reads, which has only
-  the field.
+  same value. The one exception is the 503 `busy` of the history, game, player and leaderboard
+  reads, which has only the field.
 
 Errors that any endpoint can give:
 
@@ -130,7 +130,9 @@ Errors that any endpoint can give:
 | 429 | `rate_limited` | A rate limit (section 1.5): `retryAfter` plus a `Retry-After` header. |
 | 500 | `internal_error` | An unexpected failure. The server logs it. |
 | 503 | `timeout` | The server did not answer within 30 s (60 s for the export). |
-| 503 | `busy` | The database stayed locked. `retryAfter: 1`. |
+
+The read endpoints (sections 10 to 12) and the export answer 503 `busy` with `retryAfter: 1`
+when the database stayed locked.
 
 Endpoints that check or hash a password can also answer one of these:
 
@@ -260,7 +262,7 @@ after the server sees a wave of failed sign-ins (`POW_LOGIN_TRIGGER_PER_MIN`, th
 
 2. Find a nonce: a decimal string of at most 20 digits such that
    `SHA-256(challenge + ":" + nonce)` starts with `bits` zero bits (most significant bit of the
-   first byte first). 18 bits take about 260,000 hashes.
+   first byte first). 18 bits take about 260,000 hashes on average.
 3. Send the same request again with `"pow": { "challenge": "...", "nonce": "123456" }` in the body.
 
 A challenge is valid for 2 minutes and only once, for one endpoint and one client network (an
@@ -300,8 +302,12 @@ events.
 
 ## 2. Endpoint summary
 
-Paths under `/api/v1` unless they start with `/` outside it (section 14). "Session" = bearer token
-required; "optional" = public answer without a token, more with one.
+Paths are under `/api/v1`, except the pages and the health endpoints at the end of the table
+(sections 14 and 15). In the Auth column:
+
+- **session**: a bearer token is required;
+- **optional**: the public answer without a token, and more with one;
+- **none (page)**: an HTML page for a browser.
 
 | Method and path | Auth | Limit | Purpose |
 |---|---|---|---|
@@ -336,10 +342,10 @@ required; "optional" = public answer without a token, more with one.
 | `GET /players/:username/games` | none | `public_read` | A player's recent games |
 | `GET /leaderboard` | none | global | Top players of a category |
 | `POST /reports` | session | `reports` | Report the opponent of a recent game |
-| `GET`, `POST /verify-email` | page | `page`, `auth` | E-mail confirmation link |
-| `GET`, `POST /reset-password` | page | `page`, `auth` | Password reset link |
-| `GET`, `POST /confirm-email-change` | page | `page`, `auth` | E-mail change link |
-| `GET /auth/sso/google/callback` | page | `sso_page` | Where Google sends the browser back |
+| `GET`, `POST /verify-email` | none (page) | `page`, `auth` | E-mail confirmation link |
+| `GET`, `POST /reset-password` | none (page) | `page`, `auth` | Password reset link |
+| `GET`, `POST /confirm-email-change` | none (page) | `page`, `auth` | E-mail change link |
+| `GET /auth/sso/google/callback` | none (page) | `sso_page` | Where Google sends the browser back |
 | `GET /healthz`, `GET /readyz` | none | none | Liveness and readiness (also under `/api/v1`) |
 
 ## 3. Server info
@@ -374,10 +380,12 @@ curl -sS "$API/info"
 }
 ```
 
-- `serverId`: the server's id (stable across restarts; the game ties its stored sign-in to it), or
-  `null` when the store cannot give it.
+- `serverId`: a UUID that the database gets on its first start. It stays the same across
+  restarts. It is `null` when the database cannot give it.
 - `protocol`: the WebSocket protocol versions, schema hash and subprotocol (PROTOCOL.md).
-- `wsPort`: the public WebSocket port (`PUBLIC_WS_PORT`, else `WS_PORT`, else the API port).
+- `wsPort`: the WebSocket port that players use: `PUBLIC_WS_PORT`, else `WS_PORT`, else
+  `API_PORT`. Behind a proxy that publishes 443, set `PUBLIC_WS_PORT` as well as
+  `PUBLIC_API_PORT`.
 - `registration`: `open` or `closed`. `emailVerification`: whether new accounts confirm their
   address (`REQUIRE_EMAIL_VERIFICATION`).
 - `sso.google`: whether Google sign-in is offered. `pow.register`: the proof-of-work bits that
@@ -404,7 +412,8 @@ Answers:
 
 - **202 `{ "status": "verification_sent" }`** with e-mail confirmation (the default). A link valid
   for 24 h goes to the address. The answer is the same when another account already uses the
-  address: no account is created then, and that account's owner gets a notice instead.
+  address: no account is created then, and that account's owner gets a notice instead (at most
+  one per hour).
 - **201 `{ "status": "ready" }`** without e-mail confirmation (`REQUIRE_EMAIL_VERIFICATION=false`):
   the account can sign in at once.
 
@@ -824,7 +833,7 @@ most one per hour) instead. When the link is confirmed:
 **Without e-mail confirmation** (`REQUIRE_EMAIL_VERIFICATION=false`): the address changes at once:
 200 `{ "status": "email_changed", "email": "alice.new@example.org" }`, and the former address is
 told. If another account uses the address, the answer is 409 `email_taken`, and the owner of that
-address gets the notice.
+address gets the notice (at most one per hour).
 
 Errors:
 
@@ -889,7 +898,17 @@ shortened here):
   "reportsFiled": [
     { "gameId": 4100000000001, "reported": "bob", "category": "other", "comment": "rude", "createdAt": 1790882840000, "status": "open" }
   ],
-  "games": { "total": 3, "list": [ { "id": 4100000000003, "outcome": "aborted", "...": "the summaries of GET /account/games" } ] }
+  "games": {
+    "total": 2,
+    "list": [
+      { "id": 4100000000001, "category": "3+2", "rated": true, "timeControl": "180+2",
+        "white": { "name": "alice", "rating": 1500, "ratingAfter": 1510, "ratingDiff": 10 },
+        "black": { "name": "bob", "rating": 1520, "ratingAfter": 1510, "ratingDiff": -10 },
+        "color": "white", "status": 1, "reason": 2, "result": "1-0", "termination": "Resignation",
+        "plies": 41, "startedAt": 1790620205000, "endedAt": 1790620611000, "baseMs": 180000, "incMs": 2000,
+        "outcome": "win" }
+    ]
+  }
 }
 ```
 
@@ -901,10 +920,12 @@ shortened here):
   - `updatedAt`: when the record last changed.
 - `ratingRefunds`: rating points given back to the player after an opponent was found cheating.
   The cheater is not named.
-- `sessions`: every stored session, signed-out ones included until they are purged (a day after
-  they end). There is no token in it. `ip` is erased after `RETENTION_IP_DAYS`.
-- `securityEvents`: newest first, kept `RETENTION_SECURITY_DAYS`. `detail` keeps only the fields
-  that the export allows for the event's kind:
+- `sessions`: every stored session, newest first. There is no token in it. The retention purge
+  deletes an expired session, and a signed-out one a day after the sign-out. `ip` is erased after
+  `RETENTION_IP_DAYS`.
+- `securityEvents`: newest first, kept `RETENTION_SECURITY_DAYS`, with `ip` erased after
+  `RETENTION_IP_DAYS`. `detail` keeps only the fields that the export allows for the event's
+  kind:
   - `login`: `method`;
   - `sso_login`, `sso_linked`, `sso_account_created`: `provider`;
   - `login_failed`: `failures`;
@@ -923,7 +944,7 @@ shortened here):
 - `sanctions`: every sanction, lifted ones included:
   `{ id, kind, reason, source ("auto" | "moderator"), gameId, startsAt, endsAt, createdAt, liftedAt }`.
   The moderator's name is never included.
-- `conduct`: abandoned, aborted and no-show games counted against the player
+- `conduct`: the conduct events recorded for the player's abandoned, aborted and no-show games
   (`kind`: `abandon`, `abort` or `noshow`), kept 30 days.
 - `reportsFiled`: the reports the player made. `reported` is the reported player's current public
   name, and `status` is `open`, `actioned` or `dismissed`.
@@ -1221,8 +1242,22 @@ The player's recent games, newest first. **Auth** none. **Limit** `public_read`.
 (a game id) and `limit` (1-50, default 20, as in section 10). Neither filters nor a total are
 available here.
 
+```sh
+curl -sS "$API/players/alice/games?limit=1"
+```
+
 ```json
-{ "username": "alice", "games": [ { "id": 4100000000003, "...": "summaries" } ], "next": 4100000000002 }
+{
+  "username": "alice",
+  "games": [
+    { "id": 4100000000001, "category": "3+2", "rated": true, "timeControl": "180+2",
+      "white": { "name": "alice", "rating": 1500, "ratingAfter": 1510, "ratingDiff": 10 },
+      "black": { "name": "bob", "rating": 1520, "ratingAfter": 1510, "ratingDiff": -10 },
+      "color": "white", "status": 1, "reason": 2, "result": "1-0", "termination": "Resignation",
+      "plies": 41, "startedAt": 1790620205000, "endedAt": 1790620611000 }
+  ],
+  "next": 4100000000001
+}
 ```
 
 The summaries are those of section 10 without `baseMs`, `incMs` and `outcome`; `color` is the
@@ -1256,15 +1291,15 @@ Errors: 400 `invalid_category`, 400 `invalid_limit`, 503 `busy`.
 
 ### POST /reports
 
-Reports the opponent of one of the player's own games. A report never changes a rating or a
-sanction by itself: it raises the game's priority for the engine analysis and for the moderators
-([ANTICHEAT.md](ANTICHEAT.md)). **Auth** session. **Limit** `reports`, plus `REPORTS_PER_DAY` per
+Reports the opponent of one of the player's own games. A report never changes a rating, a
+sanction or an integrity level by itself. It raises the review priority that moderators see,
+and, except for `abuse`, it asks for the engine analysis of the game ([ANTICHEAT.md](ANTICHEAT.md)). **Auth** session. **Limit** `reports`, plus `REPORTS_PER_DAY` per
 player.
 
 | Field | Type | Notes |
 |---|---|---|
 | `gameId` | integer, or a string of digits | The game. |
-| `reported` | string, max 24 | The opponent's user name, without regard to case. The current name also works after a rename. |
+| `reported` | string, max 24 | The opponent's user name, as in the game record or as it is now, without regard to case. |
 | `category` | `cheating`, `abuse` or `other` | |
 | `comment` | string, optional | At most 500 characters once control characters are removed. |
 
