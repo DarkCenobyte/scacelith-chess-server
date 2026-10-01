@@ -330,13 +330,14 @@ Restart at quiet hours, keep `SHUTDOWN_GRACE_MS` so clients receive the notice, 
 ### System
 
 - Node 24 LTS, 24.7 or later: Argon2id costs about 40 % less CPU and half the memory of scrypt per password hash. A certificate from certbot 2 or later has an ECDSA P-256 key by default.
-- systemd unit as in the [README](../README.md#running-as-a-service-systemd-example), with `LimitNOFILE` above `MAX_CONNECTIONS` and `RestartSec=2`. With the default 100 ms, repeated start failures hit systemd's limit of 5 starts in 10 s and the service stays down.
+- systemd unit as in the [README](../README.md#running-as-a-service-systemd-example), with `LimitNOFILE` above `MAX_CONNECTIONS`, `AmbientCapabilities=CAP_NET_BIND_SERVICE` for the default port 443, and `RestartSec=2`. With the default 100 ms, repeated start failures hit systemd's limit of 5 starts in 10 s and the service stays down.
 - sysctl, for example in `/etc/sysctl.d/90-scacelith.conf`:
 
 ```ini
-# The API port lies inside the ephemeral range (32768-60999). Without a reservation an outgoing
-# connection (apt, certbot) can hold it during a restart and the server's bind() fails (EADDRINUSE).
-net.ipv4.ip_local_reserved_ports = 44664
+# The default API port 443 needs no reservation. A custom API_PORT inside the ephemeral range
+# (32768-60999, e.g. 44664) does: without it an outgoing connection (apt, certbot) can hold the port
+# during a restart and the server's bind() fails (EADDRINUSE).
+# net.ipv4.ip_local_reserved_ports = 44664
 # The kernel caps LISTEN_BACKLOG (2048 by default) at somaxconn: 4096 is the default since
 # Linux 5.4 and 128 before. Raise it too if you raise LISTEN_BACKLOG.
 net.core.somaxconn = 4096
@@ -358,7 +359,7 @@ The OVH Edge Network Firewall is stateless, filters IPv4 only, applies the first
 | Priority | Action | Protocol | Source | Source port | Destination port | TCP option | Purpose |
 |---|---|---|---|---|---|---|---|
 | 0 | Accept | TCP | any | | 32768-60999 | established | replies to outgoing connections: SMTP 587/465, Google 443, apt, ACME, DNS over TCP |
-| 1 | Accept | TCP | any | | 44664 | | API and WSS |
+| 1 | Accept | TCP | any | | 443 | | API and WSS (`API_PORT`) |
 | 2 | Accept | TCP | admin IPv4/32 | | 22 | | SSH |
 | 3 | Accept | TCP | second admin /32 (optional) | | 22 | | SSH, or the machine that pulls backups |
 | 4 | Accept | ICMP | any | | | | ping, and path-MTU "fragmentation needed" messages that TLS relies on |
@@ -391,7 +392,7 @@ for i in 1 2 3 4 5; do node -e "const c=require('crypto');const t=process.cpuUsa
 5. **Load test from another machine** (on the same machine the load generator takes 25-50 % of the CPU), against a separate test instance with its own `DATA_DIR`:
    - Accounts: `node bin/admin.js bench-accounts --count 20000 --out tokens.tsv --format tsv --i-know-this-is-a-test-server`. That flag is the only safeguard: the command creates verified accounts with live sessions in whatever database the configuration points to.
    - Server: `MAX_CONNECTIONS_PER_IP` above the clients per load address (one source address gives about 28,000 ports), `MAX_PENDING_HANDSHAKES_PER_IP=127`, and `/metrics` through `ssh -L 9464:127.0.0.1:9464`.
-   - Add `--url wss://HOST:44664/ws --tokens tokens.tsv --metrics http://127.0.0.1:9464/metrics` to each command (and `--ca` for a self-signed certificate), and set `--ping-interval-ms` to the server's `CLIENT_PING_INTERVAL_MS`. The tool counts a connection the TLS gate refuses as failed, so keep `--inflight` times the load processes (2 up to 30,000 clients) below `MAX_PENDING_HANDSHAKES` × `WORKERS`, for example `--inflight 100` on 2 workers:
+   - Add `--url wss://HOST/ws --tokens tokens.tsv --metrics http://127.0.0.1:9464/metrics` to each command (and `--ca` for a self-signed certificate), and set `--ping-interval-ms` to the server's `CLIENT_PING_INTERVAL_MS`. The tool counts a connection the TLS gate refuses as failed, so keep `--inflight` times the load processes (2 up to 30,000 clients) below `MAX_PENDING_HANDSHAKES` × `WORKERS`, for example `--inflight 100` on 2 workers:
      - idle connections: `node bench/loadgen.js --scenario connect --conns 10000 --inflight 100 --ping-interval-ms 10000 --hold-s 60`;
      - games with realistic churn: `--scenario games --games N --inflight 100 --move-interval-ms 5000 --ping-interval-ms 10000 --start-rate 25 --warmup-s 400 --duration-s 300`, raising N until the p99 passes 100-150 ms;
      - reconnection wave: `--scenario connect --conns N --inflight 5000 --connect-timeout-ms 10000`, ideally from several machines. Here refusals are expected: `scacelith_tls_refused_total{reason="handshakes"}` counts the attempts the game would repeat.

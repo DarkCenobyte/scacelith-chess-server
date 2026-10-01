@@ -71,7 +71,10 @@ export async function main() {
 
 if (cluster.isWorker) {
     main().catch((e) => {
-        logger.child('worker').error('shard failed to start', { err: e });
+        // A listen failure on a privileged port carries the fix in its message (net/listeners.js
+        // listenHint): it is logged as the message itself, so that the operator reads it first.
+        if (e && e.name === 'ListenError') logger.child('worker').error(e.message, { code: e.code, port: e.port });
+        else logger.child('worker').error('shard failed to start', { err: e });
         process.exit(1);
     });
 }

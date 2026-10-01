@@ -66,6 +66,14 @@
 //
 // Health: GET /api/v1/healthz and /api/v1/readyz (also /healthz, /readyz) are answered here,
 // before the API handler, so they work whatever the API module does.
+//
+// Privileged ports: API_PORT defaults to 443, and Linux lets only a process with the
+// CAP_NET_BIND_SERVICE capability (root has it) bind a port below 1024
+// (net.ipv4.ip_unprivileged_port_start, 1024 by default). A listen that fails with EACCES or
+// EPERM on such a port is rethrown as a ListenError whose message names the fixes (listenHint):
+// the systemd unit's AmbientCapabilities=CAP_NET_BIND_SERVICE, `setcap cap_net_bind_service=+ep`
+// on the node binary, or the sysctl; the worker logs it and exits non-zero (worker-main.js), like
+// any other listen failure (EADDRINUSE...), which keeps its own error.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -329,6 +337,35 @@ export class TlsGate {
     }
 }
 
+/** A listen failure with an actionable message (listenHint); `code`, `port` and `cause` kept. */
+export class ListenError extends Error {
+    constructor(message, { code, port, cause }) {
+        super(message, { cause });
+        this.name = 'ListenError';
+        this.code = code;
+        this.port = port;
+    }
+}
+
+/**
+ * The operator's way out of a listen failure, or null when the error has no specific advice: an
+ * EACCES / EPERM on a port below 1024 (the process lacks CAP_NET_BIND_SERVICE).
+ * @param {{ code?: string }} err the error of server.listen()
+ * @param {number} port the port that was asked for
+ * @param {string} [execPath] the node binary (for the setcap command)
+ * @returns {string|null}
+ */
+export function listenHint(err, port, execPath = process.execPath) {
+    const code = err && err.code;
+    if ((code !== 'EACCES' && code !== 'EPERM') || !(port > 0 && port < 1024)) return null;
+    return `Cannot listen on port ${port} (${code}): ports below 1024 need the CAP_NET_BIND_SERVICE capability. Either `
+        + 'run the server with systemd and give the unit AmbientCapabilities=CAP_NET_BIND_SERVICE and '
+        + 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE (README, "Running as a service"); or give the node binary the '
+        + `capability: sudo setcap cap_net_bind_service=+ep ${execPath} (again after each Node.js upgrade); or let `
+        + `unprivileged processes bind it: sysctl -w net.ipv4.ip_unprivileged_port_start=${port} (and in /etc/sysctl.d/ to keep it); `
+        + 'or choose a port of 1024 or above with API_PORT (and PUBLIC_API_PORT behind a port mapping).';
+}
+
 /**
  * The function giving the client address of a request, following the TLS mode.
  * @param {object} config
@@ -493,7 +530,10 @@ export class Listeners {
     async listen() {
         const host = this.config.bindAddress;
         await Promise.all(this.servers.map(({ server, port }) => new Promise((resolve, reject) => {
-            const onErr = (e) => reject(e);
+            const onErr = (e) => {
+                const hint = listenHint(e, port);
+                reject(hint ? new ListenError(hint, { code: e.code, port, cause: e }) : e);
+            };
             server.once('error', onErr);
             const opts = { port, host, backlog: this.backlog };
             if (this.reusePort) { opts.exclusive = true; opts.reusePort = true; }

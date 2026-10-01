@@ -48,7 +48,7 @@ node bin/admin.js bench-accounts --count 20000 --prefix bench --out tokens.tsv -
 # the test server needs MAX_CONNECTIONS_PER_IP (16 by default) above the number of clients per
 # load machine, and WS_MSG_RATE / WS_MSG_BURST raised for the burst scenario
 # on the load machine
-node bench/loadgen.js --scenario games --games 10000 --url wss://test.example.org:44664/ws \
+node bench/loadgen.js --scenario games --games 10000 --url wss://test.example.org/ws \
     --ca cert.pem --tokens tokens.tsv --metrics http://test.example.org:9464/metrics --metrics-token TOKEN
 ```
 
@@ -411,8 +411,9 @@ restart and settings figures that go with it.
   at the price of a slower detection of dead connections (`HEARTBEAT_TIMEOUT_MS`).
 - **Kernel settings** for 100,000+ sockets: `fs.nr_open` and `LimitNOFILE`, `net.core.somaxconn`
   (4096 here; it caps `LISTEN_BACKLOG`) and `net.ipv4.tcp_max_syn_backlog` (8192) for the
-  reconnection storms, `net.ipv4.ip_local_reserved_ports=44664` (the server port is inside the
-  ephemeral range, and a restart can fail with `EADDRINUSE` otherwise; README, kernel settings),
+  reconnection storms, `net.ipv4.ip_local_reserved_ports` for a server port inside the ephemeral
+  range (32768-60999: a custom port such as 44664, not the default 443; a restart can fail with
+  `EADDRINUSE` otherwise; README, kernel settings),
   `net.ipv4.tcp_mem` and the socket buffer defaults, and on the load machines
   `net.ipv4.ip_local_port_range` or several source addresses.
 - **`MAX_PENDING_HANDSHAKES`** (128 per worker): enough to keep a core busy with handshakes (at

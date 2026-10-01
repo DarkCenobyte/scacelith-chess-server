@@ -33,7 +33,7 @@ Sections:
 | `SERVER_PUBLIC_HOST` | text | `localhost` | Public DNS name of the server, used in e-mail links and the Google SSO redirect URI. |
 | `SERVER_MOTD` | text (at most 200 characters) | (empty) | Short message of the day shown in the online menu. |
 | `BIND_ADDRESS` | text | `0.0.0.0` | Address the API and WebSocket listeners bind to. |
-| `API_PORT` | port (0-65535) | `44664` | HTTPS API port (TCP). 44664 is the port of the official server; any free port works for a community server. |
+| `API_PORT` | port (0-65535) | `443` | HTTPS API port (TCP). 443, the HTTPS port: firewalls and proxies let it through; any free port works for a community server. A port below 1024 needs the CAP_NET_BIND_SERVICE capability (README, systemd unit) unless the server runs as root. |
 | `WS_PORT` | port (0-65535) | (empty) | WSS (game WebSocket) port. Empty (the default) = the same port as API_PORT: one TLS listener serves the API under /api/v1 and the WebSocket upgrade on /ws. Set another port to split them. |
 | `PUBLIC_API_PORT` | port (0-65535) | `0` | API port as seen by clients when a proxy/NAT maps ports (0 = API_PORT). |
 | `PUBLIC_WS_PORT` | port (0-65535) | `0` | WSS port as seen by clients (0 = WS_PORT). |
@@ -110,7 +110,7 @@ Sections:
 | `SSO_GOOGLE_ENABLED` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Offers "Sign in with Google" (OpenID Connect, authorization code + PKCE through the system browser). |
 | `GOOGLE_CLIENT_ID` | text | (empty) | OAuth client ID of a "Web application" client in Google Cloud Console. |
 | `GOOGLE_CLIENT_SECRET` | secretText | (empty) | OAuth client secret. Never commit it. |
-| `GOOGLE_REDIRECT_URI` | text | (empty) | Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST:PUBLIC_API_PORT/auth/sso/google/callback). |
+| `GOOGLE_REDIRECT_URI` | text | (empty) | Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST/auth/sso/google/callback, with :PUBLIC_API_PORT after the host when that port is not 443). |
 
 ## Abuse protection and limits
 

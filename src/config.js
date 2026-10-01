@@ -24,8 +24,8 @@ key('SERVER_PUBLIC_HOST', { section: 'server', type: 'string', default: 'localho
 key('SERVER_MOTD', { section: 'server', type: 'string', default: '', max: 200,
     desc: 'Short message of the day shown in the online menu.' });
 key('BIND_ADDRESS', { section: 'server', type: 'string', default: '0.0.0.0', desc: 'Address the API and WebSocket listeners bind to.' });
-key('API_PORT', { section: 'server', type: 'port', default: 44664,
-    desc: 'HTTPS API port (TCP). 44664 is the port of the official server; any free port works for a community server.' });
+key('API_PORT', { section: 'server', type: 'port', default: 443,
+    desc: 'HTTPS API port (TCP). 443, the HTTPS port: firewalls and proxies let it through; any free port works for a community server. A port below 1024 needs the CAP_NET_BIND_SERVICE capability (README, systemd unit) unless the server runs as root.' });
 key('WS_PORT', { section: 'server', type: 'port',
     desc: 'WSS (game WebSocket) port. Empty (the default) = the same port as API_PORT: one TLS listener serves the API under /api/v1 and the WebSocket upgrade on /ws. Set another port to split them.' });
 key('PUBLIC_API_PORT', { section: 'server', type: 'port', default: 0,
@@ -107,7 +107,7 @@ key('SSO_GOOGLE_ENABLED', { section: 'sso', type: 'bool', default: false, desc: 
 key('GOOGLE_CLIENT_ID', { section: 'sso', type: 'string', default: '', desc: 'OAuth client ID of a "Web application" client in Google Cloud Console.' });
 key('GOOGLE_CLIENT_SECRET', { section: 'sso', type: 'secretText', default: '', desc: 'OAuth client secret. Never commit it.' });
 key('GOOGLE_REDIRECT_URI', { section: 'sso', type: 'string', default: '',
-    desc: 'Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST:PUBLIC_API_PORT/auth/sso/google/callback).' });
+    desc: 'Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST/auth/sso/google/callback, with :PUBLIC_API_PORT after the host when that port is not 443).' });
 
 // ---- Abuse protection --------------------------------------------------------------------------------
 key('MAX_CONNECTIONS', { section: 'limits', type: 'int', default: 200000, min: 1,

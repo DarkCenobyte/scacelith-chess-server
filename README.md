@@ -7,7 +7,7 @@ stored, one Elo per official time control, anti-cheat and reports. It is a plain
 with no npm dependency. The game (the Windows binary) is only a client of it; anyone can run a
 community server, and players choose the server in the game's Options.
 
-- Official server: `caissa.scacelith.com`, TCP port `44664` (HTTPS API and WSS on the same port).
+- Official server: `caissa.scacelith.com`, TCP port `443` (HTTPS API and WSS on the same port).
 - Design and contracts: [docs/DESIGN.md](docs/DESIGN.md). Every setting: [docs/CONFIG.md](docs/CONFIG.md).
   Anti-cheat: [docs/ANTICHEAT.md](docs/ANTICHEAT.md).
 - Sizing and hosting on a small VPS (capacity, memory, disk, restarts, settings): [docs/SIZING.md](docs/SIZING.md).
@@ -35,8 +35,8 @@ node bin/scacelith-server.js start
 ```
 
 `start` applies the database migrations, replays the game journal (games that were running when
-the server stopped come back), starts one worker per shard and listens on `API_PORT` (44664 by
-default). `SIGTERM` or Ctrl-C stops it gracefully: running games are journaled and resume at the
+the server stopped come back), starts one worker per shard and listens on `API_PORT` (443 by
+default; a port below 1024 needs a capability, see [Ports and firewall](#ports-and-firewall)). `SIGTERM` or Ctrl-C stops it gracefully: running games are journaled and resume at the
 next start. `npm test` runs the unit and integration tests.
 
 Configuration comes from the environment, then from `.env` next to `package.json` (or the file
@@ -48,13 +48,31 @@ configuration file in Git. Secrets can also be read from files with the `_FILE` 
 
 | Port | Default | Open to | Purpose |
 |---|---|---|---|
-| `API_PORT` | 44664/tcp | the Internet | HTTPS API (`/api/v1/...`), e-mail and Google sign-in pages, and the game WebSocket (`wss://host:44664/ws`) |
+| `API_PORT` | 443/tcp | the Internet | HTTPS API (`/api/v1/...`), e-mail and Google sign-in pages, and the game WebSocket (`wss://host/ws`) |
 | `WS_PORT` | same as `API_PORT` | the Internet | set it only to put the WebSocket on its own port |
 | `METRICS_PORT` | 9464/tcp on 127.0.0.1 | your monitoring only | Prometheus metrics, `/healthz`, `/readyz` |
 
 When a NAT or a proxy publishes other port numbers than the ones the server listens on, set
 `PUBLIC_API_PORT` / `PUBLIC_WS_PORT` to what the players must use; the server announces them in
 `GET /api/v1/info`.
+
+443 is the HTTPS port: firewalls and proxies of schools, companies and hotels let it through,
+where they often block other ports. Any free port works for a community server (players then type
+it in the game's Options with the host). On Linux, only a process with the `CAP_NET_BIND_SERVICE`
+capability (root has it) may listen on a port below 1024. Do not run the server as root; give the
+capability instead, in one of these ways:
+
+- systemd (recommended): `AmbientCapabilities=CAP_NET_BIND_SERVICE` and
+  `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` in the unit, as in
+  [Running as a service](#running-as-a-service-systemd-example);
+- on the Node.js binary: `sudo setcap cap_net_bind_service=+ep "$(readlink -f "$(command -v node)")"`
+  (every program run with that binary gets it, and a Node.js upgrade drops it: run it again);
+- for the whole machine: `sysctl -w net.ipv4.ip_unprivileged_port_start=443` (and the same line in
+  `/etc/sysctl.d/`), which lets every user bind 443 and above.
+
+Without one of them the start fails, and each worker logs the error with these fixes (`Cannot listen
+on port 443 (EACCES) ...`) and exits with a non-zero status. A port of 1024 or above needs none of
+them.
 
 ## TLS certificates
 
@@ -85,9 +103,10 @@ TLS_MIN_VERSION=TLSv1.2
   certbot's symlink swaps) and on `SIGHUP` (`systemctl reload scacelith` with the unit below).
   A broken new certificate is refused and logged; the previous one stays in use.
 - Check it from another machine:
-  `openssl s_client -connect caissa.scacelith.com:44664 -servername caissa.scacelith.com </dev/null`
+  `openssl s_client -connect caissa.scacelith.com:443 -servername caissa.scacelith.com </dev/null`
   must show the full chain and `Verify return code: 0 (ok)`, and
-  `curl https://caissa.scacelith.com:44664/api/v1/info` must answer without `-k`.
+  `curl https://caissa.scacelith.com/api/v1/info` must answer without `-k` (add the port,
+  `https://host:8443/...`, for a server on another port).
 
 With Let's Encrypt and certbot, the files under `/etc/letsencrypt/live/` are readable by root
 only. Either run a deploy hook that copies them for the service account:
@@ -133,7 +152,7 @@ upgrades on `/ws` and keep idle connections for more than a minute:
 
 ```nginx
 location / {
-    proxy_pass http://10.0.0.5:44664;
+    proxy_pass http://10.0.0.5:8443;   # API_PORT of the server (a port above 1024 needs no capability)
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $connection_upgrade;   # map $http_upgrade $connection_upgrade { default upgrade; '' close; }
@@ -143,17 +162,21 @@ location / {
 }
 ```
 
-The server then does no TLS work, so the handshake limit `MAX_PENDING_HANDSHAKES` (see
-[Kernel settings](#kernel-settings-linux)) does not apply: limit the handshakes on the proxy.
+The proxy listens on 443 and the server behind it on any port: set `API_PORT` to that port
+(8443 above) and `PUBLIC_API_PORT=443` (and `PUBLIC_WS_PORT=443`), so that the server announces the
+port the players reach. The server then does no TLS work, so the handshake limit
+`MAX_PENDING_HANDSHAKES` (see [Kernel settings](#kernel-settings-linux)) does not apply: limit the
+handshakes on the proxy.
 
 `TLS_MODE=off` exists for local development only and is refused unless `ALLOW_INSECURE_DEV=1`.
 
 ### The official server
 
-`caissa.scacelith.com:44664` uses option 1 with a certificate provided by the server operator;
+`caissa.scacelith.com` (port 443) uses option 1 with a certificate provided by the server operator;
 the game has this address built in as its default server. Its `.env` sets at least
-`SERVER_PUBLIC_HOST=caissa.scacelith.com`, `API_PORT=44664`, `TLS_MODE=native`, `TLS_CERT_FILE`
-and `TLS_KEY_FILE`.
+`SERVER_PUBLIC_HOST=caissa.scacelith.com`, `TLS_MODE=native`, `TLS_CERT_FILE` and `TLS_KEY_FILE`
+(`API_PORT` keeps its default, 443). Its former port was 44664: the game moves a sign-in saved for
+`caissa.scacelith.com:44664` to the new address by itself.
 
 ## Running as a service (systemd example)
 
@@ -175,6 +198,9 @@ KillSignal=SIGTERM
 TimeoutStopSec=30
 Restart=on-failure
 LimitNOFILE=1048576
+# Port 443 (below 1024) without running as root: this capability only, nothing else.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/scacelith
@@ -185,7 +211,11 @@ WantedBy=multi-user.target
 ```
 
 With `DATA_DIR=/var/lib/scacelith` in the environment file. `LimitNOFILE` must exceed
-`MAX_CONNECTIONS`. This unit is an example: adapt the paths to your installation.
+`MAX_CONNECTIONS`. `AmbientCapabilities=CAP_NET_BIND_SERVICE` lets the `scacelith` account listen
+on 443; `CapabilityBoundingSet` keeps every other capability away from the process, and
+`NoNewPrivileges` still applies (the capability is given at the start, not gained later). Leave
+both lines out when `API_PORT` is 1024 or above. This unit is an example: adapt the paths to your
+installation.
 
 ### Anti-cheat engine
 
@@ -229,19 +259,22 @@ After a restart every client reconnects within a few seconds. New connections wa
 queue until the server accepts them; `LISTEN_BACKLOG` (2048 by default) sets its length, but the
 kernel caps it at `net.core.somaxconn` (4096 since Linux 5.4, 128 on older kernels), and
 connections still in their TCP handshake wait in a second queue bounded by
-`net.ipv4.tcp_max_syn_backlog`. Raise both, and reserve the server's port:
+`net.ipv4.tcp_max_syn_backlog`. Raise both:
 
 ```sh
 # /etc/sysctl.d/90-scacelith.conf, applied with: sysctl --system
 net.core.somaxconn = 4096
 net.ipv4.tcp_max_syn_backlog = 8192
-net.ipv4.ip_local_reserved_ports = 44664
+# Only for a server port inside 32768-60999 (here a custom API_PORT=44664):
+# net.ipv4.ip_local_reserved_ports = 44664
 ```
 
-The last line matters because 44664 lies inside Linux's default range of ephemeral ports
-(32768-60999). While the server is stopped, any outgoing connection of the machine (a DNS query, a
-download, the SMTP relay) may get 44664 as its local port, and the restart then fails with
-`EADDRINUSE`. Reserve `WS_PORT` as well when it differs from `API_PORT` (a comma-separated list).
+The default port 443 needs nothing more. A custom port inside Linux's default range of ephemeral
+ports (32768-60999, `net.ipv4.ip_local_port_range`) must also be reserved, as the commented line
+shows: while the server is stopped, any outgoing connection of the machine (a DNS query, a
+download, the SMTP relay) may get that port as its local port, and the restart then fails with
+`EADDRINUSE`. Reserve `WS_PORT` as well when it differs from `API_PORT` and lies in that range (a
+comma-separated list).
 
 The server protects itself during such a reconnection storm. With native TLS, a new connection first
 has 3 s to send the start of its TLS handshake (the ClientHello), and holds no handshake slot while
