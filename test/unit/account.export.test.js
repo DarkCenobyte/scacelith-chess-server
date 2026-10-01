@@ -94,7 +94,9 @@ test('re-authentication like deletion; 401 without a session', async (t) => {
     assert.deepEqual([r.status, r.json.error], [403, 'mfa_code_required']);
     r = await s.request('POST', EXPORT, { token, body: { password: PW, code: '000000' } });
     assert.deepEqual([r.status, r.json.error], [403, 'invalid_code']);
-    s.now.advance(3600000);       // the five exports of the hour (account_export) are used by now
+    // Four attempts of the five of the hour (account_export, a sliding hour counted by the
+    // primary) are used by now: two hours later they no longer count.
+    s.now.advance(2 * 3600000);
     r = await s.request('POST', EXPORT, { token, body: { password: PW, code: totp(secret, s.now()) } });
     assert.equal(r.status, 200);
     assert.equal(r.json.account.mfaEnabled, true);
@@ -116,7 +118,11 @@ test('rate: 5 exports per hour and player', async (t) => {
     assert.ok(Number(r.headers['retry-after']) > 0);
     assert.equal((await s.request('POST', EXPORT, { token: b.token, body: { password: PW } })).status, 200, 'per player');
     s.now.advance(13 * 60000);
-    assert.equal((await s.request('POST', EXPORT, { token: a.token, body: { password: PW } })).status, 200, 'one more after 12 minutes');
+    assert.equal((await s.request('POST', EXPORT, { token: a.token, body: { password: PW } })).status, 429,
+        'a sliding hour shared by the workers (the primary), not a bucket refilled every 12 minutes');
+    assert.ok(s.primary.calls.some((c) => c.type === 'ratelimit.take' && c.payload.key === `account_export:u${a.user.id}`), 'shared');
+    s.now.advance(60 * 60000);
+    assert.equal((await s.request('POST', EXPORT, { token: a.token, body: { password: PW } })).status, 200, 'again in the next hour');
 });
 
 test('a long history is exported whole, newest first, in pages', async (t) => {

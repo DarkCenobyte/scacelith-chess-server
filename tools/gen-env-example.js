@@ -29,6 +29,7 @@ const SECTION_TITLES = {
     games: 'Games',
     matchmaking: 'Matchmaking and ratings',
     anticheat: 'Anti-cheat and sanctions',
+    gif: 'Animated GIFs of games',
     observability: 'Observability',
 };
 

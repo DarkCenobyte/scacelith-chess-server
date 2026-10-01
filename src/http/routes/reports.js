@@ -22,7 +22,7 @@ export function register(router, deps = {}) {
     router.post('/api/v1/reports', (ctx) => handleReport(ctx, deps), {
         auth: 'required',
         ownBodyValidation: true,
-        // Coarse per-client cap on requests; the per-day report quota is enforced by the handler.
-        rate: { key: 'reports', limit: 30, windowMs: 3600000 },
+        // Coarse per-player cap on requests; the per-day report quota is enforced by the handler.
+        rate: { key: 'reports', limit: 30, windowMs: 3600000, by: 'user' },
     });
 }

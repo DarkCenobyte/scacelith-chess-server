@@ -2,10 +2,11 @@
 
 Every server, the official `caissa.scacelith.com` and any community server, answers this HTTPS
 API. The game uses it for everything outside a game itself: sign-up and sign-in (two-step
-verification and Google included), the account page, game history and PGN downloads, signed-in
-devices, the data download and the deletion of the account, and reports. Live play (matchmaking,
-challenges, moves, clocks) goes through the WebSocket of the same server, opened with a session
-token of this API: see [PROTOCOL.md](PROTOCOL.md). Module contracts are in
+verification and Google included), the account page, game history, PGN downloads and animated
+GIFs of games, signed-in devices, the data download and the deletion of the account, and
+reports. Live play (matchmaking, challenges, moves, clocks) goes through the WebSocket of the
+same server, opened with a session token of this API: see [PROTOCOL.md](PROTOCOL.md). Module
+contracts are in
 [DESIGN.md](DESIGN.md) section 5.9, the security model in section 8, every setting named here in
 [CONFIG.md](CONFIG.md). The game's side of these calls is described in
 [docs/ONLINE_CLIENT.md](../../docs/ONLINE_CLIENT.md).
@@ -28,7 +29,7 @@ configuration; a community server may change them.
 8. [Data export](#8-data-export)
 9. [Account deletion](#9-account-deletion)
 10. [Game history](#10-game-history)
-11. [Games and PGN](#11-games-and-pgn)
+11. [Games, PGN and GIF](#11-games-pgn-and-gif)
 12. [Players and leaderboard](#12-players-and-leaderboard)
 13. [Reports](#13-reports)
 14. [HTML pages outside /api](#14-html-pages-outside-api)
@@ -92,14 +93,17 @@ password inline only to stay short.
 
 ### 1.3 Answers and errors
 
-- Answers are JSON in UTF-8, except the PGN download (`application/x-chess-pgn`) and the HTML
-  pages. Times are milliseconds since 1970-01-01 UTC. Ids are integers. Game ids have up to 16
-  digits but stay below 2^53, so a JSON number (a double) holds them exactly.
+- Answers are JSON in UTF-8, except the PGN download (`application/x-chess-pgn`), the animated
+  GIFs (`image/gif`, section 11) and the HTML pages. Times are milliseconds since 1970-01-01
+  UTC. Ids are integers. Game ids have up to 16 digits but stay below 2^53, so a JSON number (a
+  double) holds them exactly.
 - Every answer carries `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
   `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`,
   `Cross-Origin-Resource-Policy: same-origin` and a `Content-Security-Policy`
   (`default-src 'none'; frame-ancestors 'none'` for the API). With `TLS_MODE=native` it also
   carries `Strict-Transport-Security: max-age=31536000`.
+- An answer above 64 KiB (a GIF, the data export, a long PGN) must be read within 60 s: the
+  server closes the connection of a client that has not taken it all by then.
 - **Errors** have one shape:
 
   ```json
@@ -129,7 +133,7 @@ Errors that any endpoint can give:
 | 415 | `unsupported_media_type` | The body is not `application/json`, or its charset is not UTF-8. |
 | 429 | `rate_limited` | A rate limit (section 1.5): `retryAfter` plus a `Retry-After` header. |
 | 500 | `internal_error` | An unexpected failure. The server logs it. |
-| 503 | `timeout` | The server did not answer within 30 s (60 s for the export). |
+| 503 | `timeout` | The server did not answer within 30 s (60 s for the export, 45 s for the GIFs with the default settings). |
 
 The read endpoints (sections 10 to 12) and the export answer 503 `busy` with `retryAfter: 1`
 when the database stayed locked.
@@ -194,41 +198,74 @@ Authorization: Bearer sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8
 Limits apply to one of two scopes:
 
 - **Client:** an IPv4 address, or an IPv6 /64. In proxy mode, the address comes from
-  `X-Forwarded-For` sent by a `TRUSTED_PROXIES` address.
-- **Player:** the signed-in account, whatever its address.
+  `X-Forwarded-For` sent by a `TRUSTED_PROXIES` address. Some limits also count each IPv6 /48 as
+  a whole, on top of each of its /64 networks: a /48 holds 65,536 of them, and one customer often
+  gets a whole /48.
+- **Player:** the signed-in account, whatever its address. A limit counted per player on an
+  endpoint where the session is optional counts per client for a request without a token.
 
 Each worker process checks a limit as a token bucket. The bucket holds `limit` requests and
 refills continuously at `limit / window`, and `retryAfter` is the time until the next token.
 Limits marked *shared* are also counted for the whole server by the primary process, over a
-sliding window of the same length. If the primary does not answer, the worker's own check still
-applies.
+sliding window of the same length, so that they hold whatever worker a request reaches. If the
+primary does not answer, the worker's own check still applies. When one of an endpoint's limits
+refuses a request, the tokens that its other limits took for that request are given back.
+
+**Account budget.** Every request that carries a valid session token (on the endpoints marked
+**session** or **optional** in section 2) also counts against its account: `USER_RATE_PER_MIN`
+(120) requests per minute, all endpoints together, whatever the address. Each worker process
+allows its share, max(1, ceil(2 x `USER_RATE_PER_MIN` / `WORKERS`)) per minute (all of it with 1
+or 2 workers, half of it with 4), with a burst of half a minute of that share. It is counted in
+each worker only (no round trip to the primary per request), so a client spread over every
+worker gets at most twice the rate. Beyond it: 429 `rate_limited`. The game's busiest use, paging
+through the history, is about one request per second.
 
 | Limit | Default | Counted per | Endpoints |
 |---|---|---|---|
 | global | `HTTP_RATE_PER_IP` (120) / min | client | Every request except the health endpoints. |
-| `auth` | `AUTH_RATE_PER_IP` (20) / 10 min, shared | client, and each IPv6 /48 as a whole (`AUTH_RATE_PER_PREFIX`, default 5 x `AUTH_RATE_PER_IP`) | `POST /auth/register`, `/auth/login`, `/auth/login/mfa`, `/auth/verify-email/resend`, `/auth/password/forgot`, `/auth/password/reset`; `POST /verify-email`, `/reset-password`, `/confirm-email-change`; `POST /auth/sso/complete` (same bucket, without the /48 count) |
+| `auth` | `AUTH_RATE_PER_IP` (20) / 10 min, shared | client, and each IPv6 /48 (`AUTH_RATE_PER_PREFIX`, default 5 x `AUTH_RATE_PER_IP`) | `POST /auth/register`, `/auth/login`, `/auth/login/mfa`, `/auth/verify-email/resend`, `/auth/password/forgot`, `/auth/password/reset`, `/auth/sso/complete`; `POST /verify-email`, `/reset-password`, `/confirm-email-change` |
+| `auth_register` | `AUTH_REGISTER_PER_HOUR` (10) / hour, shared | client, and 3 times that per IPv6 /48 | `POST /auth/register` |
+| `auth_mail` | `AUTH_MAIL_PER_HOUR` (10) / hour, shared | client, and 3 times that per IPv6 /48 | `POST /auth/verify-email/resend` |
+| `auth_forgot` | `AUTH_FORGOT_PER_HOUR` (3) / hour, shared | client, and 3 times that per IPv6 /48 | `POST /auth/password/forgot` |
+| `auth_forgot_day` | `AUTH_FORGOT_PER_DAY` (10) / 24 hours, shared | client, and 3 times that per IPv6 /48 | `POST /auth/password/forgot` |
+| `auth_reset` | `AUTH_RESET_PER_HOUR` (10) / hour, shared | client, and 3 times that per IPv6 /48 | `POST /auth/password/reset`, `POST /reset-password` |
 | `reauth` | the same numbers as `auth`, a bucket of its own, shared | client and IPv6 /48 | `POST /account/password`, `/account/mfa/totp/setup`, `/account/mfa/totp/enable`, `/account/mfa/totp/disable`, `/account/mfa/recovery-codes`, `/account/email`, `/account/export`, `/account/delete` |
+| `reauth_user` | `AUTH_REAUTH_PER_USER` (10) / 10 min, shared | player | The same endpoints as `reauth`: a stolen session used from many addresses cannot guess the password faster. |
 | `account` | 60 / min | player | `GET /account/me`, `PUT /account/preferences` |
 | `account_games` | 60 / min | player | `GET /account/games` |
-| `account_export` | 5 / hour | player | `POST /account/export` (checked before `reauth`; every attempt counts) |
+| `account_export` | 5 / hour, shared | player | `POST /account/export` (checked before `reauth`; every attempt counts) |
 | `sessions` | 60 / min | player | `POST /auth/logout`, `/auth/logout-all`, `GET /auth/sessions`, `DELETE /auth/sessions/:id` |
-| `public_read` | 60 / min | client | `GET /players/:username/games`, `/games/:id`, `/games/:id/pgn` (one bucket for the three) |
-| `reports` | 30 / hour | client | `POST /reports` |
-| `sso_start` | 30 / 10 min, shared | client | `POST /auth/sso/google/start` |
+| `public_read` | 60 / min | player (client without a token) | `GET /players/:username`, `/players/:username/games`, `/games/:id`, `/games/:id/pgn` (one bucket for the four) |
+| `gif` | 30 / min | player | `GET /games/:id/gif`, `POST /gif` (one bucket for the two) |
+| `gif_user_min`, `gif_user_hour` | `GIF_USER_RENDERS_PER_MIN` (4) / min and `GIF_USER_RENDERS_PER_HOUR` (30) / hour, shared | player | The same two, only when the GIF has to be made (not from the cache, section 11) |
+| `gif_ip_min`, `gif_ip_hour` | `GIF_IP_RENDERS_PER_MIN` (12) / min and `GIF_IP_RENDERS_PER_HOUR` (120) / hour, shared | client (all its accounts together), and 3 times that per IPv6 /48 | The same, as above |
+| `reports` | 30 / hour | player | `POST /reports` |
+| `sso_start` | 30 / 10 min, shared | client, and 90 per IPv6 /48 | `POST /auth/sso/google/start` |
 | `sso_poll` | 120 / min | client | `POST /auth/sso/google/poll` |
 | `page` | 60 / min | client | `GET /verify-email`, `/reset-password`, `/confirm-email-change` |
 | `sso_page` | 30 / min | client | `GET /auth/sso/google/callback` |
 
-`GET /info`, `GET /players/:username` and `GET /leaderboard` have only the global limit.
+`GET /info` and `GET /leaderboard` have only the global limit.
+
+An endpoint with several limits checks them in the order of its row in section 2: on
+`POST /auth/register`, `auth` then `auth_register`. The limits of the auth family (`auth`,
+`auth_*`, `reauth`) are kept low because each request hashes a password or sends an e-mail.
+**Password recovery** is the strictest: a client (an IPv4 address or an IPv6 /64) may ask for 3
+reset e-mails per hour and 10 per 24 hours (3 times that per IPv6 /48), on top of `auth` and of
+one e-mail per address every 5 minutes, whatever the address asked for; it may send 10 new
+passwords per hour with reset links. A refusal is a 429, which says nothing about whether the
+address has an account.
 
 The server handles a request in this order:
 
 1. global limit;
 2. endpoint match;
 3. authentication;
-4. the endpoint's limits;
-5. body;
-6. the endpoint itself.
+4. the account budget, when the request carries a session;
+5. the endpoint's limits;
+6. body;
+7. the endpoint itself. The GIF endpoints take their render limits here, only when they have a
+   GIF to make.
 
 So a request refused for its token spends none of the endpoint's tokens, and a request with an
 invalid body does spend them. A limit answers 429 `rate_limited` with `retryAfter`.
@@ -241,6 +278,10 @@ Other throttles, answered by the endpoints themselves:
   forgets after an hour without failures.
 - **Failed second factors at the sign-in.** The same rule applies from the 5th wrong code of the
   account. One sign-in step accepts at most 5 wrong codes.
+- **Second-factor codes of one account.** At most `AUTH_MFA_PER_ACCOUNT` (10) codes
+  (authenticator or recovery codes, right or wrong) per 15 minutes for one account, for the whole
+  server and from any address, at sign-in and in re-authentications. Beyond it the answer is 429
+  `too_many_attempts` before the code is checked, so a recovery code is not used up.
 - **Failed re-authentications of an account** (wrong password or code): the same rule (429
   `too_many_attempts`), shared by every endpoint of section 1.7.
 - **E-mails.** One confirmation or reset mail per address every 5 minutes; the answer stays the
@@ -296,7 +337,7 @@ Errors of the re-authentication:
 | 403 | `mfa_code_required` | Two-step verification is on and neither `code` nor `recoveryCode` was sent. |
 | 403 | `invalid_code` | Wrong or already used code. |
 | 400 | `password_not_set` | A Google-only account has no password yet ("Forgot password" sets one). |
-| 429 | `too_many_attempts` | Too many failures on this account (section 1.5). |
+| 429 | `too_many_attempts` | Too many failures, or too many codes tried, on this account (section 1.5). |
 | 503 / 429 | `server_busy` / `rate_limited` | The password hash queue is busy (section 1.3). |
 
 Failed passwords and codes count in the account's failure counter and are recorded as security
@@ -305,23 +346,26 @@ events.
 ## 2. Endpoint summary
 
 Paths are under `/api/v1`, except the pages and the health endpoints at the end of the table
-(sections 14 and 15). In the Auth column:
+(sections 14 and 15). Every endpoint marked **session** or **optional** also counts in the account
+budget when it gets a token, and every `reauth` endpoint in `reauth_user` (section 1.5). In the
+Auth column:
 
 - **session**: a bearer token is required;
-- **optional**: the public answer without a token, and more with one;
+- **optional**: the public answer without a token, and more with one (the player endpoints of
+  section 12 answer the same; a token makes their limit count per player);
 - **none (page)**: an HTML page for a browser.
 
 | Method and path | Auth | Limit | Purpose |
 |---|---|---|---|
 | `GET /info` | none | global | Server name, versions, ports, sign-up rules |
-| `POST /auth/register` | none | `auth` | Create an account |
+| `POST /auth/register` | none | `auth`, `auth_register` | Create an account |
 | `POST /auth/login` | none | `auth` | Sign in with a password |
 | `POST /auth/login/mfa` | none | `auth` | Second step of a sign-in with two-step verification |
 | `POST /auth/logout` | session | `sessions` | Sign out this session |
 | `POST /auth/logout-all` | session | `sessions` | Sign out every session |
-| `POST /auth/verify-email/resend` | none | `auth` | Send the confirmation link again |
-| `POST /auth/password/forgot` | none | `auth` | Send a password reset link |
-| `POST /auth/password/reset` | none | `auth` | Set a new password with a reset link's token |
+| `POST /auth/verify-email/resend` | none | `auth`, `auth_mail` | Send the confirmation link again |
+| `POST /auth/password/forgot` | none | `auth`, `auth_forgot`, `auth_forgot_day` | Send a password reset link |
+| `POST /auth/password/reset` | none | `auth`, `auth_reset` | Set a new password with a reset link's token |
 | `POST /auth/sso/google/start` | none | `sso_start` | Start a Google sign-in |
 | `POST /auth/sso/google/poll` | none | `sso_poll` | Collect the result of a Google sign-in |
 | `POST /auth/sso/complete` | none | `auth` | Create the account of a first Google sign-in |
@@ -329,23 +373,25 @@ Paths are under `/api/v1`, except the pages and the health endpoints at the end 
 | `DELETE /auth/sessions/:id` | session | `sessions` | Sign out one device |
 | `GET /account/me` | session | `account` | The account, ratings, active sanctions |
 | `PUT /account/preferences` | session | `account` | Accept or refuse direct challenges |
-| `POST /account/password` | session | `reauth` | Change the password |
-| `POST /account/mfa/totp/setup` | session | `reauth` | Start enabling two-step verification |
-| `POST /account/mfa/totp/enable` | session | `reauth` | Finish enabling it, get recovery codes |
-| `POST /account/mfa/totp/disable` | session | `reauth` | Turn two-step verification off |
-| `POST /account/mfa/recovery-codes` | session | `reauth` | Replace the recovery codes |
-| `POST /account/email` | session | `reauth` | Change the e-mail address |
-| `POST /account/export` | session | `account_export`, `reauth` | Download the account's data (JSON) |
-| `POST /account/delete` | session | `reauth` | Delete the account |
+| `POST /account/password` | session | `reauth`, `reauth_user` | Change the password |
+| `POST /account/mfa/totp/setup` | session | `reauth`, `reauth_user` | Start enabling two-step verification |
+| `POST /account/mfa/totp/enable` | session | `reauth`, `reauth_user` | Finish enabling it, get recovery codes |
+| `POST /account/mfa/totp/disable` | session | `reauth`, `reauth_user` | Turn two-step verification off |
+| `POST /account/mfa/recovery-codes` | session | `reauth`, `reauth_user` | Replace the recovery codes |
+| `POST /account/email` | session | `reauth`, `reauth_user` | Change the e-mail address |
+| `POST /account/export` | session | `account_export`, `reauth`, `reauth_user` | Download the account's data (JSON) |
+| `POST /account/delete` | session | `reauth`, `reauth_user` | Delete the account |
 | `GET /account/games` | session | `account_games` | The player's game history, filtered and paged |
 | `GET /games/:id` | optional | `public_read` | A game record with its moves and clocks |
 | `GET /games/:id/pgn` | optional | `public_read` | The same game as a PGN file |
-| `GET /players/:username` | none | global | A player's public profile |
-| `GET /players/:username/games` | none | `public_read` | A player's recent games |
+| `GET /games/:id/gif` | session | `gif`, render limits | The game as an animated GIF |
+| `POST /gif` | session | `gif`, render limits | Any game sent as PGN, as an animated GIF |
+| `GET /players/:username` | optional | `public_read` | A player's public profile |
+| `GET /players/:username/games` | optional | `public_read` | A player's recent games |
 | `GET /leaderboard` | none | global | Top players of a category |
 | `POST /reports` | session | `reports` | Report the opponent of a recent game |
 | `GET`, `POST /verify-email` | none (page) | `page`, `auth` | E-mail confirmation link |
-| `GET`, `POST /reset-password` | none (page) | `page`, `auth` | Password reset link |
+| `GET`, `POST /reset-password` | none (page) | `page`, `auth`, `auth_reset` | Password reset link |
 | `GET`, `POST /confirm-email-change` | none (page) | `page`, `auth` | E-mail change link |
 | `GET /auth/sso/google/callback` | none (page) | `sso_page` | Where Google sends the browser back |
 | `GET /healthz`, `GET /readyz` | none | none | Liveness and readiness (also under `/api/v1`) |
@@ -401,7 +447,8 @@ curl -sS "$API/info"
 
 ### POST /auth/register
 
-Creates an account. **Auth** none. **Limit** `auth`. **Proof of work** when `POW_REGISTER_BITS` > 0.
+Creates an account. **Auth** none. **Limits** `auth` and `auth_register` (10 registrations per hour
+per client). **Proof of work** when `POW_REGISTER_BITS` > 0.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -487,7 +534,8 @@ TOKEN=$(curl -sS "$API/auth/login" -H 'Content-Type: application/json' \
 
 ### POST /auth/login/mfa
 
-The second step of a sign-in. **Auth** none. **Limit** `auth`.
+The second step of a sign-in. **Auth** none. **Limit** `auth`, and at most
+`AUTH_MFA_PER_ACCOUNT` (10) codes per 15 minutes for the account, from any address (section 1.5).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -500,8 +548,10 @@ gone. Errors:
 
 - 401 `invalid_mfa_token`: the step expired, was used, or ended after 5 wrong codes, or the
   password was reset or changed since the first step; sign in again;
-- 429 `too_many_attempts`;
+- 429 `too_many_attempts`: the account's failure delay (section 1.5);
 - 400 `invalid_request`: neither `code` nor `recoveryCode` was sent;
+- 429 `too_many_attempts`: the account's `AUTH_MFA_PER_ACCOUNT` codes of the last 15 minutes are
+  used up; the code was not checked, so a recovery code is not spent;
 - 401 `invalid_code`;
 - 403 `banned`, 403 `email_unverified`.
 
@@ -522,22 +572,40 @@ curl -sS -X POST "$API/auth/logout" -H "Authorization: Bearer $TOKEN"
 
 ### POST /auth/verify-email/resend
 
-Sends the e-mail confirmation link again. **Auth** none. **Limit** `auth`. Body:
-`{ "email": string 1-254 }`. Answer: **202 `{ "status": "accepted" }`**, always. A link is sent
-only to an active, unconfirmed account with that address, at most once every 5 minutes per
-address.
+Sends the e-mail confirmation link again. **Auth** none. **Limits** `auth` and `auth_mail` (10
+per hour per client). Body: `{ "email": string 1-254 }`. Answer:
+**202 `{ "status": "accepted" }`**, always. A link is sent only to an active, unconfirmed account
+with that address, at most once every 5 minutes per address.
 
 ### POST /auth/password/forgot
 
 Sends a password reset link, valid for one hour, which opens the page `/reset-password` (section
-14). **Auth** none. **Limit** `auth`. Body: `{ "email": string 1-254 }`. Answer:
-**202 `{ "status": "accepted" }`**, always. A link goes only to an active account, at most once
-every 5 minutes per address. A Google-only account sets its first password this way.
+14). **Auth** none. **Limits** `auth`, `auth_forgot` and `auth_forgot_day`. Body:
+`{ "email": string 1-254 }`. Answer: **202 `{ "status": "accepted" }`**, always. A link goes only
+to an active account, at most once every 5 minutes per address. A Google-only account sets its
+first password this way.
+
+Password recovery has the strictest limits of the API, all counted for the whole server:
+
+- 3 requests per hour (`AUTH_FORGOT_PER_HOUR`) and 10 per 24 hours (`AUTH_FORGOT_PER_DAY`) per
+  client, an IPv4 address or an IPv6 /64;
+- 3 times those numbers per IPv6 /48;
+- on top of the `auth` limit (20 per 10 minutes) and of the one mail per address every 5 minutes.
+
+Beyond them the answer is 429 `rate_limited` with `retryAfter`, whatever the address: neither the
+202 nor the 429 tells whether an account uses it. Setting the new password has its own limit
+(`auth_reset`, below).
+
+```sh
+curl -sS "$API/auth/password/forgot" -H 'Content-Type: application/json' -d '{"email":"alice@example.org"}'
+# -> 202 {"status":"accepted"}; a 4th request within the hour from the same address -> 429 rate_limited
+```
 
 ### POST /auth/password/reset
 
 Sets a new password with the token of a reset link (the page `/reset-password` does the same).
-**Auth** none. **Limit** `auth`.
+**Auth** none. **Limits** `auth` and `auth_reset` (10 per hour per client, 30 per IPv6 /48, shared
+with the page: each attempt hashes a password).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -622,7 +690,8 @@ Errors:
 
 #### POST /auth/sso/complete
 
-Creates the account of a first Google sign-in. **Auth** none. **Limit** `auth`.
+Creates the account of a first Google sign-in. **Auth** none. **Limit** `auth` (with its IPv6 /48
+count).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -733,7 +802,7 @@ curl -sS -X PUT "$API/account/preferences" -H "Authorization: Bearer $TOKEN" \
 
 ### POST /account/password
 
-Changes the password. **Auth** session. **Limit** `reauth`. Body:
+Changes the password. **Auth** session. **Limits** `reauth`, `reauth_user`. Body:
 `{ "currentPassword": string 1-1024, "newPassword": string 1-1024 }`. The current password is
 needed, but no second factor, even with two-step verification on.
 
@@ -757,8 +826,9 @@ Authenticator apps, RFC 6238: SHA-1, 6 digits, 30-second steps, one step of tole
 
 #### POST /account/mfa/totp/setup
 
-**Auth** session. **Limit** `reauth`. Body: `{ "password": string }`. This stores a new pending
-secret, which replaces any earlier pending one, and returns it for the authenticator app:
+**Auth** session. **Limits** `reauth`, `reauth_user`. Body: `{ "password": string }`. This
+stores a new pending secret, which replaces any earlier pending one, and returns it for the
+authenticator app:
 
 ```json
 {
@@ -773,10 +843,10 @@ password), and the re-authentication errors.
 
 #### POST /account/mfa/totp/enable
 
-**Auth** session. **Limit** `reauth`. Body: `{ "code": "123456" }`, a code from the pending secret
-(exactly 6 digits). No password is asked here; the password was given at setup. Answer: 200
-`{ "status": "mfa_enabled", "recoveryCodes": [10 codes like "j7v5-3ezx-zn"] }`. The recovery codes
-are shown this once. Errors:
+**Auth** session. **Limits** `reauth`, `reauth_user`. Body: `{ "code": "123456" }`, a code from
+the pending secret (exactly 6 digits). No password is asked here; the password was given at
+setup. Answer: 200 `{ "status": "mfa_enabled", "recoveryCodes": [10 codes like "j7v5-3ezx-zn"] }`.
+The recovery codes are shown this once. Errors:
 
 - 409 `mfa_already_enabled`;
 - 409 `mfa_setup_required`: no pending secret;
@@ -785,9 +855,10 @@ are shown this once. Errors:
 
 #### POST /account/mfa/totp/disable
 
-**Auth** session. **Limit** `reauth`. Body: `{ "password", "code"?, "recoveryCode"? }`. One of
-`code` or `recoveryCode` is required. Answer: 200 `{ "status": "mfa_disabled" }`. The secret and
-the recovery codes are deleted, and the owner gets a mail. Errors:
+**Auth** session. **Limits** `reauth`, `reauth_user`. Body:
+`{ "password", "code"?, "recoveryCode"? }`. One of `code` or `recoveryCode` is required. Answer:
+200 `{ "status": "mfa_disabled" }`. The secret and the recovery codes are deleted, and the owner
+gets a mail. Errors:
 
 - 409 `mfa_not_enabled`;
 - 403 `mfa_code_required`;
@@ -795,16 +866,16 @@ the recovery codes are deleted, and the owner gets a mail. Errors:
 
 #### POST /account/mfa/recovery-codes
 
-Replaces the recovery codes; the old ones stop working. **Auth** session. **Limit** `reauth`.
-Body: `{ "password", "code" }`, where `code` is an authenticator code (a recovery code is refused
-with 403 `invalid_code`). Answer: 200 `{ "recoveryCodes": [10 codes] }`. Errors: 409
-`mfa_not_enabled`, and the re-authentication errors.
+Replaces the recovery codes; the old ones stop working. **Auth** session. **Limits** `reauth`,
+`reauth_user`. Body: `{ "password", "code" }`, where `code` is an authenticator code (a recovery
+code is refused with 403 `invalid_code`). Answer: 200 `{ "recoveryCodes": [10 codes] }`. Errors:
+409 `mfa_not_enabled`, and the re-authentication errors.
 
 ## 7. E-mail address change
 
 ### POST /account/email
 
-**Auth** session. **Limit** `reauth`.
+**Auth** session. **Limits** `reauth`, `reauth_user`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -856,9 +927,10 @@ curl -sS "$API/account/email" -H "Authorization: Bearer $TOKEN" -H 'Content-Type
 ### POST /account/export
 
 Everything the server keeps about the account, as one JSON file to save. **Auth** session.
-**Limits** `account_export` (5 per hour per player; every attempt counts, failed ones included;
-checked first) and `reauth`. Body: `{ "password", "code"?, "recoveryCode"? }`, the
-re-authentication of section 1.7. Time limit 60 s.
+**Limits** `account_export` (5 per hour per player, for the whole server; every attempt counts,
+failed ones included; checked first), `reauth` and `reauth_user`. Body:
+`{ "password", "code"?, "recoveryCode"? }`, the re-authentication of section 1.7. Time limit
+60 s.
 
 Answer: 200, `Content-Type: application/json; charset=utf-8`, and
 `Content-Disposition: attachment; filename="scacelith-account-<username>.json"`. Characters other
@@ -976,9 +1048,9 @@ Errors:
 
 ### POST /account/delete
 
-Deletes the account; this cannot be undone. **Auth** session. **Limit** `reauth`. Body:
-`{ "password", "code"?, "recoveryCode"? }`. With two-step verification, a code or a recovery code
-is required. Answer: 200 `{ "status": "deleted" }`.
+Deletes the account; this cannot be undone. **Auth** session. **Limits** `reauth`,
+`reauth_user`. Body: `{ "password", "code"?, "recoveryCode"? }`. With two-step verification, a
+code or a recovery code is required. Answer: 200 `{ "status": "deleted" }`.
 
 - Every session is revoked at once. The token gets 401 `invalid_token` from then on.
 - The user name becomes `deleted#<id>`, in the account and in every game record.
@@ -1054,7 +1126,7 @@ Paging:
 
 Errors: 400 `invalid_cursor`, `invalid_limit` or `invalid_filter`, each with `field`; 503 `busy`.
 
-## 11. Games and PGN
+## 11. Games, PGN and GIF
 
 ### GET /games/:id
 
@@ -1175,6 +1247,132 @@ Errors:
   it);
 - 503 `busy`.
 
+### GET /games/:id/gif
+
+The game as an animated GIF, to keep or to share: the board seen from above, one frame per
+position from the start to the final position, the players' names and ratings above the board,
+the last move below it, and on the last frame the result and how the game ended. **Auth**
+session: the quotas count per account. **Limits** `gif` on every request, and the render limits
+when the GIF has to be made ([below](#cost-cache-and-quotas-of-the-gifs)).
+
+| Query parameter | Values | Default |
+|---|---|---|
+| `size` | `small` (32 px squares: 284 x 350 pixels), `medium` (48 px: 424 x 515), `large` (72 px: 628 x 762) | `medium` |
+| `orientation` | `white` or `black`: the side at the bottom of the board | `white` |
+| `delay` | 100 to 3000: milliseconds per move | `500` |
+| `coords` | `1` or `0`: the file letters and rank numbers around the board (without them: 268 x 342, 400 x 503, 600 x 748) | `1` |
+
+- The start position stays at least 1 s (`delay` when it is longer), the final position 3 s, and
+  the GIF loops. After the first frame, only the part of the picture that changes is stored.
+- The names and ratings are those of the game record (section 11, `GET /games/:id`): the ratings
+  at the start, a deleted account as `deleted#<id>`. The result and the ending (`Resignation`,
+  `Loss on time`...) are those of the record too.
+- Answer: 200, `Content-Type: image/gif`, `Content-Disposition: attachment;
+  filename="scacelith-<id>.gif"`, `Content-Length`.
+- Size of the file: about 135, 205 and 325 KiB for a 40-move game (small, medium, large), 0.5,
+  0.8 and 1.2 MiB for 150 moves.
+
+```sh
+# Save it under a name of your choice ...
+curl -sS -o alice-bob.gif "$API/games/4100000000001/gif?size=large&orientation=black&delay=800" \
+  -H "Authorization: Bearer $TOKEN"
+# ... or under the server's name (scacelith-4100000000001.gif), with the defaults.
+curl -sS -OJ "$API/games/4100000000001/gif" -H "Authorization: Bearer $TOKEN"
+```
+
+Errors:
+
+- 400 `invalid_option` with `field` (`size`, `orientation`, `delay` or `coords`): a value outside
+  the table above;
+- 400 `invalid_game_id`; 404 `not_found`;
+- 422 `game_too_long`: the game has more than `GIF_MAX_PLIES` (600) half-moves;
+- 429 `rate_limited` with `retryAfter`: the `gif` limit or a render limit;
+- 503 `server_busy` with `retryAfter` (3 to 10 s) and `Retry-After`: the worker's rendering queue
+  is full, or the GIF waited `GIF_QUEUE_TIMEOUT_MS` (10 s) for a free thread. The render limits
+  that the request took are given back;
+- 500 `render_failed`: the GIF could not be made (the server logs why);
+- 503 `busy`: the database stayed locked;
+- 404 `gif_disabled`: the server turned GIFs off (`GIF_ENABLED=false`).
+
+### POST /gif
+
+The same picture for any game sent as PGN text: a game saved by the game, an export of another
+site, a game typed by hand. **Auth** session. **Limits** as for `GET /games/:id/gif`. Body:
+
+| Field | Type | Notes |
+|---|---|---|
+| `pgn` | string, at most 65,536 bytes of UTF-8 | Only the first game of the text is used. |
+| `size` | `small`, `medium` or `large`, optional | Default `medium`. |
+| `orientation` | `white` or `black`, optional | Default `white`. |
+| `delayMs` | integer 100-3000, optional | A JSON number. Default 500. |
+| `coords` | boolean, optional | `true` or `false`. Default `true`. |
+
+- The PGN reader takes what the game's own reader takes: every PGN that this server writes and
+  the usual exports of other sites (comments, variations, NAGs and clock annotations are skipped;
+  move numbers and SAN read leniently; a `FEN` tag gives the start position unless `SetUp` is
+  `"0"`).
+- The names and ratings come from the `White`, `Black`, `WhiteElo` and `BlackElo` tags. Accented
+  letters lose their accents, other characters outside printable ASCII become `?`, and long names
+  are cut. The result comes from the `Result` tag, else from the end of the move text. The
+  `Termination` tag is shown unless it is `normal`: the final position then tells the story
+  (checkmate, stalemate).
+- Answer: as for `GET /games/:id/gif`, with `filename="scacelith-game.gif"`.
+
+```sh
+# A PGN file saved on disk (jq builds the JSON string).
+jq -n --rawfile pgn my-game.pgn '{pgn: $pgn, size: "small", delayMs: 800}' |
+  curl -sS -o my-game.gif "$API/gif" -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' --data-binary @-
+# A short game typed in.
+curl -sS -o fools-mate.gif "$API/gif" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"pgn":"1. f3 e5 2. g4 Qh4# 0-1","coords":false}'
+```
+
+Errors: those of `GET /games/:id/gif` (with `delayMs` as the `field` of the delay), except
+`invalid_game_id`, `not_found` and `busy`, plus:
+
+- 400 `invalid_request` with `field`: an unknown field, or `pgn` missing or not a string;
+- 400 `invalid_option`: also `delayMs` that is not a number (`"500"`) or `coords` that is not a
+  boolean;
+- 400 `invalid_pgn` with `line` and `column` (from 1, columns in characters) and the reader's
+  `message`: an illegal or ambiguous move, a broken tag, an unknown variant, more than 65,536
+  bytes;
+- 413 `payload_too_large`: a body above 135,168 bytes (the PGN as a JSON string, its escapes
+  included).
+
+```json
+{ "error": "invalid_pgn", "message": "illegal move 'Ke3'", "line": 1, "column": 13 }
+```
+
+(the answer to `{"pgn":"1. e4 e5 2. Ke3 *"}`)
+
+### Cost, cache and quotas of the GIFs
+
+A GIF is made on a rendering thread of the worker process, never on the thread that runs the
+games, and at the lowest CPU priority, so it only takes the CPU the games leave: `GIF_THREADS` (1)
+per worker, started with the first GIF and stopped after a minute without one. Up to
+`GIF_QUEUE_MAX` (4) GIFs wait for it, at most `GIF_QUEUE_TIMEOUT_MS` (10 s) each; a render may
+last `GIF_RENDER_TIMEOUT_MS` (30 s). A 40-move game takes a few tens of milliseconds, the longest
+ones up to about a second ([SIZING.md](SIZING.md#animated-gifs)). When the server is busy with
+its games, the GIFs wait for them, and a request that waited too long gets 503 `server_busy`.
+
+Each worker keeps the GIFs it made in a cache of `GIF_CACHE_MB` (32) MB, the least recently used
+going first. A GIF from the cache, or one being made for another request, costs no render: asking
+again for the same game with the same options is cheap (with several workers, a repeat that
+reaches another worker may be made again). The cache keys on everything that changes the picture,
+names included, so a deleted account never reappears from it.
+
+Every request counts in `gif`, 30 per minute per player for both endpoints. A GIF that has to be
+made also counts in the render limits, for the whole server:
+
+- per player: `GIF_USER_RENDERS_PER_MIN` (4) per minute and `GIF_USER_RENDERS_PER_HOUR` (30) per
+  hour;
+- per client (an IPv4 address or an IPv6 /64), all its accounts together: `GIF_IP_RENDERS_PER_MIN`
+  (12) per minute and `GIF_IP_RENDERS_PER_HOUR` (120) per hour, and 3 times that per IPv6 /48.
+
+A client should keep the file it downloaded rather than ask for it again, and wait `retryAfter`
+after a 429 or a 503.
+
 ### Game codes
 
 `status`: 1 `WhiteWins`, 2 `BlackWins`, 3 `Draw`, 4 `Aborted`. Only finished games are stored.
@@ -1216,7 +1414,8 @@ account has no profile.
 
 ### GET /players/:username
 
-**Auth** none. **Limit** global only.
+**Auth** optional (the answer is the same; with a token the limit counts per player). **Limit**
+`public_read`.
 
 ```sh
 curl -sS "$API/players/alice"
@@ -1242,9 +1441,9 @@ player, or a deleted account), 503 `busy`.
 
 ### GET /players/:username/games
 
-The player's recent games, newest first. **Auth** none. **Limit** `public_read`. Query: `before`
-(a game id) and `limit` (1-50, default 20, as in section 10). Neither filters nor a total are
-available here.
+The player's recent games, newest first. **Auth** optional, as above. **Limit** `public_read`.
+Query: `before` (a game id) and `limit` (1-50, default 20, as in section 10). Neither filters nor
+a total are available here.
 
 ```sh
 curl -sS "$API/players/alice/games?limit=1"
@@ -1298,8 +1497,8 @@ Errors: 400 `invalid_category`, 400 `invalid_limit`, 503 `busy`.
 Reports the opponent of one of the player's own games. A report never changes a rating, a
 sanction or an integrity level by itself. It raises the review priority that moderators see,
 and, except for `abuse`, it asks for the engine analysis of the game
-([ANTICHEAT.md](ANTICHEAT.md)). **Auth** session. **Limit** `reports`, plus `REPORTS_PER_DAY` per
-player.
+([ANTICHEAT.md](ANTICHEAT.md)). **Auth** session. **Limit** `reports` (per player), plus
+`REPORTS_PER_DAY` per player.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -1343,7 +1542,7 @@ Pages for a browser, opened from the links of e-mails and by Google. Their links
 | `GET /verify-email?token=` | 200: a "Confirm my e-mail address" button. 400: link invalid or expired. Limit `page`. |
 | `POST /verify-email` (form `token`) | 200: address confirmed. 400: link invalid, used or expired. Limit `auth`. |
 | `GET /reset-password?token=` | 200: the new password form (password twice). 400: link invalid. Limit `page`. |
-| `POST /reset-password` (form `token`, `newPassword`, `confirmPassword`) | 200: password changed, and every device signed out. 400: the form again with the error (the passwords differ, a weak password), or link invalid. 503 / 429: the form again with `Retry-After` when the server is busy; the link stays valid. Limit `auth`. |
+| `POST /reset-password` (form `token`, `newPassword`, `confirmPassword`) | 200: password changed, and every device signed out. 400: the form again with the error (the passwords differ, a weak password), or link invalid. 503 / 429: the form again with `Retry-After` when the server is busy; the link stays valid. Limits `auth` and `auth_reset`. |
 | `GET /confirm-email-change?token=` | 200: shows the new address and the account's name, with a "Use this e-mail address" button. 400: link invalid or expired (also when the account's address changed since the request). Limit `page`. |
 | `POST /confirm-email-change` (form `token`) | 200: address changed. 400: link invalid, used or expired. 409: another account took the address in the meantime. Limit `auth`. |
 | `GET /auth/sso/google/callback?code=&state=` | 200: "You can go back to Scacelith" (or "choose your username"). 400: the sign-in failed, was cancelled or expired. Never shows a token. Limit `sso_page`. |

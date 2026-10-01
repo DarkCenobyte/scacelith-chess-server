@@ -83,6 +83,16 @@ export async function startServer({ workers = 1, env = {}, keep = !!process.env.
         POW_LOGIN_BITS: '0',
         AUTH_RATE_PER_IP: '100000',
         HTTP_RATE_PER_IP: '100000',
+        // Every test client comes from 127.0.0.1: the per-address and per-account limits of the
+        // auth family and the account budget are raised like AUTH_RATE_PER_IP.
+        AUTH_REGISTER_PER_HOUR: '100000',
+        AUTH_MAIL_PER_HOUR: '100000',
+        AUTH_FORGOT_PER_HOUR: '100000',
+        AUTH_FORGOT_PER_DAY: '100000',
+        AUTH_RESET_PER_HOUR: '100000',
+        AUTH_MFA_PER_ACCOUNT: '100000',
+        AUTH_REAUTH_PER_USER: '100000',
+        USER_RATE_PER_MIN: '100000',
         MAX_CONNECTIONS_PER_IP: '100000',
         LOG_LEVEL: 'info',
         LOG_FORMAT: 'json',

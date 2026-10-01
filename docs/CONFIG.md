@@ -23,6 +23,7 @@ Sections:
 - [Games](#games)
 - [Matchmaking and ratings](#matchmaking-and-ratings)
 - [Anti-cheat and sanctions](#anti-cheat-and-sanctions)
+- [Animated GIFs of games](#animated-gifs-of-games)
 - [Observability](#observability)
 
 ## Server identity and network
@@ -135,6 +136,14 @@ Sections:
 | `AUTH_RATE_PER_IP` | integer (&gt;= 1) | `20` | Login / register / reset attempts per 10 minutes from one IP address (one IPv6 /64). |
 | `AUTH_RATE_PER_PREFIX` | integer (&gt;= 0) | `0` | The AUTH_RATE_PER_IP limits (login / register / reset attempts, and account changes that ask for the password), per 10 minutes for one IPv6 /48 as a whole, on top of the limit of each of its /64 networks: a /48 holds 65536 of them, and one customer often gets a /56 or a /48. 0 means 5 x AUTH_RATE_PER_IP. Raise it for a site that brings many players at once over one IPv6 prefix (a campus, a club event). IPv4 addresses are only limited one by one. |
 | `AUTH_FAILURES_PER_ACCOUNT` | integer (&gt;= 1) | `5` | Failed logins on one account before each further attempt is delayed exponentially (up to 15 minutes). |
+| `AUTH_REGISTER_PER_HOUR` | integer (&gt;= 1) | `10` | Registrations per hour from one IPv4 address or IPv6 /64 (3 times that per IPv6 /48), whole server, on top of AUTH_RATE_PER_IP. Raise it for a session where a class creates its accounts together. |
+| `AUTH_MAIL_PER_HOUR` | integer (&gt;= 1) | `10` | Confirmation e-mails asked again (POST /auth/verify-email/resend) per hour from one IPv4 address or IPv6 /64 (3 times that per /48), whole server, on top of AUTH_RATE_PER_IP and of the one e-mail per address every 5 minutes. Password reset e-mails have their own, stricter limits (AUTH_FORGOT_PER_HOUR, AUTH_FORGOT_PER_DAY). |
+| `AUTH_FORGOT_PER_HOUR` | integer (&gt;= 1) | `3` | Password reset e-mails asked (POST /auth/password/forgot) per hour from one IPv4 address or IPv6 /64 (3 times that per /48), whole server, on top of AUTH_RATE_PER_IP and of the one e-mail per address every 5 minutes. A refusal is a 429, which says nothing about the address; an accepted request answers 202 whether the address has an account or not. |
+| `AUTH_FORGOT_PER_DAY` | integer (&gt;= 1) | `10` | The same as AUTH_FORGOT_PER_HOUR per 24 hours (3 times that per /48). At least AUTH_FORGOT_PER_HOUR. |
+| `AUTH_RESET_PER_HOUR` | integer (&gt;= 1) | `10` | New passwords sent with a reset link (POST /auth/password/reset and the /reset-password page) per hour from one IPv4 address or IPv6 /64 (3 times that per /48), whole server, on top of AUTH_RATE_PER_IP: each one hashes a password. |
+| `AUTH_MFA_PER_ACCOUNT` | integer (&gt;= 1) | `10` | Second-factor codes (authenticator or recovery codes) tried per 15 minutes for one account, whole server, from any address, at sign-in and in account changes; then 429 too_many_attempts before the code is checked (a recovery code is not spent). It bounds a code guesser who knows the password, whatever the number of addresses. |
+| `AUTH_REAUTH_PER_USER` | integer (&gt;= 1) | `10` | Account changes that ask for the password or a code (password, two-step verification, e-mail, data export, deletion) per 10 minutes for one account, whole server, from any address, on top of the per-address limit AUTH_RATE_PER_IP: a stolen session used from many addresses cannot guess the password faster. |
+| `USER_RATE_PER_MIN` | integer (&gt;= 1) | `120` | API requests per minute of one signed-in account (every request with a valid session token), all endpoints together, whatever its address. Each worker allows its share, max(1, ceil(2 x this / WORKERS)) (all of it with 1 or 2 workers, half with 4), with a burst of half a minute; beyond it 429 rate_limited with Retry-After. The game's busiest use, paging through the history, is about one request per second. |
 | `POW_REGISTER_BITS` | integer (0-26) | `18` | Proof-of-work difficulty (leading zero bits of SHA-256) required to register; 0 disables it. |
 | `POW_LOGIN_BITS` | integer (0-26) | `18` | Proof-of-work difficulty required to log in while the server sees a credential-stuffing wave; 0 disables it. |
 | `POW_LOGIN_TRIGGER_PER_MIN` | integer (&gt;= 1) | `30` | Failed logins per minute (whole server) that turn on the login proof-of-work. Every failed login costs a password hash (about 0.5 s of CPU), so 30 per minute already keeps a quarter of a core busy, and a few hundred would need several cores: with PASSWORD_HASH_CONCURRENCY at 1 per worker, a small server could never reach such a trigger. Raise it only on a large server where honest typos alone come near it. |
@@ -199,6 +208,22 @@ Sections:
 | `ANALYSIS_POLL_MS` | integer (100-3600000) | `5000` | Interval at which an idle analysis engine looks for new games to analyse. |
 | `ANALYSIS_QUEUE_MAX` | integer (0-100000) | `5000` | Most ordinary games waiting for engine analysis: while this many wait, a newly finished ordinary game is not queued (the engines could not catch up anyway). Games with a report, a suspicion signal (at most 20 waiting per player) or a moderator request are queued anyway and mostly analysed first; one engine claim in four still goes to the oldest ordinary game. 0 analyses only those (and then no game feeds the population statistics). At most 100000: the waiting ordinary games are counted in every commit of finished games, under the database write lock. |
 | `ANALYSIS_SAMPLE_RATE` | number (0-1) | `1` | Share of the ordinary rated games queued for analysis (0 to 1, drawn at random when the game ends). Lower it when the engine cannot keep up with the games played. |
+
+## Animated GIFs of games
+
+| Variable | Type | Default | Description |
+| --- | --- | --- | --- |
+| `GIF_ENABLED` | boolean (true/false, 1/0, yes/no, on/off) | `true` | Animated GIFs of games for signed-in players: GET /api/v1/games/:id/gif (a game of this server) and POST /api/v1/gif (any game, as a PGN). Rendered on a thread of each worker process, never on the event loop of the games. false: both endpoints answer 404 gif_disabled. |
+| `GIF_THREADS` | integer (1-8) | `1` | GIF renders at the same time in one worker process, each on a thread of its own at the lowest CPU priority (on Linux: it only takes the CPU the games leave). A render takes one core (measured on a 2.1 GHz Xeon: about 45 ms for a 40-move game at the medium size, about 0.7 s for a game of GIF_MAX_PLIES at the large size; docs/SIZING.md), and a thread 40-50 MiB of memory while it lives (up to about 125 MiB after many of the longest games at the large size). The threads start on demand and stop after a minute without work. |
+| `GIF_QUEUE_MAX` | integer (0-64) | `4` | Renders that may wait for a free thread in one worker process; one more is refused at once with 503 server_busy and Retry-After, and the render quotas it took are given back. |
+| `GIF_QUEUE_TIMEOUT_MS` | integer (100-60000) | `10000` | Longest wait of a render for a free thread; then 503 server_busy (the render quotas are given back). |
+| `GIF_RENDER_TIMEOUT_MS` | integer (1000-120000) | `30000` | Longest render: the thread is stopped (a new one starts with the next render) and the request answers 500. |
+| `GIF_MAX_PLIES` | integer (1-1200) | `600` | Longest game, in half-moves, a GIF shows; a longer one answers 422 game_too_long. 600 plies last 5 minutes at the default speed (0.5 s per move). |
+| `GIF_CACHE_MB` | integer (0-1024) | `32` | Memory of the cache of rendered GIFs in each worker process (the least recently used goes first; a medium GIF of 80 plies is about 200 KiB). A GIF served from the cache costs no render quota. 0 disables the cache. |
+| `GIF_USER_RENDERS_PER_MIN` | integer (&gt;= 1) | `4` | GIF renders per minute of one account, whole server (a GIF served from the cache does not count); beyond it 429 rate_limited with Retry-After. |
+| `GIF_USER_RENDERS_PER_HOUR` | integer (&gt;= 1) | `30` | GIF renders per hour of one account, whole server. At least GIF_USER_RENDERS_PER_MIN. |
+| `GIF_IP_RENDERS_PER_MIN` | integer (&gt;= 1) | `12` | GIF renders per minute from one IPv4 address or IPv6 /64 (3 times that per IPv6 /48), all accounts together, whole server: a background ceiling for many accounts behind one address. |
+| `GIF_IP_RENDERS_PER_HOUR` | integer (&gt;= 1) | `120` | GIF renders per hour from one IPv4 address or IPv6 /64 (3 times that per /48), all accounts together, whole server. At least GIF_IP_RENDERS_PER_MIN. |
 
 ## Observability
 

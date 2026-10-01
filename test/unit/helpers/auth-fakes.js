@@ -258,19 +258,25 @@ export function linkIn(text) {
 
 export const TEST_DEFAULTS = Object.freeze({
     AUTH_RATE_PER_IP: '10000', HTTP_RATE_PER_IP: '100000', AUTH_FAILURES_PER_ACCOUNT: '5',
+    // The per-address and per-account limits of the auth family (abuse design 3.5) and the
+    // account budget: high, so that only the tests of those limits meet them.
+    AUTH_REGISTER_PER_HOUR: '10000', AUTH_MAIL_PER_HOUR: '10000', AUTH_FORGOT_PER_HOUR: '10000', AUTH_FORGOT_PER_DAY: '10000',
+    AUTH_RESET_PER_HOUR: '10000', AUTH_MFA_PER_ACCOUNT: '10000', AUTH_REAUTH_PER_USER: '10000', USER_RATE_PER_MIN: '100000',
     REQUIRE_EMAIL_VERIFICATION: '1', SERVER_PUBLIC_HOST: 'chess.example.org', API_PORT: '8443',
 });
 
 /**
  * Starts the real API handler on 127.0.0.1 with fakes. The client address of a request is the
- * X-Test-Ip header when given (as the proxy layer would set req.clientIp).
+ * X-Test-Ip header when given (as the proxy layer would set req.clientIp). Two servers given the
+ * same `primary`, `store` and `now` stand for two workers of one server.
  * @param {{ env?: object, scryptLogN?: number, hasher?: object, oidc?: object, oidcEndpoints?: object,
- *           handlerOptions?: object, primary?: object|null }} [opts]
+ *           handlerOptions?: object, primary?: object|null, store?: object, now?: Function }} [opts]
  */
-export async function startTestServer({ env = {}, scryptLogN = 10, hasher, oidc, oidcEndpoints, handlerOptions = {}, primary: givenPrimary } = {}) {
+export async function startTestServer({ env = {}, scryptLogN = 10, hasher, oidc, oidcEndpoints, handlerOptions = {}, primary: givenPrimary,
+    store: givenStore, now: givenNow } = {}) {
     const config = testConfig({ ...TEST_DEFAULTS, ...env });
-    const now = createClock();
-    const store = createFakeStore({ now });
+    const now = givenNow || createClock();
+    const store = givenStore || createFakeStore({ now });
     const primary = givenPrimary === undefined ? createFakePrimary({ now }) : givenPrimary;
     const log = logger.child('test');
     const mailer = createCaptureMailer(config, log);
@@ -291,9 +297,9 @@ export async function startTestServer({ env = {}, scryptLogN = 10, hasher, oidc,
     const base = `http://127.0.0.1:${port}`;
 
     /**
-     * @returns {Promise<{ status: number, headers: object, text: string, json: any }>}
+     * @returns {Promise<{ status: number, headers: object, text: string, json: any, bytes?: Buffer }>} bytes: with `binary`
      */
-    function request(method, path, { body, token, ip, headers = {}, raw, contentType } = {}) {
+    function request(method, path, { body, token, ip, headers = {}, raw, contentType, binary = false } = {}) {
         return new Promise((resolve, reject) => {
             const h = { ...headers };
             let payload = null;
@@ -307,10 +313,11 @@ export async function startTestServer({ env = {}, scryptLogN = 10, hasher, oidc,
                 const chunks = [];
                 res.on('data', (c) => chunks.push(c));
                 res.on('end', () => {
-                    const text = Buffer.concat(chunks).toString('utf8');
+                    const bytes = Buffer.concat(chunks);
+                    const text = bytes.toString('utf8');
                     let json;
                     try { json = text ? JSON.parse(text) : undefined; } catch { json = undefined; }
-                    resolve({ status: res.statusCode, headers: res.headers, text, json });
+                    resolve({ status: res.statusCode, headers: res.headers, text, json, ...(binary ? { bytes } : {}) });
                 });
             });
             req.on('error', reject);
@@ -334,6 +341,7 @@ export async function startTestServer({ env = {}, scryptLogN = 10, hasher, oidc,
 
     async function close() {
         auth.close();
+        await handler.close?.();
         await new Promise((r) => server.close(r));
     }
 

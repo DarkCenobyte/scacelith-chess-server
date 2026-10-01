@@ -139,6 +139,22 @@ key('AUTH_RATE_PER_PREFIX', { section: 'limits', type: 'int', default: 0, min: 0
     desc: 'The AUTH_RATE_PER_IP limits (login / register / reset attempts, and account changes that ask for the password), per 10 minutes for one IPv6 /48 as a whole, on top of the limit of each of its /64 networks: a /48 holds 65536 of them, and one customer often gets a /56 or a /48. 0 means 5 x AUTH_RATE_PER_IP. Raise it for a site that brings many players at once over one IPv6 prefix (a campus, a club event). IPv4 addresses are only limited one by one.' });
 key('AUTH_FAILURES_PER_ACCOUNT', { section: 'limits', type: 'int', default: 5, min: 1,
     desc: 'Failed logins on one account before each further attempt is delayed exponentially (up to 15 minutes).' });
+key('AUTH_REGISTER_PER_HOUR', { section: 'limits', type: 'int', default: 10, min: 1,
+    desc: 'Registrations per hour from one IPv4 address or IPv6 /64 (3 times that per IPv6 /48), whole server, on top of AUTH_RATE_PER_IP. Raise it for a session where a class creates its accounts together.' });
+key('AUTH_MAIL_PER_HOUR', { section: 'limits', type: 'int', default: 10, min: 1,
+    desc: 'Confirmation e-mails asked again (POST /auth/verify-email/resend) per hour from one IPv4 address or IPv6 /64 (3 times that per /48), whole server, on top of AUTH_RATE_PER_IP and of the one e-mail per address every 5 minutes. Password reset e-mails have their own, stricter limits (AUTH_FORGOT_PER_HOUR, AUTH_FORGOT_PER_DAY).' });
+key('AUTH_FORGOT_PER_HOUR', { section: 'limits', type: 'int', default: 3, min: 1,
+    desc: 'Password reset e-mails asked (POST /auth/password/forgot) per hour from one IPv4 address or IPv6 /64 (3 times that per /48), whole server, on top of AUTH_RATE_PER_IP and of the one e-mail per address every 5 minutes. A refusal is a 429, which says nothing about the address; an accepted request answers 202 whether the address has an account or not.' });
+key('AUTH_FORGOT_PER_DAY', { section: 'limits', type: 'int', default: 10, min: 1,
+    desc: 'The same as AUTH_FORGOT_PER_HOUR per 24 hours (3 times that per /48). At least AUTH_FORGOT_PER_HOUR.' });
+key('AUTH_RESET_PER_HOUR', { section: 'limits', type: 'int', default: 10, min: 1,
+    desc: 'New passwords sent with a reset link (POST /auth/password/reset and the /reset-password page) per hour from one IPv4 address or IPv6 /64 (3 times that per /48), whole server, on top of AUTH_RATE_PER_IP: each one hashes a password.' });
+key('AUTH_MFA_PER_ACCOUNT', { section: 'limits', type: 'int', default: 10, min: 1,
+    desc: 'Second-factor codes (authenticator or recovery codes) tried per 15 minutes for one account, whole server, from any address, at sign-in and in account changes; then 429 too_many_attempts before the code is checked (a recovery code is not spent). It bounds a code guesser who knows the password, whatever the number of addresses.' });
+key('AUTH_REAUTH_PER_USER', { section: 'limits', type: 'int', default: 10, min: 1,
+    desc: 'Account changes that ask for the password or a code (password, two-step verification, e-mail, data export, deletion) per 10 minutes for one account, whole server, from any address, on top of the per-address limit AUTH_RATE_PER_IP: a stolen session used from many addresses cannot guess the password faster.' });
+key('USER_RATE_PER_MIN', { section: 'limits', type: 'int', default: 120, min: 1,
+    desc: 'API requests per minute of one signed-in account (every request with a valid session token), all endpoints together, whatever its address. Each worker allows its share, max(1, ceil(2 x this / WORKERS)) (all of it with 1 or 2 workers, half with 4), with a burst of half a minute; beyond it 429 rate_limited with Retry-After. The game\'s busiest use, paging through the history, is about one request per second.' });
 key('POW_REGISTER_BITS', { section: 'limits', type: 'int', default: 18, min: 0, max: 26, desc: 'Proof-of-work difficulty (leading zero bits of SHA-256) required to register; 0 disables it.' });
 key('POW_LOGIN_BITS', { section: 'limits', type: 'int', default: 18, min: 0, max: 26, desc: 'Proof-of-work difficulty required to log in while the server sees a credential-stuffing wave; 0 disables it.' });
 key('POW_LOGIN_TRIGGER_PER_MIN', { section: 'limits', type: 'int', default: 30, min: 1,
@@ -218,6 +234,30 @@ key('ANALYSIS_QUEUE_MAX', { section: 'anticheat', type: 'int', default: 5000, mi
     desc: 'Most ordinary games waiting for engine analysis: while this many wait, a newly finished ordinary game is not queued (the engines could not catch up anyway). Games with a report, a suspicion signal (at most 20 waiting per player) or a moderator request are queued anyway and mostly analysed first; one engine claim in four still goes to the oldest ordinary game. 0 analyses only those (and then no game feeds the population statistics). At most 100000: the waiting ordinary games are counted in every commit of finished games, under the database write lock.' });
 key('ANALYSIS_SAMPLE_RATE', { section: 'anticheat', type: 'number', default: 1, min: 0, max: 1,
     desc: 'Share of the ordinary rated games queued for analysis (0 to 1, drawn at random when the game ends). Lower it when the engine cannot keep up with the games played.' });
+
+// ---- Animated GIFs of games ------------------------------------------------------------------------------
+key('GIF_ENABLED', { section: 'gif', type: 'bool', default: true,
+    desc: 'Animated GIFs of games for signed-in players: GET /api/v1/games/:id/gif (a game of this server) and POST /api/v1/gif (any game, as a PGN). Rendered on a thread of each worker process, never on the event loop of the games. false: both endpoints answer 404 gif_disabled.' });
+key('GIF_THREADS', { section: 'gif', type: 'int', default: 1, min: 1, max: 8,
+    desc: 'GIF renders at the same time in one worker process, each on a thread of its own at the lowest CPU priority (on Linux: it only takes the CPU the games leave). A render takes one core (measured on a 2.1 GHz Xeon: about 45 ms for a 40-move game at the medium size, about 0.7 s for a game of GIF_MAX_PLIES at the large size; docs/SIZING.md), and a thread 40-50 MiB of memory while it lives (up to about 125 MiB after many of the longest games at the large size). The threads start on demand and stop after a minute without work.' });
+key('GIF_QUEUE_MAX', { section: 'gif', type: 'int', default: 4, min: 0, max: 64,
+    desc: 'Renders that may wait for a free thread in one worker process; one more is refused at once with 503 server_busy and Retry-After, and the render quotas it took are given back.' });
+key('GIF_QUEUE_TIMEOUT_MS', { section: 'gif', type: 'int', default: 10000, min: 100, max: 60000,
+    desc: 'Longest wait of a render for a free thread; then 503 server_busy (the render quotas are given back).' });
+key('GIF_RENDER_TIMEOUT_MS', { section: 'gif', type: 'int', default: 30000, min: 1000, max: 120000,
+    desc: 'Longest render: the thread is stopped (a new one starts with the next render) and the request answers 500.' });
+key('GIF_MAX_PLIES', { section: 'gif', type: 'int', default: 600, min: 1, max: 1200,
+    desc: 'Longest game, in half-moves, a GIF shows; a longer one answers 422 game_too_long. 600 plies last 5 minutes at the default speed (0.5 s per move).' });
+key('GIF_CACHE_MB', { section: 'gif', type: 'int', default: 32, min: 0, max: 1024,
+    desc: 'Memory of the cache of rendered GIFs in each worker process (the least recently used goes first; a medium GIF of 80 plies is about 200 KiB). A GIF served from the cache costs no render quota. 0 disables the cache.' });
+key('GIF_USER_RENDERS_PER_MIN', { section: 'gif', type: 'int', default: 4, min: 1,
+    desc: 'GIF renders per minute of one account, whole server (a GIF served from the cache does not count); beyond it 429 rate_limited with Retry-After.' });
+key('GIF_USER_RENDERS_PER_HOUR', { section: 'gif', type: 'int', default: 30, min: 1,
+    desc: 'GIF renders per hour of one account, whole server. At least GIF_USER_RENDERS_PER_MIN.' });
+key('GIF_IP_RENDERS_PER_MIN', { section: 'gif', type: 'int', default: 12, min: 1,
+    desc: 'GIF renders per minute from one IPv4 address or IPv6 /64 (3 times that per IPv6 /48), all accounts together, whole server: a background ceiling for many accounts behind one address.' });
+key('GIF_IP_RENDERS_PER_HOUR', { section: 'gif', type: 'int', default: 120, min: 1,
+    desc: 'GIF renders per hour from one IPv4 address or IPv6 /64 (3 times that per /48), all accounts together, whole server. At least GIF_IP_RENDERS_PER_MIN.' });
 
 // ---- Observability -------------------------------------------------------------------------------------
 key('METRICS_PORT', { section: 'observability', type: 'port', default: 9464, desc: 'Prometheus metrics and health endpoint (plain HTTP; 0 disables it).' });
@@ -382,6 +422,9 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     if (cfg.ssoGoogleEnabled && (!cfg.googleClientId || !cfg.googleClientSecret)) errors.push('SSO_GOOGLE_ENABLED needs GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.');
     if (cfg.mailTransport === 'smtp' && !cfg.smtpHost) errors.push('MAIL_TRANSPORT=smtp needs SMTP_HOST.');
     if (cfg.analysisDepthFast >= cfg.analysisDepthDeep) errors.push('ANALYSIS_DEPTH_FAST must be lower than ANALYSIS_DEPTH_DEEP.');
+    if (cfg.authForgotPerDay < cfg.authForgotPerHour) errors.push('AUTH_FORGOT_PER_DAY must be at least AUTH_FORGOT_PER_HOUR.');
+    if (cfg.gifUserRendersPerHour < cfg.gifUserRendersPerMin) errors.push('GIF_USER_RENDERS_PER_HOUR must be at least GIF_USER_RENDERS_PER_MIN.');
+    if (cfg.gifIpRendersPerHour < cfg.gifIpRendersPerMin) errors.push('GIF_IP_RENDERS_PER_HOUR must be at least GIF_IP_RENDERS_PER_MIN.');
     if (cfg.maxPendingHandshakesPerIp != null && cfg.maxPendingHandshakesPerIp >= cfg.maxPendingHandshakes) {
         errors.push('MAX_PENDING_HANDSHAKES_PER_IP must be lower than MAX_PENDING_HANDSHAKES (one address group could otherwise hold every handshake slot).');
     }

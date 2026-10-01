@@ -25,6 +25,12 @@
 // 429 rate_limited{retryAfter} (the hash queue is at least half full and PASSWORD_HASH_WAITERS_PER_SOURCE
 // password hashes of this client already wait; nothing changed, and the reauth limit's token is given back).
 //
+// Limits of the routes that ask for the password or a code: `reauth` (AUTH_RATE_PER_IP per 10
+// minutes per address, AUTH_RATE_PER_PREFIX per IPv6 /48, shared) and `reauth_user`
+// (AUTH_REAUTH_PER_USER per 10 minutes per account, shared: a stolen session used from many
+// addresses cannot guess the password faster); the second factors also count against
+// AUTH_MFA_PER_ACCOUNT (auth/mfa.js). The reads take `account` (60 per minute per account).
+//
 // The e-mail change link (pages outside /api, like /verify-email):
 //   GET  /confirm-email-change?token= -> the new address and a confirmation button (the token is
 //        not consumed: link scanners open links), or 400 "link invalid or expired"
@@ -32,6 +38,7 @@
 //        | 409 "Address already used" (another account took the address since the request)
 
 import * as emailPages from '../pages/email-change.js';
+import { AUTH_ABUSE_WEIGHT, authRateOf } from './auth.js';
 
 const PASSWORD = { type: 'string', min: 1, max: 1024 };
 const CODE = { type: 'string', min: 1, max: 32 };
@@ -39,13 +46,25 @@ const EMAIL = { type: 'string', min: 1, max: 254 };
 const LINK_TOKEN = { type: 'string', min: 1, max: 128 };
 
 /**
+ * The limits of a route that asks for the password: `reauth` per address and IPv6 /48, then
+ * `reauth_user` per account (routes/account-export.js takes them too).
+ * @param {object} config
+ */
+export function reauthRatesOf(config) {
+    return [
+        { key: 'reauth', limit: config.authRatePerIp, prefixLimit: config.authRatePerPrefix, windowMs: 600000, shared: true, abuseWeight: AUTH_ABUSE_WEIGHT },
+        { key: 'reauth_user', limit: config.authReauthPerUser, windowMs: 600000, by: 'user', shared: true },
+    ];
+}
+
+/**
  * @param {import('../router.js').Router} router
  * @param {{ config: object, auth: object }} deps
  */
 export function register(router, { config, auth }) {
-    const reauthRate = { key: 'reauth', limit: config.authRatePerIp, prefixLimit: config.authRatePerPrefix, windowMs: 600000, shared: true };
+    const reauthRates = reauthRatesOf(config);
     const readRate = { key: 'account', limit: 60, windowMs: 60000, by: 'user' };
-    const opts = (body, rate = reauthRate) => ({ auth: 'required', rate, body });
+    const opts = (body, rate = reauthRates) => ({ auth: 'required', rate, body });
 
     router.get('/account/me', (ctx) => ({ body: auth.me(ctx.user.userId) }), { auth: 'required', rate: readRate });
 
@@ -73,7 +92,7 @@ export function register(router, { config, auth }) {
     // ---- the e-mail change link (GET shows a button, POST acts) ----
     const serverName = config.serverName;
     const pageRate = { key: 'page', limit: 60, windowMs: 60000 };
-    const linkRate = { key: 'auth', limit: config.authRatePerIp, prefixLimit: config.authRatePerPrefix, windowMs: 600000, shared: true };
+    const linkRate = authRateOf(config);
     router.page('GET', '/confirm-email-change', (ctx) => {
         const token = ctx.query.token;
         const pending = auth.peekEmailChange(token);

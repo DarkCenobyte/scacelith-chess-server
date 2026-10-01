@@ -24,6 +24,21 @@
 // PASSWORD_HASH_WAITERS_PER_SOURCE hashes waiting there (security/password.js); nothing was
 // changed then, and that 429 gives the auth limit's token back. The auth limit (AUTH_RATE_PER_IP
 // per address or IPv6 /64) also applies to each IPv6 /48 as a whole (AUTH_RATE_PER_PREFIX).
+//
+// Stricter limits per address on top of it (abuse design 3.5; each one per IPv4 address or IPv6
+// /64, 3 times that per IPv6 /48, shared through the primary, so exact across the workers):
+//   register                          auth_register   AUTH_REGISTER_PER_HOUR (10) per hour
+//   verify-email/resend               auth_mail       AUTH_MAIL_PER_HOUR (10) per hour
+//   password/forgot                   auth_forgot     AUTH_FORGOT_PER_HOUR (3) per hour, and
+//                                     auth_forgot_day AUTH_FORGOT_PER_DAY (10) per 24 hours
+//   password/reset, POST /reset-password  auth_reset  AUTH_RESET_PER_HOUR (10) per hour
+// plus one e-mail per address every 5 minutes (auth/accounts.js). The forgot and resend answers
+// stay 202 accepted whether the address has an account or not; a refusal is a 429, which says
+// nothing about the address. A request refused by a later limit gets back the tokens of the
+// earlier ones (http/server.js checkRates). Second factors (login/mfa) are also limited per
+// account, whatever the address (AUTH_MFA_PER_ACCOUNT, auth/mfa.js). `abuseWeight` marks the
+// limits of this family: their refusals count 5 times toward blocking an address (abuse design
+// 3.4).
 
 import * as verifyPages from '../pages/verify-email.js';
 import * as resetPages from '../pages/reset-password.js';
@@ -36,17 +51,35 @@ const PASSWORD = { type: 'string', min: 1, max: 1024 };
 const EMAIL = { type: 'string', min: 1, max: 254 };
 const LINK_TOKEN = { type: 'string', min: 1, max: 128 };
 
+/** How much more a refusal of the auth family counts toward blocking an address (abuse design 3.4). */
+export const AUTH_ABUSE_WEIGHT = 5;
+
+/**
+ * The `auth` limit: AUTH_RATE_PER_IP per 10 minutes per address, AUTH_RATE_PER_PREFIX per IPv6
+ * /48, shared. One bucket for every endpoint that hashes a password or sends an e-mail without a
+ * session (and POST /auth/sso/complete, routes/sso.js).
+ * @param {object} config
+ */
+export function authRateOf(config) {
+    return { key: 'auth', limit: config.authRatePerIp, prefixLimit: config.authRatePerPrefix, windowMs: 600000, shared: true, abuseWeight: AUTH_ABUSE_WEIGHT };
+}
+
 /**
  * @param {import('../router.js').Router} router
  * @param {{ config: object, auth: object }} deps
  */
 export function register(router, { config, auth }) {
-    const authRate = { key: 'auth', limit: config.authRatePerIp, prefixLimit: config.authRatePerPrefix, windowMs: 600000, shared: true };
+    const authRate = authRateOf(config);
+    const perHour = (key, limit, windowMs = 3600000) => ({ key, limit, prefixLimit: 3 * limit, windowMs, shared: true, abuseWeight: AUTH_ABUSE_WEIGHT });
+    const registerRate = perHour('auth_register', config.authRegisterPerHour);
+    const mailRate = perHour('auth_mail', config.authMailPerHour);
+    const forgotRates = [perHour('auth_forgot', config.authForgotPerHour), perHour('auth_forgot_day', config.authForgotPerDay, 86400000)];
+    const resetRate = perHour('auth_reset', config.authResetPerHour);
     const pageRate = { key: 'page', limit: 60, windowMs: 60000 };
     const sessionRate = { key: 'sessions', limit: 60, windowMs: 60000, by: 'user' };
 
     router.post('/auth/register', async (ctx) => auth.register({ ...ctx.body, ip: ctx.ip }), {
-        auth: 'none', rate: authRate,
+        auth: 'none', rate: [authRate, registerRate],
         body: { username: { type: 'string', min: 1, max: 64 }, email: EMAIL, password: PASSWORD, pow: POW_FIELD },
     });
 
@@ -66,13 +99,13 @@ export function register(router, { config, auth }) {
     router.delete('/auth/sessions/:id', (ctx) => ({ body: auth.revokeSession(ctx.user, ctx.params.id, ctx.ip) }), { auth: 'required', rate: sessionRate });
 
     router.post('/auth/verify-email/resend', async (ctx) => ({ status: 202, body: await auth.resendVerification({ email: ctx.body.email, ip: ctx.ip }) }), {
-        auth: 'none', rate: authRate, body: { email: EMAIL },
+        auth: 'none', rate: [authRate, mailRate], body: { email: EMAIL },
     });
     router.post('/auth/password/forgot', async (ctx) => ({ status: 202, body: await auth.forgotPassword({ email: ctx.body.email, ip: ctx.ip }) }), {
-        auth: 'none', rate: authRate, body: { email: EMAIL },
+        auth: 'none', rate: [authRate, ...forgotRates], body: { email: EMAIL },
     });
     router.post('/auth/password/reset', async (ctx) => ({ body: await auth.resetPassword({ ...ctx.body, ip: ctx.ip }) }), {
-        auth: 'none', rate: authRate, body: { token: LINK_TOKEN, newPassword: PASSWORD },
+        auth: 'none', rate: [authRate, resetRate], body: { token: LINK_TOKEN, newPassword: PASSWORD },
     });
 
     // ---- HTML pages of the e-mail links (GET shows a button / form, POST acts) ----
@@ -109,5 +142,5 @@ export function register(router, { config, auth }) {
             throw err;
         }
         return { html: resetPages.resetDone({ serverName }) };
-    }, { rate: authRate, body: { token: LINK_TOKEN, newPassword: PASSWORD, confirmPassword: PASSWORD } });
+    }, { rate: [authRate, resetRate], body: { token: LINK_TOKEN, newPassword: PASSWORD, confirmPassword: PASSWORD } });
 }
