@@ -91,11 +91,13 @@
 // (1 s here instead of Node's 30 s, so they hold to within a second: a slowloris client that sends
 // a header line now and then is cut at 10-11 s); keepAliveTimeout 5 s; a socket with no byte in or
 // out for IDLE_TIMEOUT_MS (30 s) is destroyed (a client that stops reading; upgraded sockets
-// clear it); an answer that is not flushed to the kernel SEND_TIMEOUT_MS (60 s) after the handler
-// ended it is destroyed with its socket (a client that reads a large answer, a GIF or a PGN, a
-// few bytes at a time). Malformed HTTP ('clientError': 400, 408 for a header timeout, 431 for
-// oversized headers) is counted in scacelith_http_client_errors_total{reason} and toward a block
-// of the address, unless the peer is a trusted proxy.
+// clear it), unless its request is still in the API handler, whose own timeout answers it (a GIF
+// render or a data export may take longer); an answer that is not flushed to the kernel
+// SEND_TIMEOUT_MS (60 s) after the handler ended it is destroyed with its socket (a client that
+// reads a large answer, a GIF or a PGN, a few bytes at a time). Malformed HTTP ('clientError':
+// 400, 408 for a header timeout, 431 for oversized headers) is counted in
+// scacelith_http_client_errors_total{reason} and toward a block of the address, unless the peer
+// is a trusted proxy.
 //
 // Privileged ports: API_PORT defaults to 443, and Linux lets only a process with the
 // CAP_NET_BIND_SERVICE capability (root has it) bind a port below 1024
@@ -128,7 +130,7 @@ export const HEADERS_TIMEOUT_MS = 10000;
 export const REQUEST_TIMEOUT_MS = 30000;
 /** HTTP: an idle keep-alive connection is closed after this. */
 export const KEEP_ALIVE_TIMEOUT_MS = 5000;
-/** HTTP: a socket with no byte in or out for this long is destroyed (server.timeout). */
+/** HTTP: a socket with no byte in or out for this long is destroyed (server.timeout), unless its request is in the handler. */
 export const IDLE_TIMEOUT_MS = 30000;
 /** HTTP: an answer still not flushed to the kernel this long after the handler ended it is destroyed. */
 export const SEND_TIMEOUT_MS = 60000;
@@ -536,6 +538,15 @@ function refuseRequest(res, retryAfterMs, native, close) {
 
 function destroyResponse(res) { res.destroy(); }
 
+// The inactivity timeout (server.timeout, IDLE_TIMEOUT_MS) is for a client that stops reading. A
+// request whose handler is still at work (a GIF waiting for a render thread, a data export) keeps
+// its socket: the handler's own timeout answers it. Node emits 'timeout' on the response of a
+// socket that timed out and, once a listener is there, leaves the socket to it.
+function onResponseIdle(socket) {
+    if (!this.writableEnded) return;
+    socket.destroy();
+}
+
 // 'prefinish' comes when the handler ends the answer; writableFinished is already true when
 // every byte reached the kernel, so the deadline only costs a timer for the answers that wait.
 function sendDeadline(ms) {
@@ -563,6 +574,7 @@ export function wrapApiHandler(apiHandler, { clientIp, ready, native, guard = nu
     return (req, res) => {
         req.clientIp = clientIp(req, req.socket);
         res.once('prefinish', armSendDeadline);
+        res.on('timeout', onResponseIdle);
         if (guard !== null && !admitRequest(guard, req, res, admit)) return undefined;
         if (req.method === 'GET' || req.method === 'HEAD') {
             const q = req.url.indexOf('?');

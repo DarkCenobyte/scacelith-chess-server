@@ -446,8 +446,9 @@ turns blocking off and keeps the limits.
 
 Slow clients are cut as well: the request headers must arrive within 10 s and the whole request
 within 30 s (both checked every second), a connection with no byte in or out for 30 s is closed
-(game WebSockets have their own heartbeat instead), and an answer that the client has not read 60
-s after the server finished it is dropped with its connection. A header or request timeout is
+unless the server is still preparing its answer (game WebSockets have their own heartbeat
+instead), and an answer that the client has not read 60 s after the server finished it is
+dropped with its connection. A header or request timeout is
 answered 408 and, like malformed HTTP (400) and oversized headers (431), counted in
 `scacelith_http_client_errors_total{reason}` and toward a block of the address.
 

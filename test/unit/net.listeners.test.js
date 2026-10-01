@@ -401,6 +401,21 @@ describe('listeners: protection per address and slow clients', () => {
         } finally { close(); }
     });
 
+    it('a request still in its handler keeps its socket past the inactivity timeout (a GIF render, an export)', async () => {
+        const { port, close } = await setup({ HTTP_RATE_PER_IP: '600' }, {
+            apiHandler: (req, res) => { setTimeout(() => { res.writeHead(200, { 'Content-Length': 2 }); res.end('{}'); }, 900); },
+            listeners: { idleTimeoutMs: 300 },
+        });
+        try {
+            const t0 = Date.now();
+            const r = await get(port, '/api/v1/slow-render');
+            const ms = Date.now() - t0;
+            assert.equal(r.status, 200);
+            assert.equal(r.body, '{}');
+            assert.ok(ms >= 850, `answered by the handler, three inactivity periods later (${ms} ms)`);
+        } finally { close(); }
+    });
+
     it('malformed HTTP is answered 400 and counted toward a block of the client, not of a trusted proxy', async () => {
         const plain = await setup();
         try {

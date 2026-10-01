@@ -1218,7 +1218,8 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   * Slow clients (`hardenHttp`): `headersTimeout` 10 s and `requestTimeout` 30 s checked every
     second (`connectionsCheckingInterval`; Node's own 30 s let a slowloris client hold a socket 40
     s), `keepAliveTimeout` 5 s, a socket with no byte in or out for 30 s destroyed
-    (`server.timeout`; upgraded sockets clear it), and an answer not flushed to the kernel 60 s
+    (`server.timeout`; upgraded sockets clear it; a request still in its handler keeps the socket,
+    the handler's own timeout answers it), and an answer not flushed to the kernel 60 s
     after the handler ended it destroyed with its socket (a client reading a GIF or a PGN a few
     bytes at a time). Malformed HTTP is answered 400, 408 (header timeout) or 431 (headers too
     large) and counted in `scacelith_http_client_errors_total{reason}`.
