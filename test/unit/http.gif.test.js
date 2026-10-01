@@ -6,9 +6,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
 import { createApiHandler } from '../../src/http/server.js';
 import * as gifRoutes from '../../src/http/routes/gif.js';
-import { gifCacheKey, gifOptions, GifCache, tagText } from '../../src/http/routes/gif.js';
+import { gifCacheKey, gifOptions, GifCache, tagText, GIF_THREAD_URL } from '../../src/http/routes/gif.js';
+import { GIF_THREAD_NICE } from '../../src/http/routes/gif-thread.js';
+import { createGifPool } from '../../src/gif/pool.js';
 import { gamePgn } from '../../src/http/routes/players.js';
 import { ChessGame, Position } from '../../src/chess/index.js';
 import { enums } from '../../src/protocol/schema.js';
@@ -421,12 +425,41 @@ test('the pool is created on the first render with the GIF_* settings, and close
     await postGif(s, { pgn: '1. e4 *' }, { token: alice.token });
     await postGif(s, { pgn: '1. d4 *' }, { token: alice.token });
     assert.equal(s.fp.pools.length, 1);
-    assert.deepEqual(s.fp.pools[0].opts, { threads: 2, queueMax: 7, timeoutMs: 1234, renderTimeoutMs: 5678 });
+    assert.deepEqual(s.fp.pools[0].opts, { threads: 2, queueMax: 7, timeoutMs: 1234, renderTimeoutMs: 5678, workerUrl: GIF_THREAD_URL });
     const route = s.handler.router.routes.find((r) => r.path === '/api/v1/gif');
     assert.equal(route.opts.timeoutMs, 1234 + 5678 + 5000, 'the handler waits for the queue and the render');
     await s.close();
     assert.equal(s.fp.pools[0].closed, true);
     assert.equal(tagText('Ünïcödé ✓  name'), 'Unicode ? name');
+});
+
+/** The nice value of each thread of this process (Linux), by thread id. */
+function threadNices() {
+    const out = new Map();
+    for (const tid of fs.readdirSync('/proc/self/task')) {
+        try {
+            const st = fs.readFileSync(`/proc/self/task/${tid}/stat`, 'utf8');
+            out.set(Number(tid), Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[16]));
+        } catch { /* the thread ended */ }
+    }
+    return out;
+}
+
+test('the rendering thread runs at the lowest priority on Linux; the rest of the process keeps its own', { skip: process.platform !== 'linux' }, async (t) => {
+    assert.equal(GIF_THREAD_NICE, 19);
+    const before = threadNices();
+    // This file imported the thread module: the main thread still has the nice value of the threads
+    // that Node started with it (whatever the test runner's own priority).
+    for (const [tid, nice] of before) assert.equal(nice, os.getPriority(), `thread ${tid} at the process's priority`);
+    const pool = createGifPool({ threads: 1, workerUrl: GIF_THREAD_URL });
+    t.after(() => pool.close());
+    const gifBytes = await pool.render({ moves: [], options: { size: 'small' } });
+    assert.equal(gifBytes.subarray(0, 6).toString(), 'GIF89a', 'the thread renders');
+    const after = threadNices();
+    const started = [...after].filter(([tid]) => !before.has(tid));
+    assert.deepEqual(started.filter(([, nice]) => nice === GIF_THREAD_NICE).length, 1, 'one rendering thread at nice 19');
+    assert.equal(after.get(process.pid), before.get(process.pid), 'the event loop keeps its priority');
+    for (const [tid, nice] of after) if (before.has(tid)) assert.equal(nice, before.get(tid), `thread ${tid} unchanged`);
 });
 
 function applyGame(white, black, score) {

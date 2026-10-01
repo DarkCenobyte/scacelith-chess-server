@@ -25,8 +25,10 @@
 // Cost and quotas (abuse design 3.6). Rendering never runs on the event loop: the job goes to a
 // worker thread of src/gif/pool.js (GIF_THREADS per worker process, created on the first render,
 // stopped after a minute without work, closed with the API handler at shutdown; GIF_QUEUE_MAX
-// jobs may wait GIF_QUEUE_TIMEOUT_MS for a thread). The only work done on the event loop is the
-// game record's read or the PGN's (GIF_MAX_PLIES moves at most), a hash of the job and the cache.
+// jobs may wait GIF_QUEUE_TIMEOUT_MS for a thread). The threads run at the lowest scheduling
+// priority on Linux (routes/gif-thread.js), so a render only takes the CPU the games leave. The
+// only work done on the event loop is the game record's read or the PGN's (GIF_MAX_PLIES moves at
+// most), a hash of the job and the cache.
 //  * Request level, every call: the account's budget (USER_RATE_PER_MIN, server.js) and the
 //    route's `gif` limit, 30 per minute per account (both routes together).
 //  * Render level, only when the GIF is not in the cache, through ctx.takeRates: per account
@@ -50,6 +52,9 @@ import { endReasonText, readPgn, PgnError } from '../../chess/index.js';
 import { normalizeResult } from '../../chess/pgn.js';
 import { enums } from '../../protocol/schema.js';
 import { metrics } from '../../metrics.js';
+
+/** The thread module of the pool: src/gif/worker.js at the lowest priority (routes/gif-thread.js). */
+export const GIF_THREAD_URL = new URL('./gif-thread.js', import.meta.url);
 
 /** The largest PGN text POST /gif takes, in bytes of UTF-8. */
 export const GIF_PGN_MAX_BYTES = 65536;
@@ -123,7 +128,7 @@ export function createGifService({ config, createPool = createGifPool }) {
         if (!pool) {
             pool = createPool({
                 threads: config.gifThreads, queueMax: config.gifQueueMax, timeoutMs: config.gifQueueTimeoutMs,
-                renderTimeoutMs: config.gifRenderTimeoutMs,
+                renderTimeoutMs: config.gifRenderTimeoutMs, workerUrl: GIF_THREAD_URL,
             });
         }
         return pool;
