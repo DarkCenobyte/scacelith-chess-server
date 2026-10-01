@@ -172,6 +172,9 @@ function lzw(out, pixels, minCodeSize, runSymbol) {
             run = k === runSymbol ? 1 : 0;
         }
         emit(prefix);
+        // A decoder adds a table entry for this last code too, and widens its codes when that
+        // fills the table to 2 ** codeSize: the end code must take that width (as giflib does).
+        if (next === (1 << codeSize) && codeSize < 12) codeSize++;
     }
     emit(eoi);
     if (nbits > 0) {
