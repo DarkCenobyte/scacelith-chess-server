@@ -33,7 +33,9 @@ export async function startReal(t, env = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-realauth-'));
     const file = path.join(dir, 'scacelith.db');
     const config = testConfig({ DB_PATH: file, AUTH_RATE_PER_IP: '10000', HTTP_RATE_PER_IP: '100000', REQUIRE_EMAIL_VERIFICATION: '1',
-        SERVER_PUBLIC_HOST: 'chess.example.org', API_PORT: '8443', ...env });
+        SERVER_PUBLIC_HOST: 'chess.example.org', API_PORT: '8443', AUTH_REGISTER_PER_HOUR: '10000', AUTH_MAIL_PER_HOUR: '10000',
+        AUTH_FORGOT_PER_HOUR: '10000', AUTH_FORGOT_PER_DAY: '10000', AUTH_RESET_PER_HOUR: '10000', AUTH_MFA_PER_ACCOUNT: '10000',
+        AUTH_REAUTH_PER_USER: '10000', USER_RATE_PER_MIN: '100000', ...env });
     const store = openStore(config, { applyGame });
     await migrate(store);
     const now = createClock(Date.now());

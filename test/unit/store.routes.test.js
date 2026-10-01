@@ -50,13 +50,15 @@ function game(white, black, extra = {}) {
     };
 }
 
-test('registers the five public routes; the game routes take an optional session', () => {
+test('registers the five public routes; all but the leaderboard take an optional session', () => {
     const { router } = setup();
     assert.deepEqual(router.routes.map((r) => `${r.method} ${r.path} ${r.opts.auth}`), [
-        'GET /api/v1/players/:username none', 'GET /api/v1/players/:username/games none', 'GET /api/v1/games/:id optional',
+        'GET /api/v1/players/:username optional', 'GET /api/v1/players/:username/games optional', 'GET /api/v1/games/:id optional',
         'GET /api/v1/games/:id/pgn optional', 'GET /api/v1/leaderboard none']);
-    const rates = router.routes.filter((r) => r.opts.rate).map((r) => r.opts.rate.key);
-    assert.deepEqual(rates, ['public_read', 'public_read', 'public_read'], 'the game lists, the record and its PGN share one limit');
+    const rates = router.routes.filter((r) => r.opts.rate).map((r) => r.opts.rate);
+    assert.deepEqual(rates.map((r) => r.key), ['public_read', 'public_read', 'public_read', 'public_read'],
+        'the profile, the game lists, the record and its PGN share one limit');
+    assert.ok(rates.every((r) => r.by === 'user'), 'per account when signed in (per client otherwise)');
     const other = fakeRouter();
     register(other, { store: {}, config: testConfig(), prefix: '' });
     assert.equal(other.routes[0].path, '/players/:username');

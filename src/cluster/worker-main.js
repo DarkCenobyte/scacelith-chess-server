@@ -2,7 +2,8 @@
 // GameHost (its journal is replayed with recover() before anything listens; its finished games
 // are committed by a store writer thread, src/store/writer.js), the HTTPS API
 // handler, then the shard itself (bus, router, WebSocket server, listeners). Stops gracefully on
-// the primary's 'shutdown' message or SIGTERM, and at once if the primary disappears.
+// the primary's 'shutdown' message or SIGTERM, and at once if the primary disappears; a graceful
+// stop also closes the API handler (its GIF rendering threads) before the journal and the store.
 
 import cluster from 'node:cluster';
 import { createAnticheat } from '../anticheat/index.js';
@@ -54,6 +55,7 @@ export async function main() {
     const s = await startShard({
         config, shard, serverId, primary, host, auth, anticheat, store, apiHandler, bus, log,
         onStopped: async () => {
+            await apiHandler.close();   // the GIF rendering threads (src/http/routes/gif.js)
             try { await journal.flush?.(); await journal.close?.(); } catch (e) { log.error('journal close failed', { err: e }); }
             anticheat.close();   // its buffered anomalies reach the writer before its close
             try { await writer.close(); } catch (e) { log.error('store writer close failed', { err: e }); }

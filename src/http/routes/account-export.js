@@ -8,8 +8,10 @@
 // the password, plus an authenticator code or a recovery code when two-step verification is on):
 // 403 invalid_password | mfa_code_required | invalid_code, 400 password_not_set (Google-only
 // account), 429 too_many_attempts, 503 server_busy / 429 rate_limited (password hash queue).
-// Rate: account_export (5 per hour per player, taken first) and the shared reauth limit. An
-// account_exported security event is recorded.
+// Rate: account_export (5 per hour per player, shared: an export is heavy; taken first), then the
+// limits of every re-authentication (routes/account.js reauthRatesOf: reauth per address, shared,
+// and reauth_user, AUTH_REAUTH_PER_USER per 10 minutes per player). An account_exported security
+// event is recorded.
 //
 // The document (EXPORT_FORMAT, version 1; times are epoch milliseconds):
 //   { format, version, exportedAt, server: { name, host }, notes: [plain English],
@@ -35,6 +37,7 @@
 // any other kind). The `notes` of the document say so to the player.
 
 import { historySummary } from './account-games.js';
+import { reauthRatesOf } from './account.js';
 
 export const EXPORT_FORMAT = 'scacelith-account-export';
 export const EXPORT_VERSION = 1;
@@ -179,8 +182,7 @@ const CODE = { type: 'string', min: 1, max: 32 };
  * @param {{ config: object, store: object, auth: object, log?: object, now?: () => number }} deps
  */
 export function register(router, { config, store, auth, log, now = Date.now }) {
-    const exportRate = { key: 'account_export', limit: 5, windowMs: 3600000, by: 'user' };
-    const reauthRate = { key: 'reauth', limit: config.authRatePerIp, prefixLimit: config.authRatePerPrefix, windowMs: 600000, shared: true };
+    const exportRate = { key: 'account_export', limit: 5, windowMs: 3600000, by: 'user', shared: true };
 
     router.post('/account/export', async (ctx) => {
         let doc;
@@ -196,7 +198,7 @@ export function register(router, { config, store, auth, log, now = Date.now }) {
         }
         return { body: doc, headers: { 'Content-Disposition': `attachment; filename="${exportFileName(doc.account.username)}"` } };
     }, {
-        auth: 'required', rate: [exportRate, reauthRate], timeoutMs: 60000,
+        auth: 'required', rate: [exportRate, ...reauthRatesOf(config)], timeoutMs: 60000,
         body: { password: PASSWORD, code: { ...CODE, optional: true }, recoveryCode: { ...CODE, optional: true } },
     });
 }

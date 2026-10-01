@@ -9,16 +9,21 @@
 //                | sso_cancelled, 410 sso_expired, 502 sso_failed
 //   POST /auth/sso/complete { ssoTicket, username, clientLabel? } -> { token, expiresAt, user }
 //   GET  /auth/sso/google/callback?code&state (HTML page, no token shown)
+//
+// Limits: start 30 per 10 minutes per address and 90 per IPv6 /48 (sso_start, shared; it writes
+// two token rows); complete takes the `auth` limit of routes/auth.js (the same bucket, its /48
+// included); poll 120 and the callback page 30 per minute per address (local).
 
 import { ssoResult } from '../pages/sso-callback.js';
+import { authRateOf } from './auth.js';
 
 /**
  * @param {import('../router.js').Router} router
  * @param {{ config: object, auth: object }} deps
  */
 export function register(router, { config, auth }) {
-    const authRate = { key: 'auth', limit: config.authRatePerIp, windowMs: 600000, shared: true };
-    const startRate = { key: 'sso_start', limit: 30, windowMs: 600000, shared: true };
+    const authRate = authRateOf(config);
+    const startRate = { key: 'sso_start', limit: 30, prefixLimit: 90, windowMs: 600000, shared: true };
     const pollRate = { key: 'sso_poll', limit: 120, windowMs: 60000 };
     const pageRate = { key: 'sso_page', limit: 30, windowMs: 60000 };
     const label = { type: 'string', max: 64, optional: true };

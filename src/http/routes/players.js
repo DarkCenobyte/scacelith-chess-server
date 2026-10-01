@@ -9,12 +9,14 @@
 //   GET /api/v1/games/:id/pgn                the same game as a PGN file (application/x-chess-pgn)
 //   GET /api/v1/leaderboard?category=3+2     top established players of an official category
 //
-// The two game routes take an optional session (auth 'optional'; a token that is sent must be
-// valid). When the session's player played the game, GET /games/:id adds `you` ('white' |
-// 'black') and `reportable` (whether POST /reports would take a report of the opponent for this
-// game now: anticheat/reports.js canReport, the route's own rules); every other answer is the
-// public one, unchanged. The two game routes and /players/:username/games share the 'public_read'
-// limit (60 requests per minute per client, all three together).
+// Every route but the leaderboard takes an optional session (auth 'optional'; a token that is
+// sent must be valid). When the session's player played the game, GET /games/:id adds `you`
+// ('white' | 'black') and `reportable` (whether POST /reports would take a report of the opponent
+// for this game now: anticheat/reports.js canReport, the route's own rules); every other answer
+// is the public one, unchanged. The game routes and the two player routes share the
+// 'public_read' limit: 60 requests per minute, all four together, per account when the request
+// carries a session, else per client (an IPv4 address or an IPv6 /64). The leaderboard has no
+// limit of its own (cached 10 s per category).
 //
 // The PGN (gamePgn): the game replayed with the server's chess module (ChessGame.fromMoves, SAN),
 // tags in this order: Event (as the JSON's pgn.Event), Site (SERVER_PUBLIC_HOST), Date (UTC start),
@@ -212,7 +214,7 @@ export function register(router, { store, config, log, prefix = '/api/v1', now =
     const categories = config.categories.map((c) => c.id);
     const provisionalGames = config.provisionalGames;
     const order = new Map(categories.map((c, i) => [c, i]));
-    const rate = { key: 'public_read', limit: 60, windowMs: 60000 };
+    const rate = { key: 'public_read', limit: 60, windowMs: 60000, by: 'user' };
     const boardCache = new Map();
 
     function findPlayer(ctx) {
@@ -387,8 +389,8 @@ export function register(router, { store, config, log, prefix = '/api/v1', now =
         }
     };
 
-    router.get(`${prefix}/players/:username`, wrap('profile', profile), { auth: 'none' });
-    router.get(`${prefix}/players/:username/games`, wrap('games', gamesOf), { auth: 'none', rate });
+    router.get(`${prefix}/players/:username`, wrap('profile', profile), { auth: 'optional', rate });
+    router.get(`${prefix}/players/:username/games`, wrap('games', gamesOf), { auth: 'optional', rate });
     router.get(`${prefix}/games/:id`, wrap('game', game), { auth: 'optional', rate });
     router.get(`${prefix}/games/:id/pgn`, wrap('pgn', gamePgnFile), { auth: 'optional', rate });
     router.get(`${prefix}/leaderboard`, wrap('leaderboard', leaderboard), { auth: 'none' });

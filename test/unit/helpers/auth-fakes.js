@@ -258,6 +258,10 @@ export function linkIn(text) {
 
 export const TEST_DEFAULTS = Object.freeze({
     AUTH_RATE_PER_IP: '10000', HTTP_RATE_PER_IP: '100000', AUTH_FAILURES_PER_ACCOUNT: '5',
+    // The per-address and per-account limits of the auth family (abuse design 3.5) and the
+    // account budget: high, so that only the tests of those limits meet them.
+    AUTH_REGISTER_PER_HOUR: '10000', AUTH_MAIL_PER_HOUR: '10000', AUTH_FORGOT_PER_HOUR: '10000', AUTH_FORGOT_PER_DAY: '10000',
+    AUTH_RESET_PER_HOUR: '10000', AUTH_MFA_PER_ACCOUNT: '10000', AUTH_REAUTH_PER_USER: '10000', USER_RATE_PER_MIN: '100000',
     REQUIRE_EMAIL_VERIFICATION: '1', SERVER_PUBLIC_HOST: 'chess.example.org', API_PORT: '8443',
 });
 
