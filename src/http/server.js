@@ -4,9 +4,11 @@
 //   const handle = createApiHandler({ config, store, auth, primary, anticheat, log, routes });
 //   server.on('request', handle);
 //
-// Pipeline of a request: security headers -> URL checks -> /healthz, /readyz -> global per-IP
-// token bucket (HTTP_RATE_PER_IP / min) -> route match (404, 405 + Allow, OPTIONS -> 204 + Allow,
-// HEAD = GET without body) -> authentication (Authorization: Bearer sct_...) -> route rate limits
+// Pipeline of a request: protection per address (net/ipguard.js, applied by the listener's
+// wrapApiHandler before anything else, health checks included, or here first when the handler is
+// used alone with a `guard`: block, HTTP_RATE_PER_IP / HTTP_RATE_PER_PREFIX budget, IP_MAX_INFLIGHT
+// requests in progress; 429 rate_limited) -> security headers -> URL checks -> /healthz, /readyz ->
+// route match (404, 405 + Allow, OPTIONS -> 204 + Allow, HEAD = GET without body) -> authentication (Authorization: Bearer sct_...) -> route rate limits
 // (local token bucket, then the primary's `ratelimit.take` for `shared` limits; the password
 // endpoints also limit each IPv6 /48 as a whole, see checkRates; a request refused because its
 // client already has too many password hashes waiting gets these tokens back) -> body (JSON only
@@ -34,6 +36,7 @@ import { PAGE_CSP, renderMessage } from './pages/layout.js';
 import { TokenBucketLimiter, ipKey, normalizeIp, prefixKey } from '../security/ratelimit.js';
 import { ipForLog } from '../log.js';
 import { metrics } from '../metrics.js';
+import { admitRequest } from '../net/listeners.js';
 import * as infoRoutes from './routes/info.js';
 import * as authRoutes from './routes/auth.js';
 import * as accountRoutes from './routes/account.js';
@@ -132,11 +135,12 @@ function parseQuery(search) {
  * @param {{ config: object, store: object, auth: object, primary?: { request(type: string, payload: object): Promise<object> }|null,
  *           anticheat?: object|null, log: object, routes?: Array<{ register: Function }|Function>,
  *           now?: () => number, ready?: () => boolean, bodyTimeoutMs?: number, handlerTimeoutMs?: number,
- *           deps?: object }} opts `deps` adds fields to what route modules receive.
+ *           deps?: object, guard?: import('../net/ipguard.js').IpGuard|null }} opts `deps` adds fields to what route
+ *           modules receive; `guard`: the shard's protection per address (the same one the listeners use).
  * @returns {((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>) & { router: Router }}
  */
 export function createApiHandler({ config, store, auth, primary = null, anticheat = null, log, routes = DEFAULT_ROUTES,
-    now = Date.now, ready = () => true, bodyTimeoutMs = 10000, handlerTimeoutMs = 30000, deps: extraDeps = {} }) {
+    now = Date.now, ready = () => true, bodyTimeoutMs = 10000, handlerTimeoutMs = 30000, deps: extraDeps = {}, guard = null }) {
     const router = new Router();
     const deps = { config, store, auth, primary, anticheat, log, now, ...extraDeps };
     for (const r of routes) {
@@ -147,6 +151,9 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
     const limiter = new TokenBucketLimiter({ now });
     const labelCache = new Map();
     const hsts = config.tlsMode === 'native';
+    // Requests that did not come through the listener's wrapApiHandler (a handler used alone) meet
+    // the protection per address here first; admitRequest runs once per request either way.
+    const admission = { native: hsts, closeOnBlock: config.tlsMode !== 'proxy' };
     let primaryWarnAt = 0;
 
     function setBaseHeaders(res) {
@@ -299,6 +306,7 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
     }
 
     async function handle(req, res) {
+        if (guard !== null && !admitRequest(guard, req, res, admission)) return;
         const started = performance.now();
         let label = 'unmatched';
         let page = false;
@@ -327,9 +335,6 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
                 else send(req, res, 503, { body: { error: 'not_ready', message: 'The server is starting or stopping.' } });
                 return;
             }
-
-            const global = limiter.take(`api:${ipKey(ip)}`, config.httpRatePerIp, 60000, 1);
-            if (!global.allowed) throw rateLimited(global.retryAfterMs, 'api');
 
             const found = router.match(method, pathname);
             if (!found) throw jsonError(404, 'not_found', 'No such endpoint.');

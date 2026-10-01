@@ -1,7 +1,8 @@
 // Shard worker bootstrap (cluster worker, env SHARD=<n>): store, journal, anti-cheat, auth, the
 // GameHost (its journal is replayed with recover() before anything listens; its finished games
-// are committed by a store writer thread, src/store/writer.js), the HTTPS API
-// handler, then the shard itself (bus, router, WebSocket server, listeners). Stops gracefully on
+// are committed by a store writer thread, src/store/writer.js), the protection per address
+// (net/ipguard.js, shared by the API handler and the listeners), the HTTPS API handler, then the
+// shard itself (bus, router, WebSocket server, listeners). Stops gracefully on
 // the primary's 'shutdown' message or SIGTERM, and at once if the primary disappears.
 
 import cluster from 'node:cluster';
@@ -17,7 +18,7 @@ import { openStore } from '../store/index.js';
 import { openJournal } from '../store/journal.js';
 import { startStoreWriter } from '../store/writer.js';
 import { Ipc } from './ipc.js';
-import { createBus, startShard } from './shard.js';
+import { createBus, createShardGuard, startShard } from './shard.js';
 
 /** Starts this worker's shard. */
 export async function main() {
@@ -49,10 +50,11 @@ export async function main() {
     // ('game.recovered'), which gives it back to the players as their activeGame.
     const recovered = await host.recover();
     log.info('journal replayed', { games: recovered });
-    const apiHandler = createApiHandler({ config, store, auth, primary, anticheat, log: logger.child('http') });
+    const guard = createShardGuard({ config, primary, log: log.child('guard') });
+    const apiHandler = createApiHandler({ config, store, auth, primary, anticheat, log: logger.child('http'), guard });
 
     const s = await startShard({
-        config, shard, serverId, primary, host, auth, anticheat, store, apiHandler, bus, log,
+        config, shard, serverId, primary, host, auth, anticheat, store, apiHandler, bus, log, guard,
         onStopped: async () => {
             try { await journal.flush?.(); await journal.close?.(); } catch (e) { log.error('journal close failed', { err: e }); }
             anticheat.close();   // its buffered anomalies reach the writer before its close
