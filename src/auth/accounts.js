@@ -26,10 +26,14 @@
 //    changes, emailVerified becomes true, the cached sessions are dropped on every shard (the
 //    other sessions stay signed in: the password did not change), the links sent to the former
 //    address (email_verify, password_reset, other email_change tokens) stop working, an
-//    email_changed security event is recorded and the former address gets emailChanged.
+//    email_changed security event is recorded and the former address gets emailChanged. The use
+//    of the link, the new address and the end of the former address's links are one transaction
+//    (a busy store: 503 server_busy, nothing changed, the link still works); a password reset
+//    link also has to match the account's current address when it is used, so one that another
+//    shard stored for the former address while the change committed does not work either.
 //  * Without REQUIRE_EMAIL_VERIFICATION: the change happens at once, 200 { status:
 //    'email_changed', email }, or 409 email_taken (the deviation of register, below; the owner
-//    still gets the notice), and the former address is still told.
+//    still gets the notice), and the former address is still told (the same transaction).
 //  * A password change or reset cancels a pending e-mail change (whoever requested it knew the
 //    password the owner just replaced).
 //
@@ -47,7 +51,7 @@
 //  * A password reset also marks the e-mail address as confirmed (the link proved it).
 
 import crypto from 'node:crypto';
-import { AuthError, tooManyAttempts } from './errors.js';
+import { AuthError, serverBusy, tooManyAttempts } from './errors.js';
 import { LINK_TOKEN_RE, TOKEN_TTL_MS, dataOf, isLive } from './tokens.js';
 import { checkUsername, isValidEmail, maskEmail, normalizeEmail } from './identity.js';
 import { checkPasswordPolicy } from '../security/password.js';
@@ -139,11 +143,35 @@ export function createAccounts(svc) {
         return sameAnswer;
     }
 
-    /** A live token row of `kind` for a link token, or null (does not consume it). */
+    /**
+     * A live token row of `kind` for a link token, or null (does not consume it). A password reset
+     * link also needs the account to have the address it was mailed to (sentToCurrentAddress).
+     */
     function peekToken(kind, token) {
         if (typeof token !== 'string' || !LINK_TOKEN_RE.test(token)) return null;
         const row = store.tokens.get(kind, sha256Hex(token));
-        return isLive(row, now()) ? row : null;
+        if (!isLive(row, now())) return null;
+        return kind !== 'password_reset' || sentToCurrentAddress(row) ? row : null;
+    }
+
+    // Whether the account of a link token (data { email }) is active and still has the address the
+    // link was mailed to. A link of a former address is refused even when the purge of those links
+    // missed it (a request on another shard that read the account just before the change).
+    function sentToCurrentAddress(row) {
+        const user = store.users.byId(row.userId);
+        return !!user && user.status === 'active' && normalizeEmail(user.email) === normalizeEmail(dataOf(row).email);
+    }
+
+    // svc.atomically; a busy store (another process held the write lock past the busy timeout, so
+    // the transaction did not start or was rolled back) is answered 503 server_busy: nothing
+    // changed, and the same request or link can be sent again.
+    function atomicallyOrBusy(fn) {
+        try {
+            return svc.atomically(fn);
+        } catch (err) {
+            if (err && err.code === 'busy' && !err.expose) throw serverBusy(1);
+            throw err;
+        }
     }
 
     /** POST /verify-email: consumes the token and confirms the address. */
@@ -191,6 +219,8 @@ export function createAccounts(svc) {
 
     /**
      * POST /auth/password/reset (and the HTML form). Revokes every session; never touches MFA.
+     * The link works only while the account has the address it was mailed to (a change of
+     * address ends the links of the former one).
      */
     async function resetPassword({ token, newPassword, ip }) {
         const row = peekToken('password_reset', token);
@@ -200,10 +230,17 @@ export function createAccounts(svc) {
         const policy = checkPasswordPolicy(newPassword, { minLength: config.passwordMinLength, username: user.username, email: user.email });
         if (policy) throw weak(policy);
         const passwordHash = await hasher.hash(newPassword, svc.hashBudget(ip).next());
-        if (!store.tokens.consume('password_reset', sha256Hex(token), now())) throw invalidResetToken();
-        store.users.update(user.id, { passwordHash, emailVerified: true });
+        // One transaction: no change of address can land between the check of the link's address
+        // and the new password, and the pending e-mail change goes with the old password.
+        const done = atomicallyOrBusy(() => {
+            const used = store.tokens.consume('password_reset', sha256Hex(token), now());
+            if (!used || !sentToCurrentAddress(used)) return false;
+            store.users.update(user.id, { passwordHash, emailVerified: true });
+            cancelEmailChange(user.id);
+            return true;
+        });
+        if (!done) throw invalidResetToken();
         sessions.revokeAll(user.id);
-        cancelEmailChange(user.id);
         events.record('password_reset', { userId: user.id, ip });
         svc.mail('passwordChanged', user.email, { username: user.username, when: new Date(now()), byReset: true });
         return { status: 'password_reset' };
@@ -360,12 +397,17 @@ export function createAccounts(svc) {
         return new AuthError(409, 'email_taken', 'An account already uses this e-mail address.');
     }
 
-    // After the address of `user` changed from `from` to `email`: the links sent to the former
-    // address stop working, the cached sessions are read again, the former address is told.
-    function emailChanged(user, from, email, ip) {
+    // The links sent to the former address stop working: run in the transaction that changes the
+    // address, so that the change never commits without it.
+    function dropAddressLinks(userId) {
         for (const kind of ['email_change', 'password_reset', 'email_verify']) {
-            if (typeof store.tokens.deleteForUser === 'function') store.tokens.deleteForUser(user.id, kind);
+            if (typeof store.tokens.deleteForUser === 'function') store.tokens.deleteForUser(userId, kind);
         }
+    }
+
+    // Once the address of `user` changed from `from` to `email` (committed): the cached sessions are
+    // read again, the change is recorded, the former address is told.
+    function emailChanged(user, from, email, ip) {
         sessions.refresh(user.id);
         events.record('email_changed', { userId: user.id, ip });
         if (from) svc.mail('emailChanged', from, { username: user.username, maskedEmail: maskEmail(email), when: new Date(now()) });
@@ -394,7 +436,10 @@ export function createAccounts(svc) {
                 throw emailTaken();
             }
             try {
-                store.users.update(user.id, { email: em, emailVerified: true });
+                atomicallyOrBusy(() => {
+                    store.users.update(user.id, { email: em, emailVerified: true });
+                    dropAddressLinks(user.id);
+                });
             } catch (err) {
                 if (err && err.code === 'email_taken') {
                     const o = store.users.byEmail(em);
@@ -410,7 +455,7 @@ export function createAccounts(svc) {
         // The same work and the same answer whether or not the address is free.
         const fresh = await once(mailKey('emailchange', em), NOTICE_THROTTLE_MS);
         const token = randomToken('', 32);
-        svc.atomically(() => {
+        atomicallyOrBusy(() => {
             cancelEmailChange(user.id);
             store.tokens.create({
                 kind: 'email_change', tokenHash: sha256Hex(token), userId: user.id, data: { email: em, from },
@@ -446,28 +491,36 @@ export function createAccounts(svc) {
     function confirmEmailChange(token, ip = null) {
         const invalid = { status: 'invalid' };
         if (typeof token !== 'string' || !LINK_TOKEN_RE.test(token)) return invalid;
-        const row = store.tokens.consume('email_change', sha256Hex(token), now());
-        if (!row || (row.expiresAt != null && row.expiresAt <= now())) return invalid;
-        const data = dataOf(row);
-        const em = normalizeEmail(data.email);
-        const user = store.users.byId(row.userId);
-        if (!user || user.status !== 'active' || !isValidEmail(em)) return invalid;
-        // The account's address changed since the request (another change, a moderator): stale.
-        if (normalizeEmail(user.email) !== normalizeEmail(data.from)) return invalid;
-        const refused = () => {
-            events.record('email_change_refused', { userId: user.id, ip, detail: { reason: 'email_taken' } });
+        // One transaction: the link is used up, the address changes and the links of the former
+        // address are dropped together, or nothing happens (a busy store: 503, the link still works).
+        const r = atomicallyOrBusy(() => {
+            const row = store.tokens.consume('email_change', sha256Hex(token), now());
+            if (!row || (row.expiresAt != null && row.expiresAt <= now())) return invalid;
+            const data = dataOf(row);
+            const em = normalizeEmail(data.email);
+            const user = store.users.byId(row.userId);
+            if (!user || user.status !== 'active' || !isValidEmail(em)) return invalid;
+            // The account's address changed since the request (another change, a moderator): stale.
+            if (normalizeEmail(user.email) !== normalizeEmail(data.from)) return invalid;
+            const holder = store.users.byEmail(em);
+            if (holder && holder.id !== user.id) return { status: 'taken', user };
+            try {
+                store.users.update(user.id, { email: em, emailVerified: true });
+            } catch (err) {
+                // The UNIQUE index refused it: the link stays used up (the transaction commits).
+                if (err && err.code === 'email_taken') return { status: 'taken', user };
+                throw err;
+            }
+            dropAddressLinks(user.id);
+            return { status: 'changed', email: em, user };
+        });
+        if (r.status === 'taken') {
+            events.record('email_change_refused', { userId: r.user.id, ip, detail: { reason: 'email_taken' } });
             return { status: 'taken' };
-        };
-        const holder = store.users.byEmail(em);
-        if (holder && holder.id !== user.id) return refused();
-        try {
-            store.users.update(user.id, { email: em, emailVerified: true });
-        } catch (err) {
-            if (err && err.code === 'email_taken') return refused();
-            throw err;
         }
-        emailChanged(user, user.email, em, ip);
-        return { status: 'changed', email: em };
+        if (r.status !== 'changed') return invalid;
+        emailChanged(r.user, r.user.email, r.email, ip);
+        return { status: 'changed', email: r.email };
     }
 
     /**
