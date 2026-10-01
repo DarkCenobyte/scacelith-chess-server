@@ -15,11 +15,13 @@
 //    account uses the address. An `email_change` token (24 h, single use, data { email, from })
 //    replaces the user's pending change either way, so that GET /account/me shows the same
 //    pendingEmail; the new address gets the confirmation link (GET /confirm-email-change shows a
-//    button, POST applies), or, when it belongs to another account, its owner gets the
-//    registrationAttempt notice instead (at most one per hour per address; that throttle's
-//    `once.consume` runs in both cases). The current address is told that a change to the masked
-//    new address was requested (emailChangeRequested). The requester's security event is the same
-//    in both cases (email_change_requested); the owner's (email_change_existing_email) has no IP.
+//    button, POST applies; at most one link mail per address every 5 minutes: within that time a
+//    request keeps its pending change to the same address, whose link was mailed, and mails none),
+//    or, when it belongs to another account, its owner gets the registrationAttempt notice
+//    instead (at most one per hour per address; both throttles' `once.consume` run in both
+//    cases). The current address is told that a change to the masked new address was requested
+//    (emailChangeRequested). The requester's security event is the same in both cases
+//    (email_change_requested); the owner's (email_change_existing_email) has no IP.
 //  * Confirmation (confirmEmailChange): the token is consumed; refused ('invalid') when the
 //    account's address is no longer the one of the request, refused ('taken') when another account
 //    took the new address meanwhile (the UNIQUE index decides, atomically); otherwise the address
@@ -475,8 +477,16 @@ export function createAccounts(svc) {
 
         // The same work and the same answer whether or not the address is free.
         const fresh = await once(mailKey('emailchange', em), NOTICE_THROTTLE_MS);
+        // One confirmation link per new address every 5 minutes, as for the other link mails (the
+        // address is anyone's: no flood of a stranger's inbox). Within that time the request keeps
+        // its pending change to that address, whose link was mailed already, and mails nothing.
+        const linkFresh = await once(mailKey('emailchange-link', em), MAIL_THROTTLE_MS);
         const token = randomToken('', 32);
         await withPassword(() => {
+            if (!linkFresh && typeof store.tokens.liveForUser === 'function') {
+                const live = dataOf(store.tokens.liveForUser(user.id, 'email_change', now()));
+                if (normalizeEmail(live.email) === em && normalizeEmail(live.from) === normalizeEmail(from)) return;
+            }
             cancelEmailChange(user.id);
             store.tokens.create({
                 kind: 'email_change', tokenHash: sha256Hex(token), userId: user.id, data: { email: em, from },
@@ -486,7 +496,7 @@ export function createAccounts(svc) {
         events.record('email_change_requested', { userId: user.id, ip });
         const hours = TOKEN_TTL_MS.email_change / 3600000;
         if (owner) notifyAddressClaimed(owner, fresh);
-        else svc.mail('emailChangeConfirm', em, { username: user.username, link: svc.links.emailChange(token), hours });
+        else if (linkFresh) svc.mail('emailChangeConfirm', em, { username: user.username, link: svc.links.emailChange(token), hours });
         if (from) svc.mail('emailChangeRequested', from, { username: user.username, maskedEmail: maskEmail(em), when: new Date(now()), hours });
         return { status: 202, body: { status: 'verification_sent' } };
     }

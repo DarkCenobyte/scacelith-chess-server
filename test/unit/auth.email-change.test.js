@@ -163,6 +163,41 @@ test('a taken address gets the same answer; its owner gets the throttled notice,
     assert.deepEqual(mails.map((m) => m.to), ['alice@example.com']);
 });
 
+test('one confirmation mail per new address every 5 minutes; the link already mailed keeps working', async (t) => {
+    const { s, u, token } = await setup();
+    t.after(s.close);
+    await s.createUser({ username: 'bob', email: 'bob@example.com', password: PW });
+    const bobToken = (await s.login('bob', PW)).token;
+    let from = s.mailer.sent.length;
+    for (let i = 0; i < 10; i++) {
+        const r = await s.request('POST', EMAIL, { token, body: { newEmail: 'victim@example.net', password: PW } });
+        assert.deepEqual([r.status, r.json], [202, { status: 'verification_sent' }]);
+        s.now.advance(1000);
+    }
+    // Another player asking for the same address within the 5 minutes: the same answer, no mail.
+    const rb = await s.request('POST', EMAIL, { token: bobToken, body: { newEmail: 'victim@example.net', password: PW } });
+    assert.deepEqual([rb.status, rb.json], [202, { status: 'verification_sent' }]);
+    assert.equal((await me(s, bobToken)).pendingEmail, 'victim@example.net');
+    let mails = await mailsSince(s, from);
+    const links = mails.filter((m) => m.to === 'victim@example.net');
+    assert.equal(links.length, 1, 'one confirmation mail for 11 requests');
+    assert.equal(mails.filter((m) => m.to === 'alice@example.com').length, 10, 'the requester is still told each time');
+    assert.equal((await me(s, token)).pendingEmail, 'victim@example.net');
+    const first = linkToken(links[0]);
+    assert.equal((await page(s, first)).status, 200, 'the link mailed first still works');
+
+    // 5 minutes later, a request mails a new link, which replaces the first one.
+    s.now.advance(5 * 60000);
+    from = s.mailer.sent.length;
+    await s.request('POST', EMAIL, { token, body: { newEmail: 'victim@example.net', password: PW } });
+    mails = await mailsSince(s, from);
+    assert.equal(mails.filter((m) => m.to === 'victim@example.net').length, 1);
+    const second = linkToken(mails.find((m) => m.to === 'victim@example.net'));
+    assert.equal((await confirm(s, first)).status, 400);
+    assert.equal((await confirm(s, second)).status, 200);
+    assert.equal(s.store.users.byId(u.id).email, 'victim@example.net');
+});
+
 test('invalid and same address are refused before the password is checked', async (t) => {
     const { s, token } = await setup();
     t.after(s.close);
@@ -283,6 +318,7 @@ test('a new password cancels a pending change; a change ends the links sent to t
     from = s.mailer.sent.length;
     await s.request('POST', '/api/v1/auth/password/forgot', { body: { email: 'alice@example.com' } });
     const reset = new URL(linkIn((await mailsSince(s, from))[0].text)).searchParams.get('token');
+    s.now.advance(5 * 60000);       // one confirmation mail per address every 5 minutes
     from = s.mailer.sent.length;
     await s.request('POST', EMAIL, { token, body: { newEmail: 'nora@example.org', password: NEW_PW } });
     const tk2 = linkToken((await mailsSince(s, from)).find((m) => m.to === 'nora@example.org'));
