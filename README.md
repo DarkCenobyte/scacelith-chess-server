@@ -10,6 +10,9 @@ community server, and players choose the server in the game's Options.
 - Official server: `caissa.scacelith.com`, TCP port `443` (HTTPS API and WSS on the same port).
 - Design and contracts: [docs/DESIGN.md](docs/DESIGN.md). Every setting: [docs/CONFIG.md](docs/CONFIG.md).
   Anti-cheat: [docs/ANTICHEAT.md](docs/ANTICHEAT.md).
+- HTTPS API, every endpoint with its answers, errors, rate limits and curl examples (sign-up and
+  sign-in, two-step verification, account, game history, PGN, data export, deletion):
+  [docs/API.md](docs/API.md). The realtime WebSocket protocol: [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - Sizing and hosting on a small VPS (capacity, memory, disk, restarts, settings): [docs/SIZING.md](docs/SIZING.md).
 
 ## Requirements

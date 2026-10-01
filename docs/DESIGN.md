@@ -59,8 +59,8 @@ API, and `SHARD_BASE` gives each instance its shard range (section 9).
 | `src/game/*` | game | GameRoom (authoritative game), clocks, lag compensation, disconnection policy, GameHost (rooms of a shard, timer wheel, journal hooks, persistence queue) |
 | `src/match/*` | match | Elo (per category), matchmaker, challenges/private codes/rematch, conduct cooldowns |
 | `src/net/*`, `src/cluster/*`, `bin/scacelith-server.js` | net | RFC 6455 server, TLS listeners, connections, heartbeat, backpressure, per-connection limits, primary/worker bootstrap, IPC, shard bus, presence, routing, metrics endpoint, graceful shutdown |
-| `src/store/*` (+ `migrations/*.sql`), `src/http/routes/players.js` | store | schema, migrations, Store API, game journal and crash recovery, retention jobs, public read API |
-| `src/http/server.js`, `src/http/router.js`, `src/http/routes/{auth,account,sso,info}.js`, `src/http/pages/*`, `src/auth/*`, `src/mail/*`, `src/security/*` | auth | HTTPS API, sessions, passwords, MFA, recovery, e-mail, SSO, rate limiting, proof of work |
+| `src/store/*` (+ `migrations/*.sql`), `src/http/routes/players.js`, `src/http/routes/account-games.js` | store | schema, migrations, Store API, game journal and crash recovery, retention jobs, public read API |
+| `src/http/server.js`, `src/http/router.js`, `src/http/routes/{auth,account,account-export,sso,info}.js`, `src/http/pages/*`, `src/auth/*`, `src/mail/*`, `src/security/*` | auth | HTTPS API, sessions, passwords, MFA, recovery, e-mail, SSO, rate limiting, proof of work |
 | `src/anticheat/*`, `src/http/routes/reports.js`, `bin/admin.js` | anticheat | anomaly classification, sanctions, engine analysis, suspicion levels, reports, admin CLI |
 | `test/unit/<module>.*.test.js` | each owner | unit tests of the module |
 | `test/integration/*` | tests | multiplayer scenarios against a real server |
@@ -672,10 +672,15 @@ closes the sockets it refuses with an RST, before any TLS work, and counts them 
 `createApiHandler({ config, store, auth, primary, anticheat, log }) -> (req, res)`, mounted by
 the net owner on the HTTPS server (and handling `upgrade` elsewhere). Router:
 ```js
-router.get(path, handler, { auth: 'none'|'optional'|'required', rate: { key, limit, windowMs } })
-router.post(path, handler, { auth, body: schemaObject, rate })   // JSON only, HTTP_BODY_LIMIT
-// handler(ctx) -> { status, body, headers } ; ctx = { req, ip, params, query, body, user, session, config, store, log, primary }
+router.get(path, handler, { auth: 'none'|'optional'|'required', rate: { key, limit, windowMs, shared?, by?: 'user' } | [rates] })
+router.post(path, handler, { auth, body: schemaObject, rate, timeoutMs? })   // JSON only, HTTP_BODY_LIMIT
+router.page(method, path, handler, opts)                                    // HTML page outside /api
+// handler(ctx) -> { status, body, headers } (JSON) | { status, html, headers } (page)
+//               | { status, text, contentType, headers } (a file: the PGN download)
+// ctx = { req, ip, params, query, body, user, session, config, store, log, primary }
 ```
+The complete reference of every endpoint, with its request, answers, errors, rate limits and curl
+examples, is [API.md](API.md); the table below is the contract summary.
 Path parameters use `:name`. JSON errors are `{ "error": "<snake_case_code>", "message": "...",
 "retryAfter"?: s }` (with a `Retry-After` header when `retryAfter` is set). An endpoint that
 hashes or checks a password may answer 503 `server_busy` when the worker's password hash queue
@@ -691,7 +696,7 @@ Endpoints (prefix `/api/v1`):
 | Method and path | Owner | Notes |
 |---|---|---|
 | `GET /info` | auth | `{ name, serverId, motd, protocol: {min, max, schema, subprotocol}, wsPort, wsPath: '/ws', registration, emailVerification, sso: { google }, mfa: true, pow: { register }, categories: [{id, baseSec, incSec}], limits }` |
-| `POST /auth/register` | auth | `{ username, email, password, pow? }` -> 202 `{ status: 'verification_sent' }` (same answer when the e-mail exists) |
+| `POST /auth/register` | auth | `{ username, email, password, pow? }` -> 202 `{ status: 'verification_sent' }` (same answer when the e-mail exists); without `REQUIRE_EMAIL_VERIFICATION`: 201 `{ status: 'ready' }`, or 409 `email_taken` |
 | `POST /auth/login` | auth | `{ login, password, clientLabel?, pow? }` -> `{ token, expiresAt, user }` or `{ mfaRequired: true, mfaToken }` |
 | `POST /auth/login/mfa` | auth | `{ mfaToken, code? , recoveryCode? }` (401 `invalid_mfa_token` once the step expired or was used, or when the password was reset or changed since the first step) |
 | `POST /auth/logout`, `POST /auth/logout-all` | auth | bearer |
@@ -702,20 +707,25 @@ Endpoints (prefix `/api/v1`):
 | `POST /auth/sso/google/start` | auth | `{ codeChallenge }` -> `{ attemptId, authUrl, pollMs, expiresIn }` |
 | `POST /auth/sso/google/poll` | auth | `{ attemptId, codeVerifier }` -> `{ status: 'pending' }` / login answer / `{ needsUsername, ssoTicket }` |
 | `POST /auth/sso/complete` | auth | `{ ssoTicket, username }` |
-| `GET /account/me` | auth | user, ratings, active sanctions, integrity level is NOT exposed |
+| `GET /account/me` | auth | `{ user, ratings, sanctions (active), ban }`; `user`: `{ id, username, email, emailVerified, mfaEnabled, googleLinked, hasPassword, acceptChallenges: 'all'\|'none', createdAt, lastLoginAt, pendingEmail }` (`pendingEmail`: the address of an e-mail change waiting for its link, or null; the login answers carry the same `user`); the integrity level is NOT exposed |
 | `POST /account/password` | auth | `{ currentPassword, newPassword }`: the current password only, never a second factor (by design, even with MFA on); revokes the other sessions |
 | `POST /account/mfa/totp/setup` | auth | `{ password }` -> `{ secret, uri, algorithm, digits, period }` (409 when MFA is already on) |
 | `POST /account/mfa/totp/enable` | auth | `{ code }`: a code of the secret from setup only, no password -> `{ status, recoveryCodes }` |
 | `POST /account/mfa/totp/disable`, `POST /account/delete` | auth | `{ password, code?, recoveryCode? }`: the password, plus a TOTP code or a recovery code when MFA is on (disable requires MFA on) |
 | `POST /account/mfa/recovery-codes` | auth | `{ password, code }`: the password and a TOTP code (a recovery code is refused) -> `{ recoveryCodes }` |
 | `PUT /account/preferences` | auth | `{ acceptChallenges: 'all'\|'none' }`: the session only, no re-authentication |
-| `GET /players/:username`, `GET /players/:username/games`, `GET /games/:id`, `GET /leaderboard?category=` | store | public data only |
+| `POST /account/email` | auth | `{ newEmail, password, code?, recoveryCode? }`, the re-authentication of delete. With `REQUIRE_EMAIL_VERIFICATION`: 202 `{ status: 'verification_sent' }`, the same answer and the same `pendingEmail` whether or not another account uses the address; a 24 h link to the new address (`/confirm-email-change`), a notice to the current one. Without it: 200 `{ status: 'email_changed', email }` or 409 `email_taken`. 400 `invalid_email` / `same_email` before the password check |
+| `POST /account/export` | auth | `{ password, code?, recoveryCode? }` -> 200 JSON attachment `scacelith-account-<username>.json` (`format: 'scacelith-account-export'`, version 1: account, ratings, refunds, sessions, security events, sanctions, conduct, reports filed, every game summary, notes); never a secret, token hash, anti-cheat data, report received or moderator identity. Rate `account_export` (5 per hour per player) then `reauth`; 60 s timeout |
+| `GET /account/games` | store | `?before=<id>&limit<=50&category=<id>\|custom&rated=true\|false&result=win\|loss\|draw` -> `{ games: [summary + baseMs, incMs, outcome], next, total }`, the player's own games newest first (`outcome` from the player's side; aborted games only without a result filter); rate `account_games` 60 per minute per player |
+| `GET /players/:username`, `GET /players/:username/games`, `GET /leaderboard?category=` | store | public data only |
+| `GET /games/:id`, `GET /games/:id/pgn` | store | public data, optional session: a player of the game also gets `you: 'white'\|'black'` and `reportable` (whether `POST /reports` would take a report of the opponent now). The PGN: `application/x-chess-pgn` attachment `scacelith-<id>.pgn`, standard tags plus `ScacelithGameId`, `[%clk]` / `[%emt]` per move. Both share the `public_read` limit with `/players/:username/games` |
 | `POST /reports` | anticheat | `{ gameId, reported, category: 'cheating'|'abuse'|'other', comment }` |
 | `GET /healthz`, `GET /readyz` | net | also on the metrics port |
 
 HTML pages outside `/api`: `GET/POST /verify-email?token=`, `GET/POST /reset-password?token=`,
-`GET /auth/sso/google/callback` (auth owner). GET only shows a confirmation button; the state
-change happens on POST (link scanners must not consume tokens).
+`GET/POST /confirm-email-change?token=` (POST: 200, 400 for an invalid link, 409 when another
+account took the address meanwhile), `GET /auth/sso/google/callback` (auth owner). GET only shows
+a confirmation button; the state change happens on POST (link scanners must not consume tokens).
 
 ## 6. Game policies
 
