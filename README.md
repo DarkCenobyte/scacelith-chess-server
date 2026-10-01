@@ -351,12 +351,14 @@ Signed-in players can download any game of the server as an animated GIF
 (`GET /api/v1/games/:id/gif`), and any game they have as PGN text (`POST /api/v1/gif`): a 2D
 board seen from above, one frame per move, with the players' names and ratings and the result
 ([docs/API.md](docs/API.md#get-gamesidgif)). The server draws them itself, with no external
-program, on a rendering thread of each worker process (`GIF_THREADS`, 1), so the games never wait
-for a GIF; it keeps the recent ones in memory (`GIF_CACHE_MB`, 32 per worker) and limits each
-account to 4 GIFs a minute and 30 an hour (`GIF_USER_RENDERS_*`), each address to 12 and 120
-(`GIF_IP_RENDERS_*`). A GIF takes from a few tens of milliseconds to about a second of one core,
-and a rendering thread up to about 120 MiB while it lives ([docs/SIZING.md](docs/SIZING.md#animated-gifs)).
-`GIF_ENABLED=false` turns the feature off. Every `GIF_*` setting: [docs/CONFIG.md](docs/CONFIG.md).
+program, on a rendering thread of each worker process (`GIF_THREADS`, 1) at the lowest CPU
+priority, so the games never wait for a GIF and a GIF only takes the CPU the games leave. It keeps
+the recent ones in memory (`GIF_CACHE_MB`, 32 per worker) and limits each account to 4 GIFs a
+minute and 30 an hour (`GIF_USER_RENDERS_*`), each address to 12 and 120 (`GIF_IP_RENDERS_*`); a
+GIF from the cache does not count. A GIF takes from a few tens of milliseconds to about a second
+of one core, and a rendering thread up to about 125 MiB while it lives
+([docs/SIZING.md](docs/SIZING.md#animated-gifs)). `GIF_ENABLED=false` turns the feature off.
+Every `GIF_*` setting: [docs/CONFIG.md](docs/CONFIG.md).
 
 The pictures use two works shipped in `assets/`, under their own licences:
 
@@ -366,7 +368,7 @@ The pictures use two works shipped in `assets/`, under their own licences:
 - `assets/fonts/scacelith-gif/`: "Scacelith GIF", bitmap subsets of Terminus Font 4.49.1 by
   Dimitar Toshkov Zhekov, modified (a zero without a slash) and renamed as the licence asks of
   modified versions; SIL Open Font License 1.1 (`assets/fonts/scacelith-gif/OFL.txt`).
-  `tools/gen-gif-font.js` regenerates them.
+  `tools/gen-gif-font.js` makes them again from the Terminus Font 4.49.1 sources.
 
 ## Password hashing on a small server
 
@@ -394,6 +396,17 @@ school or a company network whose players log in together while the server is bu
 10 minutes for an IPv4 address or an IPv6 /64) is also applied to each IPv6 /48 as a whole
 (`AUTH_RATE_PER_PREFIX`, 5 times as much by default), because a single customer often gets a /56
 (256 /64 networks) or a /48 (65536).
+
+Some of these endpoints have stricter limits of their own, counted for the whole server: 10
+registrations per hour per address (`AUTH_REGISTER_PER_HOUR`: raise it before a class creates its
+accounts together), 3 password reset e-mails per hour and 10 per day (`AUTH_FORGOT_PER_HOUR`,
+`AUTH_FORGOT_PER_DAY`), 10 confirmation e-mails sent again and 10 new passwords from reset links
+per hour, each with 3 times as much per IPv6 /48; 10 two-step codes per 15 minutes for one
+account (`AUTH_MFA_PER_ACCOUNT`) and 10 password re-checks per 10 minutes
+(`AUTH_REAUTH_PER_USER`), whatever the address. A signed-in player also has a budget of its own,
+`USER_RATE_PER_MIN` (120) requests a minute across the API from any address, and the endpoints
+that read games, file reports or make GIFs count per account rather than per address. Every
+limit: [docs/API.md](docs/API.md#15-rate-limits-and-other-throttles).
 
 When a stored hash is outdated (for example scrypt after an upgrade to Node 24.7, where new
 hashes use Argon2id), the login upgrades it with the password it just checked, but only when a

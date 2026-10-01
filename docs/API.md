@@ -1349,8 +1349,8 @@ Errors: those of `GET /games/:id/gif` (with `delayMs` as the `field` of the dela
 ### Cost, cache and quotas of the GIFs
 
 A GIF is made on a rendering thread of the worker process, never on the thread that runs the
-games: `GIF_THREADS` (1) per worker, started with the first GIF and stopped after a minute without
-one. Up to `GIF_QUEUE_MAX` (4) GIFs wait for it, at most `GIF_QUEUE_TIMEOUT_MS` (10 s) each; a
+games, and at the lowest CPU priority, so it only takes the CPU the games leave: `GIF_THREADS` (1)
+per worker, started with the first GIF and stopped after a minute without one. Up to `GIF_QUEUE_MAX` (4) GIFs wait for it, at most `GIF_QUEUE_TIMEOUT_MS` (10 s) each; a
 render may last `GIF_RENDER_TIMEOUT_MS` (30 s). A 40-move game takes a few tens of milliseconds,
 the longest ones up to about a second ([SIZING.md](SIZING.md#animated-gifs)).
 
