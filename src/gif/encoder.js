@@ -10,8 +10,11 @@
 //   const gif = enc.finish();   // Buffer
 //
 // The LZW dictionary is a direct table (code << 8 | pixel -> code) tagged with a generation
-// number, so a clear code costs nothing: about 5 ns per pixel on one core, long runs (the
-// transparent pixels of a frame that changed little) included.
+// number, so a clear code costs nothing (about 5 ns per pixel on one core), and runs of the
+// transparent index (the unchanged pixels of a frame) walk a chain of codes instead of one lookup
+// per pixel; the output is plain greedy LZW, read by any decoder (checked against ImageMagick and
+// ffmpeg). finish() returns a Buffer over an ArrayBuffer of its own, transferable to another
+// thread.
 
 /** Disposal methods of the graphic control extension. */
 export const Disposal = Object.freeze({ None: 0, Keep: 1, Background: 2, Previous: 3 });

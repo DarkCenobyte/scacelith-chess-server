@@ -20,9 +20,16 @@
 //    many moves...), the render ran longer than renderTimeoutMs (the thread is terminated and a
 //    new one starts with the next job), or the thread died (out of memory: resourceLimits).
 //
-// Threads start on first use and stop after idleMs without work (their memory, a few MB of V8
-// heap plus the cached sprites, returns to the system). An idle thread does not keep the process
-// alive (unref).
+// Threads start on first use and stop after idleMs without work, and their memory returns to the
+// system: measured on Node 22, a thread adds about 27 MiB to the process RSS after one render
+// (its V8 isolate, the module, the piece sprites and square pictures of one size) and about
+// 41 MiB once it has rendered all three sizes; the first render of a size in a new thread costs
+// about 150-200 ms more (rasterizing the pieces and squares). An idle thread does not keep the
+// process alive (unref).
+//
+// stats(): threads (the limit), live (threads started), running, queued, and the counters
+// completed, failed, rejectedFull, rejectedWait, renderTimeouts, threadsStarted, renderMsTotal,
+// renderMsMax, lastRenderMs, bytesTotal.
 
 import { Worker } from 'node:worker_threads';
 
