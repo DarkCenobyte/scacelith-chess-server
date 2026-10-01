@@ -90,7 +90,13 @@ function pick(obj, fields) {
  * @param {{ kind: string, at: number, ip?: string|null, detail?: any }} e
  */
 export function exportedEvent(e) {
-    const d = e.detail && typeof e.detail === 'object' && !Array.isArray(e.detail) ? e.detail : null;
+    // The auth module's events reach the store with their detail as JSON text (security/events.js),
+    // which the store gives back as that text; the anti-cheat's as objects.
+    let d = e.detail;
+    if (typeof d === 'string') {
+        try { d = JSON.parse(d); } catch { d = null; }
+    }
+    if (!d || typeof d !== 'object' || Array.isArray(d)) d = null;
     let detail = null;
     if (e.kind === 'moderator_action') {
         if (!d || !MODERATOR_ACTIONS.includes(d.action)) return null;
