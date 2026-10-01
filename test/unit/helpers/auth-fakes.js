@@ -25,7 +25,14 @@ export class StoreError extends Error {
 
 const copy = (o) => (o ? structuredClone(o) : null);
 
-/** In-memory Store (users, mfa, sessions, tokens, sso, security, sanctions, ratings, meta). */
+// The status a result filter of games.listForUser needs on each colour ([as White, as Black]).
+const RESULT_STATUS = { win: [1, 2], loss: [2, 1], draw: [3, 3] };
+
+/**
+ * In-memory Store (users, mfa, sessions, tokens, sso, security, sanctions, ratings, meta, and the
+ * account API's reads: games.listForUser / countForUser, conduct.forUser, reports.forReporter,
+ * refunds.list; `_raw.games`, `_raw.conduct`, `_raw.reports`, `_raw.refunds` hold their rows).
+ */
 export function createFakeStore({ now = Date.now } = {}) {
     const users = new Map();
     const codes = new Map();
@@ -35,8 +42,22 @@ export function createFakeStore({ now = Date.now } = {}) {
     const securityEvents = [];
     const sanctions = [];
     const ratings = new Map();
+    const games = [];
+    const conduct = [];
+    const reports = [];
+    const refunds = [];
     const calls = { touch: 0 };
     let userSeq = 0, sessionSeq = 0, sanctionSeq = 0;
+    const gameMatches = (g, userId, { category = null, rated = null, result = null } = {}) => {
+        if (g.whiteId !== userId && g.blackId !== userId) return false;
+        if (category !== null && g.category !== category) return false;
+        if (rated !== null && !!g.rated !== !!rated) return false;
+        if (result !== null) {
+            if (!RESULT_STATUS[result]) throw new StoreError('invalid');
+            if (g.status !== RESULT_STATUS[result][g.whiteId === userId ? 0 : 1]) return false;
+        }
+        return true;
+    };
 
     const findUser = (pred) => { for (const u of users.values()) if (pred(u)) return u; return null; };
     const lc = (s) => String(s ?? '').toLowerCase();
@@ -59,7 +80,17 @@ export function createFakeStore({ now = Date.now } = {}) {
             byUsername: (n) => copy(findUser((u) => lc(u.username) === lc(n))),
             byEmail: (e) => copy(findUser((u) => u.email && lc(u.email) === lc(e))),
             byLogin: (x) => store.users.byUsername(x) || store.users.byEmail(x),
-            update(id, fields) { const u = users.get(id); if (u) Object.assign(u, structuredClone(fields)); },
+            // Like the real store: an address or a name of another account is refused, nothing changes.
+            update(id, fields) {
+                const u = users.get(id);
+                if (!u) return false;
+                if (fields && fields.email && findUser((o) => o.id !== id && o.email && lc(o.email).trim() === lc(fields.email).trim())) {
+                    throw new StoreError('email_taken');
+                }
+                if (fields && fields.username && findUser((o) => o.id !== id && lc(o.username) === lc(fields.username))) throw new StoreError('username_taken');
+                Object.assign(u, structuredClone(fields));
+                return true;
+            },
             anonymize(id) {
                 const u = users.get(id);
                 if (!u) return;
@@ -92,6 +123,11 @@ export function createFakeStore({ now = Date.now } = {}) {
                 return out;
             },
             listForUser(userId) { return [...sessions.values()].filter((s) => s.userId === userId).map(copy); },
+            allForUser(userId) {
+                return [...sessions.values()].filter((s) => s.userId === userId).sort((a, b) => b.createdAt - a.createdAt || b.id - a.id)
+                    .map((s) => ({ id: s.id, createdAt: s.createdAt, lastSeenAt: s.lastSeenAt, expiresAt: s.expiresAt,
+                        idleExpiresAt: s.idleExpiresAt ?? s.expiresAt, revokedAt: s.revokedAt ?? null, clientLabel: s.clientLabel ?? null, ip: s.ip ?? null }));
+            },
             enforceLimit(userId, max) {
                 const t = now();
                 const active = [...sessions.values()].filter((s) => s.userId === userId && !s.revokedAt && s.expiresAt > t)
@@ -113,13 +149,48 @@ export function createFakeStore({ now = Date.now } = {}) {
             },
             get: (kind, tokenHash) => copy(tokens.get(`${kind}:${tokenHash}`)),
             update(kind, tokenHash, data) { const r = tokens.get(`${kind}:${tokenHash}`); if (r) r.data = JSON.stringify(data); },
+            deleteForUser(userId, kind) {
+                let n = 0;
+                for (const [k, r] of tokens) if (r.userId === userId && r.kind === kind) { tokens.delete(k); n++; }
+                return n;
+            },
+            liveForUser(userId, kind, t = now()) {
+                const live = [...tokens.values()].filter((r) => r.userId === userId && r.kind === kind && !r.usedAt && r.expiresAt > t);
+                return copy(live.sort((a, b) => b.createdAt - a.createdAt).at(0) || null);
+            },
         },
         sso: {
             find: (provider, subject) => { const l = links.find((x) => x.provider === provider && x.subject === subject); return l ? { userId: l.userId } : null; },
             link(userId, provider, subject, email) { links.push({ userId, provider, subject, email }); },
             forUser: (userId) => links.filter((l) => l.userId === userId).map(copy),
         },
-        security: { insertBatch(batch) { securityEvents.push(...batch); } },
+        security: {
+            insertBatch(batch) { securityEvents.push(...batch); },
+            forUser: (userId, limit = 100) => securityEvents.map((e, i) => ({ id: i + 1, ...e })).filter((e) => e.userId === userId)
+                .sort((a, b) => b.at - a.at || b.id - a.id).slice(0, limit).map(copy),
+        },
+        games: {
+            byId: (id) => copy(games.find((g) => g.id === Number(id)) || null),
+            listForUser(userId, { before = null, limit = 20, ...filter } = {}) {
+                return games.filter((g) => gameMatches(g, userId, filter) && (before === null || g.id < before))
+                    .sort((a, b) => b.id - a.id).slice(0, limit).map(copy);
+            },
+            countForUser: (userId, filter = null) => games.filter((g) => gameMatches(g, userId, filter || {})).length,
+        },
+        conduct: {
+            forUser: (userId, limit = 1000) => conduct.filter((e) => e.userId === userId).sort((a, b) => b.at - a.at).slice(0, limit)
+                .map((e) => ({ kind: e.kind, at: e.at })),
+        },
+        reports: {
+            forReporter: (userId, limit = 500) => reports.filter((r) => r.reporterId === userId).sort((a, b) => b.createdAt - a.createdAt)
+                .slice(0, limit).map((r) => ({ status: 'open', ...copy(r), reportedName: users.get(r.reportedId)?.username ?? null,
+                    outcome: r.status && r.status !== 'open' ? r.status : null })),
+        },
+        refunds: {
+            list: ({ cheaterId = null, victimId = null, limit = 100 } = {}) => refunds
+                .filter((f) => (cheaterId === null || f.cheaterId === cheaterId) && (victimId === null || f.victimId === victimId))
+                .sort((a, b) => b.id - a.id).slice(0, limit).map(copy),
+        },
         sanctions: {
             create(s) { const id = ++sanctionSeq; sanctions.push({ id, liftedAt: null, ...s }); return id; },
             activeBan: (userId, t) => copy(sanctions.find((s) => s.userId === userId && s.kind === 'ban' && !s.liftedAt && s.startsAt <= t && (s.endsAt == null || s.endsAt > t)) || null),
@@ -129,7 +200,7 @@ export function createFakeStore({ now = Date.now } = {}) {
             forUser: (userId) => (ratings.get(userId) || []).map(copy),
             _set(userId, list) { ratings.set(userId, list); },
         },
-        _raw: { users, sessions, tokens, links, securityEvents, sanctions, codes, calls },
+        _raw: { users, sessions, tokens, links, securityEvents, sanctions, codes, calls, games, conduct, reports, refunds },
     };
     return store;
 }

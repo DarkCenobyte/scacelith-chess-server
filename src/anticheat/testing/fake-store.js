@@ -10,6 +10,16 @@ import { LEVELS } from '../util.js';
 // AnalysisPriority of src/store/index.js.
 const PRIORITY = Object.freeze({ ordinary: 0, signal: 1, report: 2, manual: 3 });
 
+// The GameStatus a result filter needs as White and as Black (games.listForUser of the real store).
+const RESULT_STATUS = Object.freeze({ win: [1, 2], loss: [2, 1], draw: [3, 3] });
+
+function gameOf(g, userId, { category = null, rated = null, result = null } = {}) {
+    if (g.whiteId !== userId && g.blackId !== userId) return false;
+    if (category !== null && g.category !== category) return false;
+    if (rated !== null && !!g.rated !== !!rated) return false;
+    return result === null || g.status === RESULT_STATUS[result]?.[g.whiteId === userId ? 0 : 1];
+}
+
 /**
  * @param {{ textColumns?: boolean }} [o]
  */
@@ -39,11 +49,20 @@ export function createFakeStore({ textColumns = false } = {}) {
             },
             byId(id) { return users.get(Number(id)) || null; },
             byUsername(name) { for (const u of users.values()) if (u.username.toLowerCase() === String(name).toLowerCase()) return u; return null; },
-            update(id, fields) { rec('users.update', [id, fields]); Object.assign(users.get(Number(id)), fields); },
+            update(id, fields) {
+                rec('users.update', [id, fields]);
+                // Like the real store: the address of another account is refused (StoreError 'email_taken').
+                const email = fields && typeof fields.email === 'string' ? fields.email.trim().toLowerCase() : null;
+                for (const u of users.values()) {
+                    if (email && u.id !== Number(id) && String(u.email ?? '').trim().toLowerCase() === email) throw Object.assign(new Error('taken'), { code: 'email_taken' });
+                }
+                Object.assign(users.get(Number(id)), fields);
+            },
         },
         sessions: {
             create(s) { const id = seq++; sessions.push({ id, revokedAt: null, lastSeenAt: s.createdAt, ...s }); return id; },
             listForUser(userId) { return sessions.filter((s) => s.userId === userId); },
+            allForUser(userId) { return sessions.filter((s) => s.userId === userId).sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0) || b.id - a.id); },
             revokeAllForUser(userId) {
                 const out = [];
                 for (const s of sessions) if (s.userId === userId && !s.revokedAt) { s.revokedAt = Date.now(); out.push(s.tokenHash); }
@@ -59,7 +78,15 @@ export function createFakeStore({ textColumns = false } = {}) {
                 return out;
             },
         },
-        games: { byId(id) { return games.get(Number(id)) || null; } },
+        games: {
+            byId(id) { return games.get(Number(id)) || null; },
+            // The account history of the real store (filters: category, rated, result from the player's side).
+            listForUser(userId, { before = null, limit = 20, ...filter } = {}) {
+                return [...games.values()].filter((g) => gameOf(g, userId, filter) && (before === null || g.id < before))
+                    .sort((a, b) => b.id - a.id).slice(0, limit);
+            },
+            countForUser(userId, filter = null) { return [...games.values()].filter((g) => gameOf(g, userId, filter || {})).length; },
+        },
         sanctions: {
             create(s) { const id = seq++; sanctions.push({ id, liftedAt: null, liftedBy: null, ...s }); return id; },
             activeBan(userId, now) {
@@ -81,6 +108,7 @@ export function createFakeStore({ textColumns = false } = {}) {
         },
         security: {
             insertBatch(rows) { rows.forEach((r) => bind(r.detail)); for (const r of rows) security.push(r); },
+            forUser(userId, limit = 100) { return security.filter((e) => e.userId === userId).sort((a, b) => (b.at ?? 0) - (a.at ?? 0)).slice(0, limit); },
         },
         analysis: {
             // Highest priority first, then the order of queueing (the real store's reserved
@@ -152,7 +180,12 @@ export function createFakeStore({ textColumns = false } = {}) {
             exists(reporterId, reportedId, gameId) { return reports.some((r) => r.reporterId === reporterId && r.reportedId === reportedId && r.gameId === gameId); },
             listOpen(limit = 100) { return reports.filter((r) => !r.outcome).slice(0, limit); },
             forReported(userId) { return reports.filter((r) => r.reportedId === userId); },
-            forReporter(userId) { return reports.filter((r) => r.reporterId === userId); },
+            // As the real store: newest first, with the reported name, createdAt and status ('open'
+            // until an outcome); `outcome` is what the reporter weighting reads.
+            forReporter(userId, limit = 500) {
+                return reports.filter((r) => r.reporterId === userId).sort((a, b) => (b.at ?? 0) - (a.at ?? 0) || b.id - a.id).slice(0, limit)
+                    .map((r) => ({ ...r, createdAt: r.at, status: r.outcome ?? 'open', reportedName: users.get(r.reportedId)?.username ?? null }));
+            },
             resolve(id, outcome, by, now) {
                 const r = reports.find((x) => x.id === id && !x.outcome);
                 if (!r) return false;
