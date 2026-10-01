@@ -346,3 +346,30 @@ test('large inputs are read in linear time', () => {
     assert.ok(performance.now() - t2 < 500);
     assert.equal(BLACK, 1);
 });
+
+test('many tag pairs on one long line are read in linear time', () => {
+    // Every tag pair looks for the last closing quote of its line: once per line, not once per
+    // tag (128 tags in front of 1 MiB on the same line took about a second).
+    const tags = Array.from({ length: PGN_LIMITS.maxTags + 1 }, (_, i) => `[T${i} "v"] `).join('');
+    const tooMany = tags + 'x'.repeat((1 << 20) - tags.length - 1);
+    assert.ok(tooMany.length < (1 << 20) && tooMany.length > 1000000);
+    const t0 = performance.now();
+    pgnError(() => readPgn(tooMany), { line: 1, message: /too many tags/ });
+    const ms0 = performance.now() - t0;
+    assert.ok(ms0 < 300, `${ms0} ms`);
+    // A valid game: 128 tags on its first line, then a comment of almost 1 MiB on the same line.
+    const head = Array.from({ length: PGN_LIMITS.maxTags }, (_, i) => `[T${i} "v"] `).join('') + '{ ';
+    const valid = head + 'c'.repeat((1 << 20) - head.length - 16) + ' } 1. e4 e5 *';
+    assert.ok(valid.length < (1 << 20) && valid.length > 1000000);
+    const t1 = performance.now();
+    const g = readPgn(valid);
+    const ms1 = performance.now() - t1;
+    assert.equal(g.tags.length, PGN_LIMITS.maxTags);
+    assert.equal(g.moves.length, 2);
+    assert.ok(ms1 < 300, `${ms1} ms`);
+    // The same answers as one tag per line (the cache of the line's last quote changes nothing).
+    const lines = tags.replace(/\] /g, ']\n');
+    pgnError(() => readPgn(lines), { line: PGN_LIMITS.maxTags + 1, message: /too many tags/ });
+    assert.deepEqual(readPgn('[A "x"y"] [B "a"b"]\n1. e4 *').tags, [['A', 'x"y'], ['B', 'a"b']]);
+    assert.deepEqual(readPgn('[A "x" ] [B "y"]   [C "z\\"w"]\n1. e4 *').tags, [['A', 'x'], ['B', 'y'], ['C', 'z"w']]);
+});

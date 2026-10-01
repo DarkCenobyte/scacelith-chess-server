@@ -82,6 +82,11 @@ class Lexer {
         this.p = s.charCodeAt(0) === 0xfeff ? 1 : 0;
         this.line = 1;
         this.col = 1;
+        // The last quote closing a tag on the stretch [lcStart, lcEnd) of a line (tagPair), found
+        // once: many tag pairs on one long line cost one pass over it, not one pass per tag.
+        this.lcStart = 0;
+        this.lcEnd = 0;
+        this.lcLast = -1;
     }
 
     // A line ends at '\n', and at a '\r' not followed by '\n'.
@@ -224,8 +229,17 @@ class Lexer {
             return bad(t, `quoted value expected in tag ${name}`);
         }
         this.advance();
-        let lastClose = -1;
-        for (let q = this.p; q < s.length && !this.lineBreak(q); q++) if (s[q] === '"' && this.closesTag(q)) lastClose = q;
+        // The last closing quote from here to the end of the line. A later tag of a line already
+        // scanned reuses that scan: the line's last closing quote is also the last one after this.p
+        // when it lies after it, and one at or before this.p counts as none below.
+        if (!(this.p >= this.lcStart && this.p < this.lcEnd)) {
+            let q = this.p, last = -1;
+            for (; q < s.length && !this.lineBreak(q); q++) if (s[q] === '"' && this.closesTag(q)) last = q;
+            this.lcStart = this.p;
+            this.lcEnd = q;
+            this.lcLast = last;
+        }
+        const lastClose = this.lcLast;
         let value = '';
         let tooLong = false;
         for (;;) {
