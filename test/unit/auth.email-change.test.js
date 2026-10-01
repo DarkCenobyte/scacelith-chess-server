@@ -299,6 +299,76 @@ test('a new password cancels a pending change; a change ends the links sent to t
     assert.ok(![...s.store._raw.tokens.values()].some((x) => x.kind === 'email_change'), 'the pending change is gone');
 });
 
+// Holds the primary's answer to the e-mail change's once.consume (an IPC round trip) until release().
+function holdEmailChangeThrottle(s) {
+    const real = s.primary.request;
+    let release, reached;
+    const gate = new Promise((r) => { release = r; });
+    const atGate = new Promise((r) => { reached = r; });
+    s.primary.request = async (type, payload) => {
+        if (type === 'once.consume' && String(payload.key).startsWith('mail:emailchange')) {
+            reached();
+            await gate;
+        }
+        return real.call(s.primary, type, payload);
+    };
+    return { atGate, release: () => { s.primary.request = real; release(); } };
+}
+
+test('a password reset or change while the request waits for the primary: no link, 403', async (t) => {
+    const NEW_PW = 'a brand new passphrase';
+    for (const how of ['reset', 'change', 'rehash']) {
+        const { s, u, token } = await setup();
+        t.after(s.close);
+        const hold = holdEmailChangeThrottle(s);
+        const pending = s.request('POST', EMAIL, { token, body: { newEmail: 'evil@attacker.example', password: PW } });
+        await hold.atGate;      // the password was checked; the request waits for the primary
+        if (how === 'reset') {
+            const from = s.mailer.sent.length;
+            await s.request('POST', '/api/v1/auth/password/forgot', { body: { email: 'alice@example.com' } });
+            const reset = new URL(linkIn((await mailsSince(s, from)).find((m) => /Reset your/.test(m.subject)).text)).searchParams.get('token');
+            const rr = await s.request('POST', '/api/v1/auth/password/reset', { body: { token: reset, newPassword: NEW_PW } });
+            assert.equal(rr.status, 200);
+        } else if (how === 'change') {
+            const rr = await s.request('POST', '/api/v1/account/password', { token, body: { currentPassword: PW, newPassword: NEW_PW } });
+            assert.equal(rr.status, 200);
+        } else {
+            // A sign-in's rehash of the same password is not a new password.
+            s.store.users.update(u.id, { passwordHash: await s.hasher.hash(PW) });
+        }
+        const before = s.mailer.sent.length;
+        hold.release();
+        const r = await pending;
+        const pendingTokens = [...s.store._raw.tokens.values()].filter((x) => x.kind === 'email_change' && !x.usedAt);
+        const mails = await mailsSince(s, before);
+        if (how === 'rehash') {
+            assert.deepEqual([r.status, r.json], [202, { status: 'verification_sent' }]);
+            assert.equal(pendingTokens.length, 1);
+            continue;
+        }
+        assert.deepEqual([r.status, r.json.error], [403, 'invalid_password'], how);
+        assert.equal(pendingTokens.length, 0, `${how}: no pending change`);
+        assert.deepEqual(mails.filter((m) => m.to === 'evil@attacker.example'), [], `${how}: no link`);
+        assert.equal(s.store.users.byId(u.id).email, 'alice@example.com');
+    }
+});
+
+test('without e-mail verification: a new password stored after the check stops the change too', async (t) => {
+    const { s, u, token } = await setup({ REQUIRE_EMAIL_VERIFICATION: '0' });
+    t.after(s.close);
+    const newHash = await s.hasher.hash('a brand new passphrase');
+    // Another shard resets the password between the password check and the write.
+    const realByEmail = s.store.users.byEmail;
+    s.store.users.byEmail = (e) => {
+        if (String(e) === 'evil@attacker.example') s.store.users.update(u.id, { passwordHash: newHash });
+        return realByEmail(e);
+    };
+    t.after(() => { s.store.users.byEmail = realByEmail; });
+    const r = await s.request('POST', EMAIL, { token, body: { newEmail: 'evil@attacker.example', password: PW } });
+    assert.deepEqual([r.status, r.json.error], [403, 'invalid_password']);
+    assert.equal(s.store.users.byId(u.id).email, 'alice@example.com');
+});
+
 test('a reset link mailed to the former address after the change does not work (another shard\'s race)', async (t) => {
     const { s, u, token } = await setup();
     t.after(s.close);

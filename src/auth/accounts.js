@@ -35,7 +35,9 @@
 //    'email_changed', email }, or 409 email_taken (the deviation of register, below; the owner
 //    still gets the notice), and the former address is still told (the same transaction).
 //  * A password change or reset cancels a pending e-mail change (whoever requested it knew the
-//    password the owner just replaced).
+//    password the owner just replaced). A request racing it gets 403 invalid_password: its token
+//    (or its immediate change) is written only while the password it checked is still the stored
+//    one, in the same transaction (compare and set, as POST /account/password does).
 //
 // Data export (POST /account/export, same re-authentication): exportAccount() checks the
 // credentials, lets the caller build the document (http/routes/account-export.js) and records
@@ -251,8 +253,7 @@ export function createAccounts(svc) {
      * `secondFactor` is not 'none', a TOTP code ('totp') or a code or recovery code ('any').
      * `budget` is the request's hash budget (auth/index.js hashBudget), for a request that hashes
      * again afterwards.
-     * @returns {Promise<object>} the user row; with secondFactor 'none', its passwordHash is the
-     *   hash the password matched
+     * @returns {Promise<object>} the user row; its passwordHash is the hash the password matched
      */
     async function reauth(userId, { password, code, recoveryCode }, { secondFactor = 'any', ip = null, budget = svc.hashBudget(ip) } = {}) {
         const key = 'r' + userId;
@@ -280,7 +281,9 @@ export function createAccounts(svc) {
                 throw new AuthError(403, 'invalid_code', 'Wrong or already used code.');
             }
             reauthFailures.reset(key);
-            return store.users.byId(userId) || current;
+            // The row after the second factor (its MFA state), unless the password changed meanwhile.
+            const after = store.users.byId(userId);
+            return after && after.passwordHash === current.passwordHash ? after : current;
         }
         reauthFailures.reset(key);
         return current;
@@ -423,11 +426,29 @@ export function createAccounts(svc) {
         if (!isValidEmail(em)) throw new AuthError(400, 'invalid_email', 'This e-mail address is not valid.');
         const same = () => new AuthError(400, 'same_email', 'This is already the e-mail address of your account.');
         if (normalizeEmail(pre.email) === em) throw same();
-        const user = await reauth(ctxUser.userId, { password, code, recoveryCode }, { secondFactor: 'any', ip });
+        const budget = svc.hashBudget(ip);
+        const user = await reauth(ctxUser.userId, { password, code, recoveryCode }, { secondFactor: 'any', ip, budget });
         if (normalizeEmail(user.email) === em) throw same();
         const from = user.email || null;
         const holder = store.users.byEmail(em);
         const owner = holder && holder.id !== user.id ? holder : null;
+
+        // Runs write() in one transaction, only while the stored password is still the one the
+        // request proved (compare and set, as changePassword): a password reset or change that
+        // landed since the check, on any shard (the request waits for the primary below), wins and
+        // the request is refused as with a wrong password; a sign-in's rehash of the same password
+        // is checked once against the new hash and is no change.
+        const withPassword = async (write) => {
+            const attempt = (hash) => atomicallyOrBusy(() => {
+                const u = store.users.byId(user.id);
+                if (!u || u.status !== 'active' || u.passwordHash !== hash) return false;
+                write();
+                return true;
+            });
+            if (attempt(user.passwordHash)) return;
+            const again = await svc.stillCurrent(user.id, user.passwordHash, password, budget.next());
+            if (!again || !attempt(again.passwordHash)) throw new AuthError(403, 'invalid_password', 'Wrong password.');
+        };
 
         if (!config.requireEmailVerification) {
             const claimed = async (o) => notifyAddressClaimed(o, await once(mailKey('emailchange', em), NOTICE_THROTTLE_MS));
@@ -436,7 +457,7 @@ export function createAccounts(svc) {
                 throw emailTaken();
             }
             try {
-                atomicallyOrBusy(() => {
+                await withPassword(() => {
                     store.users.update(user.id, { email: em, emailVerified: true });
                     dropAddressLinks(user.id);
                 });
@@ -455,7 +476,7 @@ export function createAccounts(svc) {
         // The same work and the same answer whether or not the address is free.
         const fresh = await once(mailKey('emailchange', em), NOTICE_THROTTLE_MS);
         const token = randomToken('', 32);
-        atomicallyOrBusy(() => {
+        await withPassword(() => {
             cancelEmailChange(user.id);
             store.tokens.create({
                 kind: 'email_change', tokenHash: sha256Hex(token), userId: user.id, data: { email: em, from },
