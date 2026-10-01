@@ -40,7 +40,7 @@ import { GifEncoder, Disposal } from './encoder.js';
 export const SIZES = Object.freeze({
     small: Object.freeze({ square: 32, bold: '12b', regular: '12n', coord: '12n', pad: 6, rowH: 20, rowGap: 2, margin: 14, bar: 2 }),
     medium: Object.freeze({ square: 48, bold: '16b', regular: '16n', coord: '16n', pad: 8, rowH: 28, rowGap: 3, margin: 20, bar: 3 }),
-    large: Object.freeze({ square: 72, bold: '24b', regular: '24n', coord: '16n', pad: 12, rowH: 40, rowGap: 4, margin: 26, bar: 4 }),
+    large: Object.freeze({ square: 72, bold: '24b', regular: '24n', coord: '16b', pad: 12, rowH: 40, rowGap: 4, margin: 26, bar: 4 }),
 });
 
 /** Most plies a GIF shows (a longer game is refused). */
@@ -240,14 +240,14 @@ function replay(startFen, moves) {
         return b;
     };
     const checkOf = (p) => (p.inCheck() ? p.kingSquare(p.side) : -1);
-    const states = [{ board: boardOf(pos), from: -1, to: -1, check: checkOf(pos), side: pos.side, text: '' }];
+    const states = [{ board: boardOf(pos), from: -1, to: -1, check: checkOf(pos), side: pos.side, number: '', san: '', text: '' }];
     for (let i = 0; i < moves.length; i++) {
         const m = moves[i];
         if (!pos.isLegal(m)) throw new RangeError(`illegal move at ply ${i + 1}`);
         const san = pos.san(m);
-        const prefix = pos.side === WHITE ? `${pos.fullmove}. ` : `${pos.fullmove}... `;
+        const number = pos.side === WHITE ? `${pos.fullmove}.` : `${pos.fullmove}...`;
         pos.play(m);
-        states.push({ board: boardOf(pos), from: m & 63, to: (m >> 6) & 63, check: checkOf(pos), side: pos.side, text: prefix + san });
+        states.push({ board: boardOf(pos), from: m & 63, to: (m >> 6) & 63, check: checkOf(pos), side: pos.side, number, san, text: `${number} ${san}` });
     }
     return { states, final: pos };
 }
@@ -415,7 +415,7 @@ export function renderGame(job, hooks = {}) {
         drawRow(players[0], !showEnd && st.side === WHITE, score ? score[0] : '');
         drawRow(players[1], !showEnd && st.side === BLACK, score ? score[1] : '');
         if (showEnd) drawFooter([[resultText, fontB, P.accent], [ending, fontN, P.text]], P.text, st.text);
-        else drawFooter([[st.text, fontB, P.text]], P.text, ply === 0 ? '' : `${ply}/${last}`);
+        else drawFooter([[st.number, fontN, P.dim], [st.san, fontB, P.text]], P.text, '');
 
         const delayMs2 = ply === 0 ? (last === 0 ? DELAY.last : Math.max(DELAY.first, delayMs)) : end ? DELAY.last : delayMs;
         const delayCs = Math.round(delayMs2 / 10);
