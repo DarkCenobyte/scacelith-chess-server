@@ -115,9 +115,10 @@ function jobFromPgn(text, extra = {}) {
 function bench() {
     const sizes = Object.keys(SIZES);
     const games = [['40 moves (80 plies)', randomGame(80, 7)], ['150 moves (300 plies)', randomGame(300, 11)]];
-    console.log('Single-threaded renderGame, warm caches (median of 5 runs):');
+    console.log('Single-threaded renderGame, warm caches and JIT (median of 5 runs):');
+    // Warm the sprites, squares and the JIT of every size first.
+    for (const size of sizes) for (let k = 0; k < 2; k++) renderGame({ moves: games[1][1], options: { size } });
     for (const size of sizes) {
-        renderGame({ moves: games[0][1].slice(0, 2), options: { size } });   // warm the sprites and squares
         for (const [label, moves] of games) {
             const times = [];
             let bytes = 0;
