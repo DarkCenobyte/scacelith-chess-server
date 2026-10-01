@@ -1,0 +1,1332 @@
+# Scacelith server: HTTP API reference
+
+Every server, the official `caissa.scacelith.com` and any community server, answers this HTTPS
+API. The game uses it for everything outside a game itself: sign-up and sign-in (two-step
+verification and Google included), the account page, game history and PGN downloads, signed-in
+devices, the data download and the deletion of the account, and reports. Live play (matchmaking,
+challenges, moves, clocks) goes through the WebSocket of the same server, opened with a session
+token of this API: see [PROTOCOL.md](PROTOCOL.md). Module contracts are in
+[DESIGN.md](DESIGN.md) section 5.9, the security model in section 8, every setting named here in
+[CONFIG.md](CONFIG.md). The game's side of these calls is described in
+[docs/ONLINE_CLIENT.md](../../docs/ONLINE_CLIENT.md).
+
+This reference describes what the code does (`src/http/server.js`, `src/http/router.js`,
+`src/http/routes/*.js`, `src/auth/*.js`). Defaults are those of a server with an untouched
+configuration; a community server may change them.
+
+## Contents
+
+1. [Conventions](#1-conventions): base URL, requests, answers and errors, authentication, rate
+   limits, proof of work, re-authentication
+2. [Endpoint summary](#2-endpoint-summary)
+3. [Server info](#3-server-info)
+4. [Registration and sign-in](#4-registration-and-sign-in) (two-step verification and Google
+   included)
+5. [Sessions](#5-sessions)
+6. [Account](#6-account): the account view, preferences, password, two-step verification
+7. [E-mail address change](#7-e-mail-address-change)
+8. [Data export](#8-data-export)
+9. [Account deletion](#9-account-deletion)
+10. [Game history](#10-game-history)
+11. [Games and PGN](#11-games-and-pgn)
+12. [Players and leaderboard](#12-players-and-leaderboard)
+13. [Reports](#13-reports)
+14. [HTML pages outside /api](#14-html-pages-outside-api)
+15. [Health endpoints](#15-health-endpoints)
+
+## 1. Conventions
+
+### 1.1 Base URL, port and transport
+
+- Official server: `https://caissa.scacelith.com/api/v1`, TCP port **443**.
+- A community server: `https://<SERVER_PUBLIC_HOST>[:<port>]/api/v1`. `API_PORT` is 443 by
+  default; behind a NAT or a proxy, the port players use is `PUBLIC_API_PORT`.
+- The game's WebSocket is on the same port by default (`wss://<host>/ws`; `WS_PORT` moves it, and
+  `GET /info` tells the client where it is).
+- HTTP/1.1 over TLS. With `TLS_MODE=proxy`, a reverse proxy terminates TLS in front of the server.
+  `TLS_MODE=off` (plain HTTP) is for local development only.
+- A few HTML pages live outside `/api`, for the links of e-mails and the Google sign-in
+  ([section 14](#14-html-pages-outside-api)). The health endpoints answer both inside and outside
+  `/api/v1` ([section 15](#15-health-endpoints)).
+- A trailing slash is ignored (`/api/v1/info/` is `/api/v1/info`), and path parameters are
+  URL-decoded.
+- The Node SDK in `src/client/` (`ApiClient`) wraps these calls for tests, bots and tools. It also
+  solves the proof of work.
+
+The curl examples below use two shell variables:
+
+```sh
+API=https://caissa.scacelith.com/api/v1
+TOKEN=sct_...            # a session token from POST /auth/login (section 4)
+```
+
+For a community server with a self-signed certificate, add `--cacert server.crt` to each command.
+To keep a password out of the shell history, read it with `read -rs PASSWORD` and build the body
+with `jq`, for example `-d "$(jq -n --arg p "$PASSWORD" '{password: $p}')"`. The examples write the
+password inline only to stay short.
+
+### 1.2 Requests
+
+- **JSON bodies.** `POST`, `PUT` and `DELETE` requests carry a JSON object with
+  `Content-Type: application/json`. A `charset` parameter other than UTF-8 is refused, and so is
+  any other content type (415 `unsupported_media_type`). An empty body counts as `{}`, which is
+  what the endpoints without parameters take (`POST /auth/logout`, `DELETE /auth/sessions/:id`).
+  The body is limited to `HTTP_BODY_LIMIT` bytes (16384 by default; 413 `payload_too_large`) and
+  must arrive within 10 seconds (408 `request_timeout`). After either error the server closes the
+  connection.
+- **Strict schemas.** A field that the endpoint does not know is refused, a field without "optional"
+  in this reference is required, and types and lengths are checked. Any of these failures answers
+  400 `invalid_request`, with `field` naming the field. Strings may not contain control
+  characters. Lengths are counted in characters. Invalid JSON answers 400 `invalid_json`.
+  `POST /reports` checks its body itself ([section 13](#13-reports)).
+- **Query strings.** The first occurrence of a parameter counts, and unknown parameters are
+  ignored. A `+` decodes to a space: the endpoints that take a time-control category accept both
+  `3%2B2` and `3+2`.
+- **Methods.** `HEAD` is `GET` without the body. `OPTIONS` on an existing path answers 204 with an
+  `Allow` header. Any other method that the path does not have answers 405 `method_not_allowed`
+  with `Allow`.
+- The request target may not exceed 4096 characters (414 `uri_too_long`).
+- **No CORS.** The API serves the game, not web pages. No `Access-Control-*` header is ever sent,
+  so a web page cannot read an answer. Because only JSON bodies are taken, a cross-site write
+  would need a preflight, and that preflight fails.
+
+### 1.3 Answers and errors
+
+- Answers are JSON in UTF-8, except the PGN download (`application/x-chess-pgn`) and the HTML
+  pages. Times are milliseconds since 1970-01-01 UTC. Ids are integers. Game ids have up to 16
+  digits but stay below 2^53, so a JSON number (a double) holds them exactly.
+- Every answer carries `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`,
+  `Cross-Origin-Resource-Policy: same-origin` and a `Content-Security-Policy`
+  (`default-src 'none'; frame-ancestors 'none'` for the API). With `TLS_MODE=native` it also
+  carries `Strict-Transport-Security: max-age=31536000`.
+- **Errors** have one shape:
+
+  ```json
+  { "error": "snake_case_code", "message": "An English sentence.", "retryAfter": 30 }
+  ```
+
+  `message` is meant for logs and as a fallback. A client chooses what to show from `error`.
+  `retryAfter` (seconds) is present only on refusals that end with time. Some errors add fields:
+  `field` (invalid input), `reason` (`weak_password`, `pow_required`), `pow` (`pow_required`) and
+  `until` (`banned`). Answers that have `retryAfter` also carry a `Retry-After` header with the
+  same value. The one exception is the 503 `busy` of the game and player reads, which has only
+  the field.
+
+Errors that any endpoint can give:
+
+| Status | `error` | When |
+|---|---|---|
+| 400 | `invalid_request` | The body breaks the endpoint's schema (`field` says where), the request target or `Content-Length` is malformed, a path parameter is not valid URL encoding, or the body was cut off. |
+| 400 | `invalid_json` | The body is not JSON. |
+| 401 | `unauthorized` | No `Authorization` header on an endpoint that needs a session. |
+| 401 | `invalid_token` | The token is malformed, expired, revoked or belongs to a deleted account. This also happens on endpoints where the session is optional. |
+| 404 | `not_found` | No such endpoint. Some endpoints also use it: no such game, player or session. |
+| 405 | `method_not_allowed` | The path exists for other methods (see `Allow`). |
+| 408 | `request_timeout` | The body did not arrive within 10 s. |
+| 413 | `payload_too_large` | The body exceeds `HTTP_BODY_LIMIT`. |
+| 414 | `uri_too_long` | The request target exceeds 4096 characters. |
+| 415 | `unsupported_media_type` | The body is not `application/json`, or its charset is not UTF-8. |
+| 429 | `rate_limited` | A rate limit (section 1.5): `retryAfter` plus a `Retry-After` header. |
+| 500 | `internal_error` | An unexpected failure. The server logs it. |
+| 503 | `timeout` | The server did not answer within 30 s (60 s for the export). |
+| 503 | `busy` | The database stayed locked. `retryAfter: 1`. |
+
+Endpoints that check or hash a password can also answer one of these:
+
+- 503 `server_busy`: the worker's password hash queue (`PASSWORD_HASH_QUEUE_MAX`) is full, or the
+  wait ran out.
+- 429 `rate_limited`: once the queue is half full, this client (an IPv4 address or an IPv6 /48)
+  already has `PASSWORD_HASH_WAITERS_PER_SOURCE` hashes waiting.
+
+Both errors carry a random `retryAfter` of 5 to 15 s. Nothing was changed and no failed attempt
+was counted, and a reset link stays valid. The 429 also gives back the rate-limit tokens that the
+request took.
+
+The HTML pages (section 14) answer their errors as HTML pages with the same status codes.
+
+### 1.4 Authentication
+
+The endpoints marked **session** need a bearer token:
+
+```
+Authorization: Bearer sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8
+```
+
+- **Getting a token.** A token (`sct_` followed by 43 base64url characters) comes from any of
+  these:
+  - `POST /auth/login`;
+  - after it, `POST /auth/login/mfa` when two-step verification is on;
+  - the Google sign-in poll (`POST /auth/sso/google/poll`);
+  - `POST /auth/sso/complete`.
+
+  Every one of them answers `{ token, expiresAt, user }`. The server stores only a SHA-256 of the
+  token.
+- **Where the session is required**, a missing header answers 401 `unauthorized` with
+  `WWW-Authenticate: Bearer realm="scacelith"`. An invalid token answers 401 `invalid_token` with
+  `WWW-Authenticate: Bearer realm="scacelith", error="invalid_token"`. A client should forget a
+  token that gets `invalid_token` and sign in again.
+- **Optional session.** On some endpoints the session is optional (`GET /games/:id`,
+  `GET /games/:id/pgn`). Without the header they answer the public view. If a header is sent, its
+  token must be valid.
+- **Lifetime.** A session ends at the first of these:
+  - `SESSION_MAX_DAYS` (90) after the sign-in: this is `expiresAt`;
+  - `SESSION_IDLE_DAYS` (30) without use. Each use pushes the idle limit back; the server writes
+    the new value at most every 5 minutes.
+
+  An account keeps at most `MAX_SESSIONS_PER_USER` (10) sessions: a new sign-in revokes the
+  oldest beyond that number.
+- **Revocation.** These revoke sessions:
+  - signing out (`POST /auth/logout`, `/auth/logout-all`, `DELETE /auth/sessions/:id`);
+  - a password change, which revokes the other sessions;
+  - a password reset and the deletion of the account, which revoke every session;
+  - an administrator (`bin/admin.js`).
+
+  A revocation from the API takes effect at once on every worker. Otherwise a worker may keep
+  using its record of a valid session for up to 30 s.
+- **Scope.** A token belongs to one server and opens its WebSocket too (`Hello.token`,
+  [PROTOCOL.md](PROTOCOL.md)). Never send it to another server.
+
+### 1.5 Rate limits and other throttles
+
+Limits apply to one of two scopes:
+
+- **Client:** an IPv4 address, or an IPv6 /64. In proxy mode, the address comes from
+  `X-Forwarded-For` sent by a `TRUSTED_PROXIES` address.
+- **Player:** the signed-in account, whatever its address.
+
+Each limit is a token bucket. It holds `limit` requests, refills continuously at
+`limit / window`, and `retryAfter` is the time until the next token. Limits marked *shared* are
+also counted for the whole server, through the primary process. The others are counted by each
+worker process.
+
+| Limit | Default | Counted per | Endpoints |
+|---|---|---|---|
+| global | `HTTP_RATE_PER_IP` (120) / min | client | Every request except the health endpoints. |
+| `auth` | `AUTH_RATE_PER_IP` (20) / 10 min, shared | client, and each IPv6 /48 as a whole (`AUTH_RATE_PER_PREFIX`, default 5 x `AUTH_RATE_PER_IP`) | `POST /auth/register`, `/auth/login`, `/auth/login/mfa`, `/auth/verify-email/resend`, `/auth/password/forgot`, `/auth/password/reset`; `POST /verify-email`, `/reset-password`, `/confirm-email-change`; `POST /auth/sso/complete` (same bucket, without the /48 count) |
+| `reauth` | the same numbers as `auth`, a bucket of its own, shared | client and IPv6 /48 | `POST /account/password`, `/account/mfa/totp/setup`, `/account/mfa/totp/enable`, `/account/mfa/totp/disable`, `/account/mfa/recovery-codes`, `/account/email`, `/account/export`, `/account/delete` |
+| `account` | 60 / min | player | `GET /account/me`, `PUT /account/preferences` |
+| `account_games` | 60 / min | player | `GET /account/games` |
+| `account_export` | 5 / hour | player | `POST /account/export` (checked before `reauth`; every attempt counts) |
+| `sessions` | 60 / min | player | `POST /auth/logout`, `/auth/logout-all`, `GET /auth/sessions`, `DELETE /auth/sessions/:id` |
+| `public_read` | 60 / min | client | `GET /players/:username/games`, `/games/:id`, `/games/:id/pgn` (one bucket for the three) |
+| `reports` | 30 / hour | client | `POST /reports` |
+| `sso_start` | 30 / 10 min, shared | client | `POST /auth/sso/google/start` |
+| `sso_poll` | 120 / min | client | `POST /auth/sso/google/poll` |
+| `page` | 60 / min | client | `GET /verify-email`, `/reset-password`, `/confirm-email-change` |
+| `sso_page` | 30 / min | client | `GET /auth/sso/google/callback` |
+
+`GET /info`, `GET /players/:username` and `GET /leaderboard` have only the global limit.
+
+The server handles a request in this order:
+
+1. global limit;
+2. endpoint match;
+3. authentication;
+4. the endpoint's limits;
+5. body;
+6. the endpoint itself.
+
+So a request refused for its token spends none of the endpoint's tokens, and a request with an
+invalid body does spend them. A limit answers 429 `rate_limited` with `retryAfter`.
+
+Other throttles, answered by the endpoints themselves:
+
+- **Failed sign-ins on one login name (user name or e-mail).** From `AUTH_FAILURES_PER_ACCOUNT`
+  (5) failures on, each attempt must wait twice as long as the one before: 2 s, 4 s, and so on,
+  up to 15 min. A refused attempt answers 429 `too_many_attempts` with `retryAfter`. The counter
+  forgets after an hour without failures.
+- **Failed second factors at the sign-in.** The same rule applies from the 5th wrong code of the
+  account. One sign-in step accepts at most 5 wrong codes.
+- **Failed re-authentications of an account** (wrong password or code): the same rule (429
+  `too_many_attempts`), shared by every endpoint of section 1.7.
+- **E-mails.** One confirmation or reset mail per address every 5 minutes; the answer stays the
+  same. One "someone tried to use your address" notice per address per hour.
+- **Reports.** `REPORTS_PER_DAY` (5) per player in 24 hours: 429 `report_limit`.
+
+### 1.6 Proof of work
+
+`POST /auth/register` always needs a proof of work when `POW_REGISTER_BITS` is above 0 (18 by
+default; `GET /info` gives it as `pow.register`). `POST /auth/login` needs one only for 5 minutes
+after the server sees a wave of failed sign-ins (`POW_LOGIN_TRIGGER_PER_MIN`, then
+`POW_LOGIN_BITS`). A client cannot know that in advance, and finds out from the answer.
+
+1. The request without (or with a refused) proof answers 428:
+
+   ```json
+   { "error": "pow_required", "message": "Proof of work required.", "reason": "required",
+     "pow": { "challenge": "eyJ2IjoxLCJo...In0.nBy1dpNb...4QQ", "bits": 18, "expiresAt": 1790882991200 } }
+   ```
+
+2. Find a nonce: a decimal string of at most 20 digits such that
+   `SHA-256(challenge + ":" + nonce)` starts with `bits` zero bits (most significant bit of the
+   first byte first). 18 bits take about 260,000 hashes.
+3. Send the same request again with `"pow": { "challenge": "...", "nonce": "123456" }` in the body.
+
+A challenge is valid for 2 minutes and only once, for one endpoint and one client network (an
+IPv4 address or IPv6 /64). It holds no server state. `reason` says why a proof was refused:
+`required`, `malformed`, `signature`, `endpoint`, `network`, `expired`, `bits`, `work` or
+`replayed`. In Node, `solvePow(challenge, bits)` of `src/client/pow.js` returns the nonce.
+
+### 1.7 Re-authentication
+
+Account changes ask for the password again, and, when two-step verification is on, for a second
+factor:
+
+- the password only: `POST /account/password` and `/account/mfa/totp/setup`;
+- the password and an authenticator code, a recovery code being refused:
+  `POST /account/mfa/recovery-codes`;
+- the password and an authenticator code or a recovery code: `POST /account/mfa/totp/disable`,
+  `/account/email`, `/account/export` and `/account/delete`.
+
+In bodies, `code` holds a 6-digit authenticator code and `recoveryCode` a recovery code
+(`xxxx-xxxx-xx`; case, spaces and dashes do not matter). A recovery code may also be sent in
+`code` where recovery codes are accepted. Each code works once: a used authenticator code is
+refused until the next 30-second step, and a recovery code is gone once it is used.
+
+Errors of the re-authentication:
+
+| Status | `error` | When |
+|---|---|---|
+| 403 | `invalid_password` | Wrong password. |
+| 403 | `mfa_code_required` | Two-step verification is on and neither `code` nor `recoveryCode` was sent. |
+| 403 | `invalid_code` | Wrong or already used code. |
+| 400 | `password_not_set` | A Google-only account has no password yet ("Forgot password" sets one). |
+| 429 | `too_many_attempts` | Too many failures on this account (section 1.5). |
+| 503 / 429 | `server_busy` / `rate_limited` | The password hash queue is busy (section 1.3). |
+
+Failed passwords and codes count in the account's failure counter and are recorded as security
+events.
+
+## 2. Endpoint summary
+
+Paths under `/api/v1` unless they start with `/` outside it (section 14). "Session" = bearer token
+required; "optional" = public answer without a token, more with one.
+
+| Method and path | Auth | Limit | Purpose |
+|---|---|---|---|
+| `GET /info` | none | global | Server name, versions, ports, sign-up rules |
+| `POST /auth/register` | none | `auth` | Create an account |
+| `POST /auth/login` | none | `auth` | Sign in with a password |
+| `POST /auth/login/mfa` | none | `auth` | Second step of a sign-in with two-step verification |
+| `POST /auth/logout` | session | `sessions` | Sign out this session |
+| `POST /auth/logout-all` | session | `sessions` | Sign out every session |
+| `POST /auth/verify-email/resend` | none | `auth` | Send the confirmation link again |
+| `POST /auth/password/forgot` | none | `auth` | Send a password reset link |
+| `POST /auth/password/reset` | none | `auth` | Set a new password with a reset link's token |
+| `POST /auth/sso/google/start` | none | `sso_start` | Start a Google sign-in |
+| `POST /auth/sso/google/poll` | none | `sso_poll` | Collect the result of a Google sign-in |
+| `POST /auth/sso/complete` | none | `auth` | Create the account of a first Google sign-in |
+| `GET /auth/sessions` | session | `sessions` | List the signed-in devices |
+| `DELETE /auth/sessions/:id` | session | `sessions` | Sign out one device |
+| `GET /account/me` | session | `account` | The account, ratings, active sanctions |
+| `PUT /account/preferences` | session | `account` | Accept or refuse direct challenges |
+| `POST /account/password` | session | `reauth` | Change the password |
+| `POST /account/mfa/totp/setup` | session | `reauth` | Start enabling two-step verification |
+| `POST /account/mfa/totp/enable` | session | `reauth` | Finish enabling it, get recovery codes |
+| `POST /account/mfa/totp/disable` | session | `reauth` | Turn two-step verification off |
+| `POST /account/mfa/recovery-codes` | session | `reauth` | Replace the recovery codes |
+| `POST /account/email` | session | `reauth` | Change the e-mail address |
+| `POST /account/export` | session | `account_export`, `reauth` | Download the account's data (JSON) |
+| `POST /account/delete` | session | `reauth` | Delete the account |
+| `GET /account/games` | session | `account_games` | The player's game history, filtered and paged |
+| `GET /games/:id` | optional | `public_read` | A game record with its moves and clocks |
+| `GET /games/:id/pgn` | optional | `public_read` | The same game as a PGN file |
+| `GET /players/:username` | none | global | A player's public profile |
+| `GET /players/:username/games` | none | `public_read` | A player's recent games |
+| `GET /leaderboard` | none | global | Top players of a category |
+| `POST /reports` | session | `reports` | Report the opponent of a recent game |
+| `GET`, `POST /verify-email` | page | `page`, `auth` | E-mail confirmation link |
+| `GET`, `POST /reset-password` | page | `page`, `auth` | Password reset link |
+| `GET`, `POST /confirm-email-change` | page | `page`, `auth` | E-mail change link |
+| `GET /auth/sso/google/callback` | page | `sso_page` | Where Google sends the browser back |
+| `GET /healthz`, `GET /readyz` | none | none | Liveness and readiness (also under `/api/v1`) |
+
+## 3. Server info
+
+### GET /info
+
+What a client needs before it signs in or connects. **Auth** none. **Limit** global only.
+
+```sh
+curl -sS "$API/info"
+```
+
+```json
+{
+  "name": "Scacelith",
+  "serverId": "07dd26af-672a-43af-a8af-34011c7e977b",
+  "motd": "",
+  "protocol": { "min": 2, "max": 2, "schema": 2006414980, "subprotocol": "scacelith.v1" },
+  "wsPort": 443,
+  "wsPath": "/ws",
+  "registration": "open",
+  "emailVerification": true,
+  "sso": { "google": false },
+  "mfa": true,
+  "pow": { "register": 18 },
+  "categories": [ { "id": "1+0", "baseSec": 60, "incSec": 0 }, { "id": "3+2", "baseSec": 180, "incSec": 2 } ],
+  "limits": {
+    "usernameMin": 3, "usernameMax": 20, "usernamePattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+    "passwordMinLength": 10, "passwordMaxBytes": 256, "customTimeControls": true,
+    "reportsPerDay": 5, "wsMaxMessageBytes": 512
+  }
+}
+```
+
+- `serverId`: the server's id (stable across restarts; the game ties its stored sign-in to it), or
+  `null` when the store cannot give it.
+- `protocol`: the WebSocket protocol versions, schema hash and subprotocol (PROTOCOL.md).
+- `wsPort`: the public WebSocket port (`PUBLIC_WS_PORT`, else `WS_PORT`, else the API port).
+- `registration`: `open` or `closed`. `emailVerification`: whether new accounts confirm their
+  address (`REQUIRE_EMAIL_VERIFICATION`).
+- `sso.google`: whether Google sign-in is offered. `pow.register`: the proof-of-work bits that
+  registration needs (0: none).
+- `categories`: the official (rated) time controls (`RATED_CATEGORIES`, all of them; the example
+  shortens the list). Any other time control is `custom`.
+- `limits`: the rules a client can check before it sends a form. `customTimeControls`: whether
+  challenges and private games may use custom time controls.
+
+## 4. Registration and sign-in
+
+### POST /auth/register
+
+Creates an account. **Auth** none. **Limit** `auth`. **Proof of work** when `POW_REGISTER_BITS` > 0.
+
+| Field | Type | Notes |
+|---|---|---|
+| `username` | string, 1-64 | Then the server's rules: `USERNAME_MIN`-`USERNAME_MAX` characters (3-20), letters, digits, `_` and `-`, starting with a letter or a digit. Reserved names (`admin`, `moderator`, `deleted`, ...) and some prefixes are refused. Unique without regard to case. |
+| `email` | string, 1-254 | Trimmed and stored in lower case. Plain ASCII, with a dotted domain. |
+| `password` | string, 1-1024 | At least `PASSWORD_MIN_LENGTH` (10) characters and at most 256 bytes. It must not contain the user name or the e-mail's local part, and must not be a common password. |
+| `pow` | object, optional | `{ challenge, nonce }` (section 1.6). |
+
+Answers:
+
+- **202 `{ "status": "verification_sent" }`** with e-mail confirmation (the default). A link valid
+  for 24 h goes to the address. The answer is the same when another account already uses the
+  address: no account is created then, and that account's owner gets a notice instead.
+- **201 `{ "status": "ready" }`** without e-mail confirmation (`REQUIRE_EMAIL_VERIFICATION=false`):
+  the account can sign in at once.
+
+Errors, checked in this order:
+
+- 403 `registration_closed`;
+- 400 `invalid_username`;
+- 400 `invalid_email`;
+- 400 `weak_password`, with `reason`: `too_short`, `too_long`, `contains_username`,
+  `contains_email` or `too_common`;
+- 409 `username_taken`;
+- 428 `pow_required`;
+- the hash queue errors (section 1.3);
+- 409 `email_taken`, only without e-mail confirmation (with confirmation, the answer stays 202).
+
+```sh
+curl -sS "$API/auth/register" -H 'Content-Type: application/json' \
+  -d '{"username":"alice","email":"alice@example.org","password":"correct horse battery"}'
+# -> 428 pow_required: solve it (section 1.6), then send again with "pow":{"challenge":"...","nonce":"..."}
+```
+
+### POST /auth/login
+
+Signs in with a password. **Auth** none. **Limit** `auth`. **Proof of work** only during a wave of
+failed sign-ins.
+
+| Field | Type | Notes |
+|---|---|---|
+| `login` | string, 1-254 | The user name, or the e-mail address (any text with `@`). |
+| `password` | string, 1-1024 | |
+| `clientLabel` | string, max 64, optional | Shown in the list of signed-in devices (e.g. `Scacelith 1.4 (Windows)`). |
+| `pow` | object, optional | Section 1.6. |
+
+There are two possible answers, both with status 200. A session:
+
+```json
+{
+  "token": "sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8",
+  "expiresAt": 1798658839708,
+  "user": {
+    "id": 1, "username": "alice", "email": "alice@example.org", "emailVerified": true,
+    "mfaEnabled": false, "googleLinked": false, "hasPassword": true, "acceptChallenges": "all",
+    "createdAt": 1790882839743, "lastLoginAt": 1790882839708, "pendingEmail": null
+  }
+}
+```
+
+`user` is the account view of `GET /account/me` (section 6). Or, when two-step verification is
+on, a second step to complete within 5 minutes with `POST /auth/login/mfa`:
+
+```json
+{ "mfaRequired": true, "mfaToken": "mfa_m4wXAVhYCMWG0PX7MLcIpBeccBFg0oxPvoRujzGWjO8", "expiresIn": 300 }
+```
+
+Errors:
+
+- 429 `too_many_attempts` (`retryAfter`);
+- 428 `pow_required`;
+- the hash queue errors;
+- 401 `invalid_credentials`: the same answer, after the same time, for an unknown account, a wrong
+  password and an account without a password;
+- after a correct password only: 403 `banned`, with `until` (epoch ms, `null` for a permanent
+  ban), and 403 `email_unverified` (the address is not confirmed yet).
+
+```sh
+TOKEN=$(curl -sS "$API/auth/login" -H 'Content-Type: application/json' \
+  -d '{"login":"alice","password":"correct horse battery","clientLabel":"curl"}' | jq -r .token)
+```
+
+### POST /auth/login/mfa
+
+The second step of a sign-in. **Auth** none. **Limit** `auth`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `mfaToken` | string, 1-64 | From the login answer. |
+| `code` | string, max 32, optional | A 6-digit authenticator code, or a recovery code. |
+| `recoveryCode` | string, max 32, optional | A recovery code. |
+
+Answer: 200 `{ token, expiresAt, user }`, as for `POST /auth/login`. A recovery code used here is
+gone. Errors:
+
+- 401 `invalid_mfa_token`: the step expired, was used, or ended after 5 wrong codes, or the
+  password was reset or changed since the first step; sign in again;
+- 429 `too_many_attempts`;
+- 400 `invalid_request`: neither `code` nor `recoveryCode` was sent;
+- 401 `invalid_code`;
+- 403 `banned`, 403 `email_unverified`.
+
+```sh
+curl -sS "$API/auth/login/mfa" -H 'Content-Type: application/json' \
+  -d '{"mfaToken":"mfa_m4wX...","code":"123456"}'
+```
+
+### POST /auth/logout and POST /auth/logout-all
+
+**Auth** session. **Limit** `sessions`. No body. `logout` revokes the session of the token used,
+and `logout-all` revokes every session of the account, this one included. Answer: 200
+`{ "status": "logged_out" }`.
+
+```sh
+curl -sS -X POST "$API/auth/logout" -H "Authorization: Bearer $TOKEN"
+```
+
+### POST /auth/verify-email/resend
+
+Sends the e-mail confirmation link again. **Auth** none. **Limit** `auth`. Body:
+`{ "email": string 1-254 }`. Answer: **202 `{ "status": "accepted" }`**, always. A link is sent
+only to an active, unconfirmed account with that address, at most once every 5 minutes per
+address.
+
+### POST /auth/password/forgot
+
+Sends a password reset link, valid for one hour, which opens the page `/reset-password` (section
+14). **Auth** none. **Limit** `auth`. Body: `{ "email": string 1-254 }`. Answer:
+**202 `{ "status": "accepted" }`**, always. A link goes only to an active account, at most once
+every 5 minutes per address. A Google-only account sets its first password this way.
+
+### POST /auth/password/reset
+
+Sets a new password with the token of a reset link (the page `/reset-password` does the same).
+**Auth** none. **Limit** `auth`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `token` | string, 1-128 | The `token` parameter of the link. |
+| `newPassword` | string, 1-1024 | Password rules as at registration. |
+
+Answer: 200 `{ "status": "password_reset" }`. The password reset has these effects:
+
+- every session is revoked, and a pending e-mail change is cancelled;
+- the address counts as confirmed (the link proved it);
+- the owner gets a mail;
+- two-step verification is not touched.
+
+Errors: 400 `invalid_token` (link invalid, used or expired), 400 `weak_password`, and the hash
+queue errors. After a hash queue error, the link stays valid.
+
+### Google sign-in
+
+Offered when `GET /info` says `sso.google: true`; otherwise every endpoint below answers 404
+`sso_disabled`. The game signs in through the system browser with PKCE and never sees a Google
+credential:
+
+1. The client makes a PKCE pair: a `codeVerifier` of 43-128 characters `[A-Za-z0-9._~-]` and
+   `codeChallenge = BASE64URL(SHA-256(codeVerifier))`, which has 43 characters and no padding.
+2. `POST /auth/sso/google/start` with the challenge returns the Google URL, which the client opens
+   in the browser.
+3. Google sends the browser back to `/auth/sso/google/callback` (section 14). The page only says
+   to go back to the game.
+4. The client polls `POST /auth/sso/google/poll` with the attempt id and its `codeVerifier`. An
+   attempt id is useless without the verifier.
+5. The answer is a session, a two-step verification step (continue with `POST /auth/login/mfa`),
+   or, for a new player, `needsUsername`: the client then calls `POST /auth/sso/complete` with a
+   user name.
+
+Which account the Google sign-in reaches:
+
+- the account already linked to that Google account;
+- otherwise, a local account with the same address: it is linked when both Google and the server
+  have confirmed that address;
+- otherwise, a new account.
+
+#### POST /auth/sso/google/start
+
+**Auth** none. **Limit** `sso_start`. Body: `{ "codeChallenge": string of exactly 43 [A-Za-z0-9_-] }`.
+Answer:
+
+```json
+{ "attemptId": "sso_...", "authUrl": "https://accounts.google.com/...", "pollMs": 2000, "expiresIn": 600 }
+```
+
+#### POST /auth/sso/google/poll
+
+**Auth** none. **Limit** `sso_poll`. Poll every `pollMs`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `attemptId` | string, 1-64 | From `start`. |
+| `codeVerifier` | string, 43-128 `[A-Za-z0-9._~-]` | Its SHA-256 must match `start`'s challenge. |
+| `clientLabel` | string, max 64, optional | As at sign-in. |
+
+Answers (200). The result is given once:
+
+- `{ "status": "pending" }`: the browser has not come back yet;
+- `{ token, expiresAt, user }`: signed in;
+- `{ "mfaRequired": true, "mfaToken": "...", "expiresIn": 300 }`: continue with
+  `POST /auth/login/mfa`;
+- `{ "needsUsername": true, "ssoTicket": "sso_...", "suggestedUsername": "alice" }`: a new
+  account. `suggestedUsername` comes from the Google name or the address, and is `""` when
+  nothing fits.
+
+Errors:
+
+- 410 `sso_expired`: an unknown, used or expired attempt;
+- 403 `invalid_verifier`;
+- 409 `sso_cancelled`;
+- 502 `sso_failed`;
+- 403 `sso_email_unverified`: Google has not confirmed the address;
+- 409 `sso_account_unverified`: a local account uses the address without having confirmed it;
+- 403 `registration_closed`;
+- 403 `account_disabled`;
+- 403 `banned`, 403 `email_unverified`.
+
+#### POST /auth/sso/complete
+
+Creates the account of a first Google sign-in. **Auth** none. **Limit** `auth`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `ssoTicket` | string, 1-64 | From the poll answer, valid for 10 minutes. |
+| `username` | string, 1-64 | Username rules as at registration. |
+| `clientLabel` | string, max 64, optional | |
+
+Answer: 200 `{ token, expiresAt, user }`. The account has no password: `hasPassword` is `false`,
+and "Forgot password" gives it one. Errors:
+
+- 403 `registration_closed`;
+- 400 `invalid_username`;
+- 410 `sso_expired`;
+- 409 `username_taken`;
+- 409 `sso_already_linked`;
+- 409 `email_taken`.
+
+## 5. Sessions
+
+### GET /auth/sessions
+
+The account's active sessions (signed-in devices), the most recently used first. **Auth**
+session. **Limit** `sessions`.
+
+```sh
+curl -sS "$API/auth/sessions" -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "sessions": [
+    { "id": 3, "createdAt": 1790882839708, "lastSeenAt": 1790882839708, "expiresAt": 1798658839708,
+      "clientLabel": "Laptop", "current": false },
+    { "id": 1, "createdAt": 1790882839708, "lastSeenAt": 1790882839708, "expiresAt": 1798658839708,
+      "clientLabel": "Scacelith 1.4 (Windows)", "current": true }
+  ]
+}
+```
+
+- `lastSeenAt` is updated at most every 5 minutes.
+- `expiresAt` is the absolute end; the idle limit may end the session sooner.
+- `clientLabel` is `null` when the sign-in sent none.
+- `current` marks the session making the request.
+
+### DELETE /auth/sessions/:id
+
+Signs out one session of the account; the current one may be signed out too. **Auth** session.
+**Limit** `sessions`. No body. Answer: 200 `{ "status": "revoked" }`. Error: 404 `not_found` (no
+active session with this id on this account).
+
+```sh
+curl -sS -X DELETE "$API/auth/sessions/3" -H "Authorization: Bearer $TOKEN"
+```
+
+## 6. Account
+
+### GET /account/me
+
+The account as its player sees it. **Auth** session. **Limit** `account`.
+
+```sh
+curl -sS "$API/account/me" -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "user": {
+    "id": 1, "username": "alice", "email": "alice@example.org", "emailVerified": true,
+    "mfaEnabled": true, "googleLinked": false, "hasPassword": true, "acceptChallenges": "all",
+    "createdAt": 1790882871478, "lastLoginAt": 1790882902200, "pendingEmail": "alice.new@example.org"
+  },
+  "ratings": [
+    { "category": "3+2", "rating": 1510, "games": 2, "wins": 1, "draws": 1, "losses": 0, "peak": 1510, "provisional": true }
+  ],
+  "sanctions": [],
+  "ban": null
+}
+```
+
+- `user.hasPassword`: `false` for an account created through Google that has not set a password
+  yet.
+- `user.googleLinked`: whether a Google account is linked.
+- `user.acceptChallenges`: `all` or `none` (see `PUT /account/preferences`).
+- `user.lastLoginAt`: the last sign-in, or `null`.
+- `user.pendingEmail`: the new address of an e-mail change waiting for its link (section 7), or
+  `null`.
+- `ratings`: one record per category the player has played rated games in. `provisional` is `true`
+  while the rating is unrated or has fewer than `PROVISIONAL_GAMES` counted games (the game shows
+  it as `1510?`).
+- `sanctions`: the active ones, `[{ kind, reason, startsAt, endsAt }]`. `kind` is `ban`, `mm_block`
+  or `warning`, and `endsAt` is `null` when the sanction is permanent.
+- `ban`: `{ until }` while banned (`until` is `null` when permanent), else `null`.
+- The anti-cheat's integrity level is never shown.
+
+Error: 401 `invalid_token` (also when the account was deleted).
+
+### PUT /account/preferences
+
+**Auth** session; no re-authentication. **Limit** `account`. Body:
+`{ "acceptChallenges": "all" | "none" }`. With `none`, direct challenges by name are refused: the
+challenger is told that the player is unavailable. Answer: 200
+`{ "preferences": { "acceptChallenges": "none" } }`.
+
+```sh
+curl -sS -X PUT "$API/account/preferences" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"acceptChallenges":"none"}'
+```
+
+### POST /account/password
+
+Changes the password. **Auth** session. **Limit** `reauth`. Body:
+`{ "currentPassword": string 1-1024, "newPassword": string 1-1024 }`. The current password is
+needed, but no second factor, even with two-step verification on.
+
+Answer: 200 `{ "status": "password_changed" }`. The change has these effects:
+
+- every other session is revoked, and this one stays signed in;
+- a pending e-mail change is cancelled;
+- the owner gets a mail.
+
+Errors: the re-authentication errors (section 1.7) and 400 `weak_password` (checked after the
+current password).
+
+```sh
+curl -sS "$API/account/password" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"currentPassword":"correct horse battery","newPassword":"a much better passphrase"}'
+```
+
+### Two-step verification (TOTP)
+
+Authenticator apps, RFC 6238: SHA-1, 6 digits, 30-second steps, one step of tolerance either way.
+
+#### POST /account/mfa/totp/setup
+
+**Auth** session. **Limit** `reauth`. Body: `{ "password": string }`. This stores a new pending
+secret, which replaces any earlier pending one, and returns it for the authenticator app:
+
+```json
+{
+  "secret": "OCKJVMPMMKMPLBSIYLN6QQRMKIPC2VLH",
+  "uri": "otpauth://totp/Scacelith:alice?secret=OCKJVMPMMKMPLBSIYLN6QQRMKIPC2VLH&issuer=Scacelith&algorithm=SHA1&digits=6&period=30",
+  "algorithm": "SHA1", "digits": 6, "period": 30
+}
+```
+
+Two-step verification is not on yet. Errors: 409 `mfa_already_enabled` (checked before the
+password), and the re-authentication errors.
+
+#### POST /account/mfa/totp/enable
+
+**Auth** session. **Limit** `reauth`. Body: `{ "code": "123456" }`, a code from the pending secret
+(exactly 6 digits). No password is asked here; the password was given at setup. Answer: 200
+`{ "status": "mfa_enabled", "recoveryCodes": [10 codes like "j7v5-3ezx-zn"] }`. The recovery codes
+are shown this once. Errors:
+
+- 409 `mfa_already_enabled`;
+- 409 `mfa_setup_required`: no pending secret;
+- 403 `invalid_code`;
+- 429 `too_many_attempts`.
+
+#### POST /account/mfa/totp/disable
+
+**Auth** session. **Limit** `reauth`. Body: `{ "password", "code"?, "recoveryCode"? }`. One of
+`code` or `recoveryCode` is required. Answer: 200 `{ "status": "mfa_disabled" }`. The secret and
+the recovery codes are deleted, and the owner gets a mail. Errors:
+
+- 409 `mfa_not_enabled`;
+- 403 `mfa_code_required`;
+- the re-authentication errors.
+
+#### POST /account/mfa/recovery-codes
+
+Replaces the recovery codes; the old ones stop working. **Auth** session. **Limit** `reauth`.
+Body: `{ "password", "code" }`, where `code` is an authenticator code (a recovery code is refused
+with 403 `invalid_code`). Answer: 200 `{ "recoveryCodes": [10 codes] }`. Errors: 409
+`mfa_not_enabled`, and the re-authentication errors.
+
+## 7. E-mail address change
+
+### POST /account/email
+
+**Auth** session. **Limit** `reauth`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `newEmail` | string, 1-254 | Trimmed and lower-cased, then checked like a registration address. |
+| `password` | string, 1-1024 | |
+| `code` | string, max 32, optional | Needed with two-step verification: an authenticator code or a recovery code. |
+| `recoveryCode` | string, max 32, optional | |
+
+**With e-mail confirmation (the default):** 202 `{ "status": "verification_sent" }`. The request
+does this:
+
+- A link valid for 24 hours goes to the new address. It opens `/confirm-email-change`
+  (section 14), and the address changes only when the player presses that page's button.
+- Until then, `GET /account/me` shows the new address as `pendingEmail`.
+- A new request replaces the pending one. A password change or reset cancels it.
+- The current address gets a notice that a change to a masked address (`a***@example.org`) was
+  requested, with what to do if it was not its owner.
+
+The answer and `pendingEmail` are the same when another account already uses the new address. No
+link is sent then, so that change never completes; the owner of that address gets a notice (at
+most one per hour) instead. When the link is confirmed:
+
+- the address changes and counts as confirmed;
+- the devices stay signed in;
+- the links sent earlier (confirmation, password reset, other changes) stop working;
+- the former address is told, with the new one masked.
+
+**Without e-mail confirmation** (`REQUIRE_EMAIL_VERIFICATION=false`): the address changes at once:
+200 `{ "status": "email_changed", "email": "alice.new@example.org" }`, and the former address is
+told. If another account uses the address, the answer is 409 `email_taken`, and the owner of that
+address gets the notice.
+
+Errors:
+
+- 400 `invalid_email` and 400 `same_email` (the account's current address). Both are checked
+  before the password, so they count no failure;
+- 409 `email_taken`, only without e-mail confirmation;
+- the re-authentication errors (section 1.7). A Google-only account gets 400
+  `password_not_set`.
+
+```sh
+curl -sS "$API/account/email" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"newEmail":"alice.new@example.org","password":"correct horse battery","code":"123456"}'
+# -> 202 {"status":"verification_sent"}; open the link sent to alice.new@example.org
+```
+
+## 8. Data export
+
+### POST /account/export
+
+Everything the server keeps about the account, as one JSON file to save. **Auth** session.
+**Limits** `account_export` (5 per hour per player; every attempt counts, failed ones included;
+checked first) and `reauth`. Body: `{ "password", "code"?, "recoveryCode"? }`, the
+re-authentication of section 1.7. Time limit 60 s.
+
+Answer: 200, `Content-Type: application/json; charset=utf-8`, and
+`Content-Disposition: attachment; filename="scacelith-account-<username>.json"`. Characters other
+than letters, digits, `_`, `.` and `-` in the file name become `_`. The export records a security
+event (`account_exported`).
+
+```sh
+curl -sS -o alice-export.json "$API/account/export" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"password":"correct horse battery","code":"123456"}'
+```
+
+The document (`format` `scacelith-account-export`, `version` 1; times in epoch ms; the lists are
+shortened here):
+
+```json
+{
+  "format": "scacelith-account-export",
+  "version": 1,
+  "exportedAt": 1790882839708,
+  "server": { "name": "Scacelith", "host": "caissa.scacelith.com" },
+  "notes": ["This file holds the data Scacelith keeps about your account. ...", "Not included, ..."],
+  "account": {
+    "id": 1, "username": "alice", "email": "alice@example.org", "emailVerified": true, "pendingEmail": null,
+    "mfaEnabled": false, "googleLinked": false, "googleEmail": null, "hasPassword": true,
+    "acceptChallenges": "all", "createdAt": 1790882839743, "lastLoginAt": 1790882839708
+  },
+  "ratings": [
+    { "category": "3+2", "rating": 1510, "games": 2, "wins": 1, "draws": 1, "losses": 0, "peak": 1510,
+      "provisional": true, "rated": true, "countedGames": 2, "updatedAt": 1790882839809 }
+  ],
+  "ratingRefunds": [ { "gameId": 4100000000002, "category": "3+2", "points": 9, "at": 1790882839000 } ],
+  "sessions": [
+    { "id": 1, "createdAt": 1790882839708, "lastSeenAt": 1790882839708, "expiresAt": 1798658839708,
+      "revokedAt": null, "clientLabel": "Scacelith 1.4 (Windows)", "ip": "203.0.113.7" }
+  ],
+  "securityEvents": [ { "kind": "login", "at": 1790882839708, "ip": "203.0.113.7", "detail": { "method": "password" } } ],
+  "sanctions": [],
+  "conduct": [ { "kind": "abort", "at": 1790800000000 } ],
+  "reportsFiled": [
+    { "gameId": 4100000000001, "reported": "bob", "category": "other", "comment": "rude", "createdAt": 1790882840000, "status": "open" }
+  ],
+  "games": { "total": 3, "list": [ { "id": 4100000000003, "outcome": "aborted", "...": "the summaries of GET /account/games" } ] }
+}
+```
+
+- `account`: the account view of `GET /account/me` (section 6). It adds `googleEmail`, the address
+  of the linked Google account (or `null`).
+- `ratings`: the full rating records:
+  - `rated`: whether the player has left the unrated phase;
+  - `countedGames`: the games that entered the rating;
+  - `updatedAt`: when the record last changed.
+- `ratingRefunds`: rating points given back to the player after an opponent was found cheating.
+  The cheater is not named.
+- `sessions`: every stored session, signed-out ones included until they are purged (a day after
+  they end). There is no token in it. `ip` is erased after `RETENTION_IP_DAYS`.
+- `securityEvents`: newest first, kept `RETENTION_SECURITY_DAYS`. `detail` keeps only the fields
+  that the export allows for the event's kind:
+  - `login`: `method`;
+  - `sso_login`, `sso_linked`, `sso_account_created`: `provider`;
+  - `login_failed`: `failures`;
+  - `login_lockout`: `retryAfterMs`;
+  - `mfa_failed`: `attempts`;
+  - `recovery_code_used`: `remaining`;
+  - `reauth_failed`: `factor`;
+  - `session_revoked` and `sessions_revoked_all`: `reason`;
+  - `email_change_refused`: `reason`;
+  - `rating_refund`: `gameId`, `category`, `points`;
+  - `sanction_auto`: `kind`, `gameId`, `until`.
+
+  Every other kind has `detail: null`. A `moderator_action` event keeps only `{ action }`, for
+  the actions `ban`, `unban`, `reset_mfa`, `verify_email` and `revoke_sessions`; the export leaves
+  out the other moderator actions.
+- `sanctions`: every sanction, lifted ones included:
+  `{ id, kind, reason, source ("auto" | "moderator"), gameId, startsAt, endsAt, createdAt, liftedAt }`.
+  The moderator's name is never included.
+- `conduct`: abandoned, aborted and no-show games counted against the player
+  (`kind`: `abandon`, `abort` or `noshow`), kept 30 days.
+- `reportsFiled`: the reports the player made. `reported` is the reported player's current public
+  name, and `status` is `open`, `actioned` or `dismissed`.
+- `games`: `total` and every game, newest first, as summaries of `GET /account/games`
+  (section 10). Moves are at `GET /games/:id` and the PGN at `GET /games/:id/pgn`.
+
+**Never in the export:**
+
+- the password hash, the two-step verification secret and the recovery codes;
+- any session or link token, or a hash of one;
+- the anti-cheat's data: integrity level and score, anomalies, the analysis of the games and its
+  population statistics, the weight of a report;
+- the reports other players made about the player;
+- the identities of moderators;
+- other players' private data (opponents appear by their public name and rating).
+
+The `notes` array of the document says this to the player in plain English.
+
+Errors:
+
+- 429 `rate_limited` (`account_export` or `reauth`);
+- the re-authentication errors;
+- 503 `busy` (with a `Retry-After: 1` header);
+- 503 `timeout`.
+
+## 9. Account deletion
+
+### POST /account/delete
+
+Deletes the account; this cannot be undone. **Auth** session. **Limit** `reauth`. Body:
+`{ "password", "code"?, "recoveryCode"? }`. With two-step verification, a code or a recovery code
+is required. Answer: 200 `{ "status": "deleted" }`.
+
+- Every session is revoked at once. The token gets 401 `invalid_token` from then on.
+- The user name becomes `deleted#<id>`, in the account and in every game record.
+- These are erased: the e-mail address, the password hash, the two-step secret and recovery codes,
+  the sessions and link tokens, the Google link, the anti-cheat's integrity record, and the IP
+  addresses stored with security events.
+- Ratings and games are kept. Games stay readable under the anonymous name, and
+  `GET /players/<former name>` answers 404.
+
+Errors: the re-authentication errors.
+
+```sh
+curl -sS "$API/account/delete" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"password":"correct horse battery","code":"123456"}'
+```
+
+## 10. Game history
+
+### GET /account/games
+
+The signed-in player's games, newest first, filtered and paged, with the number of games matching
+the filter. **Auth** session. **Limit** `account_games`.
+
+Query parameters, all optional; an empty value counts as absent:
+
+| Parameter | Values |
+|---|---|
+| `before` | A game id: only older games (pass the previous page's `next`). |
+| `limit` | 1-50, default 20. A larger number of up to 3 digits counts as 50. |
+| `category` | An official category id (`3+2`, or `3%2B2`) or `custom`. |
+| `rated` | `true` or `false`. |
+| `result` | `win`, `loss` or `draw`, from the player's side. Aborted games appear only without this filter. |
+
+```sh
+curl -sS "$API/account/games?limit=20&rated=true&result=win" -H "Authorization: Bearer $TOKEN"
+curl -sS "$API/account/games?limit=20&before=4100000000002" -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "games": [
+    {
+      "id": 4100000000001, "category": "3+2", "rated": true, "timeControl": "180+2",
+      "white": { "name": "alice", "rating": 1500, "ratingAfter": 1510, "ratingDiff": 10 },
+      "black": { "name": "bob", "rating": 1520, "ratingAfter": 1510, "ratingDiff": -10 },
+      "color": "white", "status": 1, "reason": 2, "result": "1-0", "termination": "Resignation",
+      "plies": 41, "startedAt": 1790620205000, "endedAt": 1790620611000,
+      "baseMs": 180000, "incMs": 2000, "outcome": "win"
+    }
+  ],
+  "next": null,
+  "total": 1
+}
+```
+
+A summary has these fields:
+
+- `color`: the player's side.
+- `outcome`: `win`, `loss`, `draw` or `aborted`, from the player's side.
+- `white` / `black`:
+  - `name`: the name in the game record (`deleted#<id>` for a deleted account);
+  - `rating`: the rating at the start (`null` when unknown);
+  - `ratingAfter` and `ratingDiff`: `null` when the game changed no rating (casual, custom,
+    aborted).
+- `timeControl`: in seconds (`180+2`). `baseMs` and `incMs` give it in milliseconds.
+- `status`, `reason`, `result` and `termination`: see [Game codes](#game-codes).
+- `plies`: the number of half-moves.
+
+Paging:
+
+- `next`: the id to pass as `before` for the next page, or `null` on the last page.
+- `total`: the number of games matching the filter, across all pages.
+
+Errors: 400 `invalid_cursor`, `invalid_limit` or `invalid_filter`, each with `field`; 503 `busy`.
+
+## 11. Games and PGN
+
+### GET /games/:id
+
+One game record, with its moves and clocks. **Auth** optional. **Limit** `public_read`.
+
+```sh
+curl -sS "$API/games/4100000000001" -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "id": 4100000000001, "category": "3+2", "rated": true, "timeControl": "180+2",
+  "white": { "name": "alice", "rating": 1500, "ratingAfter": 1510, "ratingDiff": 10 },
+  "black": { "name": "bob", "rating": 1520, "ratingAfter": 1510, "ratingDiff": -10 },
+  "status": 1, "reason": 2, "result": "1-0", "termination": "Resignation", "plies": 2,
+  "startedAt": 1790620205000, "endedAt": 1790620611000, "baseMs": 180000, "incMs": 2000,
+  "statusName": "WhiteWins", "rematchOf": null,
+  "moves": [
+    { "uci": "e2e4", "spentMs": 0, "clockMs": 180000 },
+    { "uci": "e7e5", "spentMs": 1700, "clockMs": 180300 }
+  ],
+  "pgn": {
+    "Event": "Scacelith rated 3+2", "Site": "caissa.scacelith.com", "Date": "2026.09.28", "Round": "-",
+    "White": "alice", "Black": "bob", "Result": "1-0", "WhiteElo": 1500, "BlackElo": 1520,
+    "TimeControl": "180+2", "Termination": "Resignation", "PlyCount": 2
+  },
+  "you": "white",
+  "reportable": true
+}
+```
+
+- The record has the summary fields of section 10 without `color`, `baseMs`, `incMs` and
+  `outcome`.
+- `statusName`: the name of `status`.
+- `rematchOf`: the id of the game that this one is a rematch of, or `null`.
+- `moves`: one entry per ply.
+  - `uci`: the move in UCI notation, with `n`, `b`, `r` or `q` added for a promotion.
+  - `spentMs`: the time charged for the move.
+  - `clockMs`: the mover's clock after the move.
+
+  Both are `null` when the record does not have them.
+- `pgn`: the main PGN tags, for display. `WhiteElo` and `BlackElo` are a number or `"-"`.
+  `Termination` here is the end-reason name; the PGN file uses the PGN standard values.
+- `you` and `reportable` are only present when the token is a player of this game:
+  - `you`: `white` or `black`;
+  - `reportable`: `true` when `POST /reports` would take a report of the opponent for this game
+    now. The game must have ended within 7 days, the daily quota must not be used up, and the
+    opponent must not already be reported for this game.
+
+  Without a token, or with another player's, the answer is the public one.
+
+Errors: 400 `invalid_game_id` (not a positive integer of at most 16 digits), 404 `not_found`,
+401 `invalid_token` (a token that is not valid), 503 `busy`.
+
+### GET /games/:id/pgn
+
+The same game as a PGN file. **Auth** optional (the answer is the same). **Limit** `public_read`.
+
+- Answer: 200, `Content-Type: application/x-chess-pgn; charset=utf-8`,
+  `Content-Disposition: attachment; filename="scacelith-<id>.pgn"`.
+- One game with `\n` line endings, and move text in lines under 80 columns.
+
+```sh
+curl -sS -OJ "$API/games/4100000000001/pgn"          # saves scacelith-4100000000001.pgn
+```
+
+```
+[Event "Scacelith rated 3+2"]
+[Site "caissa.scacelith.com"]
+[Date "2026.09.28"]
+[Round "-"]
+[White "alice"]
+[Black "bob"]
+[Result "1-0"]
+[UTCDate "2026.09.28"]
+[UTCTime "18:30:05"]
+[WhiteElo "1500"]
+[BlackElo "1520"]
+[WhiteRatingDiff "+10"]
+[BlackRatingDiff "-10"]
+[TimeControl "180+2"]
+[Termination "normal"]
+[PlyCount "2"]
+[ScacelithGameId "4100000000001"]
+
+1. e4 {[%clk 0:03:00.0] [%emt 0:00:00.0]} 1... e5 {[%clk 0:03:00.3]
+[%emt 0:00:01.7]} {Resignation} 1-0
+```
+
+Tags, in this order:
+
+- `Event`: `<SERVER_NAME> rated <category>` or `<SERVER_NAME> casual <category>`.
+- `Site`: `SERVER_PUBLIC_HOST`.
+- `Date`: the UTC start date.
+- `Round`, `White`, `Black`, `Result`. The result is `*` for an aborted game.
+- `UTCDate` and `UTCTime`: the start.
+- `WhiteElo` and `BlackElo`: the ratings at the start, or `-`.
+- `WhiteRatingDiff` and `BlackRatingDiff`: only when the game changed the ratings.
+- `TimeControl`: in seconds.
+- `Termination`, with a PGN standard value:
+  - `normal`;
+  - `time forfeit`: a flag fall, also when it ends in a draw;
+  - `abandoned`;
+  - `rules infraction`: a second illegal move or a fair-play forfeit;
+  - `unterminated`: an aborted game.
+- `PlyCount`.
+- `ScacelithGameId`: the decimal id.
+
+Each move carries `{[%clk h:mm:ss.f] [%emt h:mm:ss.f]}`: the mover's clock after the move and the
+time charged for it, in tenths of a second (truncated). A value is left out when the record lacks
+it. After the last move, the end reason follows in words, then the result. The game's PGN reader
+reads `[%clk]` and `[%emt]` back (`tests/data/server-pgn/` holds server-made samples).
+
+Errors:
+
+- 400 `invalid_game_id`;
+- 404 `not_found`;
+- 500 `internal_error`: the stored moves cannot be replayed to the stored ending (the server logs
+  it);
+- 503 `busy`.
+
+### Game codes
+
+`status`: 1 `WhiteWins`, 2 `BlackWins`, 3 `Draw`, 4 `Aborted`. Only finished games are stored.
+
+`reason` (with `termination`, its name, and the words of the PGN comment):
+
+| Code | `termination` | Meaning |
+|---|---|---|
+| 1 | `Checkmate` | Checkmate |
+| 2 | `Resignation` | Resignation |
+| 3 | `Timeout` | Loss on time |
+| 4 | `IllegalMoves` | Second illegal move (forfeit) |
+| 5 | `Stalemate` | Stalemate |
+| 6 | `InsufficientMaterial` | Dead position (insufficient material) |
+| 7 | `TimeoutVsInsufficient` | Flag fall, but the opponent cannot checkmate (draw) |
+| 8 | `FivefoldRepetition` | Fivefold repetition |
+| 9 | `SeventyFiveMoves` | 75-move rule |
+| 10 | `ThreefoldClaim` | Threefold repetition (claimed) |
+| 11 | `FiftyMoveClaim` | 50-move rule (claimed) |
+| 12 | `Agreement` | Draw by agreement |
+| 13 | `IllegalMovesVsInsufficient` | Second illegal move, but the opponent cannot checkmate (draw) |
+| 20 | `Abandonment` | Abandoned (disconnected for too long) |
+| 21 | `AbandonmentVsInsufficient` | Abandoned, but the opponent cannot checkmate (draw) |
+| 22 | `Aborted` | Game aborted |
+| 23 | `NoShow` | Aborted: first move not played in time |
+| 24 | `Forfeit` | Forfeit (fair play violation) |
+| 25 | `ServerAborted` | Aborted by the server |
+| 26 | `BothDisconnected` | Aborted: both players disconnected |
+
+`result`: `1-0`, `0-1`, `1/2-1/2`, or `*` (aborted).
+
+## 12. Players and leaderboard
+
+Public data only: never an e-mail address, a session, a sanction or an integrity level. A deleted
+account has no profile.
+
+### GET /players/:username
+
+**Auth** none. **Limit** global only.
+
+```sh
+curl -sS "$API/players/alice"
+```
+
+```json
+{
+  "username": "alice",
+  "createdAt": 1790882839743,
+  "ratings": [
+    { "category": "3+2", "rating": 1510, "provisional": true, "games": 2, "wins": 1, "draws": 1, "losses": 0, "peak": 1510 }
+  ],
+  "games": { "total": 3, "rated": 2, "wins": 1, "draws": 1, "losses": 0 }
+}
+```
+
+- `ratings`: the official categories only, in the server's order.
+- `games.total`: every stored game, casual and aborted ones included.
+- `games.rated`, `wins`, `draws` and `losses`: summed over the rating records, so rated games only.
+
+Errors: 400 `invalid_username` (2-24 characters of `[A-Za-z0-9_.-]`), 404 `not_found` (no such
+player, or a deleted account), 503 `busy`.
+
+### GET /players/:username/games
+
+The player's recent games, newest first. **Auth** none. **Limit** `public_read`. Query: `before`
+(a game id) and `limit` (1-50, default 20, as in section 10). Neither filters nor a total are
+available here.
+
+```json
+{ "username": "alice", "games": [ { "id": 4100000000003, "...": "summaries" } ], "next": 4100000000002 }
+```
+
+The summaries are those of section 10 without `baseMs`, `incMs` and `outcome`; `color` is the
+side of this player. `next` is the last game's id whenever the page is full, so the next page may
+be empty. Errors: 400 `invalid_username`, `invalid_cursor` or `invalid_limit`; 404 `not_found`;
+503 `busy`.
+
+### GET /leaderboard
+
+**Auth** none. **Limit** global only. Query: `category` (required: an official category, `3%2B2`
+or `3+2`) and `limit` (1-100, default 100).
+
+```sh
+curl -sS "$API/leaderboard?category=3%2B2&limit=10"
+```
+
+```json
+{
+  "category": "3+2", "minGames": 30, "updatedAt": 1790882839828,
+  "players": [ { "rank": 1, "username": "bob", "rating": 1874, "games": 212, "wins": 120, "draws": 30, "losses": 62, "peak": 1901 } ]
+}
+```
+
+- The list holds the top 100 rated records with at least `minGames` (`PROVISIONAL_GAMES`) counted
+  games. It leaves out deleted accounts and confirmed cheaters.
+- Each worker computes it again at most every 10 seconds; `updatedAt` says when.
+
+Errors: 400 `invalid_category`, 400 `invalid_limit`, 503 `busy`.
+
+## 13. Reports
+
+### POST /reports
+
+Reports the opponent of one of the player's own games. A report never changes a rating or a
+sanction by itself: it raises the game's priority for the engine analysis and for the moderators
+([ANTICHEAT.md](ANTICHEAT.md)). **Auth** session. **Limit** `reports`, plus `REPORTS_PER_DAY` per
+player.
+
+| Field | Type | Notes |
+|---|---|---|
+| `gameId` | integer, or a string of digits | The game. |
+| `reported` | string, max 24 | The opponent's user name, without regard to case. The current name also works after a rename. |
+| `category` | `cheating`, `abuse` or `other` | |
+| `comment` | string, optional | At most 500 characters once control characters are removed. |
+
+Answer: **202 `{ "status": "received" }`**. A report of the same opponent for the same game gets
+the same answer and changes nothing; the answer never tells anything about the reported account.
+Errors:
+
+- 400 `invalid_request`;
+- 429 `report_limit` (`retryAfter: 3600`, with a `Retry-After` header);
+- 403 `report_not_allowed`: not the opponent of the reporter in a game that ended within the last
+  7 days.
+
+`GET /games/:id` tells the game's players beforehand whether a report would be taken
+(`reportable`).
+
+```sh
+curl -sS "$API/reports" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"gameId":4100000000001,"reported":"bob","category":"cheating","comment":"engine-like play"}'
+```
+
+## 14. HTML pages outside /api
+
+Pages for a browser, opened from the links of e-mails and by Google. Their links point to
+`https://<SERVER_PUBLIC_HOST>` (with `:<PUBLIC_API_PORT>` when it is not 443).
+
+- The pages run no JavaScript and load no external resource. They are served with
+  `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self';
+  frame-ancestors 'none'; base-uri 'none'`.
+- A GET only shows a button or a form, so that a mail scanner opening the link does not use it up.
+  The change happens on POST: a form sent as `application/x-www-form-urlencoded`, with the link's
+  token in a hidden field.
+- Errors (rate limits, invalid fields) are HTML pages too.
+
+| Page | Answers |
+|---|---|
+| `GET /verify-email?token=` | 200: a "Confirm my e-mail address" button. 400: link invalid or expired. Limit `page`. |
+| `POST /verify-email` (form `token`) | 200: address confirmed. 400: link invalid, used or expired. Limit `auth`. |
+| `GET /reset-password?token=` | 200: the new password form (password twice). 400: link invalid. Limit `page`. |
+| `POST /reset-password` (form `token`, `newPassword`, `confirmPassword`) | 200: password changed, and every device signed out. 400: the form again with the error (the passwords differ, a weak password), or link invalid. 503 / 429: the form again with `Retry-After` when the server is busy; the link stays valid. Limit `auth`. |
+| `GET /confirm-email-change?token=` | 200: shows the new address and the account's name, with a "Use this e-mail address" button. 400: link invalid or expired (also when the account's address changed since the request). Limit `page`. |
+| `POST /confirm-email-change` (form `token`) | 200: address changed. 400: link invalid, used or expired. 409: another account took the address in the meantime. Limit `auth`. |
+| `GET /auth/sso/google/callback?code=&state=` | 200: "You can go back to Scacelith" (or "choose your username"). 400: the sign-in failed, was cancelled or expired. Never shows a token. Limit `sso_page`. |
+
+## 15. Health endpoints
+
+On the API port, before any rate limit or authentication; both paths work for each endpoint:
+
+| Endpoint | Answer |
+|---|---|
+| `GET` or `HEAD /healthz`, `/api/v1/healthz` | 200 `{ "status": "ok" }` while the process runs. |
+| `GET` or `HEAD /readyz`, `/api/v1/readyz` | 200 `{ "status": "ready" }` when the worker accepts players; 503 `{ "status": "not_ready" }` while it starts or stops. |
+
+On the metrics port (`METRICS_PORT`, 9464 on `METRICS_BIND`, 127.0.0.1 by default; plain HTTP,
+keep it private):
+
+- `GET /healthz`: `ok`.
+- `GET /readyz`: `ready`, or 503 `not ready`, for the whole server (every shard ready, not shutting
+  down).
+- `GET /metrics`: the Prometheus metrics. With `METRICS_TOKEN` set, it needs
+  `Authorization: Bearer <token>`.
+
+```sh
+curl -sS https://caissa.scacelith.com/healthz
+curl -sS http://127.0.0.1:9464/readyz        # on the server itself
+```
