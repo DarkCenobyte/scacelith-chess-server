@@ -11,7 +11,9 @@
 // route match (404, 405 + Allow, OPTIONS -> 204 + Allow, HEAD = GET without body) -> authentication (Authorization: Bearer sct_...) -> route rate limits
 // (local token bucket, then the primary's `ratelimit.take` for `shared` limits; the password
 // endpoints also limit each IPv6 /48 as a whole, see checkRates; a request refused because its
-// client already has too many password hashes waiting gets these tokens back) -> body (JSON only
+// client already has too many password hashes waiting gets these tokens back; a refusal by a
+// limit keyed by the client's address, not by an account, also counts toward a block of that
+// address, `abuseWeight` times or once: routeRefusal, `guard`) -> body (JSON only
 // for the API, form-urlencoded for HTML pages, HTTP_BODY_LIMIT enforced while streaming: 413;
 // Content-Type checked: 415; body read timeout: 408) -> strict schema validation (400; a route
 // declared with { ownBodyValidation: true } gets the parsed JSON as it is and validates it
@@ -63,6 +65,22 @@ const rateLimitedTotal = metrics.counter('scacelith_http_rate_limited_total', 'A
 function jsonError(status, code, message, extra) { return new HttpError(status, code, message, extra); }
 
 function retryAfterSec(ms) { return Math.max(1, Math.ceil(ms / 1000)); }
+
+/**
+ * The 429 of a route limit (take()). One keyed by the client's address, not by an account,
+ * carries `abuseWeight`: sendError counts it toward a block of that address (net/ipguard.js
+ * noteRefusal), with the rate's own `abuseWeight` (the login, registration, reset and MFA family:
+ * 5, AUTH_REFUSAL_WEIGHT) or 1. A per-account limit is the account's problem, not its network's:
+ * weight 0. checkRates names the bucket of an account `<rate key>:u<userId>` and those of an
+ * address `<rate key>:<ipKey>` and `<rate key>/48:<prefixKey>` (a `by: 'user'` rate without a
+ * session falls back to the address).
+ */
+function routeRefusal(rate, key, ms, label) {
+    const err = rateLimited(ms, label);
+    const byUser = rate.by === 'user' && key.startsWith(`${rate.key}:u`);
+    err.abuseWeight = byUser ? 0 : (rate.abuseWeight > 0 ? rate.abuseWeight : 1);
+    return err;
+}
 
 function rateLimited(ms, label) {
     rateLimitedTotal.labels(label).inc();
@@ -136,7 +154,8 @@ function parseQuery(search) {
  *           anticheat?: object|null, log: object, routes?: Array<{ register: Function }|Function>,
  *           now?: () => number, ready?: () => boolean, bodyTimeoutMs?: number, handlerTimeoutMs?: number,
  *           deps?: object, guard?: import('../net/ipguard.js').IpGuard|null }} opts `deps` adds fields to what route
- *           modules receive; `guard`: the shard's protection per address (the same one the listeners use).
+ *           modules receive; `guard`: the shard's protection per address (the same one the listeners use), which
+ *           also counts the refusals of the route limits keyed by the client's address (routeRefusal).
  * @returns {((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>) & { router: Router }}
  */
 export function createApiHandler({ config, store, auth, primary = null, anticheat = null, log, routes = DEFAULT_ROUTES,
@@ -193,6 +212,10 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
     }
 
     function sendError(req, res, err, page) {
+        // A route limit of the client's address refused it (routeRefusal): toward a block.
+        if (guard !== null && err && err.abuseWeight > 0) {
+            guard.noteRefusal(guard.keysOf(req.clientIp ?? normalizeIp(req.socket?.remoteAddress), req.socket), err.abuseWeight);
+        }
         let status = 500, code = 'internal_error', message = 'Internal server error.', extra = null, headers = null;
         if (err && err.expose && Number.isInteger(err.status)) {
             status = err.status; code = err.code; message = err.message; extra = err.extra; headers = err.headers;
@@ -233,7 +256,7 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
      */
     async function take(rate, key, limit, label) {
         const local = limiter.take(key, limit, rate.windowMs, 1);
-        if (!local.allowed) throw rateLimited(local.retryAfterMs, label);
+        if (!local.allowed) throw routeRefusal(rate, key, local.retryAfterMs, label);
         const taken = { key, limit, windowMs: rate.windowMs, sharedAt: null };
         if (rate.shared && primary) {
             let r = null;
@@ -245,7 +268,7 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
                 const t = now();
                 if (t - primaryWarnAt > 60000) { primaryWarnAt = t; log.warn('shared rate limit unavailable', { err: { message: err.message } }); }
             }
-            if (r && r.allowed === false) throw rateLimited(r.retryAfterMs || 1000, label);
+            if (r && r.allowed === false) throw routeRefusal(rate, key, r.retryAfterMs || 1000, label);
             if (r && r.allowed) taken.sharedAt = askedAt;
         }
         return taken;
