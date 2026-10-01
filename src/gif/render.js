@@ -2,34 +2,49 @@
 //
 //   const gif = renderGame({
 //       startFen: null,                        // null / undefined: the standard start position
-//       moves: [796, 3364, ...],               // protocol u16 moves (from | to << 6 | promo << 12)
+//       moves: [1804, 2356, ...],              // protocol u16 moves (from | to << 6 | promo << 12)
 //       white: { name: 'alice', rating: 1520 }, black: { name: 'bob', rating: 1497 },
 //       result: '1-0',                         // '1-0' | '0-1' | '1/2-1/2' | '*'
 //       footer: 'Checkmate',                   // optional: how the game ended (shown with the result)
 //       options: { size: 'medium', orientation: 'white', delayMs: 500, coords: true },
 //   });                                        // -> Buffer (image/gif)
 //
-// Picture, top to bottom: a header band with one row per player (colour swatch, name, rating;
-// the side to move marked by a lighter row with an accent bar; at the end each player's score),
-// the board (cburnett pieces, src/gif/pieces.js; warm wood squares; the last move highlighted on
-// both squares; a red glow under a king in check) with its coordinates around it, and a footer
-// (the last move in SAN; at the end the result and how the game ended).
+// Picture, top to bottom:
+//  * a header band, one row per player, White first: a colour swatch, the name (bold), the
+//    rating (dimmed; omitted when null); the side to move has an accent bar at the start of its
+//    row and an accent dot at its end; on the last frame of a finished game each row ends with
+//    the player's score (1, 0 or the one-half glyph) instead;
+//  * the board: cburnett pieces (src/gif/pieces.js) on warm wood squares, the last move
+//    highlighted on both its squares, a red glow under a king in check, the coordinates around
+//    it (a-h below, 1-8 on the left, following the orientation; options.coords false drops them
+//    and narrows the margins);
+//  * a footer: the last move ("12..." dimmed, then the SAN in bold); on the last frame of a
+//    finished game (or when `footer` is given) the result in the accent colour, how the game
+//    ended (`footer`, else what the final position shows: checkmate, stalemate, insufficient
+//    material), and the last move on the right.
+// Names and texts keep the characters the font has (printable ASCII and a few signs, others print
+// as '?') and are cut with an ellipsis when too long; unknown sizes and orientations fall back to
+// medium and white.
 //
 // Frames: the start position (held max(1 s, delay)), one frame per move (delayMs, default 500,
 // clamped to 100..3000), the last one held 3 s; the animation loops forever. Frames after the
 // first only hold the bounding box of the pixels that changed, the unchanged ones transparent
-// (colour index 0), which keeps a move to a few hundred bytes.
+// (colour index 0); only the rectangles redrawn for the frame (changed squares, header rows,
+// footer) are compared. A move costs about 1.3 KiB (small), 2.6 KiB (medium), 4 KiB (large).
 //
-// Colours: one global palette per theme, built so that anti-aliased pieces stay smooth on every
-// square colour: each square colour blended with black in 16 steps (the pieces' outlines), a
-// 32-step grey ramp (black lines on white bodies, light lines on black bodies), the red glow of a
-// check on both square colours, and the interface colours. Every pixel of a square (piece over
-// square) is composed in true colour, then mapped to the nearest palette entry; the 6 x 13 square
-// pictures (light / dark, highlighted, in check; empty or one of 12 pieces) are made once per size
-// and cached, so a frame is a few blits.
+// Colours: one global palette (about 190 entries), built so that anti-aliased pieces stay smooth
+// on every square colour: each square colour (light, dark, both highlighted) blended with black in
+// 16 steps (the pieces' outlines), a 32-step grey ramp (black lines on white bodies, light lines
+// on black bodies), the red glow of a check over both square colours in 32 steps, and the
+// interface colours. Every pixel of a square (piece over square) is composed in true colour, then
+// mapped to the nearest palette entry; the 6 x 13 square pictures (light / dark, highlighted, in
+// check; empty or one of 12 pieces) are made once per size and cached, so a frame is a few blits.
 //
-// Sizes (square, image): small 32 px (288 x 382), medium 48 px (424 x 532), large 72 px
-// (624 x 774). Pure and synchronous; rendering runs on a worker thread (src/gif/pool.js).
+// Sizes (square, picture with / without coordinates): small 32 px (284 x 350 / 268 x 342),
+// medium 48 px (424 x 515 / 400 x 503), large 72 px (628 x 762 / 600 x 748). Pure and
+// synchronous: the HTTP layer runs it on a worker thread (src/gif/pool.js). Render time on one
+// core, warm caches: 80 plies 60-100 ms, 300 plies 100-370 ms (small to large); the first render
+// of a size in a thread also rasterizes the pieces and squares (about 150-200 ms).
 
 import { Position, WHITE, BLACK } from '../chess/index.js';
 import { pieceSprite } from './pieces.js';
@@ -51,7 +66,6 @@ export const DELAY = Object.freeze({ min: 100, max: 3000, default: 500, first: 1
 
 const THEME = Object.freeze({
     page: [0x26, 0x24, 0x21],
-    rowActive: [0x3a, 0x36, 0x31],
     text: [0xee, 0xea, 0xe2],
     dim: [0xa8, 0xa1, 0x96],
     accent: [0xe8, 0xb0, 0x40],
@@ -92,7 +106,7 @@ class Palette {
         // Index 0: the transparent colour of the frames after the first (never drawn).
         this.rgb.push(THEME.page.slice());
         this.idx = {};
-        for (const name of ['page', 'rowActive', 'text', 'dim', 'accent', 'swatchWhite', 'swatchBlack', 'swatchEdge']) {
+        for (const name of ['page', 'text', 'dim', 'accent', 'swatchWhite', 'swatchBlack', 'swatchEdge']) {
             this.idx[name] = this._add(THEME[name]);
         }
         const bases = [THEME.light, THEME.dark, THEME.lightHi, THEME.darkHi];
@@ -222,6 +236,12 @@ function ratingText(r) {
 const RESULT_TEXT = { '1-0': '1-0', '0-1': '0-1', '1/2-1/2': '½-½', '*': '*' };
 const SCORE = { '1-0': ['1', '0'], '0-1': ['0', '1'], '1/2-1/2': ['½', '½'] };
 
+// The result of a job: '1-0', '0-1', '1/2-1/2' (also written with the one-half sign), else '*'.
+function normalResult(r) {
+    if (r === '½-½') return '1/2-1/2';
+    return typeof r === 'string' && Object.hasOwn(RESULT_TEXT, r) ? r : '*';
+}
+
 /**
  * Replays the moves and records what each frame shows.
  * @returns {Array<{ board: Uint8Array, from: number, to: number, check: number, side: number, text: string }>}
@@ -282,7 +302,7 @@ export function renderGame(job, hooks = {}) {
     delayMs = Math.min(DELAY.max, Math.max(DELAY.min, delayMs));
     const moves = Array.from(job.moves ?? [], Number);
     if (moves.length > MAX_PLIES) throw new RangeError(`too many moves (${moves.length} plies, at most ${MAX_PLIES})`);
-    const result = Object.hasOwn(RESULT_TEXT, job.result ?? '') ? job.result : '*';
+    const result = normalResult(job.result);
 
     const { states, final } = replay(job.startFen, moves);
     const ending = job.footer !== undefined && job.footer !== null && String(job.footer).trim() !== ''
