@@ -196,6 +196,24 @@ test('lenient SAN', () => {
     }
 });
 
+test('promotions: every form the header lists is read in movetext; e8(Q) only by parseSan', () => {
+    const fen = '4k3/P7/8/8/8/8/8/4K3 w - - 0 1';
+    const header = readFileSync(new URL('../../src/chess/pgn.js', import.meta.url), 'utf8').split('\nimport ')[0];
+    const listed = /promotions as ([^;]*?)(?:,? in movetext|;)/s.exec(header.replace(/\n\/\/\s*/g, ' '));
+    assert.ok(listed, 'the header lists the promotion forms');
+    const forms = listed[1].split(/,\s*|\s+or\s+/).map((f) => f.trim()).filter(Boolean);
+    assert.ok(forms.length >= 3, forms.join(' | '));
+    for (const form of forms) {
+        const move = form.replace('e8', 'a8');
+        const g = readPgn(`[FEN "${fen}"]\n\n1. ${move} *`);
+        assert.deepEqual(uci(g.moves, fen), ['a7a8q'], `${form} in movetext`);
+    }
+    // The parenthesis opens a variation in movetext, as in the game's reader (src/chess/pgn.cpp).
+    pgnError(() => readPgn(`[FEN "${fen}"]\n\n1. a8(Q) *`), { line: 3, column: 4, message: /illegal move 'a8'/ });
+    const p = Position.fromFEN(fen);
+    assert.equal(p.uci(parseSan(p, 'a8(Q)')), 'a7a8q');
+});
+
 test('movetext: numbers, comments, escapes, NAGs, glyphs, evaluations, variations, results', () => {
     const text = `[White "a \\"quoted\\" \\\\ name"]
 [Black "b"]

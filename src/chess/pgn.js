@@ -19,11 +19,12 @@
 //    line, '%' escape lines, NAGs ($1), suffix glyphs (! ? !! ?? !? ?!), text evaluations
 //    (+- = -/+ ±), variations ( ... ) skipped (nesting capped), "e.p." dropped;
 //  * SAN read leniently: check / mate / annotation suffixes stripped, castling as O-O, 0-0, o-o,
-//    OO (and the long forms), promotions as e8=Q, e8Q, e8(Q), e8/Q, captures with x, X, : or
-//    none, long algebraic (Ng1-f3, e2e4) and over-disambiguated moves (Nge2 when only one knight
-//    can go), a lower-case piece letter when it is not a pawn move (nf3, but bc4 is a b-pawn
-//    capture first), figurine SAN (♘f3), and plain UCI (e7e8q) as a last resort; a move must
-//    match exactly one legal move;
+//    OO (and the long forms), promotions as e8=Q, e8Q or e8/Q in movetext (parseSan also reads
+//    e8(Q), but in movetext its '(' opens a variation, as in the game's reader), captures with x,
+//    X, : or none, long algebraic (Ng1-f3, e2e4) and over-disambiguated moves (Nge2 when only one
+//    knight can go), a lower-case piece letter when it is not a pawn move (nf3, but bc4 is a
+//    b-pawn capture first), figurine SAN (♘f3), and plain UCI (e7e8q) as a last resort; a move
+//    must match exactly one legal move;
 //  * the end of the first game: its termination marker, a tag pair after its movetext (the next
 //    game), or the end of the text.
 // Null moves ("--", "Z0") are refused. Moves after an automatic ending (fivefold repetition,
