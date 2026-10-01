@@ -25,6 +25,7 @@ const SECTION_TITLES = {
     accounts: 'Accounts',
     mail: 'Mail',
     sso: 'Google single sign-on',
+    abuse: 'Protection per address (background layer)',
     limits: 'Abuse protection and limits',
     games: 'Games',
     matchmaking: 'Matchmaking and ratings',
