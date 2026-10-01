@@ -305,16 +305,11 @@ export function renderGame(job, hooks = {}) {
 
     const canvas = { width, height, data: new Uint8Array(width * height).fill(P.page) };
     const data = canvas.data;
-    let dx0 = width, dy0 = height, dx1 = 0, dy1 = 0;     // dirty box of the frame being drawn
-    const dirty = (x, y, w, h) => {
-        if (x < dx0) dx0 = x;
-        if (y < dy0) dy0 = y;
-        if (x + w > dx1) dx1 = x + w;
-        if (y + h > dy1) dy1 = y + h;
-    };
+    // Rectangles redrawn for the frame being drawn: only they are compared with the previous frame.
+    const dirtyRects = [];
+    const dirty = (x, y, w, h) => { dirtyRects.push(x, y, w, h); };
     const fillRect = (x, y, w, h, c) => {
         for (let yy = y; yy < y + h; yy++) data.fill(c, yy * width + x, yy * width + x + w);
-        dirty(x, y, w, h);
     };
     // Text vertically centred on the capital letters in a row of height h at y.
     const textTop = (font, y, h) => y + Math.round((h - font.capHeight) / 2) - font.capTop;
@@ -340,6 +335,7 @@ export function renderGame(job, hooks = {}) {
     const drawRow = (pl, active, score) => {
         const { y } = pl;
         fillRect(rowX, y, rowW, spec.rowH, P.page);
+        dirty(rowX, y, rowW, spec.rowH);
         if (active) fillRect(rowX, y, spec.bar, spec.rowH, P.accent);
         let x = rowX + spec.bar + spec.pad;
         const sy = y + Math.round((spec.rowH - swatch) / 2);
@@ -369,6 +365,7 @@ export function renderGame(job, hooks = {}) {
 
     const drawFooter = (left, leftColor, right) => {
         fillRect(rowX, footerY, rowW, spec.rowH, P.page);
+        dirty(rowX, footerY, rowW, spec.rowH);
         const ty = textTop(fontB, footerY, spec.rowH);
         let x = rowX;
         for (const [text, font, color] of left) {
@@ -426,38 +423,48 @@ export function renderGame(job, hooks = {}) {
             enc.addFrame({ x: 0, y: 0, width, height, pixels: data, delayCs, disposal: Disposal.Keep });
             prev.set(data);
         } else {
-            // Exact box of the changed pixels inside the dirty box.
-            let bx0 = dx1, by0 = dy1, bx1 = dx0 - 1, by1 = dy0 - 1;
-            for (let y = dy0; y < dy1; y++) {
-                const o = y * width;
-                for (let x = dx0; x < dx1; x++) {
-                    if (data[o + x] !== prev[o + x]) {
-                        if (x < bx0) bx0 = x;
-                        if (x > bx1) bx1 = x;
-                        if (y < by0) by0 = y;
-                        by1 = y;
+            // Exact box of the changed pixels (they are all inside the redrawn rectangles).
+            let bx0 = width, by0 = height, bx1 = -1, by1 = -1;
+            for (let r = 0; r < dirtyRects.length; r += 4) {
+                const rx = dirtyRects[r], ry = dirtyRects[r + 1], rw = dirtyRects[r + 2], rh = dirtyRects[r + 3];
+                for (let y = ry; y < ry + rh; y++) {
+                    const o = y * width;
+                    for (let x = rx; x < rx + rw; x++) {
+                        if (data[o + x] !== prev[o + x]) {
+                            if (x < bx0) bx0 = x;
+                            if (x > bx1) bx1 = x;
+                            if (y < by0) by0 = y;
+                            if (y > by1) by1 = y;
+                        }
                     }
                 }
             }
-            if (bx1 < bx0) {
+            if (bx1 < 0) {
                 // Nothing changed: a one-pixel transparent frame keeps the timing.
                 enc.addFrame({ x: 0, y: 0, width: 1, height: 1, pixels: new Uint8Array(1), delayCs, disposal: Disposal.Keep, transparentIndex: 0 });
             } else {
+                // The changed pixels; everything else is the transparent index 0.
                 const w = bx1 - bx0 + 1, h = by1 - by0 + 1;
                 const sub = new Uint8Array(w * h);
-                for (let y = 0; y < h; y++) {
-                    const o = (by0 + y) * width + bx0;
-                    for (let x = 0; x < w; x++) {
-                        const v = data[o + x];
-                        sub[y * w + x] = v === prev[o + x] ? 0 : v;
+                for (let r = 0; r < dirtyRects.length; r += 4) {
+                    const rx = dirtyRects[r], ry = dirtyRects[r + 1], rw = dirtyRects[r + 2], rh = dirtyRects[r + 3];
+                    for (let y = ry; y < ry + rh; y++) {
+                        const o = y * width, so = (y - by0) * w - bx0;
+                        for (let x = rx; x < rx + rw; x++) {
+                            const v = data[o + x];
+                            if (v !== prev[o + x]) sub[so + x] = v;
+                        }
                     }
-                    prev.set(data.subarray(o, o + w), o);
+                }
+                for (let r = 0; r < dirtyRects.length; r += 4) {
+                    const rx = dirtyRects[r], ry = dirtyRects[r + 1], rw = dirtyRects[r + 2], rh = dirtyRects[r + 3];
+                    for (let y = ry; y < ry + rh; y++) prev.set(data.subarray(y * width + rx, y * width + rx + rw), y * width + rx);
                 }
                 enc.addFrame({ x: bx0, y: by0, width: w, height: h, pixels: sub, delayCs, disposal: Disposal.Keep, transparentIndex: 0 });
             }
         }
         if (hooks.onFrame) hooks.onFrame({ ply, width, height, pixels: data.slice(), palette: pal.flat, delayCs });
-        dx0 = width; dy0 = height; dx1 = 0; dy1 = 0;
+        dirtyRects.length = 0;
     }
     return enc.finish();
 }
