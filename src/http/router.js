@@ -12,6 +12,10 @@
 // absolute paths outside /api (e.g. '/verify-email'). Parameters are ":name" segments; a literal
 // segment wins over a parameter when both match.
 //
+// ownBodyValidation: true: the parsed JSON body (any JSON value) reaches the handler unchecked; the
+//   handler validates it (POST /reports, whose game ids may be numbers or digit strings). Without
+//   it, a route with no `body` schema accepts only an empty object.
+//
 // rate: { key, limit, windowMs, shared?: bool, by?: 'ip'|'user' } or an array of them. `shared`
 //   limits also go through the primary (`ratelimit.take`) after the local token bucket, so they
 //   hold across every shard (used for the auth-sensitive endpoints).
@@ -139,7 +143,7 @@ export class Router {
      * @param {string} method GET, POST, PUT, PATCH or DELETE
      * @param {string} path
      * @param {(ctx: object) => Promise<object>|object} handler
-     * @param {object} [opts] { auth, body, query, rate, page, timeoutMs, form }
+     * @param {object} [opts] { auth, body, ownBodyValidation, query, rate, page, timeoutMs, form }
      */
     add(method, path, handler, opts = {}) {
         if (typeof handler !== 'function') throw new TypeError(`route ${method} ${path}: handler must be a function`);

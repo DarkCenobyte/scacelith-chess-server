@@ -5,6 +5,11 @@
 // says nothing about the reported account), 400 invalid_request, 403 report_not_allowed (not
 // an opponent of the reporter in a game that ended within 7 days), 429 report_limit
 // (REPORTS_PER_DAY). Rules, weighting and caps: src/anticheat/reports.js.
+//
+// The handler validates the body itself (validateReport: gameId as a number or a digit string),
+// so the route takes it unchecked from the router (ownBodyValidation; with the router's default,
+// an empty schema, every report was refused with 400 "unknown field"). GET /api/v1/games/:id
+// tells a game's players whether a report would be taken (`reportable`, the same rules).
 
 import { handleReport } from '../../anticheat/reports.js';
 
@@ -16,6 +21,7 @@ import { handleReport } from '../../anticheat/reports.js';
 export function register(router, deps = {}) {
     router.post('/api/v1/reports', (ctx) => handleReport(ctx, deps), {
         auth: 'required',
+        ownBodyValidation: true,
         // Coarse per-client cap on requests; the per-day report quota is enforced by the handler.
         rate: { key: 'reports', limit: 30, windowMs: 3600000 },
     });

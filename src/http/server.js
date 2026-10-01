@@ -11,8 +11,9 @@
 // endpoints also limit each IPv6 /48 as a whole, see checkRates; a request refused because its
 // client already has too many password hashes waiting gets these tokens back) -> body (JSON only
 // for the API, form-urlencoded for HTML pages, HTTP_BODY_LIMIT enforced while streaming: 413;
-// Content-Type checked: 415; body read timeout: 408) -> strict schema validation (400) -> handler
-// (timeout: 503) -> JSON, HTML or text answer.
+// Content-Type checked: 415; body read timeout: 408) -> strict schema validation (400; a route
+// declared with { ownBodyValidation: true } gets the parsed JSON as it is and validates it
+// itself) -> handler (timeout: 503) -> JSON, HTML or text answer.
 //
 // Answers: a handler returns { status, body, headers } (JSON), { status, html, headers } (an HTML
 // page, PAGE_CSP) or { status, text, contentType, headers } (a text file such as a PGN download:
@@ -369,9 +370,13 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
                         throw jsonError(415, 'unsupported_media_type', page ? 'Form data expected.' : 'Content-Type must be application/json.');
                     }
                 }
-                const v = validate(route.opts.body || {}, parsed);
-                if (!v.ok) throw jsonError(400, 'invalid_request', v.message, v.field ? { field: v.field } : undefined);
-                ctx.body = v.value;
+                if (route.opts.ownBodyValidation) {
+                    ctx.body = parsed;      // any JSON value: the handler validates it
+                } else {
+                    const v = validate(route.opts.body || {}, parsed);
+                    if (!v.ok) throw jsonError(400, 'invalid_request', v.message, v.field ? { field: v.field } : undefined);
+                    ctx.body = v.value;
+                }
             }
 
             const out = await runHandler(route, ctx);

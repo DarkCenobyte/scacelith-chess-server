@@ -39,6 +39,7 @@ function routesUnderTest(router) {
     router.get('/file', () => ({ text: '[Event "é"]\n\n*\n', contentType: 'application/x-chess-pgn; charset=utf-8',
         headers: { 'Content-Disposition': 'attachment; filename="x.pgn"' } }));
     router.get('/plain', () => ({ status: 202, text: 'plain' }));
+    router.post('/own', (ctx) => ({ body: { got: ctx.body } }), { ownBodyValidation: true });
 }
 
 async function start(env = {}, opts = {}) {
@@ -127,6 +128,23 @@ test('security headers on every answer; HSTS with native TLS only', async (t) =>
     t.after(n.close);
     assert.equal((await n.req('GET', '/api/v1/echo/x')).headers['strict-transport-security'], 'max-age=31536000');
     assert.equal((await n.req('GET', '/api/v1/file')).headers['strict-transport-security'], 'max-age=31536000');
+});
+
+test('ownBodyValidation: the parsed JSON reaches the handler as it is (still JSON only, still limited)', async (t) => {
+    const s = await start();
+    t.after(s.close);
+    let r = await s.req('POST', '/api/v1/own', { body: { gameId: '123', anything: [1, { x: null }] } });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json.got, { gameId: '123', anything: [1, { x: null }] });
+    assert.deepEqual((await s.req('POST', '/api/v1/own', { body: [1, 2] })).json.got, [1, 2]);
+    assert.deepEqual((await s.req('POST', '/api/v1/own')).json.got, {}, 'an empty body is an empty object');
+    assert.equal((await s.req('POST', '/api/v1/own', { raw: '{bad', headers: { 'Content-Type': 'application/json' } })).json.error, 'invalid_json');
+    assert.equal((await s.req('POST', '/api/v1/own', { raw: 'a=1', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } })).status, 415);
+    assert.equal((await s.req('POST', '/api/v1/own', { raw: JSON.stringify({ x: 'y'.repeat(2000) }), headers: { 'Content-Type': 'application/json' } })).status, 413);
+    // Without it, a route with no schema takes no field.
+    r = await s.req('POST', '/api/v1/empty', { body: { gameId: 1 } });
+    assert.equal(r.status, 400);
+    assert.equal(r.json.field, 'gameId');
 });
 
 test('text answers: content type, byte length, extra headers, the API security headers, HEAD', async (t) => {
