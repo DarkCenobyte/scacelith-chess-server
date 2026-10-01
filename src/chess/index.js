@@ -45,6 +45,7 @@ import { _parseSquare } from './position.js';
 export { WHITE, BLACK, PieceType, GameStatus, EndReason, MoveFlag, CastlingRight } from './constants.js';
 export { Position } from './position.js';
 export { ChessGame, endReasonText } from './game.js';
+export { readPgn, PgnError, PGN_LIMITS } from './pgn.js';
 
 /**
  * @param {number} sq 0..63
