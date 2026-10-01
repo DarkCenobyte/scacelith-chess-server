@@ -545,6 +545,7 @@ Shard -> primary:
 | `once.consume` | `{ key, ttlMs }` | `{ fresh }` |
 | `sanction.applied` | `{ userId, until, reason, refunds }` | - (primary kicks the user everywhere; `refunds`: victims refunded, whose notices it looks for at once) |
 | `session.revoked` | `{ userId, tokenHashes }` | - (broadcast to every shard's auth cache) |
+| `abuse.report` | `{ entries: [[key64, key48 or null, weight]] }` | - (notification: the refusals counted toward a block since the last report, at most one report per second per worker and 512 entries, the largest first; section 8) |
 
 Primary -> shard:
 
@@ -557,12 +558,13 @@ Primary -> shard:
 | `auth.invalidate` | `{ userId, tokenHashes }` | drops cached sessions |
 | `metrics.snapshot` | - | replies `registry.snapshot()` |
 | `shutdown` | `{ graceMs }` | drain: Notice{ServerShutdown}, stop accepting, flush |
+| `abuse.block` | `{ blocks: [[key, ttlMs, level]] }` | the shard blocks these addresses (IPv4, IPv6 /64 or /48) for `ttlMs` on its monotonic clock; sent to every shard with the new blocks of each `abuse.report`, and to one shard at its `shard.ready` with every running block (section 8) |
 
 ### 5.8 Shard internals (net owner) and the anti-cheat hooks
 
 ```js
 // src/net/ws.js
-class WsServer { constructor({ maxMessageBytes, subprotocol, allowOrigins, onConnection }) ; handleUpgrade(req, socket, head) }
+class WsServer { constructor({ maxMessageBytes, subprotocol, allowOrigins, onConnection, guard }) ; handleUpgrade(req, socket, head) }
 class WsConnection {
   id; ip; userId; username; state /* 'hello'|'ready'|'closing' */; rttMs; bufferedBytes;
   sendFrame(buf) -> bool   // one binary message; false when closed or over WS_SEND_BUFFER_LIMIT (then closes 4303)
@@ -590,6 +592,15 @@ honours it too). With native TLS, a gate (`TlsGate`) runs in front of the TLS se
 closes the sockets it refuses with an RST, before any TLS work, and counts them in
 `scacelith_tls_refused_total{reason}`:
 
+* Protection per address first (`src/net/ipguard.js` `IpGuard.connection`, section 8; skipped
+  for `ABUSE_EXEMPT`): a blocked IPv4 address, IPv6 /64 or /48 (`blocked`), more than the
+  worker's share of `IP_CONN_RATE` new connections per second (`conn_rate`) or of
+  `IP_MAX_CONNECTIONS` open ones (`conn_open`) from one address are refused before anything is
+  read: two `Map` lookups and a token bucket. A socket let through is counted open until its
+  'close', whatever happens to it next. The refusals that say something about one address
+  (`conn_rate`, `conn_open`, `per_ip`, `waiting_per_ip`, `bad_hello`, `hello_timeout`, a failed
+  handshake) count toward a block of it; the server-wide ones (`handshakes`, `waiting`,
+  `server_full`) and the refusals of an address already blocked do not.
 * Waiting for the ClientHello. A new socket holds no handshake slot until its first TLS record
   has arrived whole: a handshake record of at most 16 KB whose body starts a ClientHello (a client
   may fragment the ClientHello over several records; only the first one is awaited). It has 3 s
@@ -662,10 +673,16 @@ closes the sockets it refuses with an RST, before any TLS work, and counts them 
   shared port. The waiting room needs more (128 groups and about 700 silent connections per
   second per worker). Players already connected are not affected. Raising
   `MAX_PENDING_HANDSHAKES` raises the connection rate such an attack needs in proportion, and a
-  lower `MAX_PENDING_HANDSHAKES_PER_IP` raises the number of address groups it needs; stopping it
+  lower `MAX_PENDING_HANDSHAKES_PER_IP` raises the number of address groups it needs. Stage 0
+  does not change that: every timed-out handshake counts toward a block of its address, but each
+  group needs only about 0.4 of them per second per worker (inferred: 128 slots ÷ 10 s ÷ 32
+  groups), 50 a minute on two workers, far below `ABUSE_BLOCK_REFUSALS_PER_MIN`; it stops the
+  same attack from a few addresses, which their per-address refusals soon block. Stopping it
   belongs in front of the server (a per-source connection rate limit in the firewall, or a
-  filtering provider).
+  filtering provider: SIZING, provider firewall).
 * `TLS_MODE=proxy` and `off` have no gate: the TLS work (and its limits) belongs to the proxy.
+  Behind a proxy the per-address connection limits are the proxy's job too; the request budget,
+  the in-flight cap and the blocks still apply per `X-Forwarded-For` client (section 8).
 
 ### 5.9 HTTP (`src/http/`)
 
@@ -1171,9 +1188,79 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
 * **WebSocket surface**: one message type table, strict decoding, size limit checked from the
   frame header before buffering, no compression, no fragmentation beyond the size limit,
   Hello timeout, per-connection token bucket, per-IP and global connection limits, slow
-  consumers closed, heartbeat timeout, `Origin` refused by default. Before TLS: handshakes in
-  progress capped per worker and per address, and load shed once the upgrades are refused because
-  the server is full (5.8).
+  consumers closed, heartbeat timeout, `Origin` refused by default. Before TLS: blocked addresses
+  and the per-address connection rate and open connections (below), handshakes in progress capped
+  per worker and per address, and load shed once the upgrades are refused because the server is
+  full (5.8).
+* **Protection per address (background layer)**: `src/net/ipguard.js` (`IpGuard`, one per
+  worker) and `src/cluster/abuse.js` (`AbuseTracker`, in the primary). Every request and every
+  connection meets it first, before routing, before authentication and, with native TLS, before
+  any TLS work. It only keeps one network address from saturating the server; quotas otherwise
+  belong to the signed-in account. An address is an IPv4 address or an IPv6 /64; an IPv6 address
+  also counts toward its /48 (one customer's site) with 4 times each limit, so that rotating over
+  the 65,536 /64s of a /48 multiplies nothing. A whole-server limit L is enforced in each worker
+  as its share `max(1, min(L, ceil(2 L / WORKERS)))` (`workerShare`, `src/security/ratelimit.js`):
+  all of it with 1 or 2 workers, half with 4, so a client spread over the workers gets at most
+  twice L and no request waits for an IPC.
+  * Requests (`admitRequest` in `wrapApiHandler`, `src/net/listeners.js`, and the API handler's
+    first statement when it is used alone; `WsServer.handleUpgrade` for upgrades): every HTTP
+    request, whatever its path, method or outcome (API, pages, `/healthz`, unknown paths, HEAD,
+    OPTIONS, a 414, a WebSocket upgrade), takes one token of `HTTP_RATE_PER_IP` (600 per minute,
+    burst half a minute) and, for IPv6, of `HTTP_RATE_PER_PREFIX` (4 times as much per /48; a
+    refusal there gives the /64 token back), then one of the worker's `IP_MAX_INFLIGHT` (32)
+    places of requests in progress, given back when the response closes, finished or aborted.
+    Beyond: 429 `{ "error": "rate_limited", "message": "Too many requests; try again later.",
+    "retryAfter": s }` with `Retry-After`, on an upgrade `HTTP/1.1 429` with the same JSON.
+  * Connections (TLS gate stage 0, 5.8): `IP_CONN_RATE` new connections per second (burst 4 s)
+    and `IP_MAX_CONNECTIONS` open ones (handshakes, API keep-alive and WebSockets together),
+    each worker its share; beyond, an RST before any TLS byte. `MAX_CONNECTIONS_PER_IP` (64),
+    exact through the primary, still bounds the WebSockets of an address.
+  * Slow clients (`hardenHttp`): `headersTimeout` 10 s and `requestTimeout` 30 s checked every
+    second (`connectionsCheckingInterval`; Node's own 30 s let a slowloris client hold a socket 40
+    s), `keepAliveTimeout` 5 s, a socket with no byte in or out for 30 s destroyed
+    (`server.timeout`; upgraded sockets clear it), and an answer not flushed to the kernel 60 s
+    after the handler ended it destroyed with its socket (a client reading a GIF or a PGN a few
+    bytes at a time). Malformed HTTP is answered 400, 408 (header timeout) or 431 (headers too
+    large) and counted in `scacelith_http_client_errors_total{reason}`.
+  * Blocks. Each worker sums, per address, the refusals that show a client ignoring the limits:
+    weight 1 for a 429 of the address budgets or the in-flight cap, a gate refusal of that
+    address, a failed TLS handshake, malformed HTTP (not from a trusted proxy). The API's route
+    limits report theirs through the same `IpGuard.noteRefusal` (`AUTH_REFUSAL_WEIGHT`, 5, for
+    the login, registration, reset and MFA family, whose attempts each cost a password hash).
+    Not counted: per-account limits, server-wide capacity refusals (the hash queue, the gate's
+    `handshakes`, `waiting` and `server_full`), the refusals of an address already blocked. A
+    worker reports the sums at most once a second (`abuse.report`, 5.7, at most 512 keys, the
+    largest first); the primary adds every worker up over a sliding minute and blocks an address
+    at `ABUSE_BLOCK_REFUSALS_PER_MIN` (600; 4 times that for a /48, which is also blocked once 4
+    of its /64s are), for `ABUSE_BLOCK_BASE_SEC` (60 s) times 4 at each new block within 6 hours,
+    up to `ABUSE_BLOCK_MAX_SEC` (1 h): 1, 4, 16, then 60 minutes. It sends the new blocks to every
+    worker (`abuse.block`), and the running ones to a worker at its `shard.ready`; durations
+    travel as durations and run on each process's monotonic clock. A worker that sees an address
+    reach the threshold in one second on its own blocks it at once (local fast path), so a flood
+    ends within a second on that worker and one or two on the others. A blocked address gets an
+    RST before TLS for its new connections, 429 with the time left and `Connection: close` on the
+    connections it already has (behind a proxy, 429 only: the connection is the proxy's), and 429
+    on upgrades. WebSocket connections already open are never closed by a block, so a player who
+    shares the address with an abuser (a school, a mobile operator's CGNAT) keeps the game in
+    progress; a player whose connection drops can only come back when the block ends, which is
+    why the first one is short. At most 20,000 blocks run at once (the oldest end first); the
+    primary logs each one (`ip blocked`, with `ipForLog`, the scope, level, duration and
+    refusals).
+  * `ABUSE_EXEMPT` (addresses and CIDR subnets: a school or club network, monitoring, a load
+    generator) skips all of the above. Login, registration, the other route limits and the
+    per-account quotas still apply.
+  * Cost (measured on the development container, `test/unit/net.ipguard.test.js`): about 0.15-0.25
+    µs per IPv4 request (budget and in-flight place), 0.5-0.7 µs per IPv6 request, 0.02 µs for the
+    request of a blocked address, 0.5 µs for a new connection and its close; the keys of an
+    address are computed once per connection (0.8 µs for IPv6). Memory is bounded: 50,000 buckets
+    per limiter (an evicted bucket comes back full, which only makes the limit more lenient),
+    counters for open connections and requests in progress only, 20,000 blocks.
+  * Metrics: `scacelith_http_rate_limited_total{limit}` (`ip`, `ip48`, `inflight`, `blocked`),
+    `scacelith_tls_refused_total{reason}` (`blocked`, `conn_rate`, `conn_open`),
+    `scacelith_tls_connections_open`, `scacelith_http_inflight`, `scacelith_abuse_blocked_keys`
+    and `scacelith_abuse_local_blocks_total` per shard, `scacelith_abuse_report_entries_dropped_total`,
+    `scacelith_http_client_errors_total{reason}`; in the primary `scacelith_abuse_blocks_total{scope,
+    level}`, `scacelith_abuse_blocked{scope}` and `scacelith_abuse_blocks_evicted_total`.
 * **Proof of work format**: an endpoint that wants one answers HTTP 428
   `{ "error": "pow_required", "pow": { "challenge": "<opaque ASCII>", "bits": 18, "expiresAt": ms } }`.
   The client finds a nonce, a decimal ASCII string, such that

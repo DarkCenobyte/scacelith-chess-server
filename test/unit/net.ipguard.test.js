@@ -284,8 +284,8 @@ describe('IpGuard: reports', () => {
 });
 
 describe('IpGuard: cost of the checks', () => {
-    it('a request costs about a microsecond (micro-benchmark)', () => {
-        const { guard } = guardOf({ HTTP_RATE_PER_IP: '1000000000', IP_MAX_INFLIGHT: '100000' });
+    it('a request or a new connection costs about a microsecond (micro-benchmark)', () => {
+        const { guard } = guardOf({ HTTP_RATE_PER_IP: '1000000000', IP_MAX_INFLIGHT: '100000', IP_CONN_RATE: '100000', IP_MAX_CONNECTIONS: '1000000' });
         const v4 = guard.keysOf('198.51.100.20', {}), v6 = guard.keysOf('2001:db8:3:4::5', {});
         const N = 200000;
         const bench = (fn) => {
@@ -303,9 +303,16 @@ describe('IpGuard: cost of the checks', () => {
         blocked.applyBlocks([['198.51.100.21', 3600000, 1]]);
         const bk = blocked.keys('198.51.100.21');
         const refusedBlocked = bench(() => blocked.request(bk));
+        // A new connection: keys, the token of IP_CONN_RATE, the open counts, and its close (the
+        // socket object itself is part of the cost, as a real socket's 'close' listener would be).
+        const connV4 = bench(() => { const s = new FakeSocket('198.51.100.22'); guard.connection(s); s.emit('close'); });
+        const connBlocked = bench(() => blocked.connection(new FakeSocket('198.51.100.21')));
         process.stdout.write(`# IpGuard cost (ns per call): IPv4 request+enter+leave ${reqV4.toFixed(0)}, IPv6 ${reqV6.toFixed(0)}, `
-            + `cached keys ${cached.toFixed(0)}, IPv6 keys computed ${keysV6.toFixed(0)}, blocked request ${refusedBlocked.toFixed(0)}\n`);
-        // Generous bounds (a loaded CI machine); the expected values are around 0.3-1.5 µs.
+            + `cached keys ${cached.toFixed(0)}, IPv6 keys computed ${keysV6.toFixed(0)}, blocked request ${refusedBlocked.toFixed(0)}, `
+            + `IPv4 connection+close ${connV4.toFixed(0)}, blocked connection ${connBlocked.toFixed(0)}\n`);
+        // Generous bounds (a loaded CI machine); the expected values are around 0.02-1.5 µs.
         assert.ok(reqV4 < 20000 && reqV6 < 20000 && cached < 5000 && keysV6 < 20000 && refusedBlocked < 10000);
+        assert.ok(connV4 < 30000 && connBlocked < 20000);
+        assert.equal(guard.openTotal, 0, 'every benchmarked connection was released');
     });
 });
