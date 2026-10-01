@@ -1,7 +1,9 @@
 // Admission before TLS (src/net/listeners.js TlsGate) and the server-full signal it uses
 // (src/cluster/router.js Router.isFull): the wait for the ClientHello without a slot, the
 // handshake cap, the per-group caps, the shedding while the server is full, the slots given back
-// by completed and failed handshakes, and the sockets closed after a handshake timeout.
+// by completed and failed handshakes, the sockets closed after a handshake timeout, and the
+// protection per address in front of it all (src/net/ipguard.js: blocks, IP_CONN_RATE,
+// IP_MAX_CONNECTIONS, the refusals counted toward a block).
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -19,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { FULL_HOLD_MS, Router } from '../../src/cluster/router.js';
 import { describe as describeConfig, testConfig } from '../../src/config.js';
 import { Registry } from '../../src/metrics.js';
+import { IpGuard } from '../../src/net/ipguard.js';
 import { Listeners, TlsGate, defaultPendingPerGroup } from '../../src/net/listeners.js';
 import { connectWs } from '../../src/net/ws-raw-client.js';
 import { WsServer } from '../../src/net/ws.js';
@@ -284,6 +287,84 @@ describe('TlsGate: waiting for the ClientHello (simulated sockets)', () => {
         s3.emit('close');
         s4.emit('data', helloRecord());
         assert.deepEqual([ready.length, s4.reset, refused(registry, 'server_full')], [2, true, 1]);
+    });
+});
+
+describe('TlsGate: protection per address (simulated sockets)', () => {
+    function setup(env = {}, gateOpts = {}) {
+        const registry = new Registry();
+        const reports = [];
+        let t = 1e6;
+        const clock = () => t;
+        clock.advance = (ms) => { t += ms; };
+        const guard = new IpGuard({ config: testConfig(env), workers: 1, registry, now: clock, report: (e) => reports.push(e) });
+        const gate = new TlsGate({ maxPending: 8, maxPendingPerIp: 4, registry, guard, ...gateOpts });
+        const ready = [];
+        return { registry, guard, gate, reports, ready, clock, onReady: (sock) => ready.push(sock) };
+    }
+
+    it('closes a blocked address with an RST at once: nothing read, no waiting place, no slot, not counted again', () => {
+        const { registry, guard, gate, reports, onReady } = setup();
+        guard.applyBlocks([['192.0.2.66', 60000, 1], ['2001:db8:5::/48', 60000, 1]]);
+        const s = new FakeSocket('192.0.2.66');
+        assert.equal(gate.accept(s, false, onReady), false);
+        assert.equal(s.reset, true);
+        assert.equal(s.listenerCount('data'), 0, 'not a single byte is read');
+        assert.equal(gate.accept(new FakeSocket('2001:db8:5:1::1'), false, onReady), false, 'a /48 block covers its /64s');
+        assert.deepEqual([gate.waiting, gate.pending, guard.openTotal], [0, 0, 0]);
+        assert.equal(refused(registry, 'blocked'), 2);
+        assert.equal(gate.accept(new FakeSocket('192.0.2.67'), false, onReady), true, 'another address');
+        guard.flushReports();
+        assert.equal(reports.length, 0, 'refusals of a blocked address do not count toward another block');
+    });
+
+    it('IP_CONN_RATE and IP_MAX_CONNECTIONS; the open count goes back down on close, failed handshakes included', () => {
+        // 1 per second with a burst of 4; 2 open.
+        const { registry, guard, gate, ready, onReady, clock } = setup({ IP_CONN_RATE: '1', IP_MAX_CONNECTIONS: '2' });
+        const a = new FakeSocket('192.0.2.1'), b = new FakeSocket('192.0.2.1');
+        assert.ok(gate.accept(a, false, onReady) && gate.accept(b, false, onReady));
+        const c = new FakeSocket('192.0.2.1');
+        assert.equal(gate.accept(c, false, onReady), false);
+        assert.equal(c.reset, true);
+        assert.equal(refused(registry, 'conn_open'), 1);
+        assert.equal(guard.openTotal, 2);
+        a.emit('data', helloRecord(300, { hsType: 2 }));        // not a ClientHello: closed by the gate
+        assert.equal(a.reset, true);
+        assert.equal(guard.openTotal, 1, 'a failed handshake gives its place back');
+        b.emit('data', helloRecord());
+        assert.equal(ready.length, 1);
+        b.emit('close');                                        // closed after (or during) the handshake
+        assert.equal(guard.openTotal, 0);
+        assert.equal(gate.accept(new FakeSocket('192.0.2.1'), false, onReady), true, 'the 4th token');
+        assert.equal(gate.accept(new FakeSocket('192.0.2.1'), false, onReady), false);
+        assert.equal(refused(registry, 'conn_rate'), 1);
+        clock.advance(1000);
+        assert.equal(gate.accept(new FakeSocket('192.0.2.1'), false, onReady), true);
+    });
+
+    it('the refusals that concern one address count toward a block; server-wide ones do not', async () => {
+        const { gate, guard, reports, onReady } = setup({}, { maxPending: 2, maxPendingPerIp: 1, maxWaitingPerIp: 2, helloTimeoutMs: 20 });
+        // per_ip: a second handshake of one address group.
+        const p1 = new FakeSocket('198.51.100.1'), p2 = new FakeSocket('198.51.100.1');
+        gate.accept(p1, false, onReady); gate.accept(p2, false, onReady);
+        p1.emit('data', helloRecord()); p2.emit('data', helloRecord());
+        assert.equal(p2.reset, true);
+        // handshakes (server-wide): the second slot is taken, a third address finds none.
+        const q1 = new FakeSocket('198.51.100.2'), q2 = new FakeSocket('198.51.100.3');
+        gate.accept(q1, false, onReady); gate.accept(q2, false, onReady);
+        q1.emit('data', helloRecord()); q2.emit('data', helloRecord());
+        assert.equal(q2.reset, true);
+        // waiting_per_ip, bad_hello, hello_timeout.
+        const w = [1, 2, 3].map(() => new FakeSocket('198.51.100.4'));
+        for (const x of w) gate.accept(x, false, onReady);
+        assert.equal(w[2].reset, true);
+        w[0].emit('data', Buffer.from('GET / HTTP/1.1\r\n'));
+        assert.equal(w[0].reset, true);
+        await sleep(40);
+        assert.equal(w[1].reset, true);
+        const entries = guard.flushReports();
+        assert.deepEqual(entries.sort((x, y) => x[0].localeCompare(y[0])), [['198.51.100.1', null, 1], ['198.51.100.4', null, 3]]);
+        assert.equal(reports.length, 1);
     });
 });
 
@@ -776,6 +857,58 @@ describe('config: MAX_PENDING_HANDSHAKES_PER_IP', () => {
         for (const n of [2, 64, 128, 4096]) {
             const gate = new TlsGate({ maxPending: n, maxPendingPerIp: testConfig({ MAX_PENDING_HANDSHAKES: String(n) }).maxPendingHandshakesPerIp, registry: new Registry() });
             assert.equal(gate.maxPendingPerIp, new TlsGate({ maxPending: n, registry: new Registry() }).maxPendingPerIp, `same value as the gate's own default (${n})`);
+        }
+    });
+});
+
+describe('TlsGate with the protection per address, real sockets', { skip: !hasOpenssl && 'openssl not available' }, () => {
+    let dir, cert;
+    before(() => {
+        dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-guard-'));
+        cert = makeCert(dir);
+    });
+    after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+    it('a blocked address gets an RST before a single TLS byte; another address keeps working (Linux: 127.0.0.2)', async () => {
+        const registry = new Registry();
+        const guard = new IpGuard({ config: testConfig(), workers: 1, registry, report: () => {} });
+        const gate = new TlsGate({ registry, guard });
+        let tlsWork = 0;
+        const server = tls.createServer({ key: fs.readFileSync(cert.key), cert: fs.readFileSync(cert.cert) }, (sock) => {
+            sock.on('error', () => {});
+            sock.end('hello');
+        });
+        const [tlsListener] = server.listeners('connection');
+        server.removeAllListeners('connection');
+        server.on('connection', function countTlsWork(sock) { tlsWork++; return tlsListener.call(this, sock); });
+        gate.attach(server);
+        await new Promise((r) => server.listen(0, '127.0.0.1', r));
+        const { port } = server.address();
+        try {
+            guard.applyBlocks([['127.0.0.1', 60000, 1]]);
+            // A raw client: the connection is reset and the server never sends a byte.
+            const raw = net.connect({ port, host: '127.0.0.1' });
+            let got = 0;
+            raw.on('data', (d) => { got += d.length; });
+            const err = await new Promise((resolve) => { raw.on('error', resolve); raw.on('close', () => resolve(null)); raw.write(helloRecord()); });
+            assert.equal(err?.code, 'ECONNRESET');
+            assert.equal(got, 0);
+            await assert.rejects(new Promise((resolve, reject) => {
+                const c = tls.connect({ host: '127.0.0.1', port, rejectUnauthorized: false }, () => resolve(c));
+                c.on('error', reject);
+            }), /ECONNRESET|socket disconnected/);
+            assert.equal(tlsWork, 0, 'no TLS work for a blocked address');
+            assert.equal(refused(registry, 'blocked'), 2);
+            // Another address is served.
+            const other = await new Promise((resolve, reject) => {
+                const c = tls.connect({ host: '127.0.0.1', port, localAddress: '127.0.0.2', rejectUnauthorized: false }, () => resolve(c));
+                c.on('error', reject);
+            });
+            const text = await new Promise((resolve) => { let b = ''; other.on('data', (d) => { b += d; }); other.on('end', () => resolve(b)); });
+            assert.equal(text, 'hello');
+            assert.equal(tlsWork, 1);
+        } finally {
+            await new Promise((r) => server.close(r));
         }
     });
 });

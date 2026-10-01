@@ -4,21 +4,27 @@
 //   const handle = createApiHandler({ config, store, auth, primary, anticheat, log, routes });
 //   server.on('request', handle);
 //
-// Pipeline of a request: security headers -> URL checks -> /healthz, /readyz -> global per-IP
-// token bucket (HTTP_RATE_PER_IP / min) -> route match (404, 405 + Allow, OPTIONS -> 204 + Allow,
-// HEAD = GET without body) -> authentication (Authorization: Bearer sct_...) -> the account's
-// budget when a valid session came with the request (USER_RATE_PER_MIN across every endpoint,
-// each worker its share, createUserBudget) -> route rate limits (local token bucket, then the
-// primary's `ratelimit.take` for `shared` limits; `by: 'user'` limits count per account, or per
-// client without a session; the password endpoints also limit each IPv6 /48 as a whole, see
+// Pipeline of a request: protection per address (net/ipguard.js, applied by the listener's
+// wrapApiHandler before anything else, health checks included, or here first when the handler is
+// used alone with a `guard`: block, HTTP_RATE_PER_IP / HTTP_RATE_PER_PREFIX budget, IP_MAX_INFLIGHT
+// requests in progress; 429 rate_limited) -> security headers -> URL checks -> /healthz, /readyz
+// -> route match (404, 405 + Allow, OPTIONS -> 204 + Allow, HEAD = GET without body) ->
+// authentication (Authorization: Bearer sct_...) -> the account's budget when a valid session
+// came with the request (USER_RATE_PER_MIN across every endpoint, each worker its share,
+// createUserBudget; never counted against the address) -> route rate limits (local token bucket,
+// then the primary's `ratelimit.take` for `shared` limits; `by: 'user'` limits count per account,
+// or per client without a session; the password endpoints also limit each IPv6 /48 as a whole, see
 // checkRates; all or none: a refusal gives back what the earlier rates took; a request refused
-// because its client already has too many password hashes waiting gets these tokens back) ->
-// body (JSON only for the API, form-urlencoded for HTML pages, HTTP_BODY_LIMIT, or the route's
-// `bodyLimit`, enforced while streaming: 413; Content-Type checked: 415; body read timeout: 408)
-// -> strict schema validation (400; a route declared with { ownBodyValidation: true } gets the
-// parsed JSON as it is and validates it itself) -> handler (timeout: 503; it may take more
-// rates with ctx.takeRates(rates), e.g. the render quotas of a GIF on a cache miss, which join
-// the request's tokens) -> JSON, HTML, text or binary answer.
+// because its client already has too many password hashes waiting gets these tokens back; a
+// refusal by a limit keyed by the client's address, not by an account, also counts toward a block
+// of that address, `abuseWeight` times or once: routeRefusal, `guard`) -> body (JSON only for the
+// API, form-urlencoded for HTML pages, HTTP_BODY_LIMIT, or the route's `bodyLimit`, enforced while
+// streaming: 413; Content-Type checked: 415; body read timeout: 408) -> strict schema validation
+// (400; a route declared with { ownBodyValidation: true } gets the parsed JSON as it is and
+// validates it itself) -> handler (timeout: 503; it may take more rates with ctx.takeRates(rates),
+// e.g. the render quotas of a GIF on a cache miss, which join the request's tokens and count
+// toward a block like the route's own when keyed by the address) -> JSON, HTML, text or binary
+// answer.
 //
 // Answers: a handler returns { status, body, headers } (JSON), { status, html, headers } (an HTML
 // page, PAGE_CSP), { status, text, contentType, headers } (a text file such as a PGN download:
@@ -27,10 +33,13 @@
 // application/octet-stream); null/undefined answers 204. `refundRate: true` on the result (or on
 // a thrown error) gives back every rate token the request took (a 503 of the GIF pool, a 429 of
 // the password hash queue). Every answer carries the same security headers; the JSON, text and
-// binary answers the API's CSP. An answer above 64 KiB must leave within SEND_TIMEOUT_MS (60 s),
-// or its socket is destroyed (a client that stops reading keeps neither the socket nor the
-// buffer). handle.close() runs the close hooks of the route modules (deps.onClose: the GIF
-// rendering threads) when the worker stops.
+// binary answers the API's CSP. The send deadline is the listener's (net/listeners.js
+// wrapApiHandler): an answer not flushed to the kernel SEND_TIMEOUT_MS (60 s) after the handler
+// ended it is destroyed with its socket (a client that stops reading a GIF, a PGN or an export
+// keeps neither the socket nor the buffer); the time the handler itself takes (a GIF render, an
+// export, bounded by the route's `timeoutMs`) does not count toward it. handle.close() runs the
+// close hooks of the route modules (deps.onClose: the GIF rendering threads) when the worker
+// stops.
 //
 // No CORS: the API serves the game, not browsers; no Access-Control-* header is ever sent, so a
 // web page cannot read an answer, and the JSON-only rule makes every cross-site write need a
@@ -46,6 +55,7 @@ import { PAGE_CSP, renderMessage } from './pages/layout.js';
 import { TokenBucketLimiter, ipKey, normalizeIp, prefixKey } from '../security/ratelimit.js';
 import { ipForLog } from '../log.js';
 import { metrics } from '../metrics.js';
+import { admitRequest } from '../net/listeners.js';
 import * as infoRoutes from './routes/info.js';
 import * as authRoutes from './routes/auth.js';
 import * as accountRoutes from './routes/account.js';
@@ -74,16 +84,27 @@ function jsonError(status, code, message, extra) { return new HttpError(status, 
 
 function retryAfterSec(ms) { return Math.max(1, Math.ceil(ms / 1000)); }
 
+/**
+ * The 429 of a route limit (take()). One keyed by the client's address, not by an account,
+ * carries `abuseWeight`: sendError counts it toward a block of that address (net/ipguard.js
+ * noteRefusal), with the rate's own `abuseWeight` (the login, registration, reset and MFA family:
+ * 5, AUTH_REFUSAL_WEIGHT) or 1. A per-account limit is the account's problem, not its network's:
+ * weight 0. checkRates names the bucket of an account `<rate key>:u<userId>` and those of an
+ * address `<rate key>:<ipKey>` and `<rate key>/48:<prefixKey>` (a `by: 'user'` rate without a
+ * session falls back to the address).
+ */
+function routeRefusal(rate, key, ms, label) {
+    const err = rateLimited(ms, label);
+    const byUser = rate.by === 'user' && key.startsWith(`${rate.key}:u`);
+    err.abuseWeight = byUser ? 0 : (rate.abuseWeight > 0 ? rate.abuseWeight : 1);
+    return err;
+}
+
 function rateLimited(ms, label) {
     rateLimitedTotal.labels(label).inc();
     const s = retryAfterSec(ms);
     return new HttpError(429, 'rate_limited', 'Too many requests; try again later.', { retryAfter: s });
 }
-
-/** Answers above this size get a send deadline (a GIF, a long PGN, an export). */
-const LARGE_ANSWER_BYTES = 64 * 1024;
-/** Send deadline of a large answer: the socket is destroyed if the answer has not left by then. */
-export const SEND_TIMEOUT_MS = 60000;
 
 /**
  * The budget of one signed-in account across every call that carries a valid session
@@ -174,13 +195,15 @@ function parseQuery(search) {
  * @param {{ config: object, store: object, auth: object, primary?: { request(type: string, payload: object): Promise<object> }|null,
  *           anticheat?: object|null, log: object, routes?: Array<{ register: Function }|Function>,
  *           now?: () => number, ready?: () => boolean, bodyTimeoutMs?: number, handlerTimeoutMs?: number,
- *           sendTimeoutMs?: number, deps?: object }} opts `deps` adds fields to what route modules receive (they
- *   also get `onClose(fn)`, a hook run by handle.close()).
+ *           deps?: object, guard?: import('../net/ipguard.js').IpGuard|null }} opts `deps` adds fields to what route
+ *           modules receive (they also get `onClose(fn)`, a hook run by handle.close()); `guard`: the shard's
+ *           protection per address (the same one the listeners use), which also counts the refusals of the route
+ *           limits keyed by the client's address (routeRefusal).
  * @returns {((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>)
  *   & { router: Router, close: () => Promise<void> }}
  */
 export function createApiHandler({ config, store, auth, primary = null, anticheat = null, log, routes = DEFAULT_ROUTES,
-    now = Date.now, ready = () => true, bodyTimeoutMs = 10000, handlerTimeoutMs = 30000, sendTimeoutMs = SEND_TIMEOUT_MS, deps: extraDeps = {} }) {
+    now = Date.now, ready = () => true, bodyTimeoutMs = 10000, handlerTimeoutMs = 30000, deps: extraDeps = {}, guard = null }) {
     const router = new Router();
     const closers = [];
     const deps = { config, store, auth, primary, anticheat, log, now, onClose: (fn) => { closers.push(fn); }, ...extraDeps };
@@ -193,6 +216,9 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
     const userBudget = createUserBudget(config, now);
     const labelCache = new Map();
     const hsts = config.tlsMode === 'native';
+    // Requests that did not come through the listener's wrapApiHandler (a handler used alone) meet
+    // the protection per address here first; admitRequest runs once per request either way.
+    const admission = { native: hsts, closeOnBlock: config.tlsMode !== 'proxy' };
     let primaryWarnAt = 0;
 
     function setBaseHeaders(res) {
@@ -234,20 +260,15 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
         const buf = Buffer.isBuffer(payload) ? payload : Buffer.from(payload, 'utf8');
         if (status !== 204) res.setHeader('Content-Length', buf.length);
         res.writeHead(status);
-        const out = req.method === 'HEAD' || status === 204 ? undefined : buf;
-        // A large answer must leave within sendTimeoutMs: a client that stops reading it does not
-        // keep the socket and the answer's buffer (abuse design 3.3).
-        if (out && out.length > LARGE_ANSWER_BYTES && sendTimeoutMs > 0) {
-            const timer = setTimeout(() => { if (!res.writableFinished) (res.socket || req.socket)?.destroy(); }, sendTimeoutMs);
-            timer.unref?.();
-            const clear = () => clearTimeout(timer);
-            res.once('finish', clear);
-            res.once('close', clear);
-        }
-        res.end(out);
+        // The listener's wrapApiHandler arms the send deadline when this ends the answer.
+        res.end(req.method === 'HEAD' || status === 204 ? undefined : buf);
     }
 
     function sendError(req, res, err, page) {
+        // A route limit of the client's address refused it (routeRefusal): toward a block.
+        if (guard !== null && err && err.abuseWeight > 0) {
+            guard.noteRefusal(guard.keysOf(req.clientIp ?? normalizeIp(req.socket?.remoteAddress), req.socket), err.abuseWeight);
+        }
         let status = 500, code = 'internal_error', message = 'Internal server error.', extra = null, headers = null;
         if (err && err.expose && Number.isInteger(err.status)) {
             status = err.status; code = err.code; message = err.message; extra = err.extra; headers = err.headers;
@@ -288,7 +309,7 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
      */
     async function take(rate, key, limit, label) {
         const local = limiter.take(key, limit, rate.windowMs, 1);
-        if (!local.allowed) throw rateLimited(local.retryAfterMs, label);
+        if (!local.allowed) throw routeRefusal(rate, key, local.retryAfterMs, label);
         const taken = { key, limit, windowMs: rate.windowMs, sharedAt: null };
         if (rate.shared && primary) {
             let r = null;
@@ -300,7 +321,7 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
                 const t = now();
                 if (t - primaryWarnAt > 60000) { primaryWarnAt = t; log.warn('shared rate limit unavailable', { err: { message: err.message } }); }
             }
-            if (r && r.allowed === false) throw rateLimited(r.retryAfterMs || 1000, label);
+            if (r && r.allowed === false) throw routeRefusal(rate, key, r.retryAfterMs || 1000, label);
             if (r && r.allowed) taken.sharedAt = askedAt;
         }
         return taken;
@@ -370,6 +391,7 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
     }
 
     async function handle(req, res) {
+        if (guard !== null && !admitRequest(guard, req, res, admission)) return;
         const started = performance.now();
         let label = 'unmatched';
         let page = false;
@@ -398,9 +420,6 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
                 else send(req, res, 503, { body: { error: 'not_ready', message: 'The server is starting or stopping.' } });
                 return;
             }
-
-            const global = limiter.take(`api:${ipKey(ip)}`, config.httpRatePerIp, 60000, 1);
-            if (!global.allowed) throw rateLimited(global.retryAfterMs, 'api');
 
             const found = router.match(method, pathname);
             if (!found) throw jsonError(404, 'not_found', 'No such endpoint.');

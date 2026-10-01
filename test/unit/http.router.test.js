@@ -5,6 +5,8 @@ import { createApiHandler, HttpError } from '../../src/http/server.js';
 import { Router, validate } from '../../src/http/router.js';
 import { testConfig } from '../../src/config.js';
 import { logger } from '../../src/log.js';
+import { Registry } from '../../src/metrics.js';
+import { IpGuard } from '../../src/net/ipguard.js';
 import { capturedLogs, createClock, createFakePrimary, createFakeStore } from './helpers/auth-fakes.js';
 
 const TOKEN = 'sct_' + 'a'.repeat(43);
@@ -47,9 +49,11 @@ async function start(env = {}, opts = {}) {
     const now = opts.now || createClock();
     const primary = opts.primary === undefined ? createFakePrimary({ now }) : opts.primary;
     const auth = { validateToken: (t) => (t === TOKEN ? { userId: 7, username: 'alice', sessionId: 3, emailVerified: true, tokenHash: 'h' } : null) };
+    // opts.guard: the protection per address of a handler used alone (no listener in front).
+    const guard = opts.guard ? new IpGuard({ config, workers: 1, registry: new Registry(), now }) : null;
     const handler = createApiHandler({
         config, store: createFakeStore({ now }), auth, primary, log: logger.child('router-test'), now,
-        routes: [routesUnderTest], bodyTimeoutMs: 150, handlerTimeoutMs: 150, ready: opts.ready,
+        routes: [routesUnderTest], bodyTimeoutMs: 150, handlerTimeoutMs: 150, ready: opts.ready, guard,
     });
     const server = http.createServer((req, res) => { if (req.headers['x-test-ip']) req.clientIp = req.headers['x-test-ip']; handler(req, res); });
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -274,17 +278,19 @@ test('authentication modes', async (t) => {
     assert.equal((await s.req('GET', '/api/v1/maybe', { headers: { Authorization: 'Bearer nope' } })).status, 401);
 });
 
-test('rate limits: global per IP, per route, shared through the primary, fail open', async (t) => {
-    const s = await start({ HTTP_RATE_PER_IP: '5' });
+test('rate limits: per-address budget of a handler used alone, per route, shared through the primary, fail open', async (t) => {
+    // HTTP_RATE_PER_IP 10 per minute, one worker: a burst of 5 (half a minute), then 1 per 6 s.
+    const s = await start({ HTTP_RATE_PER_IP: '10' }, { guard: true });
     t.after(s.close);
-    for (let i = 0; i < 5; i++) assert.equal((await s.req('GET', '/api/v1/echo/x', { headers: { 'X-Test-Ip': '198.51.100.1' } })).status, 200);
-    const r = await s.req('GET', '/api/v1/echo/x', { headers: { 'X-Test-Ip': '198.51.100.1' } });
-    assert.equal(r.status, 429);
+    for (let i = 0; i < 4; i++) assert.equal((await s.req('GET', '/api/v1/echo/x', { headers: { 'X-Test-Ip': '198.51.100.1' } })).status, 200);
+    assert.equal((await s.req('GET', '/healthz', { headers: { 'X-Test-Ip': '198.51.100.1' } })).status, 200, 'health takes a token too');
+    const r = await s.req('GET', '/api/v1/nothing-here', { headers: { 'X-Test-Ip': '198.51.100.1' } });
+    assert.equal(r.status, 429, 'any path, before routing');
     assert.equal(r.json.error, 'rate_limited');
     assert.equal(r.headers['retry-after'], String(r.json.retryAfter));
+    assert.equal(r.json.retryAfter, 6);
     assert.equal((await s.req('GET', '/api/v1/echo/x', { headers: { 'X-Test-Ip': '198.51.100.2' } })).status, 200, 'another client');
-    assert.equal((await s.req('GET', '/healthz', { headers: { 'X-Test-Ip': '198.51.100.1' } })).status, 200, 'health is not limited');
-    s.now.advance(60000);
+    s.now.advance(6000);
     assert.equal((await s.req('GET', '/api/v1/echo/x', { headers: { 'X-Test-Ip': '198.51.100.1' } })).status, 200, 'refilled');
 
     const q = await start();

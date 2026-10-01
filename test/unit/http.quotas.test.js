@@ -1,12 +1,15 @@
 // Per-account quotas of the HTTP layer (abuse design 3.5, 3.6): the account's budget across every
 // endpoint, `by: 'user'` limits (per account when signed in, per client otherwise), checkRates
 // taking its rates all or none, ctx.takeRates and refundRate, binary answers, a route's own
-// body limit, the send deadline of large answers, and the close hooks of the route modules.
+// body limit, the send deadline of large answers (the listener's, net/listeners.js wrapApiHandler,
+// wrapped around the handler as the shard does), and the close hooks of the route modules.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createApiHandler } from '../../src/http/server.js';
+import { wrapApiHandler } from '../../src/net/listeners.js';
+import { normalizeIp } from '../../src/net/ip.js';
 import { register as registerReports } from '../../src/http/routes/reports.js';
 import { testConfig } from '../../src/config.js';
 import { logger } from '../../src/log.js';
@@ -31,10 +34,13 @@ async function start(env = {}, { routes, sendTimeoutMs } = {}) {
     };
     const closed = [];
     const handler = createApiHandler({
-        config, store: createFakeStore({ now }), auth, primary, log: logger.child('quota-test'), now, routes, sendTimeoutMs,
+        config, store: createFakeStore({ now }), auth, primary, log: logger.child('quota-test'), now, routes,
         deps: { closed },
     });
-    const server = http.createServer((req, res) => { if (req.headers['x-test-ip']) req.clientIp = req.headers['x-test-ip']; handler(req, res); });
+    // The listener's wrapper (no guard): it sets req.clientIp and arms the send deadline.
+    const clientIp = (req, socket) => req.headers['x-test-ip'] || normalizeIp(socket.remoteAddress);
+    const wrapped = wrapApiHandler(handler, { clientIp, ready: () => true, native: false, ...(sendTimeoutMs ? { sendTimeoutMs } : {}) });
+    const server = http.createServer(wrapped);
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
     const { port } = server.address();
     const req = (method, path, { token, ip, body, raw, contentType } = {}) => new Promise((resolve, reject) => {

@@ -151,7 +151,8 @@ When nginx, HAProxy, Caddy or a load balancer already terminates TLS, set `TLS_M
 server then listens in plain text and must only be reachable from the proxy (bind it to a private
 address with `BIND_ADDRESS`, or firewall it). `TRUSTED_PROXIES` lists the proxy addresses whose
 `X-Forwarded-For` header is believed; without it, every player would share the proxy's address
-and the per-address limits would treat them as one client. The proxy must pass WebSocket
+and the per-address limits would treat them as one client, and block them together (see
+[Protection against abuse](#protection-against-abuse)). The proxy must pass WebSocket
 upgrades on `/ws` and keep idle connections for more than a minute:
 
 ```nginx
@@ -169,8 +170,9 @@ location / {
 The proxy listens on 443 and the server behind it on any port: set `API_PORT` to that port
 (8443 above) and `PUBLIC_API_PORT=443` (and `PUBLIC_WS_PORT=443`), so that the server announces the
 port the players reach. The server then does no TLS work, so the handshake limit
-`MAX_PENDING_HANDSHAKES` (see [Kernel settings](#kernel-settings-linux)) does not apply: limit the
-handshakes on the proxy.
+`MAX_PENDING_HANDSHAKES` (see [Kernel settings](#kernel-settings-linux)) does not apply, nor do
+the per-address connection limits `IP_CONN_RATE` and `IP_MAX_CONNECTIONS`: limit the handshakes
+and the connections per client on the proxy.
 
 `TLS_MODE=off` exists for local development only and is refused unless `ALLOW_INSECURE_DEV=1`.
 
@@ -444,6 +446,82 @@ as long as a scrypt check (0.5 s).
   cap; the reason `source_limit` counts the clients held back to their
   `PASSWORD_HASH_WAITERS_PER_SOURCE` waiting hashes while the queue was at least half full.
 
+## Protection against abuse
+
+The server protects itself in two layers. The first, described here, works per network address:
+it meets every request and every connection before anything else (before the API routes, before
+the login, and with native TLS before any TLS work), and only stops one address from saturating
+the server. The second works per signed-in account and per route (the limits in
+[docs/API.md](docs/API.md)). An address is an IPv4 address or an IPv6 /64; an IPv6 address also
+counts toward its /48 with 4 times each limit, because one customer often gets a /56 or a /48 and
+could otherwise rotate over its /64 networks. The limits are for the whole server: each worker
+allows its share (all of it with 1 or 2 workers, half of it with 4), so a client spread over the
+workers gets at most twice as much, and no request waits for the other processes.
+
+| Setting | Default | Beyond it |
+|---|---|---|
+| `HTTP_RATE_PER_IP` | 600 requests per minute, any path (API, pages, health checks, unknown paths, WebSocket upgrades), with a burst of half a minute | 429 `rate_limited` with `Retry-After` |
+| `HTTP_RATE_PER_PREFIX` | 4 × `HTTP_RATE_PER_IP` for an IPv6 /48 | the same |
+| `IP_MAX_INFLIGHT` | 32 requests in progress per worker | the same, with `Retry-After: 1` |
+| `IP_CONN_RATE` | 10 new connections per second, with a burst of 4 seconds | the connection is reset before TLS |
+| `IP_MAX_CONNECTIONS` | 128 open connections (TLS handshakes, API keep-alive and WebSockets together) | the same |
+| `MAX_CONNECTIONS_PER_IP` | 64 WebSocket connections, counted exactly over the workers | 429 `too_many_connections` at the upgrade |
+| `ABUSE_BLOCK_REFUSALS_PER_MIN` | 600 refusals in a minute block the address (4 times that for a /48) | blocked for `ABUSE_BLOCK_BASE_SEC` (60 s), 4 times longer at each new block within 6 hours, up to `ABUSE_BLOCK_MAX_SEC` (1 h) |
+
+The refusals that count toward a block are those that show a client ignoring the limits: the
+429s of the request budget and the in-flight cap, the connections reset before TLS, failed TLS
+handshakes and malformed HTTP, plus the 429s of the API's per-address route limits (a refused
+login, registration, password reset or second-factor attempt counts 5). A worker that sees 600
+of them from one address within a second blocks it at once; otherwise the primary adds up the
+workers' counts, reported once a second, and blocks the address everywhere within a second or
+two. A blocked address has its new connections reset before any TLS work, and its
+requests on connections already open get 429 with the time left and `Connection: close`.
+WebSocket connections that are already open are never closed by a block, so the players of a
+school or of a mobile operator who share the address with an abuser keep their games; a player
+whose connection drops can only come back when the block ends. `ABUSE_BLOCK_REFUSALS_PER_MIN=0`
+turns blocking off and keeps the limits.
+
+Slow clients are cut as well: the request headers must arrive within 10 s and the whole request
+within 30 s (both checked every second), a connection with no byte in or out for 30 s is closed
+unless the server is still preparing its answer (game WebSockets have their own heartbeat
+instead), and an answer that the client has not read 60 s after the server finished it is
+dropped with its connection. A header or request timeout is
+answered 408 and, like malformed HTTP (400) and oversized headers (431), counted in
+`scacelith_http_client_errors_total{reason}` and toward a block of the address.
+
+**Players who share one address.** A school, a club, a company network or a mobile operator's
+carrier-grade NAT puts many players behind one IPv4 address. The defaults are sized for that: a
+class of 30 browsing the menus at one request every 3 s each is 600 requests per minute, their
+launch fits in the burst, and 50 players make about 150 connections. A real player over the budget
+waits for the `Retry-After` the game shows, and does not come near 600 refusals a minute. For a
+known network that plays together (a school's or a club's address, also your monitoring and a
+load generator), list its address or subnet in `ABUSE_EXEMPT` (`203.0.113.7,2001:db8:12::/48`): it
+then skips this whole layer, never blocked, while the login, registration and account limits
+still apply to it. Raise `MAX_PENDING_HANDSHAKES_PER_IP`, `AUTH_RATE_PER_IP` and
+`PASSWORD_HASH_WAITERS_PER_SOURCE` for it too if its players log in together (see [Kernel
+settings](#kernel-settings-linux) and [Password hashing on a small
+server](#password-hashing-on-a-small-server)). Keep `IP_MAX_CONNECTIONS` at least twice
+`MAX_CONNECTIONS_PER_IP`; `check-config` warns otherwise.
+
+**Behind a reverse proxy** (`TLS_MODE=proxy`) the request budget, the in-flight cap and the
+blocks apply to the client named by `X-Forwarded-For`, and a block answers 429 without closing
+the connection, which belongs to the proxy. The connection limits (`IP_CONN_RATE`,
+`IP_MAX_CONNECTIONS`) and the reset before TLS cannot work there: limit the connections and
+handshakes per client on the proxy (nginx: `limit_conn`, `limit_req`). Set `TRUSTED_PROXIES`
+exactly: when the proxy is not trusted, every player shares its address, and the budget and a
+block would hit them all together.
+
+**Watching it.** The primary logs each block at `warn` level: `ip blocked` with the address
+(truncated as `LOG_IP` says), `scope` (`ip` or `prefix`), `level`, `ttlSec` and `refusals`. On the
+metrics endpoint: `scacelith_http_rate_limited_total{limit}` (`ip`, `ip48`, `inflight`,
+`blocked`), `scacelith_tls_refused_total{reason}` (`blocked`, `conn_rate`, `conn_open`),
+`scacelith_abuse_blocks_total{scope,level}` and `scacelith_abuse_blocked{scope}` in the primary,
+`scacelith_abuse_blocked_keys`, `scacelith_tls_connections_open` and `scacelith_http_inflight`
+per worker. Blocks at level 4 again and again from the same sources, or a flood from many
+addresses that no per-address limit catches, belong to the provider's firewall:
+[docs/SIZING.md](docs/SIZING.md#provider-firewall-the-ovh-edge-network-firewall) gives the OVH
+Edge Network Firewall rules and what this layer can still cost.
+
 ## Secrets
 
 Nothing secret is ever committed: `.env`, keys and certificates are in `.gitignore`, and only
@@ -535,7 +613,8 @@ priors (docs/ANTICHEAT.md, section 3).
 ## Monitoring
 
 `http://127.0.0.1:9464/metrics` (Prometheus text format; `METRICS_TOKEN` adds a bearer token):
-connections, messages, games, move latency, commits, journal, rate limits, anti-cheat (including
+connections, messages, games, move latency, commits, journal, rate limits and the blocked
+addresses ([Protection against abuse](#protection-against-abuse)), anti-cheat (including
 the analysis backlog, the skipped games, and the analysis engines running and sharing their
 network: `scacelith_anticheat_analysis_engines*`), the retention purge (`scacelith_retention_*`),
 process memory and event-loop lag per shard, the stalls of a shard's event loop and the time given

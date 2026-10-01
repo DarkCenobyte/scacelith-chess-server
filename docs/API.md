@@ -102,8 +102,11 @@ password inline only to stay short.
   `Cross-Origin-Resource-Policy: same-origin` and a `Content-Security-Policy`
   (`default-src 'none'; frame-ancestors 'none'` for the API). With `TLS_MODE=native` it also
   carries `Strict-Transport-Security: max-age=31536000`.
-- An answer above 64 KiB (a GIF, the data export, a long PGN) must be read within 60 s: the
-  server closes the connection of a client that has not taken it all by then.
+- An answer must be read within 60 s of the moment the server has it ready, which only matters
+  for the large ones (a GIF, the data export, a long PGN): the server closes the connection of a
+  client that has not taken it all by then. The time the server takes to prepare an answer (a GIF
+  render, an export) counts neither toward this nor toward the 30 s without a byte in or out
+  after which a connection is closed.
 - **Errors** have one shape:
 
   ```json
@@ -211,6 +214,31 @@ sliding window of the same length, so that they hold whatever worker a request r
 primary does not answer, the worker's own check still applies. When one of an endpoint's limits
 refuses a request, the tokens that its other limits took for that request are given back.
 
+There are three layers: a background ceiling per address that every request meets first, a
+budget per signed-in account, and the limits of each endpoint (table below), among which the
+stricter ones of the sign-in, registration and password recovery family and the quotas of the
+GIFs.
+
+**Per-address layer.** Before anything else, every request (any path and method, the health
+endpoints and WebSocket upgrades included) takes one token of its client's request budget:
+`HTTP_RATE_PER_IP` (600) per minute for the whole server, and `HTTP_RATE_PER_PREFIX` (default 4 x
+`HTTP_RATE_PER_IP`) for an IPv6 /48 as a whole. Each worker process allows its share,
+max(1, min(L, ceil(2 x L / `WORKERS`))) per minute (all of it with 1 or 2 workers, half of it
+with 4), with a burst of half a minute of that share. A client may also have at most
+`IP_MAX_INFLIGHT` (32) requests in progress in one worker. Beyond either: 429 `rate_limited`
+with `retryAfter` (1 for the requests in progress). This is a ceiling against one address
+saturating the server, loose enough for a class or a mobile operator's shared address, not a
+quota. A client that keeps going after its refusals is blocked: `ABUSE_BLOCK_REFUSALS_PER_MIN`
+(600) refusals in one minute, all workers together, block it for 1 minute, then 4, 16 and 60
+minutes at each new block within 6 hours. These refusals are the 429s of this layer, the 429s
+of the endpoint limits counted per client (a refusal of the `auth`, `auth_*` and `reauth`
+limits counts 5; limits counted per player never count), connections refused before TLS and
+malformed requests. A blocked client's requests on connections already open get 429
+`rate_limited` with the time left and `Connection: close`, and its new connections are closed
+before TLS (`TLS_MODE=native`); its WebSocket connections already open are kept. Addresses in
+`ABUSE_EXEMPT` skip this layer, but not the account budget or the endpoint limits. Details: the
+README, "Protection against abuse".
+
 **Account budget.** Every request that carries a valid session token (on the endpoints marked
 **session** or **optional** in section 2) also counts against its account: `USER_RATE_PER_MIN`
 (120) requests per minute, all endpoints together, whatever the address. Each worker process
@@ -222,7 +250,8 @@ through the history, is about one request per second.
 
 | Limit | Default | Counted per | Endpoints |
 |---|---|---|---|
-| global | `HTTP_RATE_PER_IP` (120) / min | client | Every request except the health endpoints. |
+| per address | `HTTP_RATE_PER_IP` (600) / min for the whole server, each worker its share; `IP_MAX_INFLIGHT` (32) requests in progress per worker | client, and each IPv6 /48 (`HTTP_RATE_PER_PREFIX`, default 4 x `HTTP_RATE_PER_IP`) | Every request, the health endpoints and WebSocket upgrades included (see above). |
+| account budget | `USER_RATE_PER_MIN` (120) / min, each worker its share | player | Every request that carries a valid session (see above). |
 | `auth` | `AUTH_RATE_PER_IP` (20) / 10 min, shared | client, and each IPv6 /48 (`AUTH_RATE_PER_PREFIX`, default 5 x `AUTH_RATE_PER_IP`) | `POST /auth/register`, `/auth/login`, `/auth/login/mfa`, `/auth/verify-email/resend`, `/auth/password/forgot`, `/auth/password/reset`, `/auth/sso/complete`; `POST /verify-email`, `/reset-password`, `/confirm-email-change` |
 | `auth_register` | `AUTH_REGISTER_PER_HOUR` (10) / hour, shared | client, and 3 times that per IPv6 /48 | `POST /auth/register` |
 | `auth_mail` | `AUTH_MAIL_PER_HOUR` (10) / hour, shared | client, and 3 times that per IPv6 /48 | `POST /auth/verify-email/resend` |
@@ -245,7 +274,7 @@ through the history, is about one request per second.
 | `page` | 60 / min | client | `GET /verify-email`, `/reset-password`, `/confirm-email-change` |
 | `sso_page` | 30 / min | client | `GET /auth/sso/google/callback` |
 
-`GET /info` and `GET /leaderboard` have only the global limit.
+`GET /info` and `GET /leaderboard` have no limit of their own: only the per-address layer.
 
 An endpoint with several limits checks them in the order of its row in section 2: on
 `POST /auth/register`, `auth` then `auth_register`. The limits of the auth family (`auth`,
@@ -258,7 +287,8 @@ address has an account.
 
 The server handles a request in this order:
 
-1. global limit;
+1. the per-address layer (block, request budget, requests in progress), then the health
+   endpoints;
 2. endpoint match;
 3. authentication;
 4. the account budget, when the request carries a session;
@@ -347,7 +377,8 @@ events.
 
 Paths are under `/api/v1`, except the pages and the health endpoints at the end of the table
 (sections 14 and 15). Every endpoint marked **session** or **optional** also counts in the account
-budget when it gets a token, and every `reauth` endpoint in `reauth_user` (section 1.5). In the
+budget when it gets a token, and every `reauth` endpoint in `reauth_user`; every request, the
+health endpoints included, also takes a token of the per-address layer (section 1.5). In the
 Auth column:
 
 - **session**: a bearer token is required;
@@ -357,7 +388,7 @@ Auth column:
 
 | Method and path | Auth | Limit | Purpose |
 |---|---|---|---|
-| `GET /info` | none | global | Server name, versions, ports, sign-up rules |
+| `GET /info` | none | per address | Server name, versions, ports, sign-up rules |
 | `POST /auth/register` | none | `auth`, `auth_register` | Create an account |
 | `POST /auth/login` | none | `auth` | Sign in with a password |
 | `POST /auth/login/mfa` | none | `auth` | Second step of a sign-in with two-step verification |
@@ -388,19 +419,19 @@ Auth column:
 | `POST /gif` | session | `gif`, render limits | Any game sent as PGN, as an animated GIF |
 | `GET /players/:username` | optional | `public_read` | A player's public profile |
 | `GET /players/:username/games` | optional | `public_read` | A player's recent games |
-| `GET /leaderboard` | none | global | Top players of a category |
+| `GET /leaderboard` | none | per address | Top players of a category |
 | `POST /reports` | session | `reports` | Report the opponent of a recent game |
 | `GET`, `POST /verify-email` | none (page) | `page`, `auth` | E-mail confirmation link |
 | `GET`, `POST /reset-password` | none (page) | `page`, `auth`, `auth_reset` | Password reset link |
 | `GET`, `POST /confirm-email-change` | none (page) | `page`, `auth` | E-mail change link |
 | `GET /auth/sso/google/callback` | none (page) | `sso_page` | Where Google sends the browser back |
-| `GET /healthz`, `GET /readyz` | none | none | Liveness and readiness (also under `/api/v1`) |
+| `GET /healthz`, `GET /readyz` | none | per address | Liveness and readiness (also under `/api/v1`) |
 
 ## 3. Server info
 
 ### GET /info
 
-What a client needs before it signs in or connects. **Auth** none. **Limit** global only.
+What a client needs before it signs in or connects. **Auth** none. **Limit** the per-address layer only (section 1.5).
 
 ```sh
 curl -sS "$API/info"
@@ -1470,7 +1501,7 @@ be empty. Errors: 400 `invalid_username`, `invalid_cursor` or `invalid_limit`; 4
 
 ### GET /leaderboard
 
-**Auth** none. **Limit** global only. Query: `category` (required: an official category, `3%2B2`
+**Auth** none. **Limit** the per-address layer only (section 1.5). Query: `category` (required: an official category, `3%2B2`
 or `3+2`) and `limit` (1-100, default 100; a larger number of up to 3 digits counts as 100).
 
 ```sh
@@ -1549,7 +1580,9 @@ Pages for a browser, opened from the links of e-mails and by Google. Their links
 
 ## 15. Health endpoints
 
-On the API port, before any rate limit or authentication; both paths work for each endpoint:
+On the API port, before authentication and every endpoint limit; like any request they take a
+token of the per-address layer (section 1.5); a monitoring host can be listed in `ABUSE_EXEMPT`.
+Both paths work for each endpoint:
 
 | Endpoint | Answer |
 |---|---|

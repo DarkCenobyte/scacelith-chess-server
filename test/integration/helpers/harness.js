@@ -94,6 +94,9 @@ export async function startServer({ workers = 1, env = {}, keep = !!process.env.
         AUTH_REAUTH_PER_USER: '100000',
         USER_RATE_PER_MIN: '100000',
         MAX_CONNECTIONS_PER_IP: '100000',
+        // Every test client is on the loopback: outside the protection per address (net/ipguard.js);
+        // test/integration/abuse.test.js narrows it to 127.0.0.1 and floods from 127.0.0.2.
+        ABUSE_EXEMPT: '127.0.0.0/8,::1',
         LOG_LEVEL: 'info',
         LOG_FORMAT: 'json',
         SCACELITH_ENV_FILE: '',

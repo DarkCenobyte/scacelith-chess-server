@@ -42,6 +42,7 @@
 
 import * as verifyPages from '../pages/verify-email.js';
 import * as resetPages from '../pages/reset-password.js';
+import { AUTH_REFUSAL_WEIGHT } from '../../net/ipguard.js';
 
 export const POW_FIELD = Object.freeze({
     type: 'object', optional: true,
@@ -51,8 +52,11 @@ const PASSWORD = { type: 'string', min: 1, max: 1024 };
 const EMAIL = { type: 'string', min: 1, max: 254 };
 const LINK_TOKEN = { type: 'string', min: 1, max: 128 };
 
-/** How much more a refusal of the auth family counts toward blocking an address (abuse design 3.4). */
-export const AUTH_ABUSE_WEIGHT = 5;
+/**
+ * How much more a refusal of the auth family counts toward blocking an address (abuse design
+ * 3.4): the protection per address's own constant (net/ipguard.js), so that both stay equal.
+ */
+export const AUTH_ABUSE_WEIGHT = AUTH_REFUSAL_WEIGHT;
 
 /**
  * The `auth` limit: AUTH_RATE_PER_IP per 10 minutes per address, AUTH_RATE_PER_PREFIX per IPv6

@@ -11,7 +11,11 @@
 // Handshake: `handleUpgrade(req, socket, head)` serves Node's http 'upgrade' event;
 // `handleSocket(socket)` takes a raw TCP/TLS socket and parses the HTTP upgrade request itself
 // (a strict, bounded parser: 8 KB, 64 header lines, CRLF only, no obs-fold), which is what the
-// dedicated WebSocket port uses: no http.Server per connection, faster accepts.
+// dedicated WebSocket port uses: no http.Server per connection, faster accepts. With a `guard`
+// (net/ipguard.js, the shard's protection per address), an upgrade request first takes its token
+// of the address's request budget like any HTTP request, before any other check and before the
+// admission IPC to the primary: a blocked address, or one over HTTP_RATE_PER_IP, gets HTTP 429
+// rate_limited with Retry-After (the game waits that long before it reconnects).
 //
 // Hot path (per message): no allocation for complete frames (the payload is unmasked in place and
 // handed out as a view of the socket chunk); a frame split across TCP reads is re-assembled with
@@ -454,12 +458,13 @@ export class WsServer {
      *        shards send Scacelith-Server-Id, so that a client checks whom it talks to before Hello)
      * @param {object} [o.log] logger
      * @param {object} [o.registry] metrics registry
+     * @param {import('./ipguard.js').IpGuard|null} [o.guard] protection per address, checked first
      */
     constructor({
         maxMessageBytes = 512, subprotocol = WS_SUBPROTOCOL, allowOrigins = [], path = '/ws',
         sendBufferLimit = 262144, onConnection, admission = null, clientIp = null, messageLabel = null,
         upgradeHeaders = null, log = null, registry = defaultRegistry, handshakeTimeoutMs = 10000,
-        maxHeaderBytes = 8192, closeTimeoutMs = 2000, pingRate = 2, pingBurst = 5,
+        maxHeaderBytes = 8192, closeTimeoutMs = 2000, pingRate = 2, pingBurst = 5, guard = null,
     } = {}) {
         this.maxMessageBytes = maxMessageBytes;
         this.subprotocol = subprotocol;
@@ -474,6 +479,7 @@ export class WsServer {
         this.sendBufferLimit = sendBufferLimit;
         this.onConnection = onConnection;
         this.admission = admission;
+        this.guard = guard;
         this.clientIp = clientIp || ((req, socket) => socket.remoteAddress || '');
         this.log = log;
         this.handshakeTimeoutMs = handshakeTimeoutMs;
@@ -581,6 +587,16 @@ export class WsServer {
     handleUpgrade(req, socket, head) {
         const t0 = performance.now();
         socket.on('error', noop);
+        let ip = null;
+        if (this.guard !== null) {
+            ip = this.clientIp(req, socket);
+            const r = this.guard.request(this.guard.keysOf(ip, socket));
+            if (r !== null) {
+                const s = Math.max(1, Math.ceil(r.retryAfterMs / 1000));
+                return this._reject(socket, 429, 'rate_limited', `Retry-After: ${s}\r\n`,
+                    { error: 'rate_limited', message: 'Too many requests; try again later.', retryAfter: s });
+            }
+        }
         const h = req.headers;
         if (!this.accepting) return this._reject(socket, 503, 'shutting_down', null);
         if (req.method !== 'GET') return this._reject(socket, 405, 'method_not_allowed', 'Allow: GET\r\n');
@@ -598,7 +614,7 @@ export class WsServer {
         if (!tokens(h['sec-websocket-protocol']).includes(this.subprotocol)) {
             return this._reject(socket, 426, 'unsupported_protocol', null, { error: 'unsupported_protocol', supported: [this.subprotocol] });
         }
-        const ip = this.clientIp(req, socket);
+        if (ip === null) ip = this.clientIp(req, socket);
         const adm = this.admission;
         if (!adm) return this._accept(req, socket, head, key, ip, false, t0);
         let r;

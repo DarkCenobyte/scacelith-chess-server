@@ -546,6 +546,7 @@ Shard -> primary:
 | `once.consume` | `{ key, ttlMs }` | `{ fresh }` |
 | `sanction.applied` | `{ userId, until, reason, refunds }` | - (primary kicks the user everywhere; `refunds`: victims refunded, whose notices it looks for at once) |
 | `session.revoked` | `{ userId, tokenHashes }` | - (broadcast to every shard's auth cache) |
+| `abuse.report` | `{ entries: [[key64, key48 or null, weight]] }` | - (notification: the refusals counted toward a block since the last report, at most one report per second per worker and 512 entries, the largest first; section 8) |
 
 Primary -> shard:
 
@@ -558,12 +559,13 @@ Primary -> shard:
 | `auth.invalidate` | `{ userId, tokenHashes }` | drops cached sessions |
 | `metrics.snapshot` | - | replies `registry.snapshot()` |
 | `shutdown` | `{ graceMs }` | drain: Notice{ServerShutdown}, stop accepting, flush |
+| `abuse.block` | `{ blocks: [[key, ttlMs, level]] }` | the shard blocks these addresses (IPv4, IPv6 /64 or /48) for `ttlMs` on its monotonic clock; sent to every shard with the new blocks of each `abuse.report`, and to one shard at its `shard.ready` with every running block (section 8) |
 
 ### 5.8 Shard internals (net owner) and the anti-cheat hooks
 
 ```js
 // src/net/ws.js
-class WsServer { constructor({ maxMessageBytes, subprotocol, allowOrigins, onConnection }) ; handleUpgrade(req, socket, head) }
+class WsServer { constructor({ maxMessageBytes, subprotocol, allowOrigins, onConnection, guard }) ; handleUpgrade(req, socket, head) }
 class WsConnection {
   id; ip; userId; username; state /* 'hello'|'ready'|'closing' */; rttMs; bufferedBytes;
   sendFrame(buf) -> bool   // one binary message; false when closed or over WS_SEND_BUFFER_LIMIT (then closes 4303)
@@ -591,6 +593,15 @@ honours it too). With native TLS, a gate (`TlsGate`) runs in front of the TLS se
 closes the sockets it refuses with an RST, before any TLS work, and counts them in
 `scacelith_tls_refused_total{reason}`:
 
+* Protection per address first (`src/net/ipguard.js` `IpGuard.connection`, section 8; skipped
+  for `ABUSE_EXEMPT`): a blocked IPv4 address, IPv6 /64 or /48 (`blocked`), more than the
+  worker's share of `IP_CONN_RATE` new connections per second (`conn_rate`) or of
+  `IP_MAX_CONNECTIONS` open ones (`conn_open`) from one address are refused before anything is
+  read: two `Map` lookups and a token bucket. A socket let through is counted open until its
+  'close', whatever happens to it next. The refusals that say something about one address
+  (`conn_rate`, `conn_open`, `per_ip`, `waiting_per_ip`, `bad_hello`, `hello_timeout`, a failed
+  handshake) count toward a block of it; the server-wide ones (`handshakes`, `waiting`,
+  `server_full`) and the refusals of an address already blocked do not.
 * Waiting for the ClientHello. A new socket holds no handshake slot until its first TLS record
   has arrived whole: a handshake record of at most 16 KB whose body starts a ClientHello (a client
   may fragment the ClientHello over several records; only the first one is awaited). It has 3 s
@@ -663,15 +674,23 @@ closes the sockets it refuses with an RST, before any TLS work, and counts them 
   shared port. The waiting room needs more (128 groups and about 700 silent connections per
   second per worker). Players already connected are not affected. Raising
   `MAX_PENDING_HANDSHAKES` raises the connection rate such an attack needs in proportion, and a
-  lower `MAX_PENDING_HANDSHAKES_PER_IP` raises the number of address groups it needs; stopping it
+  lower `MAX_PENDING_HANDSHAKES_PER_IP` raises the number of address groups it needs. Stage 0
+  does not change that: every timed-out handshake counts toward a block of its address, but each
+  group needs only about 0.4 of them per second per worker (inferred: 128 slots ÷ 10 s ÷ 32
+  groups), 50 a minute on two workers, far below `ABUSE_BLOCK_REFUSALS_PER_MIN`; it stops the
+  same attack from a few addresses, which their per-address refusals soon block. Stopping it
   belongs in front of the server (a per-source connection rate limit in the firewall, or a
-  filtering provider).
+  filtering provider: SIZING, provider firewall).
 * `TLS_MODE=proxy` and `off` have no gate: the TLS work (and its limits) belongs to the proxy.
+  Behind a proxy the per-address connection limits are the proxy's job too; the request budget,
+  the in-flight cap and the blocks still apply per `X-Forwarded-For` client (section 8).
 
 ### 5.9 HTTP (`src/http/`)
 
-`createApiHandler({ config, store, auth, primary, anticheat, log }) -> (req, res)`, mounted by
-the net owner on the HTTPS server (and handling `upgrade` elsewhere); `handler.close()` (awaited
+`createApiHandler({ config, store, auth, primary, anticheat, log, guard }) -> (req, res)`, mounted
+by the net owner on the HTTPS server behind `wrapApiHandler` (and handling `upgrade` elsewhere);
+`guard` is the shard's `IpGuard` (section 8), the same one the listeners use, which the wrapper
+applies to every request before the handler sees it; `handler.close()` (awaited
 first by the worker's shutdown) runs what the routes registered through `deps.onClose`, today the
 GIF rendering threads. Router:
 ```js
@@ -686,14 +705,17 @@ router.page(method, path, handler, opts)                                    // H
 Rates: `by: 'user'` counts per account, and per client for a request without a session;
 `prefixLimit` also counts each IPv6 /48 as a whole; `shared` adds the primary's sliding window
 (`ratelimit.take`, given back by `ratelimit.refund`); `abuseWeight` marks the auth family for the
-network shield. The rates of a route are checked in order, and when one refuses, the tokens the
+network shield: a refusal by a rate counted per client (not per account) is reported to the
+`guard` (`IpGuard.noteRefusal`) with that weight, or 1, toward a block of the address. The rates of a route are checked in order, and when one refuses, the tokens the
 earlier ones took are given back (local bucket and primary). `ctx.takeRates(rates)` takes more
 rates from inside a handler (the GIF render quotas, only on a cache miss): a 429 if one refuses,
 and they are given back with the route's when the answer carries `refundRate: true`. Before the
 route's rates, every request authenticated with a session spends one token of the account's
 budget (`USER_RATE_PER_MIN`, per worker: max(1, min(L, ceil(2L / WORKERS))) per minute, a burst
-of half a minute, local only). A route may raise its body limit (`bodyLimit`); an answer above 64
-KiB gets a 60 s send deadline, after which the socket is destroyed.
+of half a minute, local only; never counted toward a block). A route may raise its body limit
+(`bodyLimit`) and its handler timeout (`timeoutMs`: the export 60 s, the GIFs 45 s). The send
+deadline is the listener's (section 8): an answer not flushed 60 s after the handler ended it is
+destroyed with its socket, and the handler's own time does not count toward it.
 The complete reference of every endpoint, with its request, answers, errors, rate limits and curl
 examples, is [API.md](API.md); the table below is the contract summary.
 Path parameters use `:name`. JSON errors are `{ "error": "<snake_case_code>", "message": "...",
@@ -733,7 +755,7 @@ Endpoints (prefix `/api/v1`):
 | `POST /account/email` | auth | `{ newEmail, password, code?, recoveryCode? }`, the re-authentication of delete. With `REQUIRE_EMAIL_VERIFICATION`: 202 `{ status: 'verification_sent' }`, the same answer and the same `pendingEmail` whether or not another account uses the address; a 24 h link to the new address (`/confirm-email-change`), a notice to the current one. Without it: 200 `{ status: 'email_changed', email }` or 409 `email_taken`. 400 `invalid_email` / `same_email` before the password check |
 | `POST /account/export` | auth | `{ password, code?, recoveryCode? }` -> 200 JSON attachment `scacelith-account-<username>.json` (`format: 'scacelith-account-export'`, version 1: account, ratings, refunds, sessions, security events, sanctions, conduct, reports filed, every game summary, notes); never a secret, token hash, anti-cheat data, report received or moderator identity. Rate `account_export` (5 per hour per player, shared) then `reauth`, `reauth_user`; 60 s timeout |
 | `GET /account/games` | store | `?before=<id>&limit<=50&category=<id>\|custom&rated=true\|false&result=win\|loss\|draw` -> `{ games: [summary + baseMs, incMs, outcome], next, total }`, the player's own games newest first (`outcome` from the player's side; aborted games only without a result filter); rate `account_games` 60 per minute per player |
-| `GET /players/:username`, `GET /players/:username/games`, `GET /leaderboard?category=` | store | public data only; the two player routes take an optional session (same answer) so that their `public_read` limit counts per account when there is one; the leaderboard has the global limit only |
+| `GET /players/:username`, `GET /players/:username/games`, `GET /leaderboard?category=` | store | public data only; the two player routes take an optional session (same answer) so that their `public_read` limit counts per account when there is one; the leaderboard has no limit of its own (the per-address layer only, section 8) |
 | `GET /games/:id`, `GET /games/:id/pgn` | store | public data, optional session: a player of the game also gets `you: 'white'\|'black'` and `reportable` (whether `POST /reports` would take a report of the opponent now). The PGN: `application/x-chess-pgn` attachment `scacelith-<id>.pgn`, standard tags plus `ScacelithGameId`, `[%clk]` / `[%emt]` per move. Both share the `public_read` limit (60 per minute, `by: 'user'`) with the two player routes |
 | `GET /games/:id/gif?size&orientation&delay&coords` | gif | session required (quotas per account). `small\|medium\|large` (default medium), `white\|black`, delay 100-3000 ms (500), coords `0\|1` (1); else 400 `invalid_option {field}`. The game record's names, ratings, result and ending -> 200 `image/gif` attachment `scacelith-<id>.gif` (binary answer). 400 `invalid_game_id`, 404 `not_found`, 422 `game_too_long` (> `GIF_MAX_PLIES` 600), 429, 503 `server_busy {retryAfter 3-10}` (queue full or wait over; render quotas given back), 500 `render_failed`, 404 `gif_disabled` |
 | `POST /gif` | gif | `{ pgn (<= 65536 bytes), size?, orientation?, delayMs? (number), coords? (boolean) }`: the first game of the PGN (`src/chess/pgn.js` `readPgn`), names and ratings from its tags (printable ASCII), result from `Result`, ending from `Termination` unless `normal` -> attachment `scacelith-game.gif`; 400 `invalid_pgn {line, column}`; body limit 2 x 65536 + 4096; other answers as GET |
@@ -1180,8 +1202,11 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   player's own data only; never a password hash, TOTP secret, recovery code, token or token hash,
   the anti-cheat's data (integrity level, anomalies, analysis features, report weights), the reports
   made against the player or a moderator's identity (`src/http/routes/account-export.js`).
-* **Brute force and stuffing**: per-IP token buckets (API, auth; IPv6 per /64, and the password
-  endpoints also per /48 as a whole with `AUTH_RATE_PER_PREFIX`), per-account failure counter
+* **Brute force and stuffing**: per-address token buckets (the background budget of every
+  request, below, and the auth family's route limits; IPv6 per /64, and the password endpoints
+  also per /48 as a whole with `AUTH_RATE_PER_PREFIX`), whose refusals count 5 toward a block of
+  the address; per-account limits whatever the address (`AUTH_MFA_PER_ACCOUNT` second-factor
+  codes, `AUTH_REAUTH_PER_USER` re-authentications); per-account failure counter
   with exponential delay, global failure-rate detector that turns on the login proof-of-work
   (`POW_LOGIN_TRIGGER_PER_MIN`, 30 failed logins per minute: each costs a password hash, so a
   small server's hash throughput could never reach a much higher trigger),
@@ -1190,9 +1215,80 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
 * **WebSocket surface**: one message type table, strict decoding, size limit checked from the
   frame header before buffering, no compression, no fragmentation beyond the size limit,
   Hello timeout, per-connection token bucket, per-IP and global connection limits, slow
-  consumers closed, heartbeat timeout, `Origin` refused by default. Before TLS: handshakes in
-  progress capped per worker and per address, and load shed once the upgrades are refused because
-  the server is full (5.8).
+  consumers closed, heartbeat timeout, `Origin` refused by default. Before TLS: blocked addresses
+  and the per-address connection rate and open connections (below), handshakes in progress capped
+  per worker and per address, and load shed once the upgrades are refused because the server is
+  full (5.8).
+* **Protection per address (background layer)**: `src/net/ipguard.js` (`IpGuard`, one per
+  worker) and `src/cluster/abuse.js` (`AbuseTracker`, in the primary). Every request and every
+  connection meets it first, before routing, before authentication and, with native TLS, before
+  any TLS work. It only keeps one network address from saturating the server; quotas otherwise
+  belong to the signed-in account. An address is an IPv4 address or an IPv6 /64; an IPv6 address
+  also counts toward its /48 (one customer's site) with 4 times each limit, so that rotating over
+  the 65,536 /64s of a /48 multiplies nothing. A whole-server limit L is enforced in each worker
+  as its share `max(1, min(L, ceil(2 L / WORKERS)))` (`workerShare`, `src/security/ratelimit.js`):
+  all of it with 1 or 2 workers, half with 4, so a client spread over the workers gets at most
+  twice L and no request waits for an IPC.
+  * Requests (`admitRequest` in `wrapApiHandler`, `src/net/listeners.js`, and the API handler's
+    first statement when it is used alone; `WsServer.handleUpgrade` for upgrades): every HTTP
+    request, whatever its path, method or outcome (API, pages, `/healthz`, unknown paths, HEAD,
+    OPTIONS, a 414, a WebSocket upgrade), takes one token of `HTTP_RATE_PER_IP` (600 per minute,
+    burst half a minute) and, for IPv6, of `HTTP_RATE_PER_PREFIX` (4 times as much per /48; a
+    refusal there gives the /64 token back), then one of the worker's `IP_MAX_INFLIGHT` (32)
+    places of requests in progress, given back when the response closes, finished or aborted.
+    Beyond: 429 `{ "error": "rate_limited", "message": "Too many requests; try again later.",
+    "retryAfter": s }` with `Retry-After`, on an upgrade `HTTP/1.1 429` with the same JSON.
+  * Connections (TLS gate stage 0, 5.8): `IP_CONN_RATE` new connections per second (burst 4 s)
+    and `IP_MAX_CONNECTIONS` open ones (handshakes, API keep-alive and WebSockets together),
+    each worker its share; beyond, an RST before any TLS byte. `MAX_CONNECTIONS_PER_IP` (64),
+    exact through the primary, still bounds the WebSockets of an address.
+  * Slow clients (`hardenHttp`): `headersTimeout` 10 s and `requestTimeout` 30 s checked every
+    second (`connectionsCheckingInterval`; Node's own 30 s let a slowloris client hold a socket 40
+    s), `keepAliveTimeout` 5 s, a socket with no byte in or out for 30 s destroyed
+    (`server.timeout`; upgraded sockets clear it; a request still in its handler keeps the socket,
+    the handler's own timeout answers it), and an answer not flushed to the kernel 60 s
+    after the handler ended it destroyed with its socket (a client reading a GIF or a PGN a few
+    bytes at a time). Malformed HTTP is answered 400, 408 (header timeout) or 431 (headers too
+    large) and counted in `scacelith_http_client_errors_total{reason}`.
+  * Blocks. Each worker sums, per address, the refusals that show a client ignoring the limits:
+    weight 1 for a 429 of the address budgets or the in-flight cap, a gate refusal of that
+    address, a failed TLS handshake, malformed HTTP (not from a trusted proxy). The API's route
+    limits report theirs through the same `IpGuard.noteRefusal` (`AUTH_REFUSAL_WEIGHT`, 5, for
+    the login, registration, reset and MFA family, whose attempts each cost a password hash).
+    Not counted: per-account limits, server-wide capacity refusals (the hash queue, the gate's
+    `handshakes`, `waiting` and `server_full`), the refusals of an address already blocked. A
+    worker reports the sums at most once a second (`abuse.report`, 5.7, at most 512 keys, the
+    largest first); the primary adds every worker up over a sliding minute and blocks an address
+    at `ABUSE_BLOCK_REFUSALS_PER_MIN` (600; 4 times that for a /48, which is also blocked once 4
+    of its /64s are), for `ABUSE_BLOCK_BASE_SEC` (60 s) times 4 at each new block within 6 hours,
+    up to `ABUSE_BLOCK_MAX_SEC` (1 h): 1, 4, 16, then 60 minutes. It sends the new blocks to every
+    worker (`abuse.block`), and the running ones to a worker at its `shard.ready`; durations
+    travel as durations and run on each process's monotonic clock. A worker that sees an address
+    reach the threshold in one second on its own blocks it at once (local fast path), so a flood
+    ends within a second on that worker and one or two on the others. A blocked address gets an
+    RST before TLS for its new connections, 429 with the time left and `Connection: close` on the
+    connections it already has (behind a proxy, 429 only: the connection is the proxy's), and 429
+    on upgrades. WebSocket connections already open are never closed by a block, so a player who
+    shares the address with an abuser (a school, a mobile operator's CGNAT) keeps the game in
+    progress; a player whose connection drops can only come back when the block ends, which is
+    why the first one is short. At most 20,000 blocks run at once (the oldest end first); the
+    primary logs each one (`ip blocked`, with `ipForLog`, the scope, level, duration and
+    refusals).
+  * `ABUSE_EXEMPT` (addresses and CIDR subnets: a school or club network, monitoring, a load
+    generator) skips all of the above. Login, registration, the other route limits and the
+    per-account quotas still apply.
+  * Cost (measured on the development container, `test/unit/net.ipguard.test.js`): about 0.15-0.25
+    µs per IPv4 request (budget and in-flight place), 0.5-0.7 µs per IPv6 request, 0.02 µs for the
+    request of a blocked address, 0.5 µs for a new connection and its close; the keys of an
+    address are computed once per connection (0.8 µs for IPv6). Memory is bounded: 50,000 buckets
+    per limiter (an evicted bucket comes back full, which only makes the limit more lenient),
+    counters for open connections and requests in progress only, 20,000 blocks.
+  * Metrics: `scacelith_http_rate_limited_total{limit}` (`ip`, `ip48`, `inflight`, `blocked`),
+    `scacelith_tls_refused_total{reason}` (`blocked`, `conn_rate`, `conn_open`),
+    `scacelith_tls_connections_open`, `scacelith_http_inflight`, `scacelith_abuse_blocked_keys`
+    and `scacelith_abuse_local_blocks_total` per shard, `scacelith_abuse_report_entries_dropped_total`,
+    `scacelith_http_client_errors_total{reason}`; in the primary `scacelith_abuse_blocks_total{scope,
+    level}`, `scacelith_abuse_blocked{scope}` and `scacelith_abuse_blocks_evicted_total`.
 * **Proof of work format**: an endpoint that wants one answers HTTP 428
   `{ "error": "pow_required", "pow": { "challenge": "<opaque ASCII>", "bits": 18, "expiresAt": ms } }`.
   The client finds a nonce, a decimal ASCII string, such that

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    FailureCounter, LruMap, SlidingWindowCounter, TokenBucketLimiter, createLocalControl, ipKey, normalizeIp, prefixKey,
+    FailureCounter, LruMap, SlidingWindowCounter, TokenBucketLimiter, createLocalControl, ipKey, normalizeIp, prefixKey, workerShare,
 } from '../../src/security/ratelimit.js';
 import { createClock } from './helpers/auth-fakes.js';
 
@@ -136,4 +136,36 @@ test('client source keys: IPv4 address, IPv6 /48', () => {
     assert.equal(prefixKey('2001:db8:aa:ffff::9'), '2001:db8:aa::/48', 'every /64 of the /48 has the same key');
     assert.equal(prefixKey('2001:DB8:0AA::1'), '2001:db8:aa::/48');
     assert.notEqual(prefixKey('2001:db8:ab::1'), prefixKey('2001:db8:aa::1'));
+});
+
+test('workerShare: all of a limit on 1 or 2 workers, 2 L / N beyond, never 0', () => {
+    assert.equal(workerShare(600, 1), 600);
+    assert.equal(workerShare(600, 2), 600);
+    assert.equal(workerShare(600, 4), 300);
+    assert.equal(workerShare(600, 16), 75);
+    assert.equal(workerShare(10, 4), 5);
+    assert.equal(workerShare(1, 16), 1, 'ceil, at least 1');
+    assert.equal(workerShare(3, 16), 1);
+    assert.equal(workerShare(0, 4), 1, 'never 0');
+    assert.equal(workerShare(128, 0), 128, 'workers below 1 count as 1');
+    // A client spread over every worker gets at most 2 L; one on a single connection at least 2 L / N.
+    for (const n of [1, 2, 3, 4, 8, 16]) {
+        const s = workerShare(600, n);
+        assert.ok(s * n <= Math.max(600, 2 * 600 + n), `${n} workers: ${s}`);
+        assert.ok(s >= Math.min(600, 2 * 600 / n));
+    }
+});
+
+test('token bucket: a burst and a rate expressed as limit and window', () => {
+    // 600 per minute with a burst of half a minute: take(key, 300, 300 * 60000 / 600 = 30000).
+    const now = createClock();
+    const l = new TokenBucketLimiter({ now });
+    for (let i = 0; i < 300; i++) assert.ok(l.take('k', 300, 30000).allowed);
+    const r = l.take('k', 300, 30000);
+    assert.equal(r.allowed, false);
+    assert.equal(r.retryAfterMs, 100, 'one token per 100 ms: 600 per minute');
+    now.advance(60000);
+    let n = 0;
+    while (l.take('k', 300, 30000).allowed) n++;
+    assert.equal(n, 300, 'a minute refills the burst, not more');
 });

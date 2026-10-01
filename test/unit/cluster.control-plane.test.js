@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { AbuseTracker } from '../../src/cluster/abuse.js';
 import { ControlPlane } from '../../src/cluster/control-plane.js';
 import { Ipc, channelPair } from '../../src/cluster/ipc.js';
 import { OnceStore, SlidingWindowLimiter } from '../../src/cluster/limits.js';
@@ -54,7 +55,7 @@ class FakeShards {
     clear() { this.sent.length = 0; this.requests.length = 0; }
 }
 
-function setup({ config = cfg, activeBan = null, conduct = null, ratingOf = null, acceptsChallenges = null, live } = {}) {
+function setup({ config = cfg, activeBan = null, conduct = null, ratingOf = null, acceptsChallenges = null, live, abuse = false } = {}) {
     let t = Date.UTC(2026, 5, 1, 12);
     const clock = { now: () => t, advance: (ms) => { t += ms; } };
     const shards = new FakeShards(live);
@@ -65,6 +66,8 @@ function setup({ config = cfg, activeBan = null, conduct = null, ratingOf = null
         config, presence, matchmaker: mm, challenges: ch, conduct, limiter: new SlidingWindowLimiter({ now: clock.now }),
         once: new OnceStore({ now: clock.now }), shards, activeBan, ratingOf, acceptsChallenges, now: clock.now,
         random: () => 0.1, registry: new Registry(),
+        // abuse: a tracker on the test clock that broadcasts like the default one.
+        abuse: abuse ? new AbuseTracker({ config, now: clock.now, registry: new Registry(), broadcast: (blocks) => shards.broadcast('abuse.block', { blocks }) }) : null,
     });
     const online = (userId, username, shard, connId = userId * 10) => {
         const r = cp.presenceClaim({ userId, username, shard, connId, ip: `10.0.0.${userId}` }, shard);
@@ -454,5 +457,30 @@ describe('control plane: games, sanctions, shards', () => {
         assert.equal(cp.presence.get(3), undefined);
         assert.ok(!cp.readyShards.has(1));
         assert.deepEqual(shards.of('shard.down').map((x) => x.shard), [0, 2]);
+    });
+
+    it('abuse.report leads to an abuse.block broadcast; a shard that becomes ready gets the running blocks; sweep ends them', () => {
+        const { cp, shards, clock } = setup({ abuse: true, config: testConfig({ ABUSE_BLOCK_REFUSALS_PER_MIN: '50' }) });
+        cp.handlers['abuse.report']({ entries: [['198.51.100.7', null, 30]] }, 0);
+        assert.deepEqual(shards.of('abuse.block'), []);
+        assert.equal(cp.handlers['abuse.report']({ entries: [['198.51.100.7', null, 20], ['198.51.100.8', null, 1]] }, 1), null);
+        assert.deepEqual(shards.of('abuse.block'), [{ shard: '*', type: 'abuse.block', payload: { blocks: [['198.51.100.7', 60000, 1]] } }]);
+        cp.handlers['abuse.report']({}, 0);                    // malformed: ignored
+        shards.clear();
+        clock.advance(15000);
+        cp.shardReady(1);
+        assert.deepEqual(shards.of('abuse.block'), [{ shard: 1, type: 'abuse.block', payload: { blocks: [['198.51.100.7', 45000, 1]] } }]);
+        clock.advance(45000);
+        cp.sweep();
+        assert.equal(cp.abuse.size, 0);
+        shards.clear();
+        cp.shardReady(0);
+        assert.deepEqual(shards.of('abuse.block'), [], 'nothing to give once the blocks ended');
+    });
+
+    it('builds its own tracker by default, broadcasting through the shards directory', () => {
+        const { cp, shards } = setup({ config: testConfig({ ABUSE_BLOCK_REFUSALS_PER_MIN: '5' }) });
+        cp.handlers['abuse.report']({ entries: [['2001:db8::/64', '2001:db8::/48', 5]] }, 0);
+        assert.deepEqual(shards.of('abuse.block').map((x) => [x.shard, x.payload.blocks.map(([k, , l]) => [k, l])]), [['*', [['2001:db8::/64', 1]]]]);
     });
 });

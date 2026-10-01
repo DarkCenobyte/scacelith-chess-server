@@ -25,8 +25,14 @@
 // kernel caps it at net.core.somaxconn); the round-robin handle of the primary honours it too.
 //
 // Admission before TLS (native mode; TlsGate): a TLS server wraps each accepted TCP socket in a
-// TLSSocket from its own 'connection' listener. The gate runs in front of that listener, in two
+// TLSSocket from its own 'connection' listener. The gate runs in front of that listener, in three
 // stages, and counts every socket it closes in scacelith_tls_refused_total{reason}:
+//   0. The protection per address (net/ipguard.js IpGuard.connection, when the shard gives a
+//      guard; ABUSE_EXEMPT addresses skip it): a blocked IPv4 address, IPv6 /64 or /48
+//      ("blocked"), more than IP_CONN_RATE new connections per second ("conn_rate") or
+//      IP_MAX_CONNECTIONS open ones ("conn_open", handshakes, API keep-alive and WebSockets
+//      together) from one address are closed with an RST at once: two Map lookups and a token
+//      bucket, no TLS byte, no slot. The other sockets are counted open until they close.
 //   1. A new socket first waits, without a handshake slot, until its first TLS record has arrived
 //      whole: a handshake record of at most 16 KB that starts the ClientHello (clients send the
 //      whole ClientHello in that record, unless they fragment it on purpose). It has
@@ -46,7 +52,10 @@
 // reconnection storm in turn (one handshake is 1-3.5 ms of CPU) instead of starting every
 // handshake at once and finishing none before the clients' deadline; a refused client retries
 // with its backoff. An attacker with enough address groups can still fill the caps: see
-// docs/DESIGN.md 5.8 for what remains possible.
+// docs/DESIGN.md 5.8 for what remains possible. The refusals that say something about one address
+// (conn_rate, conn_open, per_ip, waiting_per_ip, bad_hello, hello_timeout, and a failed handshake)
+// count toward a block of that address (IpGuard.noteRefusal); the server-wide ones (handshakes,
+// waiting, server_full) do not.
 // On the listener that carries the WebSocket upgrade, the gate also sheds load while the `full`
 // predicate says so (Router.isFull: for up to 5 s after the primary refused an upgrade because the
 // server is full, or while this worker holds 1.2 times its share of MAX_CONNECTIONS): new
@@ -64,8 +73,31 @@
 // layout for a server that expects to be full. Plain modes (proxy, off) have no gate: there is no
 // TLS work to save.
 //
+// Requests (wrapApiHandler, every mode): the protection per address comes first, before the
+// health endpoints and the API handler, for any path or method: a blocked address gets 429
+// rate_limited with the time left (plus Connection: close, then the socket ends, except behind a
+// proxy, whose connection is shared by many clients); then one token of HTTP_RATE_PER_IP and
+// HTTP_RATE_PER_PREFIX, and a slot of IP_MAX_INFLIGHT requests in progress, given back when the
+// response closes (finished or aborted). Beyond them: 429 rate_limited with Retry-After. The
+// WebSocket upgrade takes the same token in WsServer.handleUpgrade, before its IPC to the primary.
+// In proxy mode the address is the X-Forwarded-For client and only these per-request checks exist:
+// the connection limits are the proxy's job.
+//
 // Health: GET /api/v1/healthz and /api/v1/readyz (also /healthz, /readyz) are answered here,
 // before the API handler, so they work whatever the API module does.
+//
+// Slow clients (hardenHttp; constants, shortened by the tests through the constructor):
+// headersTimeout 10 s and requestTimeout 30 s, which Node checks every connectionsCheckingInterval
+// (1 s here instead of Node's 30 s, so they hold to within a second: a slowloris client that sends
+// a header line now and then is cut at 10-11 s); keepAliveTimeout 5 s; a socket with no byte in or
+// out for IDLE_TIMEOUT_MS (30 s) is destroyed (a client that stops reading; upgraded sockets
+// clear it), unless its request is still in the API handler, whose own timeout answers it (a GIF
+// render or a data export may take longer); an answer that is not flushed to the kernel
+// SEND_TIMEOUT_MS (60 s) after the handler ended it is destroyed with its socket (a client that
+// reads a large answer, a GIF or a PGN, a few bytes at a time). Malformed HTTP ('clientError':
+// 400, 408 for a header timeout, 431 for oversized headers) is counted in
+// scacelith_http_client_errors_total{reason} and toward a block of the address, unless the peer
+// is a trusted proxy.
 //
 // Privileged ports: API_PORT defaults to 443, and Linux lets only a process with the
 // CAP_NET_BIND_SERVICE capability (root has it) bind a port below 1024
@@ -92,10 +124,26 @@ const DEFAULT_BACKLOG = 2048;
 export const HANDSHAKE_TIMEOUT_MS = 10000;
 /** Time a new TLS connection has to send the first record of its ClientHello (TlsGate, before it takes a slot). */
 export const HELLO_TIMEOUT_MS = 3000;
+/** HTTP: time to receive the request headers (Node's headersTimeout). */
+export const HEADERS_TIMEOUT_MS = 10000;
+/** HTTP: time to receive the whole request (Node's requestTimeout). */
+export const REQUEST_TIMEOUT_MS = 30000;
+/** HTTP: an idle keep-alive connection is closed after this. */
+export const KEEP_ALIVE_TIMEOUT_MS = 5000;
+/** HTTP: a socket with no byte in or out for this long is destroyed (server.timeout), unless its request is in the handler. */
+export const IDLE_TIMEOUT_MS = 30000;
+/** HTTP: an answer still not flushed to the kernel this long after the handler ended it is destroyed. */
+export const SEND_TIMEOUT_MS = 60000;
+/** HTTP: how often Node checks headersTimeout and requestTimeout (its default is 30 s). */
+export const CONNECTIONS_CHECK_MS = 1000;
 /** Largest body of a TLS record (RFC 8446 section 5.1: 2^14 bytes). */
 const MAX_RECORD_BODY = 16384;
 const kSlot = Symbol('scacelith.tlsGateSlot');   // address group of a socket holding a handshake slot
 const kWait = Symbol('scacelith.tlsGateWait');   // state of a socket waiting for its ClientHello
+const kAdmitted = Symbol('scacelith.ipguardAdmitted');   // request already through admitRequest
+const kInflight = Symbol('scacelith.ipguardInflight');   // keys of a response counted in progress
+const kGuard = Symbol('scacelith.ipguard');
+const kSendTimer = Symbol('scacelith.sendDeadline');
 
 // Default handshake slots per address group (MAX_PENDING_HANDSHAKES_PER_IP empty): config.js computes
 // it, so that check-config prints the value the gate uses.
@@ -126,10 +174,11 @@ export class TlsGate {
      * @param {number} [o.fullRatePerSec] new connections let through per second while full
      * @param {() => number} [o.now] monotonic clock, in ms
      * @param {object} [o.registry] metrics registry
+     * @param {import('./ipguard.js').IpGuard|null} [o.guard] protection per address (stage 0)
      */
     constructor({
         maxPending = 128, maxPendingPerIp = 0, maxWaiting = 0, maxWaitingPerIp = 0, helloTimeoutMs = HELLO_TIMEOUT_MS,
-        full = null, fullRatePerSec = 0, now = () => performance.now(), registry = defaultRegistry,
+        full = null, fullRatePerSec = 0, now = () => performance.now(), registry = defaultRegistry, guard = null,
     } = {}) {
         this.maxPending = Math.max(1, Math.floor(maxPending) || 1);
         this.maxPendingPerIp = maxPendingPerIp >= 1 ? Math.floor(maxPendingPerIp) : defaultPendingPerGroup(this.maxPending);
@@ -137,6 +186,7 @@ export class TlsGate {
         this.maxWaitingPerIp = maxWaitingPerIp >= 1 ? Math.floor(maxWaitingPerIp) : 4 * this.maxPendingPerIp;
         this.helloTimeoutMs = helloTimeoutMs > 0 ? helloTimeoutMs : HELLO_TIMEOUT_MS;
         this.full = full;
+        this.guard = guard;
         this.fullRate = fullRatePerSec > 0 ? fullRatePerSec : Math.max(1, Math.ceil(this.maxPending / 2));
         this.now = now;
         /** Handshakes in progress. */
@@ -160,12 +210,13 @@ export class TlsGate {
         this._refusedWaitingIp = refused.labels('waiting_per_ip');
         this._refusedTimeout = refused.labels('hello_timeout');
         this._refusedBadHello = refused.labels('bad_hello');
+        this._refusedBy = { blocked: refused.labels('blocked'), conn_rate: refused.labels('conn_rate'), conn_open: refused.labels('conn_open') };
         const gate = this;
         this._onClose = function onGatedSocketClose() { gate.release(this); };
         this._onWaitData = function onWaitingData(chunk) { gate._waitData(this, chunk); };
         this._onWaitEnd = function onWaitingEnd() { gate._drop(this, null); };
         this._onWaitClose = function onWaitingClose() { gate._leave(this); };
-        this._onWaitTimeout = (socket) => gate._drop(socket, gate._refusedTimeout);
+        this._onWaitTimeout = (socket) => gate._drop(socket, gate._refusedTimeout, true);
     }
 
     /**
@@ -190,7 +241,9 @@ export class TlsGate {
         // complete the handshake later, outside the gate.
         server.on('secureConnection', (tlsSocket) => gate.release(tlsSocket?._parent));
         server.on('tlsClientError', (err, tlsSocket) => {
-            gate.release(tlsSocket?._parent);
+            const raw = tlsSocket?._parent;
+            gate.release(raw);
+            if (gate.guard !== null && raw) gate.guard.noteRefusal(gate.guard.socketKeys(raw), 1);
             tlsSocket?.destroy();
         });
     }
@@ -205,10 +258,18 @@ export class TlsGate {
      * @param {(socket: import('node:net').Socket) => void} ready
      */
     accept(socket, shed, ready) {
+        let key;
+        if (this.guard !== null) {
+            const why = this.guard.connection(socket);
+            if (why !== null) return this._refuse(socket, this._refusedBy[why]);
+            const k = this.guard.socketKeys(socket);
+            key = k.k48 ?? k.k64;               // what ipGroupKey(address, 48) gives
+        } else {
+            key = ipGroupKey(socket.remoteAddress, 48);
+        }
         if (this.waiting >= this.maxWaiting) return this._refuse(socket, this._refusedWaiting);
-        const key = ipGroupKey(socket.remoteAddress, 48);
         const n = this.waitingPerIp.get(key) || 0;
-        if (n >= this.maxWaitingPerIp) return this._refuse(socket, this._refusedWaitingIp);
+        if (n >= this.maxWaitingPerIp) return this._refuse(socket, this._refusedWaitingIp, true);
         this.waitingPerIp.set(key, n + 1);
         this.waiting++;
         socket[kWait] = {
@@ -235,7 +296,7 @@ export class TlsGate {
             // TLSPlaintext: ContentType handshake (22), a 3.x record version, a body of 1 to 2^14
             // bytes (RFC 8446 section 5.1 forbids empty handshake fragments).
             const body = st.head.readUInt16BE(3);
-            if (st.head[0] !== 22 || st.head[1] !== 3 || body < 1 || body > MAX_RECORD_BODY) return this._drop(socket, this._refusedBadHello);
+            if (st.head[0] !== 22 || st.head[1] !== 3 || body < 1 || body > MAX_RECORD_BODY) return this._drop(socket, this._refusedBadHello, true);
             st.need = 5 + body;
             // A ClientHello is usually 0.3-2 KB: the room for the rest is only taken once the
             // client has sent it, so a header alone does not reserve 16 KB.
@@ -257,7 +318,7 @@ export class TlsGate {
         // censorship do). Requiring the whole message would protect nothing: an attacker can
         // replay a whole captured ClientHello and then stay silent, which holds the slot just as
         // long and costs the server more.
-        if (st.record[5] !== 1) return this._drop(socket, this._refusedBadHello);
+        if (st.record[5] !== 1) return this._drop(socket, this._refusedBadHello, true);
         this._leave(socket);
         if (!this.admit(socket, st.shed, st.key)) return;
         socket.pause();
@@ -282,11 +343,11 @@ export class TlsGate {
     }
 
     // Closes a waiting socket: with an RST, counted, when the gate gives up on it; quietly when
-    // the client ended it first (counter null).
-    _drop(socket, counter) {
+    // the client ended it first (counter null). perAddress: the refusal counts toward a block.
+    _drop(socket, counter, perAddress = false) {
         if (!this._leave(socket)) return;
         if (counter === null) { socket.on('error', noop); socket.destroy(); return; }
-        this._refuse(socket, counter);
+        this._refuse(socket, counter, perAddress);
     }
 
     /**
@@ -298,7 +359,7 @@ export class TlsGate {
     admit(socket, shed = false, key = ipGroupKey(socket.remoteAddress, 48)) {
         if (this.pending >= this.maxPending) return this._refuse(socket, this._refusedBusy);
         const n = this.perIp.get(key) || 0;
-        if (n >= this.maxPendingPerIp) return this._refuse(socket, this._refusedIp);
+        if (n >= this.maxPendingPerIp) return this._refuse(socket, this._refusedIp, true);
         if (shed && this.full !== null && this.full() && !this._takeFullToken()) return this._refuse(socket, this._refusedFull);
         this.perIp.set(key, n + 1);
         this.pending++;
@@ -318,8 +379,11 @@ export class TlsGate {
         if (n <= 1) this.perIp.delete(key); else this.perIp.set(key, n - 1);
     }
 
-    _refuse(socket, counter) {
+    // perAddress: a refusal that says something about the client's address (not a server-wide
+    // cap), counted toward a block of that address.
+    _refuse(socket, counter, perAddress = false) {
         counter.inc();
+        if (perAddress && this.guard !== null) this.guard.noteRefusal(this.guard.socketKeys(socket), 1);
         refuseSocket(socket);
         return false;
     }
@@ -401,26 +465,117 @@ export function tlsOptions(config) {
     };
 }
 
-function sendJson(res, status, body, native) {
+/**
+ * A small JSON answer with the security headers of the API (the answers given before the API
+ * handler: health, refusals of the protection per address).
+ * @param {import('node:http').ServerResponse} res
+ * @param {number} status
+ * @param {object} body
+ * @param {boolean} native HTTPS served here (HSTS)
+ * @param {Record<string, string>|null} [headers] extra headers
+ */
+export function sendJson(res, status, body, native, headers = null) {
+    if (res.headersSent || res.writableEnded) return;
     const json = JSON.stringify(body);
-    const headers = {
+    const h = {
         'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(json), 'Cache-Control': 'no-store',
-        'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer',
+        'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY',
+        'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'",
     };
-    if (native) headers['Strict-Transport-Security'] = 'max-age=31536000';
-    res.writeHead(status, headers);
+    if (native) h['Strict-Transport-Security'] = 'max-age=31536000';
+    if (headers) Object.assign(h, headers);
+    res.writeHead(status, h);
     res.end(json);
 }
 
+function onAdmittedClose() {
+    const k = this[kInflight];
+    if (k === undefined || k === null) return;
+    this[kInflight] = null;
+    this[kGuard].leave(k);
+}
+
 /**
- * Wraps the API handler: sets `req.clientIp` (proxy-aware address) and answers the health
+ * The protection per address for one request (net/ipguard.js): block, budget, requests in
+ * progress. Returns true when the request may go on; otherwise it has been answered 429
+ * rate_limited with Retry-After (a blocked address also gets Connection: close when
+ * `closeOnBlock`, so that its keep-alive connection ends after this answer). Runs once per request:
+ * wrapApiHandler calls it, and createApiHandler again only for a request that did not come
+ * through the wrapper (an API handler used alone).
+ * @param {import('./ipguard.js').IpGuard} guard
+ * @param {import('node:http').IncomingMessage} req `req.clientIp` when set (proxy aware), else the socket's address
+ * @param {import('node:http').ServerResponse} res
+ * @param {{ native?: boolean, closeOnBlock?: boolean }} [o]
+ */
+export function admitRequest(guard, req, res, { native = false, closeOnBlock = true } = {}) {
+    if (req[kAdmitted] === true) return true;
+    req[kAdmitted] = true;
+    const ip = req.clientIp ?? normalizeIp(req.socket?.remoteAddress);
+    const keys = guard.keysOf(ip, req.socket);
+    if (keys.exempt) return true;
+    const r = guard.request(keys);
+    if (r === null) {
+        if (guard.enter(keys)) {
+            res[kGuard] = guard;
+            res[kInflight] = keys;
+            res.once('close', onAdmittedClose);
+            return true;
+        }
+        refuseRequest(res, 1000, native, false);
+        return false;
+    }
+    refuseRequest(res, r.retryAfterMs, native, r.reason === 'blocked' && closeOnBlock);
+    return false;
+}
+
+function refuseRequest(res, retryAfterMs, native, close) {
+    const s = Math.max(1, Math.ceil(retryAfterMs / 1000));
+    const headers = { 'Retry-After': String(s) };
+    // Node ends the socket once this answer is flushed (no further request is read on it).
+    if (close) headers.Connection = 'close';
+    sendJson(res, 429, { error: 'rate_limited', message: 'Too many requests; try again later.', retryAfter: s }, native, headers);
+}
+
+function destroyResponse(res) { res.destroy(); }
+
+// The inactivity timeout (server.timeout, IDLE_TIMEOUT_MS) is for a client that stops reading. A
+// request whose handler is still at work (a GIF waiting for a render thread, a data export) keeps
+// its socket: the handler's own timeout answers it. Node emits 'timeout' on the response of a
+// socket that timed out and, once a listener is there, leaves the socket to it.
+function onResponseIdle(socket) {
+    if (!this.writableEnded) return;
+    socket.destroy();
+}
+
+// 'prefinish' comes when the handler ends the answer; writableFinished is already true when
+// every byte reached the kernel, so the deadline only costs a timer for the answers that wait.
+function sendDeadline(ms) {
+    function onClose() { clearTimeout(this[kSendTimer]); }
+    return function armSendDeadline() {
+        if (this.writableFinished || this.destroyed) return;
+        const t = setTimeout(destroyResponse, ms, this);
+        t.unref?.();
+        this[kSendTimer] = t;
+        this.once('close', onClose);
+    };
+}
+
+/**
+ * Wraps the API handler: sets `req.clientIp` (proxy-aware address), applies the protection per
+ * address (admitRequest, when a guard is given) and the send deadline, and answers the health
  * endpoints.
  * @param {((req: object, res: object) => void) | null} apiHandler
- * @param {{ clientIp: Function, ready: () => boolean, native: boolean }} o
+ * @param {{ clientIp: Function, ready: () => boolean, native: boolean, guard?: import('./ipguard.js').IpGuard|null,
+ *           closeOnBlock?: boolean, sendTimeoutMs?: number }} o closeOnBlock: false behind a proxy
  */
-export function wrapApiHandler(apiHandler, { clientIp, ready, native }) {
+export function wrapApiHandler(apiHandler, { clientIp, ready, native, guard = null, closeOnBlock = true, sendTimeoutMs = SEND_TIMEOUT_MS }) {
+    const armSendDeadline = sendDeadline(sendTimeoutMs);
+    const admit = { native, closeOnBlock };
     return (req, res) => {
         req.clientIp = clientIp(req, req.socket);
+        res.once('prefinish', armSendDeadline);
+        res.on('timeout', onResponseIdle);
+        if (guard !== null && !admitRequest(guard, req, res, admit)) return undefined;
         if (req.method === 'GET' || req.method === 'HEAD') {
             const q = req.url.indexOf('?');
             const p = q >= 0 ? req.url.slice(0, q) : req.url;
@@ -435,15 +590,38 @@ export function wrapApiHandler(apiHandler, { clientIp, ready, native }) {
     };
 }
 
-function hardenHttp(server) {
-    server.headersTimeout = 10000;
-    server.requestTimeout = 30000;
-    server.keepAliveTimeout = 5000;
+const CLIENT_ERROR_STATUS = { timeout: '408 Request Timeout', too_large: '431 Request Header Fields Too Large', malformed: '400 Bad Request' };
+
+// What a 'clientError' says about the client: null for a connection that simply went away.
+function clientErrorReason(err) {
+    const code = err && err.code;
+    if (code === 'ECONNRESET' || code === 'EPIPE' || code === 'ECONNABORTED' || code === 'ETIMEDOUT') return null;
+    if (code === 'ERR_HTTP_REQUEST_TIMEOUT') return 'timeout';
+    if (code === 'HPE_HEADER_OVERFLOW' || code === 'HPE_CHUNK_EXTENSIONS_OVERFLOW') return 'too_large';
+    return 'malformed';
+}
+
+function hardenHttp(server, { guard, isTrusted, clientErrors, headersTimeoutMs, requestTimeoutMs, idleTimeoutMs }) {
+    server.headersTimeout = headersTimeoutMs;
+    server.requestTimeout = requestTimeoutMs;
+    server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
+    server.timeout = idleTimeoutMs;
     server.maxHeadersCount = 64;
     server.maxRequestsPerSocket = 1000;
     server.on('clientError', (err, socket) => {
-        if (socket.writable && !socket.destroyed) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-        else socket.destroy();
+        const reason = clientErrorReason(err);
+        if (reason !== null) {
+            clientErrors[reason].inc();
+            // Behind a proxy the peer is the proxy, not the client: nothing to attribute.
+            if (guard !== null && !(isTrusted !== null && isTrusted(socket.remoteAddress))) {
+                guard.noteRefusal(guard.keysOf(normalizeIp(socket.remoteAddress), socket), 1);
+            }
+        }
+        if (reason !== null && socket.writable && !socket.destroyed) {
+            socket.end(`HTTP/1.1 ${CLIENT_ERROR_STATUS[reason]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+        } else {
+            socket.destroy();
+        }
     });
 }
 
@@ -463,10 +641,19 @@ export class Listeners {
      * @param {object} [o.registry] metrics registry
      * @param {number} [o.handshakeTimeoutMs] TLS handshake timeout (tests shorten it)
      * @param {number} [o.helloTimeoutMs] time a new TLS connection has to send its ClientHello (tests shorten it)
+     * @param {import('./ipguard.js').IpGuard|null} [o.guard] protection per address (the shard's; also given
+     *   to the WsServer and the API handler)
+     * @param {number} [o.headersTimeoutMs] HTTP headers timeout (tests shorten it; likewise the next four)
+     * @param {number} [o.requestTimeoutMs] whole-request timeout
+     * @param {number} [o.idleTimeoutMs] socket inactivity timeout
+     * @param {number} [o.sendTimeoutMs] send deadline of an answer
+     * @param {number} [o.checkIntervalMs] Node's connectionsCheckingInterval
      */
     constructor({
         config, apiHandler, wsServer, log = null, ready = () => true, reusePort, full = null, registry = defaultRegistry,
-        handshakeTimeoutMs = HANDSHAKE_TIMEOUT_MS, helloTimeoutMs = HELLO_TIMEOUT_MS,
+        handshakeTimeoutMs = HANDSHAKE_TIMEOUT_MS, helloTimeoutMs = HELLO_TIMEOUT_MS, guard = null,
+        headersTimeoutMs = HEADERS_TIMEOUT_MS, requestTimeoutMs = REQUEST_TIMEOUT_MS, idleTimeoutMs = IDLE_TIMEOUT_MS,
+        sendTimeoutMs = SEND_TIMEOUT_MS, checkIntervalMs = CONNECTIONS_CHECK_MS,
     }) {
         this.config = config;
         this.log = log;
@@ -483,7 +670,17 @@ export class Listeners {
         this._reloadTimer = null;
         /** @type {TlsGate|null} admission before TLS (native mode only) */
         this.gate = null;
-        const api = wrapApiHandler(apiHandler, { clientIp: this.clientIp, ready, native: this.native });
+        this.guard = guard;
+        const proxy = config.tlsMode === 'proxy';
+        const api = wrapApiHandler(apiHandler, { clientIp: this.clientIp, ready, native: this.native, guard, closeOnBlock: !proxy, sendTimeoutMs });
+        const errs = registry.counter('scacelith_http_client_errors_total', 'Malformed HTTP requests closed before the API handler, by reason', ['reason']);
+        const hardening = {
+            guard, isTrusted: proxy ? ipMatcher(config.trustedProxies || []) : null,
+            clientErrors: { timeout: errs.labels('timeout'), too_large: errs.labels('too_large'), malformed: errs.labels('malformed') },
+            headersTimeoutMs, requestTimeoutMs, idleTimeoutMs,
+        };
+        // Node checks headersTimeout / requestTimeout only every connectionsCheckingInterval.
+        const httpOpts = { maxHeaderSize: 8192, requestTimeout: requestTimeoutMs, connectionsCheckingInterval: checkIntervalMs };
         const shared = config.wsPort === config.apiPort;
         const onUpgrade = (req, socket, head) => wsServer.handleUpgrade(req, socket, head);
 
@@ -494,10 +691,11 @@ export class Listeners {
                 helloTimeoutMs,
                 full,
                 registry,
+                guard,
             });
-            const opts = { ...tlsOptions(config), handshakeTimeout: handshakeTimeoutMs, maxHeaderSize: 8192, requestTimeout: 30000 };
+            const opts = { ...tlsOptions(config), handshakeTimeout: handshakeTimeoutMs, ...httpOpts };
             const apiServer = https.createServer(opts, api);
-            hardenHttp(apiServer);
+            hardenHttp(apiServer, hardening);
             if (shared) apiServer.on('upgrade', onUpgrade);
             this._addTls(apiServer, shared);
             this.servers.push({ kind: shared ? 'api+ws' : 'api', server: apiServer, port: config.apiPort });
@@ -507,8 +705,8 @@ export class Listeners {
                 this.servers.push({ kind: 'ws', server: wss, port: config.wsPort });
             }
         } else {
-            const apiServer = http.createServer({ maxHeaderSize: 8192, requestTimeout: 30000 }, api);
-            hardenHttp(apiServer);
+            const apiServer = http.createServer(httpOpts, api);
+            hardenHttp(apiServer, hardening);
             if (shared) apiServer.on('upgrade', onUpgrade);
             this.servers.push({ kind: shared ? 'api+ws' : 'api', server: apiServer, port: config.apiPort });
             if (!shared) {
