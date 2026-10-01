@@ -1132,16 +1132,25 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   against a login (both of its steps), a rehash or a password change that was in flight, and no
   session is opened with a password the reset has replaced.
 * **Tokens**: 32 random bytes, only their SHA-256 is stored; e-mail verification (24 h),
-  password reset (1 h, revokes all sessions), MFA login challenge (5 min), SSO attempt (10 min),
-  all single-use.
+  password reset (1 h, revokes all sessions), e-mail change (24 h, sent to the new address; a new
+  request replaces it, a password change or reset cancels it, and the change itself ends the reset
+  and verification links of the former address), MFA login challenge (5 min), SSO attempt
+  (10 min), all single-use.
 * **TOTP**: RFC 6238 (SHA-1, 6 digits, 30 s, +-1 step), secret 20 bytes, AES-256-GCM at rest with
   a key derived from SERVER_SECRET (or MFA_ENCRYPTION_KEY), replay refused (last used step
   stored). 10 recovery codes (`xxxx-xxxx-xx`, 50 bits) stored as HMAC-SHA256 with a derived
   pepper, single use. Password reset never disables MFA; an administrator can
   (`bin/admin.js user reset-mfa`) after verifying the owner by other means.
-* **Enumeration**: register / forgot / resend answer the same whatever the e-mail; login errors
+* **Enumeration**: register / forgot / resend answer the same whatever the e-mail; so does an
+  e-mail change (`POST /account/email` answers 202 and shows the address as pending whether or not
+  another account uses it; the owner of a taken address gets a notice, never a link); login errors
   are the same for an unknown account and a wrong password; usernames are public anyway (the
-  "taken" answer is rate limited).
+  "taken" answer is rate limited). Without `REQUIRE_EMAIL_VERIFICATION`, register and the e-mail
+  change answer 409 `email_taken` (no link would confirm the address).
+* **Account data export** (`POST /account/export`, password and second factor, 5 per hour): the
+  player's own data only; never a password hash, TOTP secret, recovery code, token or token hash,
+  the anti-cheat's data (integrity level, anomalies, analysis features, report weights), the reports
+  made against the player or a moderator's identity (`src/http/routes/account-export.js`).
 * **Brute force and stuffing**: per-IP token buckets (API, auth; IPv6 per /64, and the password
   endpoints also per /48 as a whole with `AUTH_RATE_PER_PREFIX`), per-account failure counter
   with exponential delay, global failure-rate detector that turns on the login proof-of-work

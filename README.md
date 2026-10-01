@@ -328,12 +328,18 @@ limit, the better layout for a server that expects to be full.
   to the log instead (tests), `none` disables e-mail (then turn e-mail confirmation off).
 - Google sign-in is optional and off by default. Create an OAuth client of type "Web application"
   in the Google Cloud console, add the redirect URI
-  `https://<SERVER_PUBLIC_HOST>:<port>/auth/sso/google/callback` (the value `check-config`
-  prints as `googleRedirectUri`), then set `SSO_GOOGLE_ENABLED=true`, `GOOGLE_CLIENT_ID` and
+  `https://<SERVER_PUBLIC_HOST>/auth/sso/google/callback` (`https://<SERVER_PUBLIC_HOST>:<port>/...`
+  when the public port is not 443; the value `check-config` prints as `googleRedirectUri`), then set `SSO_GOOGLE_ENABLED=true`, `GOOGLE_CLIENT_ID` and
   `GOOGLE_CLIENT_SECRET` (or `GOOGLE_CLIENT_SECRET_FILE`). The client secret stays on the server:
   the game signs in through the system browser with PKCE and never sees it.
 - Every server is a separate trust boundary: the game keeps one login per server address and
   never sends a server the credentials or tokens of another one.
+- Players manage their account from the game through the HTTPS API (every endpoint:
+  [docs/API.md](docs/API.md)): game history and PGN downloads, signed-in devices, password,
+  two-step verification, e-mail address, a download of their data and the deletion of the
+  account. A change of e-mail address is confirmed through a link sent to the new address (with
+  `REQUIRE_EMAIL_VERIFICATION`; without it the address changes at once), and the former address
+  is told. The data download holds no password hash, two-step secret, token or anti-cheat data.
 
 ## Password hashing on a small server
 
