@@ -267,3 +267,54 @@ test('PGN export', () => {
     assert.ok(lines.length > 15);
     for (const l of lines) assert.ok(l.length <= 79, l);
 });
+
+test('PGN export: tags after Result, per-ply comments, Termination of the online endings', () => {
+    const g = line(new ChessGame(), 'e2e4 e7e5 g1f3');
+    g.resign(BLACK);
+    const pgn = g.pgn({
+        event: 'E', site: 'S', date: '2026.09.28', white: 'W', black: 'B', timeControl: '180+2',
+        afterResult: [['UTCDate', '2026.09.28'], ['UTCTime', '12:00:00']], extra: [['PlyCount', '3']],
+        comments: [['[%clk 0:03:00.0]', '[%emt 0:00:00.0]'], 'nice {move}\n', null, ['ignored: no such ply']],
+    });
+    assert.equal(pgn, [
+        '[Event "E"]', '[Site "S"]', '[Date "2026.09.28"]', '[Round "-"]', '[White "W"]', '[Black "B"]', '[Result "1-0"]',
+        '[UTCDate "2026.09.28"]', '[UTCTime "12:00:00"]', '[TimeControl "180+2"]', '[Termination "normal"]', '[PlyCount "3"]', '',
+        '1. e4 {[%clk 0:03:00.0] [%emt 0:00:00.0]} 1... e5 {nice move} 2. Nf3', '{Resignation} 1-0', '',
+    ].join('\n'));
+    // An empty comment is no comment (and the Black move keeps its plain form).
+    assert.match(line(new ChessGame(), 'e2e4 e7e5').pgn({ comments: ['', [], ' '] }), /\n1\. e4 e5 \*\n$/);
+    // Termination of the online endings (PGN standard values).
+    const term = (status, reason) => {
+        const x = new ChessGame();
+        x.end(status, reason);
+        return /\[Termination "([^"]+)"\]/.exec(x.pgn())[1];
+    };
+    assert.equal(term(GameStatus.Aborted, EndReason.Aborted), 'unterminated');
+    assert.equal(term(GameStatus.Aborted, EndReason.NoShow), 'unterminated');
+    assert.equal(term(GameStatus.Aborted, EndReason.ServerAborted), 'unterminated');
+    assert.equal(term(GameStatus.Aborted, EndReason.BothDisconnected), 'unterminated');
+    assert.equal(term(GameStatus.WhiteWins, EndReason.Abandonment), 'abandoned');
+    assert.equal(term(GameStatus.Draw, EndReason.AbandonmentVsInsufficient), 'abandoned');
+    assert.equal(term(GameStatus.BlackWins, EndReason.Forfeit), 'rules infraction');
+    assert.equal(term(GameStatus.WhiteWins, EndReason.IllegalMoves), 'rules infraction');
+    assert.equal(term(GameStatus.Draw, EndReason.TimeoutVsInsufficient), 'time forfeit');
+    assert.equal(term(GameStatus.BlackWins, EndReason.Timeout), 'time forfeit');
+    assert.equal(term(GameStatus.Draw, EndReason.Agreement), 'normal');
+    const aborted = new ChessGame();
+    aborted.end(GameStatus.Aborted, EndReason.NoShow);
+    assert.match(aborted.pgn(), /\[Result "\*"\][\s\S]*\n\{Aborted: first move not played in time\} \*\n$/);
+    // Long games with clocks still wrap under 80 columns, a [%command] never broken.
+    const long = new ChessGame();
+    const comments = [];
+    for (let i = 0; i < 160 && !long.isOver; i++) {
+        const legal = long.position.legalMoves().sort((a, b) => a - b);
+        long.play(legal[(i * 7919) % legal.length]);
+        comments.push([`[%clk 1:${String(59 - (i % 60)).padStart(2, '0')}:00.${i % 10}]`, '[%emt 0:00:01.5]']);
+    }
+    const text = long.pgn({ comments });
+    for (const l of text.split('\n')) {
+        assert.ok(l.length <= 79, l);
+        assert.ok(!/\[%(clk|emt)$/.test(l) && !/^[0-9:.]+\]/.test(l), `a command split: ${l}`);
+    }
+    assert.equal((text.match(/\[%clk /g) || []).length, long.ply);
+});

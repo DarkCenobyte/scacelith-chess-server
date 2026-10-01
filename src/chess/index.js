@@ -27,7 +27,12 @@
 //    end(status, reason) validates its arguments (RangeError).
 //  * Additions: Position.pieceAt/kingSquare/isAttacked/keyLo/keyHi, ChessGame.fromMoves (journal
 //    replay), startFen/ply/isOver getters, resultString(), uciMoves(), endReasonText(),
-//    squareName()/parseSquare(). pgn(tags) takes the player names as tags.white / tags.black.
+//    squareName()/parseSquare(). pgn(tags) takes the player names as tags.white / tags.black,
+//    and, for the server's PGN export (GET /api/v1/games/:id/pgn), tags.afterResult (tags written
+//    after Result) and tags.comments (a comment per ply, e.g. [%clk] / [%emt]; a Black move after
+//    a comment repeats its number). Its Termination tag covers the online endings: an aborted
+//    game (Result "*") is "unterminated", an abandonment "abandoned", a fair-play forfeit a
+//    "rules infraction".
 //
 // Performance (Node 22.22, one core; tools/bench-chess.js): Position isLegal + play ~0.5 us per
 // move, ChessGame isLegal + play (with the automatic endings) ~1.1 us, digest() ~0.4 us, no
