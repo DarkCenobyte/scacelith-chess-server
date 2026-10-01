@@ -36,6 +36,9 @@ function routesUnderTest(router) {
     router.page('GET', '/page', () => ({ html: '<!DOCTYPE html><p>page</p>' }));
     router.page('POST', '/page', (ctx) => ({ html: `<p>${ctx.body.token}</p>` }), { body: { token: { type: 'string', max: 64 } } });
     router.page('GET', '/page-error', () => { throw new HttpError(400, 'bad', 'Bad <things>.'); });
+    router.get('/file', () => ({ text: '[Event "é"]\n\n*\n', contentType: 'application/x-chess-pgn; charset=utf-8',
+        headers: { 'Content-Disposition': 'attachment; filename="x.pgn"' } }));
+    router.get('/plain', () => ({ status: 202, text: 'plain' }));
 }
 
 async function start(env = {}, opts = {}) {
@@ -123,6 +126,31 @@ test('security headers on every answer; HSTS with native TLS only', async (t) =>
     const n = await start({ TLS_MODE: 'native', TLS_CERT_FILE: '/nonexistent/cert.pem', TLS_KEY_FILE: '/nonexistent/key.pem' });
     t.after(n.close);
     assert.equal((await n.req('GET', '/api/v1/echo/x')).headers['strict-transport-security'], 'max-age=31536000');
+    assert.equal((await n.req('GET', '/api/v1/file')).headers['strict-transport-security'], 'max-age=31536000');
+});
+
+test('text answers: content type, byte length, extra headers, the API security headers, HEAD', async (t) => {
+    const s = await start();
+    t.after(s.close);
+    let r = await s.req('GET', '/api/v1/file');
+    assert.equal(r.status, 200);
+    assert.equal(r.text, '[Event "é"]\n\n*\n');
+    assert.equal(r.headers['content-type'], 'application/x-chess-pgn; charset=utf-8');
+    assert.equal(r.headers['content-disposition'], 'attachment; filename="x.pgn"');
+    assert.equal(+r.headers['content-length'], Buffer.byteLength('[Event "é"]\n\n*\n'));
+    assert.equal(r.headers['content-security-policy'], "default-src 'none'; frame-ancestors 'none'");
+    assert.equal(r.headers['cache-control'], 'no-store');
+    assert.equal(r.headers['x-content-type-options'], 'nosniff');
+    assert.equal(r.headers['x-frame-options'], 'DENY');
+    assert.equal(r.headers['referrer-policy'], 'no-referrer');
+    r = await s.req('GET', '/api/v1/plain');
+    assert.equal(r.status, 202);
+    assert.equal(r.text, 'plain');
+    assert.equal(r.headers['content-type'], 'text/plain; charset=utf-8');
+    r = await s.req('HEAD', '/api/v1/file');
+    assert.equal(r.status, 200);
+    assert.equal(r.text, '');
+    assert.equal(+r.headers['content-length'], Buffer.byteLength('[Event "é"]\n\n*\n'));
 });
 
 test('JSON body: 201, 415 wrong type, 400 invalid JSON, charset, empty body allowed only without required fields', async (t) => {

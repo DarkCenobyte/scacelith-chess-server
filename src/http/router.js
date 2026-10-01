@@ -4,6 +4,7 @@
 //   router.post(path, handler, { auth, body: schema, rate })      // also put / patch / delete
 //   router.page(method, path, handler, opts)                      // HTML page outside /api
 //   handler(ctx) -> { status, body, headers } | { status, html, headers }
+//                 | { status, text, contentType, headers }    // a text file (e.g. a PGN download)
 //
 // Paths: a path that starts with "/api/" is taken as it is; any other path is relative to the
 // API prefix "/api/v1" (so route modules may write either '/players/:username' or

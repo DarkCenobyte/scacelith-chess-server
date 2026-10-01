@@ -12,7 +12,12 @@
 // client already has too many password hashes waiting gets these tokens back) -> body (JSON only
 // for the API, form-urlencoded for HTML pages, HTTP_BODY_LIMIT enforced while streaming: 413;
 // Content-Type checked: 415; body read timeout: 408) -> strict schema validation (400) -> handler
-// (timeout: 503) -> JSON or HTML answer.
+// (timeout: 503) -> JSON, HTML or text answer.
+//
+// Answers: a handler returns { status, body, headers } (JSON), { status, html, headers } (an HTML
+// page, PAGE_CSP) or { status, text, contentType, headers } (a text file such as a PGN download:
+// UTF-8, contentType defaults to text/plain; charset=utf-8); null/undefined answers 204. Every
+// answer carries the same security headers; the JSON and text answers the API's CSP.
 //
 // No CORS: the API serves the game, not browsers; no Access-Control-* header is ever sent, so a
 // web page cannot read an answer, and the JSON-only rule makes every cross-site write need a
@@ -149,13 +154,19 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
         if (hsts) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     }
 
-    function send(req, res, status, { body, html, headers } = {}) {
+    function send(req, res, status, { body, html, text, contentType, headers } = {}) {
         if (res.headersSent || res.writableEnded) return;
         let payload = '';
         if (html !== undefined) {
             res.setHeader('Content-Type', 'text/html; charset=utf-8');
             res.setHeader('Content-Security-Policy', PAGE_CSP);
             payload = html;
+        } else if (text !== undefined) {
+            res.setHeader('Content-Security-Policy', API_CSP);
+            if (status !== 204) {
+                res.setHeader('Content-Type', contentType || 'text/plain; charset=utf-8');
+                payload = String(text);
+            }
         } else {
             res.setHeader('Content-Security-Policy', API_CSP);
             if (body !== undefined && status !== 204) {
@@ -367,6 +378,7 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
             if (out === undefined || out === null) { send(req, res, 204); return; }
             const status = out.status || 200;
             if (out.html !== undefined) send(req, res, status, { html: out.html, headers: out.headers });
+            else if (out.text !== undefined) send(req, res, status, { text: out.text, contentType: out.contentType, headers: out.headers });
             else send(req, res, status, { body: out.body, headers: out.headers });
         } catch (err) {
             if (!(err && err.expose)) log.error('request failed', { route: label, err });
