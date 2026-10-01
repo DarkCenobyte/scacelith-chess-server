@@ -16,6 +16,7 @@ Terms used throughout:
 - Memory comes next, near 70 KB per connection: about 24,000-29,000 connections on 4 GB and 51,000-62,000 on 8 GB with the settings below (inferred), at or just after the p99 limit of the CPU with a 10 s ping.
 - Network bandwidth and disk I/O are not limits on a typical VPS. Disk space is: finished games take about 85 MB per day per 1,000 average connected players, and nothing archives old games.
 - Restarts need one setting near the comfortable load: after a crash or a graceful restart alike, every player is back within about 60 s with the 10 s ping, inside the default `RECOVERY_GRACE_MS` of 90 s, but the last players with a game in progress may need about 30 s, more than the default `RECOVERY_CLOCK_HOLD_MS` of 20 s (inferred). See [Restarts](#restarts).
+- Animated GIFs of games are made on one thread per worker at the lowest CPU priority, so they only use the CPU the games leave, and the quotas bound what one account or one address can ask for: at most about 8 % of an OVH vCore for an account and 24 % for an address over a minute, with the longest games at the largest size (inferred). Memory: about 80 MiB per worker while players make GIFs, up to 160 MiB. See [Animated GIFs](#animated-gifs).
 
 ## CPU
 
@@ -126,6 +127,7 @@ Fixed costs to subtract from the visible RAM before dividing by the cost of a co
 - With the default `DB_CACHE_MB=64` (and `DB_MMAP_MB=256`), the budget gives about 21,000-25,000 connections on VPS-1 and 51,000-61,000 on VPS-2 (inferred: 240 MiB more SQLite cache on VPS-1; on VPS-2, 288 MiB more cache and 256 MiB less mapped memory nearly cancel out).
 - The engine analysis process, when enabled, adds 290-350 MB with one engine: a Node process and its SQLite connection (20-80 MB), and Stockfish 19 with its hash table (273 MB). VPS-2 then holds 47,000-58,000 connections (inferred). Further engines: [Anti-cheat engines](#anti-cheat-engines).
 - `DB_MMAP_MB` only covers the start of the file. A database of several GB is read mostly through the OS page cache, and the per-connection cache only keeps the hot pages, so 16 or 32 MB is enough (inferred).
+- Animated GIFs are not in the table: about 80 MiB per worker while players make them, 160 MiB at worst, which takes up to about 4,700 connections on VPS-1 and 9,500 on VPS-2 (inferred, [Animated GIFs](#animated-gifs)).
 
 ### Anti-cheat engines
 
@@ -155,6 +157,42 @@ Budget of the analysis process (the Node side, 20-80 MB, plus the engines) again
 | 4, not shared | 820-880 MB | about 11,300 | 13,000-18,000 | 40,000-51,000 |
 
 CPU sets the number of engines, not memory: an engine busy with the backlog takes a whole vCore (at low priority, on the CPU the server leaves idle). Run one on VPS-1 and two on VPS-2 (`ANALYSIS_WORKERS=2` when the CPU allows); at those counts the memory limit is about the p99 CPU limit with a 10 s ping (22,000 and 44,500 at `s` = 0.65): on VPS-1 it can come up to 2,000 connections before it, on VPS-2 it stays above. Sharing saves 110 MB per engine after the first: nothing with one engine, 1,500 connections' worth with two.
+
+## Animated GIFs
+
+Signed-in players can download a game as an animated GIF (`GET /api/v1/games/:id/gif` for a game of the server, `POST /api/v1/gif` for any game sent as PGN: [API.md](API.md#11-games-pgn-and-gif)). Each worker process makes them on a rendering thread of its own (`GIF_THREADS`, 1), never on the event loop of its games, and that thread runs at the lowest CPU priority (nice 19, on Linux). The thread starts with the first GIF and stops after a minute without one. Up to `GIF_QUEUE_MAX` (4) GIFs wait for it, each at most `GIF_QUEUE_TIMEOUT_MS` (10 s); beyond that the request is answered 503 `server_busy` and its quotas are given back. A GIF already made is kept in a cache of `GIF_CACHE_MB` (32 MiB) per worker and costs no render.
+
+### Cost of one GIF
+
+CPU time of one render (the median of 5, with warm caches and optimized code), measured with `node tools/gif-sample.js --bench` and the same renderer on a 600-ply game, on the development container: a 4-vCPU Intel Xeon at 2.10 GHz, Node 22.22, single-threaded. That vCPU does the scrypt reference of [Validating on the real machine](#validating-on-the-real-machine) in 0.42 s, against 0.50 s for the test vCPU, so an OVH vCore at `s` = 0.65 takes about 1.8 times as long (inferred, as for the [gestures](#gestures)).
+
+| Game | small (284 × 350) | medium (424 × 515) | large (628 × 762) | OVH vCore, `s` = 0.65 (inferred) | File (small / medium / large) |
+|---|---|---|---|---|---|
+| 40 moves (80 plies) | 30 ms | 47 ms | 97 ms | 55 / 85 / 180 ms | 135 / 206 / 324 KiB |
+| 150 moves (300 plies) | 85 ms | 166 ms | 336 ms | 155 / 305 / 615 ms | 506 / 783 / 1,235 KiB |
+| 300 moves (600 plies, `GIF_MAX_PLIES`) | 159 ms | 312 ms | 645 ms | 290 / 570 / 1,180 ms | 980 / 1,514 / 2,384 KiB |
+
+- The first GIF in a new thread takes about 0.25 s more on the development container (0.5 s on an OVH vCore, inferred): the thread starts, the pieces are drawn at that size and the code is not optimized yet. The next few renders are still slower: three 40-move GIFs at the medium size in a new thread took 309, 106 and 61 ms (47 ms warm), and a long game at the large size settles about 10 % above the table.
+- Memory, measured as the RSS the thread adds to its worker process: 43-45 MiB once it has made 40-move GIFs at the three sizes, 63 MiB after one 600-ply GIF at the large size, and 105-125 MiB after ten of those in a row (the pool caps the thread's V8 heap at 128 MiB). When the thread stops, 7-22 MiB stayed in the process (80 MiB after the ten long renders): memory the allocator keeps and gives to the next thread.
+- The cache holds up to `GIF_CACHE_MB` per worker, and a GIF being sent stays in memory until it is sent (2.4 MiB at most). An answer that does not leave within 60 s has its connection closed.
+
+### What the quotas allow at most
+
+All GIF quotas are counted for the whole server, whatever worker a request reaches. Only a GIF that has to be made counts in the render quotas; a request served from the cache only counts in the `gif` limit (30 per minute per account) and in the account's budget. Taking the most expensive GIF, 600 plies at the large size (1.2 s of an OVH vCore, inferred):
+
+| Who | Render quotas | CPU at most, one minute | CPU at most, one hour |
+|---|---|---|---|
+| One account | `GIF_USER_RENDERS_PER_MIN` (4), `GIF_USER_RENDERS_PER_HOUR` (30) | 4.8 s: 8 % of one vCore | 36 s: 1 % |
+| One IPv4 address or IPv6 /64, all its accounts | `GIF_IP_RENDERS_PER_MIN` (12), `GIF_IP_RENDERS_PER_HOUR` (120) | 14 s: 24 % | 144 s: 4 % |
+| One IPv6 /48, all its /64s | 3 times those: 36 and 360 | 43 s: 72 % | 432 s: 12 % |
+
+A 40-move game at the medium size costs 14 times less: an address that makes its 12 GIFs a minute of usual games uses about 2 % of a vCore. Many accounts on many addresses together are not bounded by a quota but by the pool: at most one render at a time per worker, so at most one vCore per worker, which on VPS-1 (2 workers) and VPS-2 (4) is the whole machine. A rendering thread makes at most about 11 GIFs of 40 moves (medium) per second on an idle OVH vCore, 3 of 150 moves, or 0.85 of the longest games at the large size (inferred).
+
+**Effect on the games.** The rendering threads run at nice 19, so they only take the CPU the games leave. Measured on one core of the development container, with an event loop doing 30, 50 or 80 % of that core's work in 10 ms ticks and a rendering thread always busy beside it on the same core (600-ply GIFs at the large size): the 99th percentile of the loop's timer lateness was 5, 6-9 and 45 ms with the low priority, against 53, 90-118 ms and a loop that fell behind at the normal priority (at 80 %, its timers were 360 ms late at the median); 0.3 ms without renders. The renders used what the loop left: 5, 3 and 1 GIFs in 6 s. At the comfortable point (55 % CPU), a worker whose thread renders all the time may see its move round trip rise by about 5-10 ms at the 99th percentile (inferred); when the CPU is full, the renders wait for the games and the requests behind them get 503 `server_busy`.
+
+**Memory budget.** Count about 80 MiB per worker while players make GIFs (45 for the thread, 32 for the cache) and 160 MiB at worst (125 and 32), only when GIFs are made: VPS-1 160-320 MiB, VPS-2 320-640 MiB. The worst case takes about 3,900-4,700 connections on VPS-1 (20,000-24,000 instead of 24,000-29,000 in the [Memory](#memory) table) and 7,900-9,500 on VPS-2 (43,000-52,000 instead of 51,000-62,000) (inferred). `GIF_CACHE_MB=16` saves 16 MiB per worker; `GIF_ENABLED=false` turns the feature off.
+
+**Network.** A GIF is 135 KiB to 2.4 MiB. The `gif` limit lets one account download 30 a minute, cached ones included: about 1 Mbit/s with usual games, 10 Mbit/s with the longest at the large size (inferred).
 
 ## Network
 
@@ -316,6 +354,7 @@ Restart at quiet hours, keep `SHUTDOWN_GRACE_MS` so clients receive the notice, 
 | `HEARTBEAT_INTERVAL_MS`, `HEARTBEAT_TIMEOUT_MS` | 10000, 30000 (default) | same | the heartbeat round trip feeds lag compensation, and the game drops a connection after two silent intervals |
 | `JOURNAL_FLUSH_MS`, `JOURNAL_FSYNC`, `DB_COMMIT_MS` | 50, true, 50 (default) | same | NVMe has plenty of room |
 | `ANALYSIS_ENGINE_PATH` | empty | optional: the official Stockfish 19 binary, `ANALYSIS_WORKERS=1` (2 when the CPU allows) | one engine takes a whole vCore and about 300 MB (70 MB more per further engine, with the network shared), and analyses about 870 games a day (inferred) |
+| `GIF_THREADS`, `GIF_CACHE_MB` | 1, 32 (defaults) | same | one rendering thread per worker, at the lowest priority, and about 80 MiB per worker while players make GIFs (160 MiB at worst, [Animated GIFs](#animated-gifs)); more threads only help when the CPU is idle |
 | `TLS_MODE`, `TLS_MIN_VERSION` | native, TLSv1.2 | same | the TLS gate needs native TLS, and a proxy on the same machine only moves the cost; Windows 10 WinHTTP lacks TLS 1.3 (inferred) |
 | `TLS_CERT_FILE`, `TLS_KEY_FILE` | full chain, ECDSA P-256 key | same | the key type all measurements used; RSA adds about 1 ms per handshake (inferred) |
 | `DATA_DIR` | /var/lib/scacelith | same | as in the README's systemd unit and the backup command above |
@@ -414,6 +453,7 @@ for i in 1 2 3 4 5; do node -e "const c=require('crypto');const t=process.cpuUsa
 | `scacelith_journal_errors_total`, `scacelith_game_commit_unjournaled_total` | any increase: the journal cannot be written, and finished games are committed without it; fix the disk before a restart |
 | `scacelith_gestures_relayed_total`, `scacelith_gestures_dropped_total{reason}` | the relayed rate divided by the players in a game is r of [Gestures](#gestures); `backlog` drops mean slow players or an overloaded worker, `rate` drops a client that exceeds `GESTURE_RATE`, or a player's link that stalled and then delivered more than `GESTURE_BURST` gestures at once (a few now and then are normal) |
 | `scacelith_game_stall_ms`, `scacelith_game_timer_late_ms` | stalls of a worker's event loop (the games do not charge them to the players, up to `GAME_STALL_CREDIT_MAX_MS`); frequent ones of 100 ms or more mean an overloaded machine, CPU steal or a slow disk |
+| `scacelith_gif_renders_total{result}`, `scacelith_gif_render_duration_ms`, `scacelith_gif_queue`, `scacelith_gif_cache_total{result}`, `scacelith_http_rate_limited_total{limit=~"gif.*"}` (per shard) | `busy` renders (503 `server_busy`) or a rising render time: the CPU is full and the GIFs wait for the games, as intended; a low cache hit rate is normal (each game is asked for once or twice) |
 
 ## Risks, largest first
 
