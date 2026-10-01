@@ -197,10 +197,11 @@ Limits apply to one of two scopes:
   `X-Forwarded-For` sent by a `TRUSTED_PROXIES` address.
 - **Player:** the signed-in account, whatever its address.
 
-Each limit is a token bucket. It holds `limit` requests, refills continuously at
-`limit / window`, and `retryAfter` is the time until the next token. Limits marked *shared* are
-also counted for the whole server, through the primary process. The others are counted by each
-worker process.
+Each worker process checks a limit as a token bucket. The bucket holds `limit` requests and
+refills continuously at `limit / window`, and `retryAfter` is the time until the next token.
+Limits marked *shared* are also counted for the whole server by the primary process, over a
+sliding window of the same length. If the primary does not answer, the worker's own check still
+applies.
 
 | Limit | Default | Counted per | Endpoints |
 |---|---|---|---|
@@ -266,7 +267,8 @@ after the server sees a wave of failed sign-ins (`POW_LOGIN_TRIGGER_PER_MIN`, th
 3. Send the same request again with `"pow": { "challenge": "...", "nonce": "123456" }` in the body.
 
 A challenge is valid for 2 minutes and only once, for one endpoint and one client network (an
-IPv4 address or IPv6 /64). It holds no server state. `reason` says why a proof was refused:
+IPv4 address or IPv6 /64). The challenge is signed, so the server keeps nothing about it until
+it comes back with its answer. `reason` says why a proof was refused:
 `required`, `malformed`, `signature`, `endpoint`, `network`, `expired`, `bits`, `work` or
 `replayed`. In Node, `solvePow(challenge, bits)` of `src/client/pow.js` returns the nonce.
 
@@ -1084,8 +1086,7 @@ curl -sS "$API/games/4100000000001" -H "Authorization: Bearer $TOKEN"
 }
 ```
 
-- The record has the summary fields of section 10 without `color`, `baseMs`, `incMs` and
-  `outcome`.
+- The record has the summary fields of section 10 except `color` and `outcome`.
 - `statusName`: the name of `status`.
 - `rematchOf`: the id of the game that this one is a rematch of, or `null`.
 - `moves`: one entry per ply.
@@ -1178,9 +1179,12 @@ Errors:
 
 `status`: 1 `WhiteWins`, 2 `BlackWins`, 3 `Draw`, 4 `Aborted`. Only finished games are stored.
 
-`reason` (with `termination`, its name, and the words of the PGN comment):
+`reason`, with its name (`termination`) and the words that end the PGN file's move text. Codes 7
+and 21 are draws: the player who ran out of time or abandoned faced an opponent who could not
+checkmate. The server never ends a game with codes 4 and 13; they are part of the shared list of
+reasons.
 
-| Code | `termination` | Meaning |
+| Code | `termination` | Words in the PGN |
 |---|---|---|
 | 1 | `Checkmate` | Checkmate |
 | 2 | `Resignation` | Resignation |
@@ -1188,15 +1192,15 @@ Errors:
 | 4 | `IllegalMoves` | Second illegal move (forfeit) |
 | 5 | `Stalemate` | Stalemate |
 | 6 | `InsufficientMaterial` | Dead position (insufficient material) |
-| 7 | `TimeoutVsInsufficient` | Flag fall, but the opponent cannot checkmate (draw) |
+| 7 | `TimeoutVsInsufficient` | Flag fall, but the opponent cannot checkmate |
 | 8 | `FivefoldRepetition` | Fivefold repetition |
 | 9 | `SeventyFiveMoves` | 75-move rule |
 | 10 | `ThreefoldClaim` | Threefold repetition (claimed) |
 | 11 | `FiftyMoveClaim` | 50-move rule (claimed) |
 | 12 | `Agreement` | Draw by agreement |
-| 13 | `IllegalMovesVsInsufficient` | Second illegal move, but the opponent cannot checkmate (draw) |
+| 13 | `IllegalMovesVsInsufficient` | Second illegal move, but the opponent cannot checkmate |
 | 20 | `Abandonment` | Abandoned (disconnected for too long) |
-| 21 | `AbandonmentVsInsufficient` | Abandoned, but the opponent cannot checkmate (draw) |
+| 21 | `AbandonmentVsInsufficient` | Abandoned, but the opponent cannot checkmate |
 | 22 | `Aborted` | Game aborted |
 | 23 | `NoShow` | Aborted: first move not played in time |
 | 24 | `Forfeit` | Forfeit (fair play violation) |
@@ -1268,7 +1272,7 @@ be empty. Errors: 400 `invalid_username`, `invalid_cursor` or `invalid_limit`; 4
 ### GET /leaderboard
 
 **Auth** none. **Limit** global only. Query: `category` (required: an official category, `3%2B2`
-or `3+2`) and `limit` (1-100, default 100).
+or `3+2`) and `limit` (1-100, default 100; a larger number of up to 3 digits counts as 100).
 
 ```sh
 curl -sS "$API/leaderboard?category=3%2B2&limit=10"
@@ -1293,7 +1297,8 @@ Errors: 400 `invalid_category`, 400 `invalid_limit`, 503 `busy`.
 
 Reports the opponent of one of the player's own games. A report never changes a rating, a
 sanction or an integrity level by itself. It raises the review priority that moderators see,
-and, except for `abuse`, it asks for the engine analysis of the game ([ANTICHEAT.md](ANTICHEAT.md)). **Auth** session. **Limit** `reports`, plus `REPORTS_PER_DAY` per
+and, except for `abuse`, it asks for the engine analysis of the game
+([ANTICHEAT.md](ANTICHEAT.md)). **Auth** session. **Limit** `reports`, plus `REPORTS_PER_DAY` per
 player.
 
 | Field | Type | Notes |
