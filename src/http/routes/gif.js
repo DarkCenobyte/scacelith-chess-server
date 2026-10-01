@@ -175,12 +175,17 @@ function error(status, code, message, extra) { return { status, body: { error: c
 const invalidOption = (field, message) => error(400, 'invalid_option', message, { field });
 
 /**
- * The picture options of a request, with the defaults filled in.
+ * The picture options of a request, with the defaults filled in. A query string only carries text,
+ * so the GET form takes the delay as decimal digits and coords as '0' / '1'; a JSON body has types,
+ * and the POST form takes only a number (field delayMs) and a boolean: "500" or 1 there is a
+ * mistake of the client, refused rather than guessed.
  * @param {{ size?: unknown, orientation?: unknown, delay?: unknown, coords?: unknown }} o
- *   delay: a number (POST) or its decimal text (GET); coords: a boolean (POST) or '0' / '1' (GET)
+ * @param {'query' | 'body'} [from]  where the options come from
  * @returns {{ options: { size: string, orientation: string, delayMs: number, coords: boolean } } | { error: object }}
  */
-export function gifOptions({ size, orientation, delay, coords }, fields = { delay: 'delay' }) {
+export function gifOptions({ size, orientation, delay, coords }, from = 'query') {
+    const query = from === 'query';
+    const delayField = query ? 'delay' : 'delayMs';
     const out = { size: 'medium', orientation: 'white', delayMs: DELAY.default, coords: true };
     if (size !== undefined) {
         if (typeof size !== 'string' || !SIZE_NAMES.includes(size)) return { error: invalidOption('size', `size must be one of ${SIZE_NAMES.join(', ')}.`) };
@@ -191,16 +196,16 @@ export function gifOptions({ size, orientation, delay, coords }, fields = { dela
         out.orientation = orientation;
     }
     if (delay !== undefined) {
-        const n = typeof delay === 'string' ? (/^\d{1,6}$/.test(delay) ? Number(delay) : NaN) : delay;
+        const n = query ? (typeof delay === 'string' && /^\d{1,6}$/.test(delay) ? Number(delay) : NaN) : delay;
         if (!Number.isInteger(n) || n < DELAY.min || n > DELAY.max) {
-            return { error: invalidOption(fields.delay, `${fields.delay} must be an integer from ${DELAY.min} to ${DELAY.max} (milliseconds per move).`) };
+            return { error: invalidOption(delayField, `${delayField} must be an integer from ${DELAY.min} to ${DELAY.max} (milliseconds per move).`) };
         }
         out.delayMs = n;
     }
     if (coords !== undefined) {
-        if (coords === true || coords === '1') out.coords = true;
-        else if (coords === false || coords === '0') out.coords = false;
-        else return { error: invalidOption('coords', typeof coords === 'string' ? 'coords must be 0 or 1.' : 'coords must be true or false.') };
+        if (coords === (query ? '1' : true)) out.coords = true;
+        else if (coords === (query ? '0' : false)) out.coords = false;
+        else return { error: invalidOption('coords', query ? 'coords must be 0 or 1.' : 'coords must be true or false.') };
     }
     return { options: out };
 }
@@ -323,7 +328,7 @@ export function register(router, deps) {
         if (b === null || typeof b !== 'object' || Array.isArray(b)) return error(400, 'invalid_request', 'The body must be a JSON object.');
         for (const k of Object.keys(b)) if (!BODY_FIELDS.has(k)) return error(400, 'invalid_request', `unknown field "${k}"`, { field: k });
         if (typeof b.pgn !== 'string') return error(400, 'invalid_request', b.pgn === undefined ? '"pgn" is required' : '"pgn" must be a string', { field: 'pgn' });
-        const o = gifOptions({ size: b.size, orientation: b.orientation, delay: b.delayMs, coords: b.coords }, { delay: 'delayMs' });
+        const o = gifOptions({ size: b.size, orientation: b.orientation, delay: b.delayMs, coords: b.coords }, 'body');
         if (o.error) return o.error;
         let game;
         try {
