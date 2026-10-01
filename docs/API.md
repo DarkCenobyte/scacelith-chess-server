@@ -650,8 +650,10 @@ Answer: 200 `{ "status": "password_reset" }`. The password reset has these effec
 - the owner gets a mail;
 - two-step verification is not touched.
 
-Errors: 400 `invalid_token` (link invalid, used or expired), 400 `weak_password`, and the hash
-queue errors. After a hash queue error, the link stays valid.
+Errors: 400 `invalid_token` (link invalid, used or expired, or mailed to an address the account
+no longer has), 400 `weak_password`, the hash queue errors, and 503 `server_busy` with
+`retryAfter: 1` when the database stayed locked (nothing changed). After a hash queue error or a
+503, the link stays valid.
 
 ### Google sign-in
 
@@ -921,7 +923,12 @@ does this:
 - A link valid for 24 hours goes to the new address. It opens `/confirm-email-change`
   (section 14), and the address changes only when the player presses that page's button.
 - Until then, `GET /account/me` shows the new address as `pendingEmail`.
-- A new request replaces the pending one. A password change or reset cancels it.
+- A new request replaces the pending one. A password change or reset cancels it, and a request
+  that a password change or reset overtakes while it is being checked gets 403
+  `invalid_password`, with no link sent.
+- At most one link goes to a given new address every 5 minutes, whoever asks: within that time a
+  request mails no new link (a request for the change already pending keeps the link sent
+  earlier, which stays valid). The answer is the same.
 - The current address gets a notice that a change to a masked address (`a***@example.org`) was
   requested, with what to do if it was not its owner.
 
@@ -944,6 +951,8 @@ Errors:
 - 400 `invalid_email` and 400 `same_email` (the account's current address). Both are checked
   before the password, so they count no failure;
 - 409 `email_taken`, only without e-mail confirmation;
+- 503 `server_busy` with `retryAfter: 1` when the database stayed locked: nothing changed, and
+  the same request can be sent again;
 - the re-authentication errors (section 1.7). A Google-only account gets 400
   `password_not_set`.
 
@@ -992,7 +1001,7 @@ shortened here):
     { "category": "3+2", "rating": 1510, "games": 2, "wins": 1, "draws": 1, "losses": 0, "peak": 1510,
       "provisional": true, "rated": true, "countedGames": 2, "updatedAt": 1790882839809 }
   ],
-  "ratingRefunds": [ { "gameId": 4100000000002, "category": "3+2", "points": 9, "at": 1790882839000 } ],
+  "ratingRefunds": [ { "day": 1790812800000, "category": "3+2", "points": 9 } ],
   "sessions": [
     { "id": 1, "createdAt": 1790882839708, "lastSeenAt": 1790882839708, "expiresAt": 1798658839708,
       "revokedAt": null, "clientLabel": "Scacelith 1.4 (Windows)", "ip": "203.0.113.7" }
@@ -1023,14 +1032,25 @@ shortened here):
   - `rated`: whether the player has left the unrated phase;
   - `countedGames`: the games that entered the rating;
   - `updatedAt`: when the record last changed.
-- `ratingRefunds`: rating points given back to the player after an opponent was found cheating.
-  The cheater is not named.
+- `ratingRefunds`: rating points given back to the player after an opponent was found cheating,
+  added up per UTC day and category, newest first: `{ day, category, points }`, where `day` is
+  00:00 UTC of that day (epoch ms). Neither the games nor the cheaters are named, so the export
+  does not tell which opponent was sanctioned; it gives the points as the game's notice does (a
+  total may still match the rating changes of some games in `games.list`).
 - `sessions`: every stored session, newest first. There is no token in it. The retention purge
   deletes an expired session, and a signed-out one a day after the sign-out. `ip` is erased after
   `RETENTION_IP_DAYS`.
 - `securityEvents`: newest first, kept `RETENTION_SECURITY_DAYS`, with `ip` erased after
-  `RETENTION_IP_DAYS`. `detail` keeps only the fields that the export allows for the event's
-  kind:
+  `RETENTION_IP_DAYS`. `ip` is given only for what was done while signed in, with the account's
+  password (and second factor) or with a link mailed to its address: `register`,
+  `email_verified`, `login`, `sso_login`, `sso_account_created`, `recovery_code_used`,
+  `password_reset`, `password_changed`, `reauth_failed`, `mfa_setup_started`, `mfa_enabled`,
+  `mfa_disabled`, `recovery_codes_regenerated`, `session_revoked`, `sessions_revoked_all`,
+  `email_change_requested`, `email_changed`, `email_change_refused` and `account_exported`. Every
+  other kind has `ip: null`: failed sign-ins (`login_failed`, `login_lockout`, `mfa_failed`) and
+  the requests anyone can make by typing the account's name or address
+  (`password_reset_requested`, `verification_resent`, `register_existing_email`) may come from
+  another person. `detail` keeps only the fields that the export allows for the event's kind:
   - `login`: `method`;
   - `sso_login`, `sso_linked`, `sso_account_created`: `provider`;
   - `login_failed`: `failures`;
@@ -1040,19 +1060,20 @@ shortened here):
   - `reauth_failed`: `factor`;
   - `session_revoked` and `sessions_revoked_all`: `reason`;
   - `email_change_refused`: `reason`;
-  - `rating_refund`: `gameId`, `category`, `points`;
   - `sanction_auto`: `kind`, `gameId`, `until`.
 
   Every other kind has `detail: null`. A `moderator_action` event keeps only `{ action }`, for
   the actions `ban`, `unban`, `reset_mfa`, `verify_email` and `revoke_sessions`; the export leaves
-  out the other moderator actions.
+  out the other moderator actions. The `rating_refund` events are left out: their points are in
+  `ratingRefunds`.
 - `sanctions`: every sanction, lifted ones included:
   `{ id, kind, reason, source ("auto" | "moderator"), gameId, startsAt, endsAt, createdAt, liftedAt }`.
   The moderator's name is never included.
 - `conduct`: the conduct events recorded for the player's abandoned, aborted and no-show games
   (`kind`: `abandon`, `abort` or `noshow`), kept 30 days.
 - `reportsFiled`: the reports the player made. `reported` is the reported player's current public
-  name, and `status` is `open`, `actioned` or `dismissed`.
+  name, and `status` is `open` or `closed` (whether the reported player was sanctioned is not
+  said).
 - `games`: `total` and every game, newest first, as summaries of `GET /account/games`
   (section 10). Moves are at `GET /games/:id` and the PGN at `GET /games/:id/pgn`.
 
@@ -1064,7 +1085,9 @@ shortened here):
   population statistics, the weight of a report;
 - the reports other players made about the player;
 - the identities of moderators;
-- other players' private data (opponents appear by their public name and rating).
+- other players' private data: opponents appear by their public name and rating, nothing tells
+  whether another player was sanctioned, and no IP address that may be another person's is
+  included.
 
 The `notes` array of the document says this to the player in plain English.
 
@@ -1572,10 +1595,10 @@ Pages for a browser, opened from the links of e-mails and by Google. Their links
 |---|---|
 | `GET /verify-email?token=` | 200: a "Confirm my e-mail address" button. 400: link invalid or expired. Limit `page`. |
 | `POST /verify-email` (form `token`) | 200: address confirmed. 400: link invalid, used or expired. Limit `auth`. |
-| `GET /reset-password?token=` | 200: the new password form (password twice). 400: link invalid. Limit `page`. |
-| `POST /reset-password` (form `token`, `newPassword`, `confirmPassword`) | 200: password changed, and every device signed out. 400: the form again with the error (the passwords differ, a weak password), or link invalid. 503 / 429: the form again with `Retry-After` when the server is busy; the link stays valid. Limits `auth` and `auth_reset`. |
+| `GET /reset-password?token=` | 200: the new password form (password twice). 400: link invalid (also when it was mailed to an address the account no longer has). Limit `page`. |
+| `POST /reset-password` (form `token`, `newPassword`, `confirmPassword`) | 200: password changed, and every device signed out. 400: the form again with the error (the passwords differ, a weak password), or link invalid. 503 / 429: the form again with `Retry-After` when the server is busy (the password hash queue, or the database stayed locked); the link stays valid. Limits `auth` and `auth_reset`. |
 | `GET /confirm-email-change?token=` | 200: shows the new address and the account's name, with a "Use this e-mail address" button. 400: link invalid or expired (also when the account's address changed since the request). Limit `page`. |
-| `POST /confirm-email-change` (form `token`) | 200: address changed. 400: link invalid, used or expired. 409: another account took the address in the meantime. Limit `auth`. |
+| `POST /confirm-email-change` (form `token`) | 200: address changed. 400: link invalid, used or expired. 409: another account took the address in the meantime. 503 (`Retry-After: 1`): the database stayed locked; nothing changed and the link still works. Limit `auth`. |
 | `GET /auth/sso/google/callback?code=&state=` | 200: "You can go back to Scacelith" (or "choose your username"). 400: the sign-in failed, was cancelled or expired. Never shows a token. Limit `sso_page`. |
 
 ## 15. Health endpoints

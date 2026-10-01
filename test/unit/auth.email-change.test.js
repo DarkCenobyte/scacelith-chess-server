@@ -4,10 +4,12 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 import { base32Decode, totp } from '../../src/security/totp.js';
 import { maskEmail } from '../../src/auth/identity.js';
 import { templates } from '../../src/mail/templates.js';
-import { linkIn, startTestServer } from './helpers/auth-fakes.js';
+import { StoreError, linkIn, startTestServer } from './helpers/auth-fakes.js';
+import { startReal } from './helpers/real-auth.js';
 
 const PW = 'correct horse battery';
 const EMAIL = '/api/v1/account/email';
@@ -161,6 +163,41 @@ test('a taken address gets the same answer; its owner gets the throttled notice,
     assert.deepEqual(mails.map((m) => m.to), ['alice@example.com']);
 });
 
+test('one confirmation mail per new address every 5 minutes; the link already mailed keeps working', async (t) => {
+    const { s, u, token } = await setup();
+    t.after(s.close);
+    await s.createUser({ username: 'bob', email: 'bob@example.com', password: PW });
+    const bobToken = (await s.login('bob', PW)).token;
+    let from = s.mailer.sent.length;
+    for (let i = 0; i < 10; i++) {
+        const r = await s.request('POST', EMAIL, { token, body: { newEmail: 'victim@example.net', password: PW } });
+        assert.deepEqual([r.status, r.json], [202, { status: 'verification_sent' }]);
+        s.now.advance(1000);
+    }
+    // Another player asking for the same address within the 5 minutes: the same answer, no mail.
+    const rb = await s.request('POST', EMAIL, { token: bobToken, body: { newEmail: 'victim@example.net', password: PW } });
+    assert.deepEqual([rb.status, rb.json], [202, { status: 'verification_sent' }]);
+    assert.equal((await me(s, bobToken)).pendingEmail, 'victim@example.net');
+    let mails = await mailsSince(s, from);
+    const links = mails.filter((m) => m.to === 'victim@example.net');
+    assert.equal(links.length, 1, 'one confirmation mail for 11 requests');
+    assert.equal(mails.filter((m) => m.to === 'alice@example.com').length, 10, 'the requester is still told each time');
+    assert.equal((await me(s, token)).pendingEmail, 'victim@example.net');
+    const first = linkToken(links[0]);
+    assert.equal((await page(s, first)).status, 200, 'the link mailed first still works');
+
+    // 5 minutes later, a request mails a new link, which replaces the first one.
+    s.now.advance(5 * 60000);
+    from = s.mailer.sent.length;
+    await s.request('POST', EMAIL, { token, body: { newEmail: 'victim@example.net', password: PW } });
+    mails = await mailsSince(s, from);
+    assert.equal(mails.filter((m) => m.to === 'victim@example.net').length, 1);
+    const second = linkToken(mails.find((m) => m.to === 'victim@example.net'));
+    assert.equal((await confirm(s, first)).status, 400);
+    assert.equal((await confirm(s, second)).status, 200);
+    assert.equal(s.store.users.byId(u.id).email, 'victim@example.net');
+});
+
 test('invalid and same address are refused before the password is checked', async (t) => {
     const { s, token } = await setup();
     t.after(s.close);
@@ -281,6 +318,7 @@ test('a new password cancels a pending change; a change ends the links sent to t
     from = s.mailer.sent.length;
     await s.request('POST', '/api/v1/auth/password/forgot', { body: { email: 'alice@example.com' } });
     const reset = new URL(linkIn((await mailsSince(s, from))[0].text)).searchParams.get('token');
+    s.now.advance(5 * 60000);       // one confirmation mail per address every 5 minutes
     from = s.mailer.sent.length;
     await s.request('POST', EMAIL, { token, body: { newEmail: 'nora@example.org', password: NEW_PW } });
     const tk2 = linkToken((await mailsSince(s, from)).find((m) => m.to === 'nora@example.org'));
@@ -295,6 +333,175 @@ test('a new password cancels a pending change; a change ends the links sent to t
     const reset2 = new URL(linkIn((await mailsSince(s, from))[0].text)).searchParams.get('token');
     assert.equal((await s.request('POST', '/api/v1/auth/password/reset', { body: { token: reset2, newPassword: 'yet another passphrase' } })).status, 200);
     assert.ok(![...s.store._raw.tokens.values()].some((x) => x.kind === 'email_change'), 'the pending change is gone');
+});
+
+// Holds the primary's answer to the e-mail change's once.consume (an IPC round trip) until release().
+function holdEmailChangeThrottle(s) {
+    const real = s.primary.request;
+    let release, reached;
+    const gate = new Promise((r) => { release = r; });
+    const atGate = new Promise((r) => { reached = r; });
+    s.primary.request = async (type, payload) => {
+        if (type === 'once.consume' && String(payload.key).startsWith('mail:emailchange')) {
+            reached();
+            await gate;
+        }
+        return real.call(s.primary, type, payload);
+    };
+    return { atGate, release: () => { s.primary.request = real; release(); } };
+}
+
+test('a password reset or change while the request waits for the primary: no link, 403', async (t) => {
+    const NEW_PW = 'a brand new passphrase';
+    for (const how of ['reset', 'change', 'rehash']) {
+        const { s, u, token } = await setup();
+        t.after(s.close);
+        const hold = holdEmailChangeThrottle(s);
+        const pending = s.request('POST', EMAIL, { token, body: { newEmail: 'evil@attacker.example', password: PW } });
+        await hold.atGate;      // the password was checked; the request waits for the primary
+        if (how === 'reset') {
+            const from = s.mailer.sent.length;
+            await s.request('POST', '/api/v1/auth/password/forgot', { body: { email: 'alice@example.com' } });
+            const reset = new URL(linkIn((await mailsSince(s, from)).find((m) => /Reset your/.test(m.subject)).text)).searchParams.get('token');
+            const rr = await s.request('POST', '/api/v1/auth/password/reset', { body: { token: reset, newPassword: NEW_PW } });
+            assert.equal(rr.status, 200);
+        } else if (how === 'change') {
+            const rr = await s.request('POST', '/api/v1/account/password', { token, body: { currentPassword: PW, newPassword: NEW_PW } });
+            assert.equal(rr.status, 200);
+        } else {
+            // A sign-in's rehash of the same password is not a new password.
+            s.store.users.update(u.id, { passwordHash: await s.hasher.hash(PW) });
+        }
+        const before = s.mailer.sent.length;
+        hold.release();
+        const r = await pending;
+        const pendingTokens = [...s.store._raw.tokens.values()].filter((x) => x.kind === 'email_change' && !x.usedAt);
+        const mails = await mailsSince(s, before);
+        if (how === 'rehash') {
+            assert.deepEqual([r.status, r.json], [202, { status: 'verification_sent' }]);
+            assert.equal(pendingTokens.length, 1);
+            continue;
+        }
+        assert.deepEqual([r.status, r.json.error], [403, 'invalid_password'], how);
+        assert.equal(pendingTokens.length, 0, `${how}: no pending change`);
+        assert.deepEqual(mails.filter((m) => m.to === 'evil@attacker.example'), [], `${how}: no link`);
+        assert.equal(s.store.users.byId(u.id).email, 'alice@example.com');
+    }
+});
+
+test('without e-mail verification: a new password stored after the check stops the change too', async (t) => {
+    const { s, u, token } = await setup({ REQUIRE_EMAIL_VERIFICATION: '0' });
+    t.after(s.close);
+    const newHash = await s.hasher.hash('a brand new passphrase');
+    // Another shard resets the password between the password check and the write.
+    const realByEmail = s.store.users.byEmail;
+    s.store.users.byEmail = (e) => {
+        if (String(e) === 'evil@attacker.example') s.store.users.update(u.id, { passwordHash: newHash });
+        return realByEmail(e);
+    };
+    t.after(() => { s.store.users.byEmail = realByEmail; });
+    const r = await s.request('POST', EMAIL, { token, body: { newEmail: 'evil@attacker.example', password: PW } });
+    assert.deepEqual([r.status, r.json.error], [403, 'invalid_password']);
+    assert.equal(s.store.users.byId(u.id).email, 'alice@example.com');
+});
+
+test('a reset link mailed to the former address after the change does not work (another shard\'s race)', async (t) => {
+    const { s, u, token } = await setup();
+    t.after(s.close);
+    let from = s.mailer.sent.length;
+    await s.request('POST', EMAIL, { token, body: { newEmail: 'nora@example.org', password: PW } });
+    const tk = linkToken((await mailsSince(s, from)).find((m) => m.to === 'nora@example.org'));
+    // "Forgot password" for the former address reads the account, another shard confirms the
+    // change (and drops the links of the former address), then the reset link is stored and mailed.
+    const realByEmail = s.store.users.byEmail;
+    let armed = true;
+    s.store.users.byEmail = (e) => {
+        const row = realByEmail(e);
+        if (armed && String(e).toLowerCase() === 'alice@example.com') {
+            armed = false;
+            assert.deepEqual(s.auth.confirmEmailChange(tk), { status: 'changed', email: 'nora@example.org' });
+        }
+        return row;
+    };
+    t.after(() => { s.store.users.byEmail = realByEmail; });
+    from = s.mailer.sent.length;
+    assert.equal((await s.request('POST', '/api/v1/auth/password/forgot', { body: { email: 'alice@example.com' } })).status, 202);
+    s.store.users.byEmail = realByEmail;
+    assert.equal(armed, false);
+    assert.equal(s.store.users.byId(u.id).email, 'nora@example.org');
+    const resetMail = (await mailsSince(s, from)).find((m) => m.to === 'alice@example.com' && /Reset your/.test(m.subject));
+    assert.ok(resetMail, 'the reset link went to the former address');
+    const reset = new URL(linkIn(resetMail.text)).searchParams.get('token');
+
+    // Whoever reads the former mailbox cannot use it: not on the page, not through the API.
+    assert.equal((await s.request('GET', `/reset-password?token=${reset}`)).status, 400);
+    const rr = await s.request('POST', '/api/v1/auth/password/reset', { body: { token: reset, newPassword: 'attacker chooses this one' } });
+    assert.deepEqual([rr.status, rr.json.error], [400, 'invalid_token']);
+    assert.equal((await s.request('POST', '/api/v1/auth/login', { body: { login: 'nora@example.org', password: PW } })).status, 200);
+});
+
+test('a lock held by another process right after the address changed: the change is whole and the old links die', async (t) => {
+    const s = await startReal(t);
+    await s.store.users.create({ username: 'alice', email: 'alice@example.org', passwordHash: await s.hasher.hash(PW), emailVerified: true });
+    const login = await s.request('POST', '/api/v1/auth/login', { body: { login: 'alice', password: PW } });
+    const token = login.json.token;
+    assert.equal((await s.request('POST', '/api/v1/auth/password/forgot', { body: { email: 'alice@example.org' } })).status, 202);
+    assert.equal((await s.request('POST', EMAIL, { token, body: { newEmail: 'nora@example.org', password: PW } })).status, 202);
+    await s.mailer.idle();
+    const reset = new URL(linkIn(s.mailer.sent.find((m) => /Reset your/.test(m.subject)).text)).searchParams.get('token');
+    const tk = linkToken(s.mailer.sent.find((m) => m.to === 'nora@example.org'));
+
+    // Another process takes the write lock as soon as the new address is written (when it can).
+    const other = new DatabaseSync(s.file);
+    t.after(() => other.close());
+    let locked = false;
+    const realUpdate = s.store.users.update;
+    s.store.users.update = (id, fields) => {
+        const r = realUpdate(id, fields);
+        if (fields && fields.email) {
+            try { other.exec('BEGIN IMMEDIATE'); locked = true; } catch { /* the change's own transaction holds it */ }
+        }
+        return r;
+    };
+    let r;
+    try {
+        r = await confirm(s, tk);
+    } finally {
+        s.store.users.update = realUpdate;
+        if (locked) other.exec('ROLLBACK');
+    }
+    assert.equal(locked, false, 'the address and the purge of the old links commit together');
+    assert.equal(r.status, 200);
+    assert.equal(s.store.users.byEmail('nora@example.org')?.username, 'alice');
+    const rr = await s.request('POST', '/api/v1/auth/password/reset', { body: { token: reset, newPassword: 'attacker chooses this one' } });
+    assert.deepEqual([rr.status, rr.json.error], [400, 'invalid_token']);
+});
+
+test('a busy store answers 503 server_busy and changes nothing; the links still work afterwards', async (t) => {
+    const { s, u, token } = await setup();
+    t.after(s.close);
+    let from = s.mailer.sent.length;
+    await s.request('POST', EMAIL, { token, body: { newEmail: 'nora@example.org', password: PW } });
+    const tk = linkToken((await mailsSince(s, from)).find((m) => m.to === 'nora@example.org'));
+    from = s.mailer.sent.length;
+    await s.request('POST', '/api/v1/auth/password/forgot', { body: { email: 'alice@example.com' } });
+    const reset = new URL(linkIn((await mailsSince(s, from))[0].text)).searchParams.get('token');
+    // The transaction cannot start (another process holds the lock past the busy timeout).
+    s.store.transaction = () => { throw new StoreError('busy'); };
+    const r = await confirm(s, tk);
+    assert.equal(r.status, 503);
+    assert.equal(r.headers['retry-after'], '1');
+    assert.match(r.text, /busy/);
+    const again = await s.request('POST', EMAIL, { token, body: { newEmail: 'zoe@example.org', password: PW } });
+    assert.deepEqual([again.status, again.json.error, again.json.retryAfter], [503, 'server_busy', 1]);
+    const rr = await s.request('POST', '/api/v1/auth/password/reset', { body: { token: reset, newPassword: 'a brand new passphrase' } });
+    assert.deepEqual([rr.status, rr.json.error], [503, 'server_busy']);
+    assert.equal(s.store.users.byId(u.id).email, 'alice@example.com');
+    assert.equal((await me(s, token)).pendingEmail, 'nora@example.org');
+    assert.equal((await s.request('POST', '/api/v1/auth/login', { body: { login: 'alice', password: PW } })).status, 200, 'password unchanged');
+    delete s.store.transaction;
+    assert.equal((await confirm(s, tk)).status, 200);
+    assert.equal(s.store.users.byId(u.id).email, 'nora@example.org');
 });
 
 test('without e-mail verification: changed at once, 409 email_taken, the former address told', async (t) => {

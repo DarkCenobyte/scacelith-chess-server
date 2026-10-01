@@ -17,6 +17,7 @@
 //   POST /auth/verify-email/resend { email } -> 202 { status: 'accepted' }
 //   POST /auth/password/forgot { email } -> 202 { status: 'accepted' }
 //   POST /auth/password/reset { token, newPassword } -> 200 { status: 'password_reset' } | 400 invalid_token | weak_password
+//        | 503 server_busy{retryAfter: 1} (the store stayed locked: nothing changed, the link still works)
 // Every endpoint that hashes or checks a password (register, login, password reset) may also
 // answer 503 server_busy{retryAfter} (with a Retry-After header) when the password hash queue of
 // the worker is full or the wait expired, or 429 rate_limited{retryAfter} when the queue is at

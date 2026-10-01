@@ -196,6 +196,24 @@ test('lenient SAN', () => {
     }
 });
 
+test('promotions: every form the header lists is read in movetext; e8(Q) only by parseSan', () => {
+    const fen = '4k3/P7/8/8/8/8/8/4K3 w - - 0 1';
+    const header = readFileSync(new URL('../../src/chess/pgn.js', import.meta.url), 'utf8').split('\nimport ')[0];
+    const listed = /promotions as ([^;]*?)(?:,? in movetext|;)/s.exec(header.replace(/\n\/\/\s*/g, ' '));
+    assert.ok(listed, 'the header lists the promotion forms');
+    const forms = listed[1].split(/,\s*|\s+or\s+/).map((f) => f.trim()).filter(Boolean);
+    assert.ok(forms.length >= 3, forms.join(' | '));
+    for (const form of forms) {
+        const move = form.replace('e8', 'a8');
+        const g = readPgn(`[FEN "${fen}"]\n\n1. ${move} *`);
+        assert.deepEqual(uci(g.moves, fen), ['a7a8q'], `${form} in movetext`);
+    }
+    // The parenthesis opens a variation in movetext, as in the game's reader (src/chess/pgn.cpp).
+    pgnError(() => readPgn(`[FEN "${fen}"]\n\n1. a8(Q) *`), { line: 3, column: 4, message: /illegal move 'a8'/ });
+    const p = Position.fromFEN(fen);
+    assert.equal(p.uci(parseSan(p, 'a8(Q)')), 'a7a8q');
+});
+
 test('movetext: numbers, comments, escapes, NAGs, glyphs, evaluations, variations, results', () => {
     const text = `[White "a \\"quoted\\" \\\\ name"]
 [Black "b"]
@@ -345,4 +363,31 @@ test('large inputs are read in linear time', () => {
     readPgn(`[A "${'" '.repeat(1000)}"]\n1. e4 *`);
     assert.ok(performance.now() - t2 < 500);
     assert.equal(BLACK, 1);
+});
+
+test('many tag pairs on one long line are read in linear time', () => {
+    // Every tag pair looks for the last closing quote of its line: once per line, not once per
+    // tag (128 tags in front of 1 MiB on the same line took about a second).
+    const tags = Array.from({ length: PGN_LIMITS.maxTags + 1 }, (_, i) => `[T${i} "v"] `).join('');
+    const tooMany = tags + 'x'.repeat((1 << 20) - tags.length - 1);
+    assert.ok(tooMany.length < (1 << 20) && tooMany.length > 1000000);
+    const t0 = performance.now();
+    pgnError(() => readPgn(tooMany), { line: 1, message: /too many tags/ });
+    const ms0 = performance.now() - t0;
+    assert.ok(ms0 < 300, `${ms0} ms`);
+    // A valid game: 128 tags on its first line, then a comment of almost 1 MiB on the same line.
+    const head = Array.from({ length: PGN_LIMITS.maxTags }, (_, i) => `[T${i} "v"] `).join('') + '{ ';
+    const valid = head + 'c'.repeat((1 << 20) - head.length - 16) + ' } 1. e4 e5 *';
+    assert.ok(valid.length < (1 << 20) && valid.length > 1000000);
+    const t1 = performance.now();
+    const g = readPgn(valid);
+    const ms1 = performance.now() - t1;
+    assert.equal(g.tags.length, PGN_LIMITS.maxTags);
+    assert.equal(g.moves.length, 2);
+    assert.ok(ms1 < 300, `${ms1} ms`);
+    // The same answers as one tag per line (the cache of the line's last quote changes nothing).
+    const lines = tags.replace(/\] /g, ']\n');
+    pgnError(() => readPgn(lines), { line: PGN_LIMITS.maxTags + 1, message: /too many tags/ });
+    assert.deepEqual(readPgn('[A "x"y"] [B "a"b"]\n1. e4 *').tags, [['A', 'x"y'], ['B', 'a"b']]);
+    assert.deepEqual(readPgn('[A "x" ] [B "y"]   [C "z\\"w"]\n1. e4 *').tags, [['A', 'x'], ['B', 'y'], ['C', 'z"w']]);
 });

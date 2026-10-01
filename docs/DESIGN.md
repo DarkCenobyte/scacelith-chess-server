@@ -1183,10 +1183,16 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   against a login (both of its steps), a rehash or a password change that was in flight, and no
   session is opened with a password the reset has replaced.
 * **Tokens**: 32 random bytes, only their SHA-256 is stored; e-mail verification (24 h),
-  password reset (1 h, revokes all sessions), e-mail change (24 h, sent to the new address; a new
-  request replaces it, a password change or reset cancels it, and the change itself ends the reset
-  and verification links of the former address), MFA login challenge (5 min), SSO attempt
-  (10 min), all single-use.
+  password reset (1 h, revokes all sessions; it works only while the account still has the
+  address it was mailed to), e-mail change (24 h, sent to the new address, at most one link per
+  new address every 5 minutes whoever asks; a new request replaces it, a password change or reset
+  cancels it, and a request that one of them overtakes gets 403 `invalid_password`: its write is a
+  compare-and-set on the password hash it checked), MFA login challenge (5 min), SSO attempt
+  (10 min), all single-use. The confirmation of an e-mail change (the link used, the new address,
+  the end of the reset and verification links of the former address) and a password reset (the
+  link used, the new password, the pending e-mail change cancelled) are each one transaction; a
+  store that stays locked answers 503 `server_busy` with `retryAfter: 1`, nothing changed and
+  the link still valid.
 * **TOTP**: RFC 6238 (SHA-1, 6 digits, 30 s, +-1 step), secret 20 bytes, AES-256-GCM at rest with
   a key derived from SERVER_SECRET (or MFA_ENCRYPTION_KEY), replay refused (last used step
   stored). 10 recovery codes (`xxxx-xxxx-xx`, 50 bits) stored as HMAC-SHA256 with a derived
@@ -1201,7 +1207,10 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
 * **Account data export** (`POST /account/export`, password and second factor, 5 per hour): the
   player's own data only; never a password hash, TOTP secret, recovery code, token or token hash,
   the anti-cheat's data (integrity level, anomalies, analysis features, report weights), the reports
-  made against the player or a moderator's identity (`src/http/routes/account-export.js`).
+  made against the player or a moderator's identity, nor anything that tells which opponent was
+  sanctioned (rating refunds are summed per UTC day and category, a filed report is only open or
+  closed) or another person's IP address (an event keeps its IP only for the kinds the account
+  holder does: `IP_KINDS`) (`src/http/routes/account-export.js`).
 * **Brute force and stuffing**: per-address token buckets (the background budget of every
   request, below, and the auth family's route limits; IPv6 per /64, and the password endpoints
   also per /48 as a whole with `AUTH_RATE_PER_PREFIX`), whose refusals count 5 toward a block of

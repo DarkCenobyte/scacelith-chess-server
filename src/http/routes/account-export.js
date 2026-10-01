@@ -19,20 +19,28 @@
 //                googleEmail, hasPassword, acceptChallenges, createdAt, lastLoginAt },
 //     ratings: [{ category, rating, games, wins, draws, losses, peak, provisional, rated,
 //                 countedGames, updatedAt }],
-//     ratingRefunds: [{ gameId, category, points, at }]          (points given back to the player)
+//     ratingRefunds: [{ day, category, points }]   (points given back, per UTC day and category)
 //     sessions: [{ id, createdAt, lastSeenAt, expiresAt, revokedAt, clientLabel, ip }]
 //     securityEvents: [{ kind, at, ip, detail }]                 (newest first)
 //     sanctions: [{ id, kind, reason, source, gameId, startsAt, endsAt, createdAt, liftedAt }]
 //     conduct: [{ kind, at }]
-//     reportsFiled: [{ gameId, reported, category, comment, createdAt, status }]
+//     reportsFiled: [{ gameId, reported, category, comment, createdAt, status: 'open'|'closed' }]
 //     games: { total, list: [the summaries of GET /account/games, newest first] } }
 //
 // Never in it: the password hash, the MFA secret, the recovery codes, any token or token hash (the
 // session list has none), the anti-cheat's data (integrity level and score, anomalies, analysis
 // features, population statistics, the weight of a report), the reports made against the player,
 // the identities of moderators (sanctions lose createdBy / liftedBy; a moderator_action event keeps
-// only its action, and only for the actions in MODERATOR_ACTIONS), and other players' private data
-// (a refund does not name the cheater; a report names the reported player by the public name).
+// only its action, and only for the actions in MODERATOR_ACTIONS), and other players' private data:
+//  * nothing tells which opponent was sanctioned: a rating refund names neither the cheater nor
+//    the game (its game id would name the opponent through games.list), the refunds are added up
+//    per UTC day and category (what the game's Notice{RatingRestored} already tells) and their
+//    rating_refund security events are left out; a filed report is only 'open' or 'closed' (not
+//    'actioned' or 'dismissed') and names the reported player by the public name;
+//  * no other person's IP address: an event keeps its IP only for the kinds in IP_KINDS, done by
+//    someone signed in, or with the account's password and second factor, or with a link mailed
+//    to its address; anyone can cause the other kinds (failed sign-ins, a reset requested or a
+//    registration tried with the account's address) by typing its name or address.
 // The detail of a security event keeps only the fields DETAIL_FIELDS lists for its kind (null for
 // any other kind). The `notes` of the document say so to the player.
 
@@ -59,12 +67,26 @@ export const DETAIL_FIELDS = Object.freeze({
     session_revoked: ['reason'],
     sessions_revoked_all: ['reason'],
     email_change_refused: ['reason'],
-    rating_refund: ['gameId', 'category', 'points'],
     sanction_auto: ['kind', 'gameId', 'until'],
 });
 
 /** Moderator actions an exported moderator_action event shows ({ action } only); others are left out. */
 export const MODERATOR_ACTIONS = Object.freeze(['ban', 'unban', 'reset_mfa', 'verify_email', 'revoke_sessions']);
+
+/**
+ * Security event kinds whose IP address the export keeps: what someone signed in to the account,
+ * or holding its password and second factor, or a link mailed to its address, did. Any other kind
+ * has ip null (failed sign-ins, reset and confirmation requests, a registration tried with the
+ * account's address: their IP may be another person's).
+ */
+export const IP_KINDS = Object.freeze([
+    'register', 'email_verified', 'login', 'sso_login', 'sso_account_created', 'recovery_code_used', 'password_reset',
+    'password_changed', 'reauth_failed', 'mfa_setup_started', 'mfa_enabled', 'mfa_disabled', 'recovery_codes_regenerated',
+    'session_revoked', 'sessions_revoked_all', 'email_change_requested', 'email_changed', 'email_change_refused', 'account_exported',
+]);
+const IP_KIND_SET = new Set(IP_KINDS);
+
+const DAY_MS = 86400000;
 
 /**
  * The plain English notes of the document.
@@ -76,7 +98,8 @@ export function exportNotes(config) {
         `This file holds the data ${config.serverName} keeps about your account. Times are milliseconds since 1970-01-01 UTC.`,
         'Not included, to protect your account: your password (only a one-way hash of it is stored), your two-step verification secret, your recovery codes, and your sign-in and e-mail link tokens.',
         'Not included: the anti-cheat\'s records (integrity level, anomalies, the analysis of your games and the statistics it uses), the reports other players made about you, and the names of the moderators who acted on your account.',
-        'Not included: other players\' private data. Your games show the public names and ratings of your opponents.',
+        'Not included: other players\' private data. Your games show the public names and ratings of your opponents. The rating points given back to you after an opponent was found cheating are added up per day, without the games; a report you filed shows only whether it is still open.',
+        'IP addresses are given only for what was done while signed in to your account, or with its password, or with a link sent to your address. Failed sign-ins and the requests anyone can make by typing your name or address (a password reset, a registration with your address) are listed without one: it may be another person\'s.',
         'games.list has a summary of each of your games; the moves of a game are at /api/v1/games/<id> and its PGN at /api/v1/games/<id>/pgn.',
         `Security events are kept for ${config.retentionSecurityDays} days, and the IP addresses stored with them and with your sessions for ${config.retentionIpDays} days. A session is deleted when it expires, or a day after it was signed out; conduct events (abandoned and aborted games) after 30 days.`,
     ];
@@ -101,13 +124,32 @@ export function exportedEvent(e) {
     }
     if (!d || typeof d !== 'object' || Array.isArray(d)) d = null;
     let detail = null;
+    if (e.kind === 'rating_refund') return null;      // in ratingRefunds, added up per day (header)
     if (e.kind === 'moderator_action') {
         if (!d || !MODERATOR_ACTIONS.includes(d.action)) return null;
         detail = { action: d.action };
     } else if (d && DETAIL_FIELDS[e.kind]) {
         detail = pick(d, DETAIL_FIELDS[e.kind]);
     }
-    return { kind: e.kind, at: e.at, ip: e.ip ?? null, detail };
+    return { kind: e.kind, at: e.at, ip: IP_KIND_SET.has(e.kind) ? e.ip ?? null : null, detail };
+}
+
+/**
+ * Rating refunds added up per UTC day and category, newest day first: the points, without the
+ * games they came from (each of whose opponents was found cheating).
+ * @param {{ category: string, points: number, createdAt: number }[]} refunds
+ * @returns {{ day: number, category: string, points: number }[]}  day: 00:00 UTC, epoch ms
+ */
+export function refundsPerDay(refunds) {
+    const sums = new Map();
+    for (const f of refunds) {
+        const day = Math.floor(f.createdAt / DAY_MS) * DAY_MS;
+        const key = `${day} ${f.category}`;
+        const sum = sums.get(key);
+        if (sum) sum.points += f.points;
+        else sums.set(key, { day, category: f.category, points: f.points });
+    }
+    return [...sums.values()].sort((a, b) => b.day - a.day || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
 }
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -147,9 +189,7 @@ export async function buildAccountExport({ store, config, user, account, now }) 
             category: r.category, rating: r.rating, games: r.games, wins: r.wins, draws: r.draws, losses: r.losses, peak: r.peak,
             provisional: !!r.provisional, rated: r.rated ?? null, countedGames: r.countedGames ?? null, updatedAt: r.updatedAt ?? null,
         })),
-        ratingRefunds: (store.refunds.list({ victimId: id, limit: ROWS_MAX }) || []).map((f) => ({
-            gameId: f.gameId, category: f.category, points: f.points, at: f.createdAt,
-        })),
+        ratingRefunds: refundsPerDay(store.refunds.list({ victimId: id, limit: ROWS_MAX }) || []),
         sessions: (store.sessions.allForUser(id) || []).map((r) => ({
             id: r.id, createdAt: r.createdAt, lastSeenAt: r.lastSeenAt ?? r.createdAt, expiresAt: r.expiresAt, revokedAt: r.revokedAt ?? null,
             clientLabel: r.clientLabel ?? null, ip: r.ip ?? null,
@@ -162,7 +202,7 @@ export async function buildAccountExport({ store, config, user, account, now }) 
         conduct: (store.conduct.forUser(id, ROWS_MAX) || []).map((c) => ({ kind: c.kind, at: c.at })),
         reportsFiled: (store.reports.forReporter(id, ROWS_MAX) || []).map((r) => ({
             gameId: r.gameId || null, reported: r.reportedName ?? null, category: r.category, comment: r.comment ?? null,
-            createdAt: r.createdAt, status: r.status || r.outcome || 'open',
+            createdAt: r.createdAt, status: (r.status || r.outcome || 'open') === 'open' ? 'open' : 'closed',
         })),
         games: { total: store.games.countForUser(id), list },
     };

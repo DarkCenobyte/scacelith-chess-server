@@ -19,11 +19,12 @@
 //    line, '%' escape lines, NAGs ($1), suffix glyphs (! ? !! ?? !? ?!), text evaluations
 //    (+- = -/+ ±), variations ( ... ) skipped (nesting capped), "e.p." dropped;
 //  * SAN read leniently: check / mate / annotation suffixes stripped, castling as O-O, 0-0, o-o,
-//    OO (and the long forms), promotions as e8=Q, e8Q, e8(Q), e8/Q, captures with x, X, : or
-//    none, long algebraic (Ng1-f3, e2e4) and over-disambiguated moves (Nge2 when only one knight
-//    can go), a lower-case piece letter when it is not a pawn move (nf3, but bc4 is a b-pawn
-//    capture first), figurine SAN (♘f3), and plain UCI (e7e8q) as a last resort; a move must
-//    match exactly one legal move;
+//    OO (and the long forms), promotions as e8=Q, e8Q or e8/Q in movetext (parseSan also reads
+//    e8(Q), but in movetext its '(' opens a variation, as in the game's reader), captures with x,
+//    X, : or none, long algebraic (Ng1-f3, e2e4) and over-disambiguated moves (Nge2 when only one
+//    knight can go), a lower-case piece letter when it is not a pawn move (nf3, but bc4 is a
+//    b-pawn capture first), figurine SAN (♘f3), and plain UCI (e7e8q) as a last resort; a move
+//    must match exactly one legal move;
 //  * the end of the first game: its termination marker, a tag pair after its movetext (the next
 //    game), or the end of the text.
 // Null moves ("--", "Z0") are refused. Moves after an automatic ending (fivefold repetition,
@@ -82,6 +83,11 @@ class Lexer {
         this.p = s.charCodeAt(0) === 0xfeff ? 1 : 0;
         this.line = 1;
         this.col = 1;
+        // The last quote closing a tag on the stretch [lcStart, lcEnd) of a line (tagPair), found
+        // once: many tag pairs on one long line cost one pass over it, not one pass per tag.
+        this.lcStart = 0;
+        this.lcEnd = 0;
+        this.lcLast = -1;
     }
 
     // A line ends at '\n', and at a '\r' not followed by '\n'.
@@ -224,8 +230,17 @@ class Lexer {
             return bad(t, `quoted value expected in tag ${name}`);
         }
         this.advance();
-        let lastClose = -1;
-        for (let q = this.p; q < s.length && !this.lineBreak(q); q++) if (s[q] === '"' && this.closesTag(q)) lastClose = q;
+        // The last closing quote from here to the end of the line. A later tag of a line already
+        // scanned reuses that scan: the line's last closing quote is also the last one after this.p
+        // when it lies after it, and one at or before this.p counts as none below.
+        if (!(this.p >= this.lcStart && this.p < this.lcEnd)) {
+            let q = this.p, last = -1;
+            for (; q < s.length && !this.lineBreak(q); q++) if (s[q] === '"' && this.closesTag(q)) last = q;
+            this.lcStart = this.p;
+            this.lcEnd = q;
+            this.lcLast = last;
+        }
+        const lastClose = this.lcLast;
         let value = '';
         let tooLong = false;
         for (;;) {

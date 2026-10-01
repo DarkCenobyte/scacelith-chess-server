@@ -17,7 +17,8 @@
 //           whether or not another account uses the address; the link goes to the new address)
 //         | 200 { status: 'email_changed', email } (without e-mail verification: changed at once)
 //        errors: 400 invalid_email | same_email, 409 email_taken (only without e-mail verification),
-//                and the re-authentication errors below (auth/accounts.js, e-mail change)
+//                503 server_busy{retryAfter: 1} (the store stayed locked: nothing changed), and
+//                the re-authentication errors below (auth/accounts.js, e-mail change)
 //   POST /account/export { password, code?, recoveryCode? } -> the account's data (routes/account-export.js)
 //   PUT  /account/preferences { acceptChallenges: 'all'|'none' } -> { preferences }
 // Re-authentication errors: 403 invalid_password | mfa_code_required | invalid_code, 400 password_not_set,
@@ -36,6 +37,8 @@
 //        not consumed: link scanners open links), or 400 "link invalid or expired"
 //   POST /confirm-email-change (form: token) -> "E-mail address changed" | 400 invalid or expired
 //        | 409 "Address already used" (another account took the address since the request)
+//        | 503 server_busy, Retry-After 1 (the store stayed locked: nothing changed, the link
+//          still works)
 
 import * as emailPages from '../pages/email-change.js';
 import { AUTH_ABUSE_WEIGHT, authRateOf } from './auth.js';

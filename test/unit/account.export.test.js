@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { refundVictims } from '../../src/anticheat/refunds.js';
 import { base32Decode, totp } from '../../src/security/totp.js';
 import { enums } from '../../src/protocol/schema.js';
-import { DETAIL_FIELDS, EXPORT_FORMAT, exportedEvent, exportFileName } from '../../src/http/routes/account-export.js';
+import { DETAIL_FIELDS, EXPORT_FORMAT, IP_KINDS, exportedEvent, exportFileName, refundsPerDay } from '../../src/http/routes/account-export.js';
 import { linkIn, startTestServer } from './helpers/auth-fakes.js';
 import { startReal } from './helpers/real-auth.js';
 
@@ -57,7 +57,7 @@ test('the document: format, account, sections, Content-Disposition; account_expo
     });
     assert.deepEqual(d.ratings, [{ category: '3+2', rating: 1612, games: 42, wins: 20, draws: 5, losses: 17, peak: 1650, provisional: false,
         rated: true, countedGames: 42, updatedAt: 1234 }]);
-    assert.deepEqual(d.ratingRefunds, [{ gameId: 12, category: '3+2', points: 9, at: s.now() - 50 }]);
+    assert.deepEqual(d.ratingRefunds, [{ day: Math.floor((s.now() - 50) / 86400000) * 86400000, category: '3+2', points: 9 }]);
     assert.equal(d.sessions.length, 1);
     assert.deepEqual(Object.keys(d.sessions[0]).sort(), ['clientLabel', 'createdAt', 'expiresAt', 'id', 'ip', 'lastSeenAt', 'revokedAt']);
     assert.equal(d.sessions[0].clientLabel, 'Scacelith 1.4 (Windows)');
@@ -162,11 +162,66 @@ test('security event details: only the listed fields; moderator actions reduced 
         { kind: 'moderator_action', at: 2, ip: null, detail: { action: 'ban' } });
     assert.equal(exportedEvent({ kind: 'moderator_action', at: 2, detail: { action: 'integrity_confirm', previousLevel: 'suspected', score: 0.8 } }), null);
     assert.equal(exportedEvent({ kind: 'moderator_action', at: 2, detail: null }), null);
-    assert.deepEqual(exportedEvent({ kind: 'rating_refund', at: 3, detail: { refundId: 1, gameId: 9, cheaterId: 4, category: '3+2', points: 7, by: 'mod' } }).detail,
-        { gameId: 9, category: '3+2', points: 7 });
-    assert.deepEqual(DETAIL_FIELDS.rating_refund, ['gameId', 'category', 'points']);
+    // A refund's event would name its game (and so the cheater): ratingRefunds has its points.
+    assert.equal(exportedEvent({ kind: 'rating_refund', at: 3, detail: { refundId: 1, gameId: 9, cheaterId: 4, category: '3+2', points: 7, by: 'mod' } }), null);
+    assert.equal(DETAIL_FIELDS.rating_refund, undefined);
+    // The IP only for what the account holder did (IP_KINDS); a future kind has none.
+    assert.equal(exportedEvent({ kind: 'login_failed', at: 4, ip: '198.51.100.7', detail: { failures: 2 } }).ip, null);
+    assert.equal(exportedEvent({ kind: 'password_reset_requested', at: 4, ip: '198.51.100.7' }).ip, null);
+    assert.equal(exportedEvent({ kind: 'some_future_kind', at: 4, ip: '198.51.100.7' }).ip, null);
+    assert.equal(exportedEvent({ kind: 'password_changed', at: 4, ip: '192.0.2.1' }).ip, '192.0.2.1');
+    assert.ok(IP_KINDS.includes('login') && !IP_KINDS.includes('login_failed') && !IP_KINDS.includes('register_existing_email'));
+    assert.deepEqual(refundsPerDay([
+        { category: '3+2', points: 4, createdAt: 86400000 * 3 + 5 }, { category: '3+2', points: 6, createdAt: 86400000 * 4 - 1 },
+        { category: '1+0', points: 2, createdAt: 86400000 * 3 }, { category: '3+2', points: 1, createdAt: 86400000 * 9 },
+    ]), [{ day: 86400000 * 9, category: '3+2', points: 1 }, { day: 86400000 * 3, category: '1+0', points: 2 }, { day: 86400000 * 3, category: '3+2', points: 10 }]);
     assert.equal(exportFileName('Al_ice-9'), 'scacelith-account-Al_ice-9.json');
     assert.equal(exportFileName('a"b/c'), 'scacelith-account-a_b_c.json');
+});
+
+test('IP addresses: those of the account holder only; the IP of someone who typed the address or name is left out', async (t) => {
+    const s = await startTestServer({ env: { AUTH_FAILURES_PER_ACCOUNT: '3' } });
+    t.after(s.close);
+    const u = await s.createUser({ username: 'alice', email: 'alice@example.com', password: PW });
+    const BOB = '198.51.100.77', ALICE = '203.0.113.7';
+    // Bob uses Alice's address to register, asks for a reset of her password, guesses it, and
+    // gets her password right but not her second factor.
+    let r = await s.request('POST', '/api/v1/auth/register', { ip: BOB, body: { username: 'bobby', email: 'alice@example.com', password: 'another fine passphrase' } });
+    assert.equal(r.status, 202);
+    r = await s.request('POST', '/api/v1/auth/password/forgot', { ip: BOB, body: { email: 'alice@example.com' } });
+    assert.equal(r.status, 202);
+    for (let i = 0; i < 3; i++) {
+        r = await s.request('POST', '/api/v1/auth/login', { ip: BOB, body: { login: 'alice', password: 'not her password' } });
+        assert.equal(r.status, 401);
+    }
+    s.now.advance(3600000);
+    const signIn = await s.request('POST', '/api/v1/auth/login', { ip: ALICE, body: { login: 'alice', password: PW } });
+    assert.equal(signIn.status, 200);
+    const token = signIn.json.token;
+    const setup = await s.request('POST', '/api/v1/account/mfa/totp/setup', { token, ip: ALICE, body: { password: PW } });
+    const secret = base32Decode(setup.json.secret);
+    assert.equal((await s.request('POST', '/api/v1/account/mfa/totp/enable', { token, ip: ALICE, body: { code: totp(secret, s.now()) } })).status, 200);
+    r = await s.request('POST', '/api/v1/auth/login', { ip: BOB, body: { login: 'alice', password: PW } });
+    assert.ok(r.json.mfaToken);
+    assert.equal((await s.request('POST', '/api/v1/auth/login/mfa', { ip: BOB, body: { mfaToken: r.json.mfaToken, code: '000000' } })).status, 401);
+    s.now.advance(30000);
+    s.auth.events.flush();
+    const stored = s.store._raw.securityEvents.filter((e) => e.userId === u.id && e.ip === BOB).map((e) => e.kind).sort();
+    assert.deepEqual([...new Set(stored)], ['login_failed', 'login_lockout', 'mfa_failed', 'password_reset_requested', 'register_existing_email']);
+
+    r = await s.request('POST', EXPORT, { token, ip: ALICE, body: { password: PW, code: totp(secret, s.now()) } });
+    assert.equal(r.status, 200);
+    assert.ok(!r.text.includes(BOB), 'no IP address of another person');
+    const ev = r.json.securityEvents;
+    for (const kind of ['register_existing_email', 'password_reset_requested', 'login_failed', 'login_lockout', 'mfa_failed']) {
+        const e = ev.find((x) => x.kind === kind);
+        assert.ok(e, kind);
+        assert.equal(e.ip, null, kind);
+    }
+    assert.deepEqual(ev.find((x) => x.kind === 'login_failed').detail, { failures: 3 }, 'the rest of the event stays');
+    for (const kind of ['login', 'mfa_setup_started', 'mfa_enabled']) assert.equal(ev.find((x) => x.kind === kind).ip, ALICE, kind);
+    assert.ok(r.json.sessions.every((x) => x.ip === ALICE));
+    assert.ok(r.json.notes.some((n) => n.includes('IP address')));
 });
 
 // ---- the real store: no secret, no anti-cheat data, no moderator identity -------------------------
@@ -262,8 +317,7 @@ test('an export never holds a secret, the anti-cheat\'s data, reports against th
     assert.equal(d.games.total, 2);
     assert.deepEqual(d.games.list.map((x) => x.outcome).sort(), ['draw', 'loss']);
     assert.equal(d.ratingRefunds.length, 1);
-    assert.deepEqual(Object.keys(d.ratingRefunds[0]).sort(), ['at', 'category', 'gameId', 'points']);
-    assert.equal(d.ratingRefunds[0].gameId, lost.id);
+    assert.deepEqual(Object.keys(d.ratingRefunds[0]).sort(), ['category', 'day', 'points']);
     assert.equal(d.ratingRefunds[0].points, 10);
     assert.equal(d.sanctions.length, 2);
     assert.ok(d.sanctions.some((x) => x.liftedAt));
@@ -271,13 +325,13 @@ test('an export never holds a secret, the anti-cheat\'s data, reports against th
     assert.deepEqual(d.conduct.map((x) => x.kind), ['abandon']);
     assert.deepEqual(d.reportsFiled, [{ gameId: lost.id, reported: 'Mallory', category: 'cheating', comment: 'engine moves', createdAt: d.reportsFiled[0].createdAt, status: 'open' }]);
     const kinds = d.securityEvents.map((e) => e.kind);
-    for (const k of ['login', 'mfa_enabled', 'recovery_code_used', 'email_change_requested', 'rating_refund', 'sanction_auto', 'moderator_action']) {
+    for (const k of ['login', 'mfa_enabled', 'recovery_code_used', 'email_change_requested', 'sanction_auto', 'moderator_action']) {
         assert.ok(kinds.includes(k), `security event ${k}`);
     }
+    assert.ok(!kinds.includes('rating_refund'), 'a refund is in ratingRefunds, without its game');
     assert.deepEqual(d.securityEvents.filter((e) => e.kind === 'moderator_action').map((e) => e.detail), [{ action: 'reset_mfa' }]);
     assert.deepEqual(d.securityEvents.find((e) => e.kind === 'login').detail, { method: 'password' }, 'the auth events\' JSON text detail');
     assert.deepEqual(d.securityEvents.find((e) => e.kind === 'recovery_code_used').detail, { remaining: 9 });
-    assert.deepEqual(d.securityEvents.find((e) => e.kind === 'rating_refund').detail, { gameId: lost.id, category: '3+2', points: 10 });
     assert.deepEqual(Object.keys(d.securityEvents.find((e) => e.kind === 'sanction_auto').detail).sort(), ['gameId', 'kind', 'until']);
 
     // What it must never hold: every secret column of the database, in every encoding...
@@ -336,4 +390,47 @@ test('an export never holds a secret, the anti-cheat\'s data, reports against th
     assert.equal(raw.prepare('SELECT count(*) AS n FROM anomalies WHERE user_id = ?').get(uid).n, 1);
     assert.equal(raw.prepare('SELECT count(*) AS n FROM reports WHERE reported_id = ?').get(uid).n, 1);
     assert.ok(raw.prepare("SELECT count(*) AS n FROM security_events WHERE user_id = ? AND kind = 'moderator_action'").get(uid).n === 2);
+});
+
+test('rating refunds and the outcomes of reports never tell which opponent was sanctioned', async (t) => {
+    const s = await startReal(t);
+    const { store } = s;
+    const mk = async (username) => store.users.create({ username, email: `${username.toLowerCase()}@example.org`, passwordHash: await s.hasher.hash(PW), emailVerified: true });
+    const uid = await mk('Alice'), mallory = await mk('Mallory'), victor = await mk('Victor');
+    const login = await s.request('POST', '/api/v1/auth/login', { body: { login: 'Alice', password: PW } });
+    assert.equal(login.status, 200, login.text);
+    let gid = 7_100_000_000_000;
+    const game = (white, black, status) => ({
+        id: ++gid, category: '3+2', rated: true, baseMs: 180000, incMs: 2000, whiteId: white.id, blackId: black.id, whiteName: white.name,
+        blackName: black.name, whiteRating: 1500, blackRating: 1500, startedAt: Date.now() - 7200000, endedAt: Date.now() - 3600000, status,
+        reason: EndReason.Resignation, moves: Uint16Array.from([12 | (28 << 6), 52 | (36 << 6)]), spentMs: Uint32Array.from([0, 0]),
+        clockMs: Uint32Array.from([180000, 180000]), rematchOf: 0, flags: 0,
+    });
+    const A = { id: uid, name: 'Alice' }, M = { id: mallory, name: 'Mallory' }, V = { id: victor, name: 'Victor' };
+    const lostToM = game(M, A, GameStatus.WhiteWins), lostToV = game(V, A, GameStatus.WhiteWins), lostToM2 = game(A, M, GameStatus.BlackWins);
+    store.games.finishBatch([lostToM, lostToV, lostToM2]);
+    // Mallory is banned for cheating: Alice gets back the points of her two games against Mallory.
+    const at = Date.now();
+    const sanctionId = store.sanctions.create({ userId: mallory, kind: 'ban', reason: 'confirmed: engine', createdBy: 'mod_x' });
+    const given = refundVictims(store, { cheaterId: mallory, since: 0, now: at, sanctionId, source: 'moderator', by: 'mod_x' });
+    assert.deepEqual(given.filter((g) => g.victimId === uid).map((g) => g.gameId).sort(), [lostToM.id, lostToM2.id]);
+    // Alice's reports: the one on Mallory was actioned, the one on Victor dismissed.
+    store.reports.resolve(store.reports.create({ reporterId: uid, reportedId: mallory, gameId: lostToM.id, category: 'cheating', comment: 'engine', weight: 0.5 }), 'actioned', 'mod_x');
+    store.reports.resolve(store.reports.create({ reporterId: uid, reportedId: victor, gameId: lostToV.id, category: 'cheating', comment: 'fast', weight: 0.5 }), 'dismissed', 'mod_x');
+    s.auth.events.flush();
+
+    const r = await s.request('POST', EXPORT, { token: login.json.token, body: { password: PW } });
+    assert.equal(r.status, 200, r.text);
+    const d = r.json;
+    assert.equal(d.games.total, 3);
+    // The points given back, added up per UTC day and category (as the game's notice gives them).
+    assert.deepEqual(d.ratingRefunds, [{ day: at - (at % 86400000), category: '3+2', points: 20 }]);
+    // No refund field, and nothing outside the game list and Alice's own reports, names a game.
+    const ids = [lostToM.id, lostToV.id, lostToM2.id].map(String);
+    const rest = JSON.stringify({ ...d, games: null, reportsFiled: null });
+    assert.deepEqual(ids.filter((id) => rest.includes(id)), [], 'no refunded game in the refunds or the events');
+    assert.ok(!d.securityEvents.some((e) => e.kind === 'rating_refund'), 'refund events are in ratingRefunds');
+    // A filed report is open or closed; whether the reported player was sanctioned is not said.
+    assert.deepEqual(d.reportsFiled.map((x) => [x.reported, x.status]).sort(), [['Mallory', 'closed'], ['Victor', 'closed']]);
+    assert.ok(!r.text.includes('actioned') && !r.text.includes('dismissed'));
 });

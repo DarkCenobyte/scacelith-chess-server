@@ -1,7 +1,8 @@
 // A small GIF decoder for the tests of src/gif/ (written from the GIF89a specification, sharing
 // nothing with the encoder): header, logical screen, global colour table, extensions (graphic
 // control, NETSCAPE2.0 loop), image descriptors, LZW, and the composition of the frames on the
-// logical screen (disposal "keep" and transparency), strict about the format.
+// logical screen (disposal "keep" and transparency), strict about the format (the end-of-information
+// code must come at the code width a decoder expects, followed only by the zero padding bits).
 
 /**
  * @param {Uint8Array} buf
@@ -122,7 +123,13 @@ export function lzwDecode(data, minCodeSize, expected) {
             prev = -1;
             continue;
         }
-        if (code === eoi) break;
+        if (code === eoi) {
+            // Strict end: the end-of-information code was read at the width the decoder expects,
+            // and only the zero bits padding its last byte follow it.
+            if (Math.ceil(bitPos / 8) !== data.length) throw new Error('LZW data goes on after the end-of-information code');
+            if ((bitPos & 7) && (data[data.length - 1] >> (bitPos & 7)) !== 0) throw new Error('non-zero padding after the end-of-information code');
+            break;
+        }
         if (prev === -1) {
             if (code >= clear) throw new Error(`first code after a clear is ${code}`);
             write(code);

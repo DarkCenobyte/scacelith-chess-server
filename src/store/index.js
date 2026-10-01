@@ -677,13 +677,13 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         },
         /** Deletes every token of `kind` of the user (consumed or not); returns how many. */
         deleteForUser(userId, kind) {
-            return Number(st('DELETE FROM tokens WHERE user_id = ? AND kind = ?').run(userId, kind).changes);
+            return guard(() => Number(st('DELETE FROM tokens WHERE user_id = ? AND kind = ?').run(userId, kind).changes));
         },
         /** The newest token of `kind` of the user that is neither consumed nor expired, or null. */
         liveForUser(userId, kind, now = Date.now()) {
-            return toToken(st(`SELECT id, kind, user_id, data, created_at, expires_at, consumed_at FROM tokens
+            return toToken(guard(() => st(`SELECT id, kind, user_id, data, created_at, expires_at, consumed_at FROM tokens
                 WHERE user_id = ? AND kind = ? AND consumed_at IS NULL AND expires_at > ? ORDER BY created_at DESC, id DESC LIMIT 1`)
-                .get(userId, kind, ms(now)));
+                .get(userId, kind, ms(now))));
         },
     };
 
