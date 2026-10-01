@@ -3,9 +3,10 @@
 Every server, the official `caissa.scacelith.com` and any community server, answers this HTTPS
 API. The game uses it for everything outside a game itself: sign-up and sign-in (two-step
 verification and Google included), the account page, game history, PGN downloads and animated
-GIFs of games, signed-in devices, the data download and the deletion of the account, and reports. Live play (matchmaking,
-challenges, moves, clocks) goes through the WebSocket of the same server, opened with a session
-token of this API: see [PROTOCOL.md](PROTOCOL.md). Module contracts are in
+GIFs of games, signed-in devices, the data download and the deletion of the account, and
+reports. Live play (matchmaking, challenges, moves, clocks) goes through the WebSocket of the
+same server, opened with a session token of this API: see [PROTOCOL.md](PROTOCOL.md). Module
+contracts are in
 [DESIGN.md](DESIGN.md) section 5.9, the security model in section 8, every setting named here in
 [CONFIG.md](CONFIG.md). The game's side of these calls is described in
 [docs/ONLINE_CLIENT.md](../../docs/ONLINE_CLIENT.md).
@@ -93,8 +94,9 @@ password inline only to stay short.
 ### 1.3 Answers and errors
 
 - Answers are JSON in UTF-8, except the PGN download (`application/x-chess-pgn`), the animated
-  GIFs (`image/gif`, section 11) and the HTML pages. Times are milliseconds since 1970-01-01 UTC. Ids are integers. Game ids have up to 16
-  digits but stay below 2^53, so a JSON number (a double) holds them exactly.
+  GIFs (`image/gif`, section 11) and the HTML pages. Times are milliseconds since 1970-01-01
+  UTC. Ids are integers. Game ids have up to 16 digits but stay below 2^53, so a JSON number (a
+  double) holds them exactly.
 - Every answer carries `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
   `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`,
   `Cross-Origin-Resource-Policy: same-origin` and a `Content-Security-Policy`
@@ -246,12 +248,13 @@ through the history, is about one request per second.
 `GET /info` and `GET /leaderboard` have only the global limit.
 
 An endpoint with several limits checks them in the order of its row in section 2: on
-`POST /auth/register`, `auth` then `auth_register`. The limits of the auth family (`auth`, `auth_*`, `reauth`) are kept
-low because each request hashes a password or sends an e-mail. **Password recovery** is the
-strictest: a client (an IPv4 address or an IPv6 /64) may ask for 3 reset e-mails per hour and 10
-per 24 hours (3 times that per IPv6 /48), on top of `auth` and of one e-mail per address every 5
-minutes, whatever the address asked for; it may send 10 new passwords per hour with reset links.
-A refusal is a 429, which says nothing about whether the address has an account.
+`POST /auth/register`, `auth` then `auth_register`. The limits of the auth family (`auth`,
+`auth_*`, `reauth`) are kept low because each request hashes a password or sends an e-mail.
+**Password recovery** is the strictest: a client (an IPv4 address or an IPv6 /64) may ask for 3
+reset e-mails per hour and 10 per 24 hours (3 times that per IPv6 /48), on top of `auth` and of
+one e-mail per address every 5 minutes, whatever the address asked for; it may send 10 new
+passwords per hour with reset links. A refusal is a 429, which says nothing about whether the
+address has an account.
 
 The server handles a request in this order:
 
@@ -370,14 +373,14 @@ Auth column:
 | `DELETE /auth/sessions/:id` | session | `sessions` | Sign out one device |
 | `GET /account/me` | session | `account` | The account, ratings, active sanctions |
 | `PUT /account/preferences` | session | `account` | Accept or refuse direct challenges |
-| `POST /account/password` | session | `reauth` | Change the password |
-| `POST /account/mfa/totp/setup` | session | `reauth` | Start enabling two-step verification |
-| `POST /account/mfa/totp/enable` | session | `reauth` | Finish enabling it, get recovery codes |
-| `POST /account/mfa/totp/disable` | session | `reauth` | Turn two-step verification off |
-| `POST /account/mfa/recovery-codes` | session | `reauth` | Replace the recovery codes |
-| `POST /account/email` | session | `reauth` | Change the e-mail address |
-| `POST /account/export` | session | `account_export`, `reauth` | Download the account's data (JSON) |
-| `POST /account/delete` | session | `reauth` | Delete the account |
+| `POST /account/password` | session | `reauth`, `reauth_user` | Change the password |
+| `POST /account/mfa/totp/setup` | session | `reauth`, `reauth_user` | Start enabling two-step verification |
+| `POST /account/mfa/totp/enable` | session | `reauth`, `reauth_user` | Finish enabling it, get recovery codes |
+| `POST /account/mfa/totp/disable` | session | `reauth`, `reauth_user` | Turn two-step verification off |
+| `POST /account/mfa/recovery-codes` | session | `reauth`, `reauth_user` | Replace the recovery codes |
+| `POST /account/email` | session | `reauth`, `reauth_user` | Change the e-mail address |
+| `POST /account/export` | session | `account_export`, `reauth`, `reauth_user` | Download the account's data (JSON) |
+| `POST /account/delete` | session | `reauth`, `reauth_user` | Delete the account |
 | `GET /account/games` | session | `account_games` | The player's game history, filtered and paged |
 | `GET /games/:id` | optional | `public_read` | A game record with its moves and clocks |
 | `GET /games/:id/pgn` | optional | `public_read` | The same game as a PGN file |
@@ -531,7 +534,8 @@ TOKEN=$(curl -sS "$API/auth/login" -H 'Content-Type: application/json' \
 
 ### POST /auth/login/mfa
 
-The second step of a sign-in. **Auth** none. **Limit** `auth`.
+The second step of a sign-in. **Auth** none. **Limit** `auth`, and at most
+`AUTH_MFA_PER_ACCOUNT` (10) codes per 15 minutes for the account, from any address (section 1.5).
 
 | Field | Type | Notes |
 |---|---|---|
@@ -544,8 +548,10 @@ gone. Errors:
 
 - 401 `invalid_mfa_token`: the step expired, was used, or ended after 5 wrong codes, or the
   password was reset or changed since the first step; sign in again;
-- 429 `too_many_attempts`;
+- 429 `too_many_attempts`: the account's failure delay (section 1.5);
 - 400 `invalid_request`: neither `code` nor `recoveryCode` was sent;
+- 429 `too_many_attempts`: the account's `AUTH_MFA_PER_ACCOUNT` codes of the last 15 minutes are
+  used up; the code was not checked, so a recovery code is not spent;
 - 401 `invalid_code`;
 - 403 `banned`, 403 `email_unverified`.
 
@@ -796,7 +802,7 @@ curl -sS -X PUT "$API/account/preferences" -H "Authorization: Bearer $TOKEN" \
 
 ### POST /account/password
 
-Changes the password. **Auth** session. **Limit** `reauth`. Body:
+Changes the password. **Auth** session. **Limits** `reauth`, `reauth_user`. Body:
 `{ "currentPassword": string 1-1024, "newPassword": string 1-1024 }`. The current password is
 needed, but no second factor, even with two-step verification on.
 
@@ -820,8 +826,9 @@ Authenticator apps, RFC 6238: SHA-1, 6 digits, 30-second steps, one step of tole
 
 #### POST /account/mfa/totp/setup
 
-**Auth** session. **Limit** `reauth`. Body: `{ "password": string }`. This stores a new pending
-secret, which replaces any earlier pending one, and returns it for the authenticator app:
+**Auth** session. **Limits** `reauth`, `reauth_user`. Body: `{ "password": string }`. This
+stores a new pending secret, which replaces any earlier pending one, and returns it for the
+authenticator app:
 
 ```json
 {
@@ -836,10 +843,10 @@ password), and the re-authentication errors.
 
 #### POST /account/mfa/totp/enable
 
-**Auth** session. **Limit** `reauth`. Body: `{ "code": "123456" }`, a code from the pending secret
-(exactly 6 digits). No password is asked here; the password was given at setup. Answer: 200
-`{ "status": "mfa_enabled", "recoveryCodes": [10 codes like "j7v5-3ezx-zn"] }`. The recovery codes
-are shown this once. Errors:
+**Auth** session. **Limits** `reauth`, `reauth_user`. Body: `{ "code": "123456" }`, a code from
+the pending secret (exactly 6 digits). No password is asked here; the password was given at
+setup. Answer: 200 `{ "status": "mfa_enabled", "recoveryCodes": [10 codes like "j7v5-3ezx-zn"] }`.
+The recovery codes are shown this once. Errors:
 
 - 409 `mfa_already_enabled`;
 - 409 `mfa_setup_required`: no pending secret;
@@ -848,9 +855,10 @@ are shown this once. Errors:
 
 #### POST /account/mfa/totp/disable
 
-**Auth** session. **Limit** `reauth`. Body: `{ "password", "code"?, "recoveryCode"? }`. One of
-`code` or `recoveryCode` is required. Answer: 200 `{ "status": "mfa_disabled" }`. The secret and
-the recovery codes are deleted, and the owner gets a mail. Errors:
+**Auth** session. **Limits** `reauth`, `reauth_user`. Body:
+`{ "password", "code"?, "recoveryCode"? }`. One of `code` or `recoveryCode` is required. Answer:
+200 `{ "status": "mfa_disabled" }`. The secret and the recovery codes are deleted, and the owner
+gets a mail. Errors:
 
 - 409 `mfa_not_enabled`;
 - 403 `mfa_code_required`;
@@ -858,16 +866,16 @@ the recovery codes are deleted, and the owner gets a mail. Errors:
 
 #### POST /account/mfa/recovery-codes
 
-Replaces the recovery codes; the old ones stop working. **Auth** session. **Limit** `reauth`.
-Body: `{ "password", "code" }`, where `code` is an authenticator code (a recovery code is refused
-with 403 `invalid_code`). Answer: 200 `{ "recoveryCodes": [10 codes] }`. Errors: 409
-`mfa_not_enabled`, and the re-authentication errors.
+Replaces the recovery codes; the old ones stop working. **Auth** session. **Limits** `reauth`,
+`reauth_user`. Body: `{ "password", "code" }`, where `code` is an authenticator code (a recovery
+code is refused with 403 `invalid_code`). Answer: 200 `{ "recoveryCodes": [10 codes] }`. Errors:
+409 `mfa_not_enabled`, and the re-authentication errors.
 
 ## 7. E-mail address change
 
 ### POST /account/email
 
-**Auth** session. **Limit** `reauth`.
+**Auth** session. **Limits** `reauth`, `reauth_user`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -920,8 +928,9 @@ curl -sS "$API/account/email" -H "Authorization: Bearer $TOKEN" -H 'Content-Type
 
 Everything the server keeps about the account, as one JSON file to save. **Auth** session.
 **Limits** `account_export` (5 per hour per player, for the whole server; every attempt counts,
-failed ones included; checked first), `reauth` and `reauth_user`. Body: `{ "password", "code"?, "recoveryCode"? }`, the
-re-authentication of section 1.7. Time limit 60 s.
+failed ones included; checked first), `reauth` and `reauth_user`. Body:
+`{ "password", "code"?, "recoveryCode"? }`, the re-authentication of section 1.7. Time limit
+60 s.
 
 Answer: 200, `Content-Type: application/json; charset=utf-8`, and
 `Content-Disposition: attachment; filename="scacelith-account-<username>.json"`. Characters other
@@ -1039,9 +1048,9 @@ Errors:
 
 ### POST /account/delete
 
-Deletes the account; this cannot be undone. **Auth** session. **Limit** `reauth`. Body:
-`{ "password", "code"?, "recoveryCode"? }`. With two-step verification, a code or a recovery code
-is required. Answer: 200 `{ "status": "deleted" }`.
+Deletes the account; this cannot be undone. **Auth** session. **Limits** `reauth`,
+`reauth_user`. Body: `{ "password", "code"?, "recoveryCode"? }`. With two-step verification, a
+code or a recovery code is required. Answer: 200 `{ "status": "deleted" }`.
 
 - Every session is revoked at once. The token gets 401 `invalid_token` from then on.
 - The user name becomes `deleted#<id>`, in the account and in every game record.
@@ -1430,9 +1439,9 @@ player, or a deleted account), 503 `busy`.
 
 ### GET /players/:username/games
 
-The player's recent games, newest first. **Auth** optional, as above. **Limit** `public_read`. Query: `before`
-(a game id) and `limit` (1-50, default 20, as in section 10). Neither filters nor a total are
-available here.
+The player's recent games, newest first. **Auth** optional, as above. **Limit** `public_read`.
+Query: `before` (a game id) and `limit` (1-50, default 20, as in section 10). Neither filters nor
+a total are available here.
 
 ```sh
 curl -sS "$API/players/alice/games?limit=1"
