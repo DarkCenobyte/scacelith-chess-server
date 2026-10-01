@@ -119,6 +119,33 @@ test('rate: 5 exports per hour and player', async (t) => {
     assert.equal((await s.request('POST', EXPORT, { token: a.token, body: { password: PW } })).status, 200, 'one more after 12 minutes');
 });
 
+test('a long history is exported whole, newest first, in pages', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const u = await s.createUser({ username: 'alice', password: PW });
+    const bob = await s.createUser({ username: 'bob', password: PW });
+    const { token } = await s.login('alice', PW);
+    const N = 1203;
+    let calls = 0;
+    for (let i = 1; i <= N; i++) {
+        const white = i % 2 ? u.id : bob.id;
+        s.store._raw.games.push({ id: i, category: i % 3 ? '3+2' : 'custom', rated: i % 3 !== 0, baseMs: 180000, incMs: 2000, whiteId: white,
+            blackId: white === u.id ? bob.id : u.id, whiteName: white === u.id ? 'alice' : 'bob', blackName: white === u.id ? 'bob' : 'alice',
+            status: i % 5 ? GameStatus.WhiteWins : GameStatus.Aborted, reason: EndReason.Resignation, plies: 10, startedAt: i, endedAt: i + 1 });
+    }
+    const list = s.store.games.listForUser;
+    s.store.games.listForUser = (...a) => { calls++; return list(...a); };
+    const r = await s.request('POST', EXPORT, { token, body: { password: PW } });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.games.total, N);
+    assert.equal(r.json.games.list.length, N);
+    assert.deepEqual(r.json.games.list.slice(0, 3).map((g) => g.id), [1203, 1202, 1201]);
+    assert.equal(r.json.games.list.at(-1).id, 1);
+    assert.equal(new Set(r.json.games.list.map((g) => g.id)).size, N);
+    assert.equal(calls, 3, 'pages of 500');
+    assert.ok(r.json.games.list.some((g) => g.outcome === 'aborted'));
+});
+
 test('security event details: only the listed fields; moderator actions reduced or left out', () => {
     assert.deepEqual(exportedEvent({ kind: 'login', at: 1, ip: '192.0.2.1', detail: { method: 'password', extra: 'x' } }),
         { kind: 'login', at: 1, ip: '192.0.2.1', detail: { method: 'password' } });
