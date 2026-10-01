@@ -889,7 +889,7 @@ shortened here):
     { "category": "3+2", "rating": 1510, "games": 2, "wins": 1, "draws": 1, "losses": 0, "peak": 1510,
       "provisional": true, "rated": true, "countedGames": 2, "updatedAt": 1790882839809 }
   ],
-  "ratingRefunds": [ { "gameId": 4100000000002, "category": "3+2", "points": 9, "at": 1790882839000 } ],
+  "ratingRefunds": [ { "day": 1790812800000, "category": "3+2", "points": 9 } ],
   "sessions": [
     { "id": 1, "createdAt": 1790882839708, "lastSeenAt": 1790882839708, "expiresAt": 1798658839708,
       "revokedAt": null, "clientLabel": "Scacelith 1.4 (Windows)", "ip": "203.0.113.7" }
@@ -920,14 +920,25 @@ shortened here):
   - `rated`: whether the player has left the unrated phase;
   - `countedGames`: the games that entered the rating;
   - `updatedAt`: when the record last changed.
-- `ratingRefunds`: rating points given back to the player after an opponent was found cheating.
-  The cheater is not named.
+- `ratingRefunds`: rating points given back to the player after an opponent was found cheating,
+  added up per UTC day and category, newest first: `{ day, category, points }`, where `day` is
+  00:00 UTC of that day (epoch ms). Neither the games nor the cheaters are named, so the export
+  does not tell which opponent was sanctioned; it gives the points as the game's notice does (a
+  total may still match the rating changes of some games in `games.list`).
 - `sessions`: every stored session, newest first. There is no token in it. The retention purge
   deletes an expired session, and a signed-out one a day after the sign-out. `ip` is erased after
   `RETENTION_IP_DAYS`.
 - `securityEvents`: newest first, kept `RETENTION_SECURITY_DAYS`, with `ip` erased after
-  `RETENTION_IP_DAYS`. `detail` keeps only the fields that the export allows for the event's
-  kind:
+  `RETENTION_IP_DAYS`. `ip` is given only for what was done while signed in, with the account's
+  password (and second factor) or with a link mailed to its address: `register`,
+  `email_verified`, `login`, `sso_login`, `sso_account_created`, `recovery_code_used`,
+  `password_reset`, `password_changed`, `reauth_failed`, `mfa_setup_started`, `mfa_enabled`,
+  `mfa_disabled`, `recovery_codes_regenerated`, `session_revoked`, `sessions_revoked_all`,
+  `email_change_requested`, `email_changed`, `email_change_refused` and `account_exported`. Every
+  other kind has `ip: null`: failed sign-ins (`login_failed`, `login_lockout`, `mfa_failed`) and
+  the requests anyone can make by typing the account's name or address
+  (`password_reset_requested`, `verification_resent`, `register_existing_email`) may come from
+  another person. `detail` keeps only the fields that the export allows for the event's kind:
   - `login`: `method`;
   - `sso_login`, `sso_linked`, `sso_account_created`: `provider`;
   - `login_failed`: `failures`;
@@ -937,19 +948,20 @@ shortened here):
   - `reauth_failed`: `factor`;
   - `session_revoked` and `sessions_revoked_all`: `reason`;
   - `email_change_refused`: `reason`;
-  - `rating_refund`: `gameId`, `category`, `points`;
   - `sanction_auto`: `kind`, `gameId`, `until`.
 
   Every other kind has `detail: null`. A `moderator_action` event keeps only `{ action }`, for
   the actions `ban`, `unban`, `reset_mfa`, `verify_email` and `revoke_sessions`; the export leaves
-  out the other moderator actions.
+  out the other moderator actions. The `rating_refund` events are left out: their points are in
+  `ratingRefunds`.
 - `sanctions`: every sanction, lifted ones included:
   `{ id, kind, reason, source ("auto" | "moderator"), gameId, startsAt, endsAt, createdAt, liftedAt }`.
   The moderator's name is never included.
 - `conduct`: the conduct events recorded for the player's abandoned, aborted and no-show games
   (`kind`: `abandon`, `abort` or `noshow`), kept 30 days.
 - `reportsFiled`: the reports the player made. `reported` is the reported player's current public
-  name, and `status` is `open`, `actioned` or `dismissed`.
+  name, and `status` is `open` or `closed` (whether the reported player was sanctioned is not
+  said).
 - `games`: `total` and every game, newest first, as summaries of `GET /account/games`
   (section 10). Moves are at `GET /games/:id` and the PGN at `GET /games/:id/pgn`.
 
@@ -961,7 +973,9 @@ shortened here):
   population statistics, the weight of a report;
 - the reports other players made about the player;
 - the identities of moderators;
-- other players' private data (opponents appear by their public name and rating).
+- other players' private data: opponents appear by their public name and rating, nothing tells
+  whether another player was sanctioned, and no IP address that may be another person's is
+  included.
 
 The `notes` array of the document says this to the player in plain English.
 
