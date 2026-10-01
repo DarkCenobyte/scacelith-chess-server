@@ -1,21 +1,42 @@
-// /api/v1/account/* (docs/DESIGN.md 5.9). Every route needs a session (bearer token).
+// /api/v1/account/* (docs/DESIGN.md 5.9, docs/API.md). Every route needs a session (bearer token),
+// except the HTML pages of the e-mail change link at the end.
 //
 //   GET  /account/me -> { user, ratings: [...], sanctions: [...], ban: { until } | null }
-//        (the integrity level is never exposed)
+//        user: { id, username, email, emailVerified, mfaEnabled, googleLinked, hasPassword,
+//                acceptChallenges: 'all'|'none', createdAt, lastLoginAt, pendingEmail }
+//        (pendingEmail: the new address of a pending e-mail change, or null; the integrity level
+//        is never exposed)
 //   POST /account/password { currentPassword, newPassword } -> { status: 'password_changed' } (other sessions revoked)
 //   POST /account/mfa/totp/setup { password } -> { secret, uri, algorithm, digits, period }
 //   POST /account/mfa/totp/enable { code } -> { status: 'mfa_enabled', recoveryCodes: [10] }
 //   POST /account/mfa/totp/disable { password, code? , recoveryCode? } -> { status: 'mfa_disabled' }
 //   POST /account/mfa/recovery-codes { password, code } -> { recoveryCodes: [10] }
 //   POST /account/delete { password, code?, recoveryCode? } -> { status: 'deleted' }
+//   POST /account/email { newEmail, password, code?, recoveryCode? }
+//        -> 202 { status: 'verification_sent' } (REQUIRE_EMAIL_VERIFICATION: the same answer
+//           whether or not another account uses the address; the link goes to the new address)
+//         | 200 { status: 'email_changed', email } (without e-mail verification: changed at once)
+//        errors: 400 invalid_email | same_email, 409 email_taken (only without e-mail verification),
+//                and the re-authentication errors below (auth/accounts.js, e-mail change)
+//   POST /account/export { password, code?, recoveryCode? } -> the account's data (routes/account-export.js)
 //   PUT  /account/preferences { acceptChallenges: 'all'|'none' } -> { preferences }
 // Re-authentication errors: 403 invalid_password | mfa_code_required | invalid_code, 400 password_not_set,
 // 429 too_many_attempts, 503 server_busy{retryAfter} (password hash queue full, nothing changed),
 // 429 rate_limited{retryAfter} (the hash queue is at least half full and PASSWORD_HASH_WAITERS_PER_SOURCE
 // password hashes of this client already wait; nothing changed, and the reauth limit's token is given back).
+//
+// The e-mail change link (pages outside /api, like /verify-email):
+//   GET  /confirm-email-change?token= -> the new address and a confirmation button (the token is
+//        not consumed: link scanners open links), or 400 "link invalid or expired"
+//   POST /confirm-email-change (form: token) -> "E-mail address changed" | 400 invalid or expired
+//        | 409 "Address already used" (another account took the address since the request)
+
+import * as emailPages from '../pages/email-change.js';
 
 const PASSWORD = { type: 'string', min: 1, max: 1024 };
 const CODE = { type: 'string', min: 1, max: 32 };
+const EMAIL = { type: 'string', min: 1, max: 254 };
+const LINK_TOKEN = { type: 'string', min: 1, max: 128 };
 
 /**
  * @param {import('../router.js').Router} router
@@ -43,6 +64,26 @@ export function register(router, { config, auth }) {
     router.post('/account/delete', async (ctx) => ({ body: await auth.deleteAccount(ctx.user, { ...ctx.body, ip: ctx.ip }) }),
         opts({ password: PASSWORD, code: { ...CODE, optional: true }, recoveryCode: { ...CODE, optional: true } }));
 
+    router.post('/account/email', async (ctx) => auth.changeEmail(ctx.user, { ...ctx.body, ip: ctx.ip }),
+        opts({ newEmail: EMAIL, password: PASSWORD, code: { ...CODE, optional: true }, recoveryCode: { ...CODE, optional: true } }));
+
     router.put('/account/preferences', (ctx) => ({ body: auth.setPreferences(ctx.user, ctx.body) }),
         opts({ acceptChallenges: { type: 'enum', values: ['all', 'none'] } }, readRate));
+
+    // ---- the e-mail change link (GET shows a button, POST acts) ----
+    const serverName = config.serverName;
+    const pageRate = { key: 'page', limit: 60, windowMs: 60000 };
+    const linkRate = { key: 'auth', limit: config.authRatePerIp, prefixLimit: config.authRatePerPrefix, windowMs: 600000, shared: true };
+    router.page('GET', '/confirm-email-change', (ctx) => {
+        const token = ctx.query.token;
+        const pending = auth.peekEmailChange(token);
+        if (!pending) return { status: 400, html: emailPages.emailChangeInvalid({ serverName }) };
+        return { html: emailPages.emailChangeForm({ serverName, token, email: pending.email, username: pending.username }) };
+    }, { rate: pageRate });
+    router.page('POST', '/confirm-email-change', (ctx) => {
+        const r = auth.confirmEmailChange(ctx.body.token, ctx.ip);
+        if (r.status === 'changed') return { html: emailPages.emailChangeDone({ serverName, email: r.email }) };
+        if (r.status === 'taken') return { status: 409, html: emailPages.emailChangeTaken({ serverName }) };
+        return { status: 400, html: emailPages.emailChangeInvalid({ serverName }) };
+    }, { rate: linkRate, body: { token: LINK_TOKEN } });
 }

@@ -1,10 +1,41 @@
 // Account flows: registration, e-mail confirmation, password reset and change, account view,
-// re-authenticated account changes (MFA, deletion), preferences, sessions, logout.
+// re-authenticated account changes (MFA, e-mail address, data export, deletion), preferences,
+// sessions, logout.
 //
 // Enumeration resistance: register / resend / forgot give the same answer whatever the e-mail;
 // the "e-mail exists" branch of register hashes the password too (same work) and mails the
 // owner of the address instead. E-mails are throttled per address (primary `once.consume`, the
 // same call made whether the address exists or not).
+//
+// E-mail change (POST /account/email { newEmail, password, code?, recoveryCode? }; the
+// re-authentication of deletion: password, plus a code or a recovery code when MFA is on):
+//  * 400 invalid_email / same_email before the password is checked (the session already shows
+//    the address).
+//  * With REQUIRE_EMAIL_VERIFICATION: 202 { status: 'verification_sent' } whether or not another
+//    account uses the address. An `email_change` token (24 h, single use, data { email, from })
+//    replaces the user's pending change either way, so that GET /account/me shows the same
+//    pendingEmail; the new address gets the confirmation link (GET /confirm-email-change shows a
+//    button, POST applies), or, when it belongs to another account, its owner gets the
+//    registrationAttempt notice instead (at most one per hour per address; that throttle's
+//    `once.consume` runs in both cases). The current address is told that a change to the masked
+//    new address was requested (emailChangeRequested). The requester's security event is the same
+//    in both cases (email_change_requested); the owner's (email_change_existing_email) has no IP.
+//  * Confirmation (confirmEmailChange): the token is consumed; refused ('invalid') when the
+//    account's address is no longer the one of the request, refused ('taken') when another account
+//    took the new address meanwhile (the UNIQUE index decides, atomically); otherwise the address
+//    changes, emailVerified becomes true, the cached sessions are dropped on every shard (the
+//    other sessions stay signed in: the password did not change), the links sent to the former
+//    address (email_verify, password_reset, other email_change tokens) stop working, an
+//    email_changed security event is recorded and the former address gets emailChanged.
+//  * Without REQUIRE_EMAIL_VERIFICATION: the change happens at once, 200 { status:
+//    'email_changed', email }, or 409 email_taken (the deviation of register, below; the owner
+//    still gets the notice), and the former address is still told.
+//  * A password change or reset cancels a pending e-mail change (whoever requested it knew the
+//    password the owner just replaced).
+//
+// Data export (POST /account/export, same re-authentication): exportAccount() checks the
+// credentials, lets the caller build the document (http/routes/account-export.js) and records
+// an account_exported security event.
 //
 // Deviations (documented in the report):
 //  * REQUIRE_EMAIL_VERIFICATION=false: an account is ready at once (201 { status: 'ready' }) and an
@@ -18,7 +49,7 @@
 import crypto from 'node:crypto';
 import { AuthError, tooManyAttempts } from './errors.js';
 import { LINK_TOKEN_RE, TOKEN_TTL_MS, dataOf, isLive } from './tokens.js';
-import { checkUsername, isValidEmail, normalizeEmail } from './identity.js';
+import { checkUsername, isValidEmail, maskEmail, normalizeEmail } from './identity.js';
 import { checkPasswordPolicy } from '../security/password.js';
 import { FailureCounter } from '../security/ratelimit.js';
 import { randomToken, sha256Hex } from '../security/keys.js';
@@ -56,6 +87,14 @@ export function createAccounts(svc) {
         if (await once(mailKey('regattempt', user.email), NOTICE_THROTTLE_MS)) {
             svc.mail('registrationAttempt', user.email, { username: user.username });
         }
+    }
+
+    // The owner of an address another player asked to move their account to. `fresh`: the hourly
+    // throttle of this notice (the once.consume the caller made for the address, taken or not).
+    // No IP in the owner's event: it would be the other player's.
+    function notifyAddressClaimed(owner, fresh) {
+        events.record('email_change_existing_email', { userId: owner.id });
+        if (fresh) svc.mail('registrationAttempt', owner.email, { username: owner.username, emailChange: true });
     }
 
     /**
@@ -164,6 +203,7 @@ export function createAccounts(svc) {
         if (!store.tokens.consume('password_reset', sha256Hex(token), now())) throw invalidResetToken();
         store.users.update(user.id, { passwordHash, emailVerified: true });
         sessions.revokeAll(user.id);
+        cancelEmailChange(user.id);
         events.record('password_reset', { userId: user.id, ip });
         svc.mail('passwordChanged', user.email, { username: user.username, when: new Date(now()), byReset: true });
         return { status: 'password_reset' };
@@ -225,6 +265,7 @@ export function createAccounts(svc) {
             if (!fresh || !svc.setPasswordHashIf(user.id, fresh.passwordHash, next)) throw new AuthError(403, 'invalid_password', 'Wrong password.');
         }
         sessions.revokeAll(user.id, sessionId);
+        cancelEmailChange(user.id);
         events.record('password_changed', { userId: user.id, ip });
         svc.mail('passwordChanged', user.email, { username: user.username, when: new Date(now()), byReset: false });
         return { status: 'password_changed' };
@@ -301,11 +342,146 @@ export function createAccounts(svc) {
         return { status: 'deleted' };
     }
 
-    /** PUT /account/preferences. */
+    /** PUT /account/preferences ('all' | 'none', stored as the Store's boolean). */
     function setPreferences(ctxUser, { acceptChallenges }) {
         const user = activeUser(ctxUser.userId);
-        store.users.update(user.id, { acceptChallenges });
+        store.users.update(user.id, { acceptChallenges: acceptChallenges !== 'none' });
         return { preferences: { acceptChallenges } };
+    }
+
+    // ---- e-mail change (header) ----
+
+    /** Drops the user's pending e-mail change (its link stops working). */
+    function cancelEmailChange(userId) {
+        if (typeof store.tokens.deleteForUser === 'function') store.tokens.deleteForUser(userId, 'email_change');
+    }
+
+    function emailTaken() {
+        return new AuthError(409, 'email_taken', 'An account already uses this e-mail address.');
+    }
+
+    // After the address of `user` changed from `from` to `email`: the links sent to the former
+    // address stop working, the cached sessions are read again, the former address is told.
+    function emailChanged(user, from, email, ip) {
+        for (const kind of ['email_change', 'password_reset', 'email_verify']) {
+            if (typeof store.tokens.deleteForUser === 'function') store.tokens.deleteForUser(user.id, kind);
+        }
+        sessions.refresh(user.id);
+        events.record('email_changed', { userId: user.id, ip });
+        if (from) svc.mail('emailChanged', from, { username: user.username, maskedEmail: maskEmail(email), when: new Date(now()) });
+    }
+
+    /**
+     * POST /account/email (header).
+     * @returns {Promise<{ status: number, body: object }>}
+     */
+    async function changeEmail(ctxUser, { newEmail, password, code, recoveryCode, ip }) {
+        const pre = activeUser(ctxUser.userId);
+        const em = normalizeEmail(newEmail);
+        if (!isValidEmail(em)) throw new AuthError(400, 'invalid_email', 'This e-mail address is not valid.');
+        const same = () => new AuthError(400, 'same_email', 'This is already the e-mail address of your account.');
+        if (normalizeEmail(pre.email) === em) throw same();
+        const user = await reauth(ctxUser.userId, { password, code, recoveryCode }, { secondFactor: 'any', ip });
+        if (normalizeEmail(user.email) === em) throw same();
+        const from = user.email || null;
+        const holder = store.users.byEmail(em);
+        const owner = holder && holder.id !== user.id ? holder : null;
+
+        if (!config.requireEmailVerification) {
+            const claimed = async (o) => notifyAddressClaimed(o, await once(mailKey('emailchange', em), NOTICE_THROTTLE_MS));
+            if (owner) {
+                await claimed(owner);
+                throw emailTaken();
+            }
+            try {
+                store.users.update(user.id, { email: em, emailVerified: true });
+            } catch (err) {
+                if (err && err.code === 'email_taken') {
+                    const o = store.users.byEmail(em);
+                    if (o && o.id !== user.id) await claimed(o);
+                    throw emailTaken();
+                }
+                throw err;
+            }
+            emailChanged(user, from, em, ip);
+            return { status: 200, body: { status: 'email_changed', email: em } };
+        }
+
+        // The same work and the same answer whether or not the address is free.
+        const fresh = await once(mailKey('emailchange', em), NOTICE_THROTTLE_MS);
+        const token = randomToken('', 32);
+        svc.atomically(() => {
+            cancelEmailChange(user.id);
+            store.tokens.create({
+                kind: 'email_change', tokenHash: sha256Hex(token), userId: user.id, data: { email: em, from },
+                expiresAt: now() + TOKEN_TTL_MS.email_change,
+            });
+        });
+        events.record('email_change_requested', { userId: user.id, ip });
+        const hours = TOKEN_TTL_MS.email_change / 3600000;
+        if (owner) notifyAddressClaimed(owner, fresh);
+        else svc.mail('emailChangeConfirm', em, { username: user.username, link: svc.links.emailChange(token), hours });
+        if (from) svc.mail('emailChangeRequested', from, { username: user.username, maskedEmail: maskEmail(em), when: new Date(now()), hours });
+        return { status: 202, body: { status: 'verification_sent' } };
+    }
+
+    /**
+     * A live e-mail change link's account and new address, without consuming it (the page
+     * GET /confirm-email-change), or null.
+     * @returns {{ username: string, email: string }|null}
+     */
+    function peekEmailChange(token) {
+        const row = peekToken('email_change', token);
+        if (!row) return null;
+        const data = dataOf(row);
+        const user = store.users.byId(row.userId);
+        if (!user || user.status !== 'active' || normalizeEmail(user.email) !== normalizeEmail(data.from)) return null;
+        return { username: user.username, email: data.email };
+    }
+
+    /**
+     * POST /confirm-email-change: consumes the link's token and applies the change (header).
+     * @returns {{ status: 'changed', email: string } | { status: 'invalid' } | { status: 'taken' }}
+     */
+    function confirmEmailChange(token, ip = null) {
+        const invalid = { status: 'invalid' };
+        if (typeof token !== 'string' || !LINK_TOKEN_RE.test(token)) return invalid;
+        const row = store.tokens.consume('email_change', sha256Hex(token), now());
+        if (!row || (row.expiresAt != null && row.expiresAt <= now())) return invalid;
+        const data = dataOf(row);
+        const em = normalizeEmail(data.email);
+        const user = store.users.byId(row.userId);
+        if (!user || user.status !== 'active' || !isValidEmail(em)) return invalid;
+        // The account's address changed since the request (another change, a moderator): stale.
+        if (normalizeEmail(user.email) !== normalizeEmail(data.from)) return invalid;
+        const refused = () => {
+            events.record('email_change_refused', { userId: user.id, ip, detail: { reason: 'email_taken' } });
+            return { status: 'taken' };
+        };
+        const holder = store.users.byEmail(em);
+        if (holder && holder.id !== user.id) return refused();
+        try {
+            store.users.update(user.id, { email: em, emailVerified: true });
+        } catch (err) {
+            if (err && err.code === 'email_taken') return refused();
+            throw err;
+        }
+        emailChanged(user, user.email, em, ip);
+        return { status: 'changed', email: em };
+    }
+
+    /**
+     * POST /account/export: re-authenticates, then `build(user)` makes the document (it may be
+     * async); records account_exported.
+     * @param {object} ctxUser
+     * @param {{ password: string, code?: string, recoveryCode?: string, ip?: string|null }} creds
+     * @param {(user: object) => object|Promise<object>} build
+     */
+    async function exportAccount(ctxUser, { password, code, recoveryCode, ip }, build) {
+        const user = await reauth(ctxUser.userId, { password, code, recoveryCode }, { secondFactor: 'any', ip });
+        const doc = await build(user);
+        events.record('account_exported', { userId: user.id, ip });
+        return doc;
     }
 
     /** POST /auth/logout. */
@@ -334,6 +510,7 @@ export function createAccounts(svc) {
     return {
         register, peekToken, verifyEmail, resendVerification, forgotPassword, resetPassword, reauth, changePassword,
         me, mfaSetup, mfaEnable, mfaDisable, regenerateRecoveryCodes, deleteAccount, setPreferences,
+        changeEmail, peekEmailChange, confirmEmailChange, exportAccount,
         logout, logoutAll, revokeSession,
     };
 }

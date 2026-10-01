@@ -72,7 +72,7 @@ export function createFakeStore({ now = Date.now } = {}) {
                 users.set(id, {
                     id, username, email, emailVerified: !!emailVerified, passwordHash: passwordHash ?? null,
                     mfaEnabled: false, mfaSecretEnc: null, mfaLastStep: 0, createdAt: now(), lastLoginAt: null,
-                    status: 'active', acceptChallenges: 'all', pendingMfaSecretEnc: null,
+                    status: 'active', acceptChallenges: true, pendingMfaSecretEnc: null,
                 });
                 return id;
             },

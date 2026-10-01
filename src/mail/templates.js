@@ -35,10 +35,21 @@ export function passwordReset({ serverName, username, link, minutes }) {
 }
 
 /**
- * Sent to the owner of an address somebody tried to register again.
- * @param {{ serverName: string, username: string, forgotHint: boolean }} v
+ * Sent to the owner of an address somebody tried to register again, or (emailChange) that another
+ * player asked to move their account to.
+ * @param {{ serverName: string, username: string, emailChange?: boolean }} v
  */
-export function registrationAttempt({ serverName, username }) {
+export function registrationAttempt({ serverName, username, emailChange = false }) {
+    if (emailChange) {
+        return {
+            subject: `Someone tried to use your e-mail address on ${serverName}`,
+            text: `Hello ${username},\n\n` +
+                `A player of ${serverName} asked to change the e-mail address of their account to yours.\n` +
+                'Your address already belongs to your account, so it was not given to theirs, and your\n' +
+                'account did not change.\n\n' +
+                'You do not need to do anything.\n' + sign(serverName),
+        };
+    }
     return {
         subject: `Someone tried to register on ${serverName} with your e-mail address`,
         text: `Hello ${username},\n\n` +
@@ -77,4 +88,58 @@ export function passwordChanged({ serverName, username, when, byReset }) {
     };
 }
 
-export const templates = { verification, passwordReset, registrationAttempt, mfaDisabled, passwordChanged };
+/**
+ * Sent to the new address of an e-mail change: the confirmation link.
+ * @param {{ serverName: string, username: string, link: string, hours: number }} v
+ */
+export function emailChangeConfirm({ serverName, username, link, hours }) {
+    return {
+        subject: `Confirm your new e-mail address for ${serverName}`,
+        text: `Hello ${username},\n\n` +
+            `You asked to use this e-mail address for your ${serverName} account. To confirm it, open\n` +
+            `this link and press the confirmation button:\n\n${link}\n\n` +
+            `The link is valid for ${hours} hours and can be used once. Until it is used, your account\n` +
+            'keeps its current address.\n\n' +
+            'If you did not ask for this, ignore this message: nothing changes.\n' + sign(serverName),
+    };
+}
+
+/**
+ * Sent to the current address when a change of address is requested.
+ * @param {{ serverName: string, username: string, maskedEmail: string, when: Date, hours: number }} v
+ */
+export function emailChangeRequested({ serverName, username, maskedEmail, when, hours }) {
+    return {
+        subject: `A change of your ${serverName} e-mail address was requested`,
+        text: `Hello ${username},\n\n` +
+            `On ${when.toUTCString()}, a change of the e-mail address of your ${serverName} account\n` +
+            `to ${maskedEmail} was requested, with your password. The address changes only if the\n` +
+            `link sent to the new address is opened within ${hours} hours; until then, this address stays\n` +
+            'the one of your account.\n\n' +
+            'If it was you, there is nothing else to do.\n\n' +
+            'If it was not you, someone knows your password: change it at once in the game, or reset it\n' +
+            'with "Forgot password". A new password cancels the change of address.\n' + sign(serverName),
+    };
+}
+
+/**
+ * Sent to the former address once the change of address is done.
+ * @param {{ serverName: string, username: string, maskedEmail: string, when: Date }} v
+ */
+export function emailChanged({ serverName, username, maskedEmail, when }) {
+    return {
+        subject: `Your ${serverName} e-mail address was changed`,
+        text: `Hello ${username},\n\n` +
+            `The e-mail address of your ${serverName} account was changed to ${maskedEmail} on\n` +
+            `${when.toUTCString()}.\n\n` +
+            'Messages about your account, password resets included, now go to the new address: this\n' +
+            'is the last one sent to this address.\n\n' +
+            `If you did not do this, someone else controls your account: contact the administrator of\n` +
+            `${serverName} at once.\n` + sign(serverName),
+    };
+}
+
+export const templates = {
+    verification, passwordReset, registrationAttempt, mfaDisabled, passwordChanged, emailChangeConfirm, emailChangeRequested,
+    emailChanged,
+};

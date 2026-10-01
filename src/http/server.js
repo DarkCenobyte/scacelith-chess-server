@@ -41,11 +41,13 @@ import * as ssoRoutes from './routes/sso.js';
 import * as playerRoutes from './routes/players.js';
 import * as reportRoutes from './routes/reports.js';
 import * as accountGameRoutes from './routes/account-games.js';
+import * as accountExportRoutes from './routes/account-export.js';
 
 export { HttpError } from './router.js';
 
 /** Route modules of the auth owner (the bootstrap passes the full list, other owners' included). */
-export const DEFAULT_ROUTES = Object.freeze([infoRoutes, authRoutes, accountRoutes, ssoRoutes, playerRoutes, reportRoutes, accountGameRoutes]);
+export const DEFAULT_ROUTES = Object.freeze([infoRoutes, authRoutes, accountRoutes, ssoRoutes, playerRoutes, reportRoutes, accountGameRoutes,
+    accountExportRoutes]);
 
 const API_CSP = "default-src 'none'; frame-ancestors 'none'";
 const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);

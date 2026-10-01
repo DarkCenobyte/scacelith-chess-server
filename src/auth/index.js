@@ -28,6 +28,7 @@
 
 import { createAccounts } from './accounts.js';
 import { AuthError, hashRateLimited, serverBusy } from './errors.js';
+import { dataOf } from './tokens.js';
 import { createLogin } from './login.js';
 import { createMfa } from './mfa.js';
 import { createOidcClient, GOOGLE_OIDC } from './oidc.js';
@@ -132,6 +133,7 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
     // Runs fn in one store transaction when the store has them (the SQLite store: atomic across the
     // processes that share the database; the in-memory test store runs it as it is).
     const atomically = (fn) => (typeof store.transaction === 'function' ? store.transaction(fn) : fn());
+    svc.atomically = atomically;
 
     /**
      * Stores `passwordHash` for `userId` only while the stored hash is still `expected` (compare and
@@ -168,6 +170,7 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
     svc.links = {
         verify: (token) => `${publicBaseUrl(config)}/verify-email?token=${token}`,
         reset: (token) => `${publicBaseUrl(config)}/reset-password?token=${token}`,
+        emailChange: (token) => `${publicBaseUrl(config)}/confirm-email-change?token=${token}`,
     };
     // Fire-and-forget: a request never waits for an e-mail.
     svc.mail = (template, to, vars) => {
@@ -175,15 +178,34 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
             .then(() => svc.mailer.sendTemplate(template, to, vars))
             .catch((err) => log.error('e-mail not queued', { template, err: { message: err.message } }));
     };
+    /**
+     * The new address of the user's pending e-mail change (a live `email_change` token), or null.
+     * @param {number} userId
+     * @returns {string|null}
+     */
+    svc.pendingEmail = (userId) => {
+        if (typeof store.tokens.liveForUser !== 'function') return null;
+        const row = store.tokens.liveForUser(userId, 'email_change', now());
+        const email = row ? dataOf(row).email : null;
+        return typeof email === 'string' && email ? email : null;
+    };
+    /**
+     * The account as the player sees it (the `user` of GET /account/me and of the login answers).
+     * acceptChallenges is 'all' or 'none' (stored as a boolean: the Store's accept_challenges, which
+     * the challenge check reads as `acceptChallenges !== false`).
+     */
     svc.accountView = (user) => {
         let googleLinked = !!user.googleLinked;
         if (typeof store.sso.forUser === 'function') {
             try { googleLinked = (store.sso.forUser(user.id) || []).some((l) => l.provider === 'google'); } catch { /* keep default */ }
         }
+        let pendingEmail = null;
+        try { pendingEmail = svc.pendingEmail(user.id); } catch { /* informative only */ }
         return {
             id: user.id, username: user.username, email: user.email, emailVerified: !!user.emailVerified,
             mfaEnabled: !!user.mfaEnabled, googleLinked, hasPassword: !!user.passwordHash,
-            acceptChallenges: user.acceptChallenges || 'all', createdAt: user.createdAt ?? null,
+            acceptChallenges: user.acceptChallenges === false || user.acceptChallenges === 'none' ? 'none' : 'all',
+            createdAt: user.createdAt ?? null, lastLoginAt: user.lastLoginAt ?? null, pendingEmail,
         };
     };
     /** Throws 428 pow_required unless `given` is a valid, fresh answer for this endpoint and client. */
@@ -248,6 +270,12 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
         regenerateRecoveryCodes: a.regenerateRecoveryCodes,
         deleteAccount: a.deleteAccount,
         setPreferences: a.setPreferences,
+        changeEmail: a.changeEmail,
+        peekEmailChange: a.peekEmailChange,
+        confirmEmailChange: a.confirmEmailChange,
+        exportAccount: a.exportAccount,
+        /** The account as GET /account/me shows it (svc.accountView). */
+        accountView: (user) => svc.accountView(user),
         sso: { enabled: s.enabled, start: s.start, callback: s.callback, poll: s.poll, complete: s.complete },
 
         /** True while the login proof of work is on (credential-stuffing wave). */
