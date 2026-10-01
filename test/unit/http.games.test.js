@@ -215,7 +215,8 @@ test('the fixtures of the game\'s PGN reader are up to date (tests/data/server-p
     const files = renderFixtures();
     assert.ok(Object.keys(files).filter((n) => n.endsWith('.pgn')).length >= 6);
     for (const [name, text] of Object.entries(files)) {
-        assert.equal(fs.readFileSync(path.join(FIXTURES_DIR, name), 'utf8'), text, `${name}: run node dedicated-server/tools/gen-pgn-fixtures.js`);
+        // A checkout with CRLF line endings (Windows) keeps the same content.
+        assert.equal(fs.readFileSync(path.join(FIXTURES_DIR, name), 'utf8').replace(/\r\n/g, '\n'), text, `${name}: run node dedicated-server/tools/gen-pgn-fixtures.js`);
     }
     const index = JSON.parse(files['index.json']);
     assert.equal(index.games.length, fixtureGames().length);

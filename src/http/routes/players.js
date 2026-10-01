@@ -13,7 +13,8 @@
 // valid). When the session's player played the game, GET /games/:id adds `you` ('white' |
 // 'black') and `reportable` (whether POST /reports would take a report of the opponent for this
 // game now: anticheat/reports.js canReport, the route's own rules); every other answer is the
-// public one, unchanged. Both share the 'public_read' limit (60 per minute per client).
+// public one, unchanged. The two game routes and /players/:username/games share the 'public_read'
+// limit (60 requests per minute per client, all three together).
 //
 // The PGN (gamePgn): the game replayed with the server's chess module (ChessGame.fromMoves, SAN),
 // tags in this order: Event (as the JSON's pgn.Event), Site (SERVER_PUBLIC_HOST), Date (UTC start),

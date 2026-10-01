@@ -155,7 +155,8 @@ function main(argv) {
     const rel = path.relative(process.cwd(), FIXTURES_DIR) || '.';
     const stale = Object.entries(files).filter(([name, text]) => {
         const p = path.join(FIXTURES_DIR, name);
-        return !fs.existsSync(p) || fs.readFileSync(p, 'utf8') !== text;
+        // Line endings are normalised: a checkout with CRLF (Windows) is not stale.
+        return !fs.existsSync(p) || fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n') !== text;
     });
     if (argv.includes('--check')) {
         if (stale.length) { console.error(`${rel}: ${stale.map(([n]) => n).join(', ')} stale: run node dedicated-server/tools/gen-pgn-fixtures.js`); return 1; }
