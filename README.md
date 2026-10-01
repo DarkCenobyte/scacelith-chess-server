@@ -11,7 +11,8 @@ community server, and players choose the server in the game's Options.
 - Design and contracts: [docs/DESIGN.md](docs/DESIGN.md). Every setting: [docs/CONFIG.md](docs/CONFIG.md).
   Anti-cheat: [docs/ANTICHEAT.md](docs/ANTICHEAT.md).
 - HTTPS API, every endpoint with its answers, errors, rate limits and curl examples (sign-up and
-  sign-in, two-step verification, account, game history, PGN, data export, deletion):
+  sign-in, two-step verification, account, game history, PGN, animated GIFs, data export,
+  deletion):
   [docs/API.md](docs/API.md). The realtime WebSocket protocol: [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - Sizing and hosting on a small VPS (capacity, memory, disk, restarts, settings): [docs/SIZING.md](docs/SIZING.md).
 
@@ -343,6 +344,29 @@ limit, the better layout for a server that expects to be full.
   account. A change of e-mail address is confirmed through a link sent to the new address (with
   `REQUIRE_EMAIL_VERIFICATION`; without it the address changes at once), and the former address
   is told. The data download holds no password hash, two-step secret, token or anti-cheat data.
+
+## Animated GIFs of games
+
+Signed-in players can download any game of the server as an animated GIF
+(`GET /api/v1/games/:id/gif`), and any game they have as PGN text (`POST /api/v1/gif`): a 2D
+board seen from above, one frame per move, with the players' names and ratings and the result
+([docs/API.md](docs/API.md#get-gamesidgif)). The server draws them itself, with no external
+program, on a rendering thread of each worker process (`GIF_THREADS`, 1), so the games never wait
+for a GIF; it keeps the recent ones in memory (`GIF_CACHE_MB`, 32 per worker) and limits each
+account to 4 GIFs a minute and 30 an hour (`GIF_USER_RENDERS_*`), each address to 12 and 120
+(`GIF_IP_RENDERS_*`). A GIF takes from a few tens of milliseconds to about a second of one core,
+and a rendering thread up to about 120 MiB while it lives ([docs/SIZING.md](docs/SIZING.md#animated-gifs)).
+`GIF_ENABLED=false` turns the feature off. Every `GIF_*` setting: [docs/CONFIG.md](docs/CONFIG.md).
+
+The pictures use two works shipped in `assets/`, under their own licences:
+
+- `assets/pieces/cburnett/`: the "cburnett" chess pieces by Colin M.L. Burnett, GPL version 2
+  or later, as distributed with lichess (details in `assets/pieces/cburnett/LICENSE.md`). The
+  server is GPL-3.0-or-later, so the combination is distributed under the GPL version 3 or later.
+- `assets/fonts/scacelith-gif/`: "Scacelith GIF", bitmap subsets of Terminus Font 4.49.1 by
+  Dimitar Toshkov Zhekov, modified (a zero without a slash) and renamed as the licence asks of
+  modified versions; SIL Open Font License 1.1 (`assets/fonts/scacelith-gif/OFL.txt`).
+  `tools/gen-gif-font.js` regenerates them.
 
 ## Password hashing on a small server
 
