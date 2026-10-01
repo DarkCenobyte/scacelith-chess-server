@@ -86,6 +86,14 @@ times `WORKERS`, or raise the key with `--server-env MAX_PENDING_HANDSHAKES=1000
 default, a ramp that opens connections faster than the server completes them measures the gate
 instead.
 
+**Refused connections.** `node bench/gate-cost.js` measures what a connection the TLS gate
+refuses still costs the server: 20,000 connections from a blocked loopback address (reset at
+accept) and 20,000 that send a first record that is not TLS (`bad_hello`), with the CPU time of
+the server process (kernel included) per connection. On the development container (4-vCPU Xeon at
+2.1 GHz) both were 26-30 µs; SIZING "Protection per address" scales it to an OVH vCore. The
+per-address checks alone (a request, a new connection) are timed by the micro-benchmark of
+`test/unit/net.ipguard.test.js`, which prints them with `npm run test:unit`.
+
 **Open files.** The container used here has a hard `nofile` limit of 20,000 per process that
 cannot be raised without `CAP_SYS_RESOURCE`, so the tool uses at least `clients / 15000` server
 workers and load processes (7 of each for 100,000 connections on 4 cores). On a real server raise

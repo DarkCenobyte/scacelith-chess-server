@@ -269,16 +269,16 @@ At about 3.7 ms of CPU per new connection on these vCores (TLS handshake, upgrad
 
 Every request and every connection first meets a per-address layer (README, [Protection against abuse](../README.md#protection-against-abuse); [DESIGN.md](DESIGN.md) section 8): a request budget (`HTTP_RATE_PER_IP`, 600 per minute), a cap on the requests in progress (`IP_MAX_INFLIGHT`, 32 per worker), and with native TLS, before any TLS work, a new-connection rate (`IP_CONN_RATE`, 10 per second) and a cap on open connections (`IP_MAX_CONNECTIONS`, 128). An address is an IPv4 address or an IPv6 /64, and an IPv6 /48 gets 4 times each limit. These are whole-server limits: each worker allows its share, all of it on 2 workers (VPS-1) and half of it on 4 (VPS-2), so a client spread over the workers gets at most twice the figure, and no request waits for the primary. An address that keeps going after being refused (`ABUSE_BLOCK_REFUSALS_PER_MIN`, 600 refusals in a minute) is blocked: 1 min, then 4, 16 and 60 minutes at each new block within 6 hours.
 
-**Cost of the checks.** Measured on the development container, a 4-vCPU Intel Xeon at 2.10 GHz whose vCPU did the scrypt reference of [Validating on the real machine](#validating-on-the-real-machine) in 0.42-0.43 s against 0.50 s for the test vCPU, so its times are multiplied by about 1.8 for an OVH vCore at `s` = 0.65 (inferred). The checks themselves come from the micro-benchmark of `test/unit/net.ipguard.test.js` (it prints them); the last row from a TLS server behind the gate in one process and 20,000 connections from a blocked loopback address opened by another, the server process's CPU time (kernel included) divided by the count:
+**Cost of the checks.** Measured on the development container, a 4-vCPU Intel Xeon at 2.10 GHz whose vCPU did the scrypt reference of [Validating on the real machine](#validating-on-the-real-machine) in 0.42-0.43 s against 0.50 s for the test vCPU, so its times are multiplied by about 1.8 for an OVH vCore at `s` = 0.65 (inferred). The checks themselves come from the micro-benchmark of `test/unit/net.ipguard.test.js` (it prints them); the last row from `node bench/gate-cost.js`: a TLS server behind the gate in one process and 20,000 connections from a blocked loopback address opened by another, the server process's CPU time (kernel included) divided by the count:
 
 | Check | Development container | OVH vCore, `s` = 0.65 (inferred) |
 |---|---|---|
-| A request from an IPv4 address (budget, a place among the requests in progress, and its release) | 0.15-0.26 µs | about 0.3-0.5 µs |
-| The same from an IPv6 address (its /64 and its /48) | 0.48-0.70 µs | about 0.9-1.3 µs |
-| The keys of an IPv6 address, once per connection (cached on the socket afterwards: 0.005-0.03 µs) | 0.76-0.86 µs | about 1.5 µs |
-| A request from a blocked address | 0.02-0.03 µs | about 0.05 µs |
-| A new connection (rate, open counts) and its close | 0.53-0.57 µs | about 1 µs |
-| A whole connection reset before TLS (accept, the socket, the check, the reset); the same for one closed at a first record that is not TLS (`bad_hello`) | about 30 µs | about 55 µs |
+| A request from an IPv4 address (budget, a place among the requests in progress, and its release) | 0.14-0.26 µs | about 0.3-0.5 µs |
+| The same from an IPv6 address (its /64 and its /48) | 0.46-0.70 µs | about 0.8-1.3 µs |
+| The keys of an IPv6 address, once per connection (cached on the socket afterwards: 0.005-0.03 µs) | 0.74-0.86 µs | about 1.5 µs |
+| A request from a blocked address | 0.02-0.04 µs | about 0.05 µs |
+| A new connection (rate, open counts) and its close | 0.52-0.61 µs | about 1 µs |
+| A whole connection reset before TLS (accept, the socket, the check, the reset); the same for one closed at a first record that is not TLS (`bad_hello`) | 26-30 µs | about 50-55 µs |
 
 So the checks add well under 1 % to the cheapest request or move (a move costs 190-420 µs of the test vCPU), and refusing costs little. The last row is what a blocked address, or any connection flood, still costs: 1,000 connections per second from blocked addresses take about 5 % of a vCore, 10,000 about half of one (inferred). Only the provider's edge or a filter on the host remove that (see [Provider firewall](#provider-firewall-the-ovh-edge-network-firewall)).
 
