@@ -197,6 +197,29 @@ test('a silent server times out', async () => {
     } finally { await s.close(); }
 });
 
+test('a reply that never ends is refused', async () => {
+    // Continuation lines ("220-...") and never the last one: the server keeps the connection busy,
+    // so the idle timeout does not end it.
+    const socks = new Set();
+    const srv = net.createServer((sock) => {
+        socks.add(sock);
+        sock.on('error', () => {});
+        const timer = setInterval(() => sock.write('220-fake.test\r\n'.repeat(50)), 20);
+        sock.on('close', () => { clearInterval(timer); socks.delete(sock); });
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    let timer;
+    try {
+        const stuck = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('still reading after 3 s')), 3000); });
+        await assert.rejects(Promise.race([sendSmtp({ ...base(srv.address().port), security: 'none' }), stuck]),
+            (e) => e.code === 'protocol' && /reply too long/.test(e.message));
+    } finally {
+        clearTimeout(timer);
+        for (const sock of socks) sock.destroy();
+        await new Promise((r) => srv.close(r));
+    }
+});
+
 test('connection refused is an error', async () => {
     const srv = net.createServer();
     await new Promise((r) => srv.listen(0, '127.0.0.1', r));

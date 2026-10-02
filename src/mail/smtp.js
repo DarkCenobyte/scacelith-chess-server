@@ -54,6 +54,9 @@ class Conn {
             this.lines.push(this.buf.slice(0, i).replace(/\r$/, ''));
             this.buf = this.buf.slice(i + 1);
         }
+        // More than 512 lines: a server that never sends the last line of a reply (each chunk resets
+        // the idle timeout) would be read forever.
+        if (this.lines.length > 512) { this.fail(new SmtpError('protocol', 'reply too long')); this.socket.destroy(); return; }
         this.pump();
     }
     fail(err) {
