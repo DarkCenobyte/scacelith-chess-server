@@ -130,9 +130,14 @@ function onSocketData(chunk) { this._ws._onData(chunk); }
 function onSocketClose() { this._ws._onSocketClose(); }
 function onSocketError() { /* 'close' follows */ }
 function onSocketEnd() {
-    // The peer half-closed: finish our side too (no data can arrive any more).
+    // The peer half-closed: finish our side too (no data can arrive any more). Like every closing
+    // path, destroyed after closeTimeoutMs at the latest: a peer that no longer reads would keep
+    // the end() from finishing, and close() does nothing once _closeSent is set.
     const c = this._ws;
-    if (!c._closeSent) { c._closeSent = true; c._closeCode = c._closeCode || 1006; c.state = 'closing'; }
+    if (!c._closeSent) {
+        c._closeSent = true; c._closeCode = c._closeCode || 1006; c.state = 'closing';
+        setTimeout(destroySocket, c._server.closeTimeoutMs, this).unref();
+    }
     this.end();
 }
 function uncorkConnection(conn) {

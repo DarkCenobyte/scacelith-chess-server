@@ -234,3 +234,36 @@ describe('ws frames', () => {
         assert.equal(closes.get(conns[0].id), 1006);
     });
 });
+
+describe('ws: a peer that half-closes without a close frame and stops reading', () => {
+    it('is destroyed after closeTimeoutMs, and its admission slot is given back once', async () => {
+        let conn = null, closedCode = 0, releases = 0;
+        const wss = new WsServer({
+            registry: new Registry(), sendBufferLimit: 64 << 20, closeTimeoutMs: 300,
+            admission: { acquire: () => true, release: () => { releases++; } },
+            onConnection: (c) => { conn = c; c.onClose = (cn, code) => { closedCode = code; }; },
+        });
+        const srv = net.createServer((s) => wss.handleSocket(s));
+        await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+        const client = await connectWs({ port: srv.address().port });
+        try {
+            client.socket.removeAllListeners('data');
+            client.socket.pause();
+            // More than the socket buffers hold: the rest stays queued in user space, so the
+            // server's end() cannot finish while the client does not read.
+            const chunk = Buffer.alloc(60000, 7);
+            for (let i = 0; i < 400; i++) conn.sendFrame(chunk);
+            await sleep(100);
+            assert.ok(conn.bufferedBytes > 0);
+            client.socket.end();
+            const t0 = Date.now();
+            while (closedCode === 0) {
+                assert.ok(Date.now() - t0 < 1800, 'destroyed after closeTimeoutMs');
+                await sleep(10);
+            }
+            assert.equal(closedCode, 1006);
+            assert.equal(wss.size, 0);
+            assert.equal(releases, 1);
+        } finally { client.destroy(); srv.close(); }
+    });
+});
