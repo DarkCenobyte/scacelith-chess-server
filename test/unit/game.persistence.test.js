@@ -102,6 +102,7 @@ test('real store + journal + rules: a rated game is committed with ratings, an o
         s = await setup(dir);
         s.clock.t = before.serverTime + 2000;
         assert.equal(await s.host.recover(), 1);
+        assert.equal(s.journal.recover().size, 0, 'the journal lets the replayed records go');
         const room = s.host.room(g2);
         assert.ok(room, 'the unfinished game is back');
         assert.equal(s.host.room(g1), null);

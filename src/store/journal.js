@@ -430,6 +430,11 @@ class Journal {
         return this.recovered;
     }
 
+    /** Lets the records of recover() go once the games are rebuilt; recover() is empty afterwards. */
+    releaseRecovered() {
+        this.recovered = new Map();
+    }
+
     /** Numbers for metrics and tests. */
     stats() {
         return {
