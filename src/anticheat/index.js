@@ -286,8 +286,10 @@ export function createAnticheat({ config, store, primary = null, log = null, now
 /**
  * Starts the engine-analysis process (bin/analysis-worker.js) as a low-priority child of the
  * primary, restarting it with exponential backoff when it dies. Disabled (no process) when
- * ANALYSIS_ENGINE_PATH is empty or ANALYSIS_WORKERS is 0.
- * @param {object} config
+ * ANALYSIS_ENGINE_PATH is empty or ANALYSIS_WORKERS is 0. The process runs `config`, which it asks
+ * for at its start ('config.snapshot', config.js primaryConfig), not .env and the secret files as
+ * they are when it restarts.
+ * @param {object} config the primary's (loadConfig)
  * @param {{ log?: object, script?: string, env?: object, minBackoffMs?: number, maxBackoffMs?: number, stableMs?: number }} [o]
  * @returns {{ enabled: boolean, readonly pid: number|null, readonly restarts: number, metricsSnapshot: (timeoutMs?: number) => Promise<object[]|null>, stop: (graceMs?: number) => Promise<void> }}
  *          metricsSnapshot: the process's metrics registry snapshot, null while it is not running or does not answer
@@ -314,6 +316,7 @@ export function startAnalysisProcess(config, { log = null, script = null, env = 
         try { os.setPriority(child.pid, os.constants.priority.PRIORITY_LOW); } catch { /* the worker lowers itself too */ }
         lg.info('analysis process started', { pid: child.pid });
         const me = child, channel = new Ipc(child, { name: 'analysis', log: lg });
+        channel.on('config.snapshot', () => config.rawValues);
         ipc = channel;
         me.on('error', (e) => lg.warn('analysis process error', { err: e }));
         me.on('exit', (code, signal) => {

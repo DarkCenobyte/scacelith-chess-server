@@ -359,8 +359,7 @@ function toCamel(name) {
 // not set. Values are exposed in camelCase (API_PORT -> apiPort); secrets as Buffers (keys of
 // type secret) and never appear in describe()/toJSON(). `rawValues` (not enumerable) holds the
 // text of every key that was set, *_FILE contents included: loadConfig({ env: rawValues,
-// envFile: '' }) gives the same configuration without reading any file again (the shards'
-// configuration, cluster/worker-main.js).
+// envFile: '' }) gives the same configuration without reading any file again (primaryConfig).
 export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } = {}) {
     const named = envFile ?? env.SCACELITH_ENV_FILE;            // '' = no file
     const fileName = named ?? path.join(cwd, '.env');
@@ -521,6 +520,20 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     Object.defineProperty(cfg, 'loadNotes', { value: Object.freeze(notes), enumerable: false });
     Object.defineProperty(cfg, 'rawValues', { value: Object.freeze(rawValues), enumerable: false });
     return Object.freeze(cfg);
+}
+
+/**
+ * The configuration of a process the primary started (a shard, the analysis process): the one the
+ * primary loaded at its start (environment, .env and the *_FILE secrets as it read them then),
+ * asked for over IPC ('config.snapshot'). Such a process restarted after an edit of .env or of a
+ * secret file keeps the settings of the primary and of its peers (bus token, journal, database)
+ * until the whole server restarts.
+ * @param {{ request(type: string): Promise<any> }} primary the Ipc to the primary
+ */
+export async function primaryConfig(primary) {
+    const snapshot = await primary.request('config.snapshot');
+    if (!snapshot || typeof snapshot !== 'object') throw new Error('the primary sent no configuration');
+    return loadConfig({ env: snapshot, envFile: '' });
 }
 
 /**

@@ -541,7 +541,7 @@ Shard -> primary:
 
 | type | payload | reply |
 |---|---|---|
-| `config.snapshot` | - | the text of every configuration key the primary loaded at its start (`*_FILE` contents included): the worker's configuration, so that a restarted shard keeps the primary's settings |
+| `config.snapshot` | - | the text of every configuration key the primary loaded at its start (`*_FILE` contents included): the worker's configuration, so that a restarted shard keeps the primary's settings (the analysis process asks for it too) |
 | `presence.claim` | `{ userId, username, shard, connId }` | `{ ok, activeGame: id or 0, kicked: bool }` or `{ error }` (ServerFull, Banned) |
 | `presence.release` | `{ userId, connId }` | - |
 | `conn.ipAcquire` / `conn.ipRelease` | `{ ip }` | `{ ok }` or `{ ok: false, reason }` (`per_ip`: `MAX_CONNECTIONS_PER_IP`; `global`: `MAX_CONNECTIONS` plus `max(16, 2 %)`) |

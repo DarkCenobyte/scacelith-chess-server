@@ -120,7 +120,9 @@ is recorded, the player being `confirmed` and under the automatic ban by then.
 ## 3. Engine analysis
 
 `startAnalysisProcess(config)` (primary) forks `bin/analysis-worker.js` at low CPU priority and
-restarts it with exponential backoff (1 s .. 60 s) if it dies. It does nothing when
+restarts it with exponential backoff (1 s .. 60 s) if it dies. The process runs the configuration
+the primary loaded at its start, asked for over IPC as the shards do, so an edit of `.env` or of a
+secret file reaches it only with a restart of the whole server. It does nothing when
 `ANALYSIS_ENGINE_PATH` is empty or `ANALYSIS_WORKERS=0`; timing and reports still work. The
 worker runs `ANALYSIS_WORKERS` engines (one thread each, `ANALYSIS_HASH_MB` of hash, low
 priority), claims rated games of at least `ANALYSIS_MIN_PLIES` from the queue, and for each game:

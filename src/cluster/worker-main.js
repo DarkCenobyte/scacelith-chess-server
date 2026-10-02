@@ -8,13 +8,14 @@
 // cluster module then exits the worker with code 0; the journal replay recovers everything but the
 // events of its last JOURNAL_FLUSH_MS); a graceful stop also closes the API handler (its GIF
 // rendering threads) before the journal and the store.
-// The configuration is the primary's (shardConfig), not read again from the environment and files.
+// The configuration is the primary's (config.js primaryConfig), not read again from the environment
+// and files.
 
 import cluster from 'node:cluster';
 import { createAnticheat } from '../anticheat/index.js';
 import { createAuth } from '../auth/index.js';
 import { ChessGame } from '../chess/index.js';
-import { loadConfig } from '../config.js';
+import { primaryConfig } from '../config.js';
 import { GameHost } from '../game/host.js';
 import { createApiHandler } from '../http/server.js';
 import { configureLogging, logger } from '../log.js';
@@ -24,19 +25,6 @@ import { openJournal } from '../store/journal.js';
 import { startStoreWriter } from '../store/writer.js';
 import { Ipc } from './ipc.js';
 import { createBus, createShardGuard, startShard } from './shard.js';
-
-/**
- * The shard's configuration: the one the primary loaded at its start (environment, .env and the
- * *_FILE secrets as it read them then). A shard restarted after an edit of .env or of a secret file
- * keeps the settings of the primary and of its peers (bus token, journal, database) until the
- * whole server restarts.
- * @param {Ipc} primary
- */
-export async function shardConfig(primary) {
-    const snapshot = await primary.request('config.snapshot');
-    if (!snapshot || typeof snapshot !== 'object') throw new Error('the primary sent no configuration');
-    return loadConfig({ env: snapshot, envFile: '' });
-}
 
 /** Starts this worker's shard (null when the primary stopped it during the start-up). */
 export async function main() {
@@ -49,7 +37,7 @@ export async function main() {
     // replaces this one.
     let stopRequested = false;
     primary.on('shutdown', () => { stopRequested = true; return { ok: true }; });
-    const config = await shardConfig(primary);
+    const config = await primaryConfig(primary);
     configureLogging({ level: config.logLevel, format: config.logFormat, ipMode: config.logIp, secret: config.serverSecret, base: { inst: config.instanceId, shard } });
     process.on('uncaughtException', (e) => { log.error('uncaught exception: the shard restarts', { err: e }); process.exit(1); });
     process.on('unhandledRejection', (e) => { log.error('unhandled rejection', { err: e }); });
