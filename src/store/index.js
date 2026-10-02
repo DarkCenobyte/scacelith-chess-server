@@ -135,6 +135,9 @@
 //         each with reportedName and `outcome` (null while open, else 'actioned' | 'dismissed').
 //         anticheat/reports.js reads the outcomes for the reporter's track record when this call
 //         exists: before it, every reporter of a real store had the neutral track record.
+//       reports.resolveOpenFor(reportedId, category, outcome, by, now) -> [ids]: every open report
+//         of that category against the player resolved in one statement (forReported returns only
+//         the newest 200: bin/admin.js integrity confirm / clear).
 //       explainQueryPlan(store, sql, params) (module export): the EXPLAIN QUERY PLAN rows of a
 //         statement on the store's own connection (tests and diagnostics).
 
@@ -1412,6 +1415,12 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             if (outcome !== 'actioned' && outcome !== 'dismissed') throw new StoreError('invalid', "outcome must be 'actioned' or 'dismissed'");
             return Number(st(`UPDATE reports SET status = ?, resolved_at = ?, resolved_by = ? WHERE id = ? AND status = 'open'`)
                 .run(outcome, ms(now), by === null || by === undefined ? null : String(by), id).changes) === 1;
+        },
+        /** Resolves every open report of `category` against the player in one statement; returns their ids. */
+        resolveOpenFor(reportedId, category, outcome, by = null, now = Date.now()) {
+            if (outcome !== 'actioned' && outcome !== 'dismissed') throw new StoreError('invalid', "outcome must be 'actioned' or 'dismissed'");
+            return guard(() => st(`UPDATE reports SET status = ?, resolved_at = ?, resolved_by = ? WHERE reported_id = ? AND category = ? AND status = 'open'
+                RETURNING id`).all(outcome, ms(now), by === null || by === undefined ? null : String(by), reportedId, category).map((r) => r.id));
         },
     };
 

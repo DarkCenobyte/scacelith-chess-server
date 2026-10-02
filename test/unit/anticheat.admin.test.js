@@ -223,6 +223,36 @@ test('integrity show / reports list on the real store: report dates and outcomes
     assert.deepEqual(list.json.map((r) => [r.username, r.ids, r.latest]), [['bob', [r2], NOW - 3600000]]);
 });
 
+test('integrity confirm / clear resolve every open cheating report, not only those among the newest 200', async (t) => {
+    const store = openStore(testConfig({ DB_PATH: ':memory:' }));
+    t.after(() => store.close());
+    migrate(store);
+    const bob = store.users.create({ username: 'bob', email: 'bob@example.org' });
+    const eve = store.users.create({ username: 'eve', email: 'eve@example.org' });
+    const ann = store.users.create({ username: 'ann', email: 'ann@example.org' });
+    // Per reported player: 20 old open cheating reports, then 200 newer ones, resolved or about abuse.
+    const file = (reportedId, game, category, at) => store.reports.create({ reporterId: ann, reportedId, gameId: game, category, comment: '', weight: 0.1, at });
+    for (const target of [bob, eve]) {
+        for (let i = 0; i < 20; i++) file(target, 1000 + i, 'cheating', NOW - 10 * 86400000 + i);
+        for (let i = 0; i < 200; i++) {
+            const id = file(target, 2000 + i, i % 2 ? 'abuse' : 'cheating', NOW - 86400000 + i);
+            store.reports.resolve(id, 'dismissed', 'mod', NOW - 86400000 + i);
+        }
+    }
+    const open = (userId) => store.reports.listOpen(1000).filter((r) => r.reportedId === userId);
+    assert.equal(open(eve).length, 20);
+    const clr = await run(store, ['integrity', 'clear', 'eve', '--dismiss-reports', '--json']);
+    assert.equal(clr.code, 0, clr.err);
+    assert.equal(clr.json.reportsDismissed, 20);
+    assert.deepEqual(open(eve), []);
+    assert.equal(store.reports.forReporter(ann, 1000).filter((r) => r.reportedId === eve && r.outcome === 'dismissed' && r.resolvedBy === 'mod-anna').length, 20);
+    const conf = await run(store, ['integrity', 'confirm', 'bob', '--reason', 'engine', '--no-refund', '--json']);
+    assert.equal(conf.code, 0, conf.err);
+    assert.equal(conf.json.reportsActioned, 20);
+    assert.deepEqual(open(bob), []);
+    assert.equal(store.reports.forReporter(ann, 1000).filter((r) => r.reportedId === bob && r.outcome === 'actioned').length, 20);
+});
+
 test('bench-accounts: refused without the test-server flag; creates verified accounts with sessions', async (t) => {
     const { store } = world();
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bench-'));

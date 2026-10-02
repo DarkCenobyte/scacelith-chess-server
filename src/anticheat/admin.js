@@ -164,14 +164,9 @@ function reportsAgainst(ctx, userId) {
 
 function isOpen(r) { return !(r.outcome ?? r.resolution ?? r.resolvedAt ?? r.resolved_at); }
 
+// Every open cheating report, not only those among the newest reports that forReported returns.
 function resolveOpenCheatingReports(ctx, userId, outcome) {
-    let n = 0;
-    for (const r of reportsAgainst(ctx, userId)) {
-        if (!isOpen(r) || r.category !== 'cheating') continue;
-        ctx.store.reports.resolve(r.id, outcome, ctx.moderator, ctx.now());
-        n++;
-    }
-    return n;
+    return ctx.store.reports.resolveOpenFor(userId, 'cheating', outcome, ctx.moderator, ctx.now()).length;
 }
 
 function pushReview(ev, entry) {

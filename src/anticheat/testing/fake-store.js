@@ -197,6 +197,11 @@ export function createFakeStore({ textColumns = false } = {}) {
                 r.outcome = outcome; r.resolvedBy = by; r.resolvedAt = now;
                 return true;
             },
+            resolveOpenFor(reportedId, category, outcome, by, now) {
+                const open = reports.filter((r) => r.reportedId === reportedId && r.category === category && !r.outcome);
+                for (const r of open) { r.outcome = outcome; r.resolvedBy = by; r.resolvedAt = now; }
+                return open.map((r) => r.id);
+            },
         },
         // Same contract as the real store (games as store.games.byId returns them, with whiteK /
         // blackK for the K factor; the games of the ratings are not checked against the records).
