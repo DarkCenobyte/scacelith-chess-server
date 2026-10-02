@@ -37,7 +37,7 @@ describe('TLS session-ticket keys', () => {
         assert.notDeepEqual(k.ticketKeys(at(103)), day101);
     });
 
-    it('give out copies of their state, and refuse a malformed one', () => {
+    it('give out copies of their state, wipe the one a shard takes, and refuse a malformed one', () => {
         const k = new TicketKeys({ key: Buffer.alloc(32, 1), day: 5 });
         const s = k.state(at(5));
         s.key.fill(7);
@@ -46,6 +46,11 @@ describe('TLS session-ticket keys', () => {
         const w = new TicketKeys({ key: given, day: 5 });
         w.advance(at(6));
         assert.deepEqual(given, Buffer.alloc(32, 3), 'the caller\'s buffer is not touched');
+        // A shard takes the state it received over IPC: that copy of the key is overwritten.
+        const received = { key: Buffer.alloc(32, 3), day: 5 };
+        const taken = TicketKeys.take(received);
+        assert.deepEqual(received.key, Buffer.alloc(32));
+        assert.deepEqual(taken.ticketKeys(at(6)), w.ticketKeys(at(6)));
         for (const bad of [undefined, null, {}, { key: Buffer.alloc(31), day: 5 }, { key: Buffer.alloc(32), day: 1.5 }, { key: 'x'.repeat(32), day: 5 }]) {
             assert.throws(() => new TicketKeys(bad), TypeError);
         }

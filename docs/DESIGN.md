@@ -538,7 +538,7 @@ Shard -> primary:
 | type | payload | reply |
 |---|---|---|
 | `config.snapshot` | - | the text of every configuration key the primary loaded at its start (`*_FILE` contents included): the worker's configuration, so that a restarted shard keeps the primary's settings |
-| `tls.ticketKeys` | - | `{ key, day }` (native TLS only, before the shard listens): the current state of the session-ticket keys every worker shares, drawn at random by the primary at its start and moved forward one way each UTC day (`src/net/ticket-keys.js`), so that a restarted shard resumes the others' sessions; `null` in the other TLS modes |
+| `tls.ticketKeys` | - | `{ key, day }` (native TLS only, before the shard listens): the current state of the session-ticket keys every worker shares, drawn at random by the primary at its start and moved forward one way each UTC day (`src/net/ticket-keys.js`), so that a restarted shard resumes the others' sessions; the shard overwrites the key it received once copied; `null` in the other TLS modes |
 | `presence.claim` | `{ userId, username, shard, connId }` | `{ ok, activeGame: id or 0, kicked: bool }` or `{ error }` (ServerFull, Banned) |
 | `presence.release` | `{ userId, connId }` | - |
 | `conn.ipAcquire` / `conn.ipRelease` | `{ ip }` | `{ ok }` or `{ ok: false, reason }` (`per_ip`: `MAX_CONNECTIONS_PER_IP`; `global`: `MAX_CONNECTIONS` plus `max(16, 2 %)`) |

@@ -8,6 +8,9 @@
 // kernel hands it to), while nothing left in memory or on disk recomputes the keys of a past day:
 // recorded TLS 1.2 sessions stay private when SERVER_SECRET leaks or the memory is read later.
 // Nothing is written to disk either, so after a full restart every client does one full handshake.
+// The copies that cross the IPC are wiped as far as this code holds them: a shard overwrites the
+// key it received once copied (TicketKeys.take); the primary's reply and the serialized message
+// are left to the garbage collector (best effort, the key of the day a worker started).
 
 import crypto from 'node:crypto';
 
@@ -29,6 +32,13 @@ export class TicketKeys {
     /** A new random state for the day of `now` (the primary's, at its start). */
     static random(now = Date.now()) {
         return new TicketKeys({ key: crypto.randomBytes(KEY_BYTES), day: Math.floor(now / DAY_MS) });
+    }
+
+    /** The state a shard received from the primary: copied, then the received key overwritten. */
+    static take(state) {
+        const keys = new TicketKeys(state);
+        state.key.fill(0);
+        return keys;
     }
 
     /**

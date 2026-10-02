@@ -69,7 +69,7 @@ export function createShardGuard({ config, primary, log = null, registry = defau
  */
 export async function startShard({ config, shard, serverId, primary, host, auth, anticheat = null, store = null, apiHandler = null,
     bus = null, log, registry = defaultRegistry, reusePort, onStopped = null, guard = null }) {
-    const ticketKeys = config.tlsMode === 'native' ? new TicketKeys(await primary.request('tls.ticketKeys')) : null;
+    const ticketKeys = config.tlsMode === 'native' ? TicketKeys.take(await primary.request('tls.ticketKeys')) : null;
     const proc = startProcessMetrics({ registry });
     const theGuard = guard || createShardGuard({ config, primary, log: log.child('guard'), registry });
     const theBus = bus || createBus({ config, shard, serverId, log: log.child('bus'), registry });
