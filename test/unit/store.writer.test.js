@@ -85,7 +85,7 @@ test('close(): the requests the thread has not answered when the close times out
     migrate(store);
     store.close();
     // Another connection holds the write lock: each commit waits busy_timeout (5 s) for it, so the
-    // second one is still waiting when the close times out (5 s).
+    // second one is still waiting when the close times out (7 s).
     const raw = new DatabaseSync(config.dbPath);
     raw.exec('BEGIN IMMEDIATE');
     const writer = startStoreWriter({ config, logging: false });
@@ -100,6 +100,36 @@ test('close(): the requests the thread has not answered when the close times out
         assert.match(await first, /closed before answering|locked/);
     } finally {
         raw.exec('ROLLBACK');
+        raw.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('close(): a request answered after one busy_timeout wait for the write lock settles with its own outcome', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-writer-'));
+    const config = testConfig({ DB_PATH: path.join(dir, 'scacelith.db'), DATA_DIR: dir });
+    const store = openStore(config, { applyGame, log: silentLog });
+    migrate(store);
+    store.close();
+    const writer = startStoreWriter({ config, logging: false });
+    await writer.finishBatch([]);                        // the thread is up before the lock is taken
+    const raw = new DatabaseSync(config.dbPath);
+    raw.exec('BEGIN IMMEDIATE');
+    let locked = true, timer = null;
+    const unlock = () => { if (locked) { locked = false; raw.exec('ROLLBACK'); } };
+    try {
+        const outcome = (p) => p.then(() => 'resolved', (e) => e.message);
+        // The first commit waits busy_timeout (5 s) for the lock and fails; the lock is released
+        // 300 ms later, so the second one is answered about 5.3 s after the close started.
+        const first = outcome(writer.finishBatch([{ id: 9001, status: 99 }]))
+            .then((o) => { timer = setTimeout(unlock, 300); return o; });
+        const second = outcome(writer.finishBatch([{ id: 9002, status: 99 }]));
+        await writer.close();
+        assert.match(await first, /locked/);
+        assert.match(await second, /game 9002: invalid/);
+    } finally {
+        clearTimeout(timer);
+        unlock();
         raw.close();
         fs.rmSync(dir, { recursive: true, force: true });
     }

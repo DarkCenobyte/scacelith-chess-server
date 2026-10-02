@@ -160,7 +160,13 @@ transaction, its disk writes or the write lock it takes. The anti-cheat writes t
 thread (the anomaly rows, the automatic sanction of a certain cheat and its rating refunds), and
 the thread handles its messages one at a time in the order they were sent: the anomalies flushed
 right before a commit are written before it, without the event loop waiting for either. After
-the commit it sends `RatingUpdate` and tells the primary `game.ended`.
+the commit it sends `RatingUpdate` and tells the primary `game.ended`. At a stop the shard closes
+the thread last: it waits up to 7 s for the requests already sent (the last anomaly batch, a
+sanction), longer than `busy_timeout` (5 s), so that one wait for another process's write lock
+does not lose them, and rejects the ones still unanswered then (logged; finished games stay in
+the journal). The primary kills a worker `SHUTDOWN_GRACE_MS` + 15 s after its `shutdown`: with
+one such lock wait, during the final commits or during the close, the stop ends about 6 s after
+the drain. Only a lock held through several waits lets the kill come first.
 
 When the journal's writes keep failing (a full disk, a read-only or failing `JOURNAL_DIR`
 volume, too many open files), waiting for the journal would keep every finished game out of the

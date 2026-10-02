@@ -118,7 +118,10 @@ export class ShardSupervisor {
 
     /**
      * Graceful stop: 'shutdown' to every worker, then waits for them to exit (killing the ones
-     * still running after graceMs + timeoutMs).
+     * still running after graceMs + timeoutMs). timeoutMs is what a worker has after its drain:
+     * its final commits, then its store writer's close, which waits up to 7 s
+     * (store/writer.js) so that one busy_timeout wait (5 s) for the write lock still fits; a
+     * worker still starting has no drain, but the rest of its journal replay counts.
      */
     async stop(graceMs, timeoutMs = 15000) {
         this.stopping = true;

@@ -23,6 +23,17 @@ import { Worker, isMainThread, parentPort, workerData } from 'node:worker_thread
 import { fileURLToPath } from 'node:url';
 import { countCommit, mBusy } from './commit-metrics.js';
 
+// How long close() waits for the thread: longer than the store's busy_timeout (5 s), so that a
+// last batch (anomalies, a sanction) that waits once for another process's write lock is still
+// answered. Without such a wait the close takes milliseconds. The thread cannot be stopped inside
+// a lock wait: when the timer fires during one, the close (and the process exit) also waits for
+// its end. A shard closes its writer last in its stop (worker-main.js), after the drain
+// (SHUTDOWN_GRACE_MS) and the final commits, and the supervisor kills a worker
+// SHUTDOWN_GRACE_MS + 15 s after the 'shutdown' (supervisor.js stop): with one lock wait, before
+// or during this close, the stop ends about 6 s after the drain. Only a lock held through several
+// waits lets the kill come first (as with 5 s), and it then loses what the timeout would reject.
+const CLOSE_TIMEOUT_MS = 7000;
+
 if (!isMainThread && parentPort && workerData && workerData.scacelithStoreWriter) {
     const { configureLogging, logger } = await import('../log.js');
     const { openStore } = await import('./index.js');
@@ -121,8 +132,8 @@ export function startStoreWriter({ config, shard = 0, logging = true, log = null
         insertAnomalies: (rows) => send('anomalies', rows),
         sanction: (s) => send('sanction', s),
         // Closes the thread's database connection after the batches already sent, then the thread.
-        // The requests it has not answered within the 5 s are rejected: they may have been
-        // carried out or not.
+        // The requests it has not answered within CLOSE_TIMEOUT_MS are rejected: they may have
+        // been carried out or not.
         close() {
             const t = w;
             if (!t) { closing = () => {}; return Promise.resolve(); }
@@ -132,7 +143,7 @@ export function startStoreWriter({ config, shard = 0, logging = true, log = null
                     rejectAll(new Error('store writer closed before answering (outcome unknown)'));
                     w = null; t.terminate().finally(resolve);
                 };
-                const timer = setTimeout(done, 5000);
+                const timer = setTimeout(done, CLOSE_TIMEOUT_MS);
                 closing = done;
                 t.postMessage({ close: true });
             });
