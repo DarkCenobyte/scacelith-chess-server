@@ -349,11 +349,14 @@ function message(c, b, p, len) {
     if (type === T.MoveMade) { onMoveMade(c, b, p, len); return; }
     if (type === T.S_Ping) {
         cnt.serverPings++;
-        send(c, pongFrame(++c.seq, readNonce(b, p, len, 'S_Ping'), c.mask));
+        let nonce;
+        try { nonce = readNonce(b, p, len, 'S_Ping'); } catch { cnt.decodeErrors++; return; }
+        send(c, pongFrame(++c.seq, nonce, c.mask));
         return;
     }
     if (type === T.S_Pong) {
-        const nonce = readNonce(b, p, len, 'S_Pong');
+        let nonce;
+        try { nonce = readNonce(b, p, len, 'S_Pong'); } catch { cnt.decodeErrors++; return; }
         if (c.pingAt && nonce === c.pingNonce) { hist.hb.add((now() - c.pingAt) * 1000); c.pingAt = 0; cnt.pongs++; }
         return;
     }
@@ -533,7 +536,7 @@ function doMove(c, gen) {
 }
 
 function onMoveMade(c, b, p, len) {
-    readMoveMade(b, p, len, MM);
+    try { readMoveMade(b, p, len, MM); } catch { cnt.decodeErrors++; return; }
     const g = c.game;
     if (!g || g.id !== MM.game) { cnt.strayMoves++; return; }
     if (MM.ply === g.ply) {
