@@ -40,6 +40,7 @@ export function verifyTaken({ serverName }) {
 export function verifyInvalid({ serverName }) {
     return renderMessage({ serverName, title: 'Link invalid or expired', tone: 'error',
         message: 'This confirmation link is invalid, was already used, or has expired.',
-        note: 'If you have just signed up, create your account again from Scacelith (the same username and address work) to ' +
-            'receive a new link. An existing account can ask for a new confirmation e-mail from the login screen of Scacelith.' });
+        note: 'If you have just signed up, press "Resend the e-mail" on the page Scacelith shows after signing up, or create ' +
+            'your account again from Scacelith (the same username and address work), to receive a new link (at most one every ' +
+            '5 minutes). An existing account can ask for a new confirmation e-mail from the login screen of Scacelith.' });
 }
