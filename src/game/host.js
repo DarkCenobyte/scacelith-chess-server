@@ -131,7 +131,7 @@ import { logger } from '../log.js';
 import { metrics as processMetrics } from '../metrics.js';
 import { GameIdAllocator } from '../util/ids.js';
 import { now as clockNow } from './clock.js';
-import { GameRoom, JournalKind, CERTAIN_KINDS } from './room.js';
+import { GameRoom, CERTAIN_KINDS } from './room.js';
 import { TimerWheel } from './timer-wheel.js';
 
 const { ErrorCode: EC, EndReason: ER, GameStatus: GS } = enums;
@@ -1097,5 +1097,3 @@ export class GameHost {
         this.log.error('commit of finished games failed; retrying', { err, games: n, retryInMs: this.backoffMs });
     }
 }
-
-export { JournalKind };
