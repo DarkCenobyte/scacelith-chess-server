@@ -494,12 +494,17 @@ describe('ScacelithClient', () => {
         // No answer at all.
         const fake3 = await fakeServer({ hello: () => {} });
         await assert.rejects(new ScacelithClient().connect({ port: fake3.port, insecure: true, token: TOKEN, timeoutMs: 300 }), /no Welcome in time/);
+        // No answer to the upgrade: the same rejection, and no unhandled one (the process survives).
+        const stalled = await startWsServer({ handshake: () => ({ skip: true }) });
+        const sc = new ScacelithClient();
+        await assert.rejects(sc.connect({ port: stalled.port, insecure: true, token: TOKEN, timeoutMs: 300 }), /no Welcome in time/);
+        assert.equal(sc.state, 'closed');
         // Upgrade refused.
         const refused = await startWsServer({ handshake: () => ({ status: 429 }) });
         await assert.rejects(new ScacelithClient().connect({ port: refused.port, insecure: true, token: TOKEN }), (e) => e.status === 429);
         // A Hello that cannot be encoded fails before connecting.
         await assert.rejects(new ScacelithClient().connect({ port: fake.port, insecure: true, token: '' }), /invalid Hello \(token bad length\)/);
-        for (const f of [fake, fake2, fake3, refused]) await f.close();
+        for (const f of [fake, fake2, fake3, stalled, refused]) await f.close();
     });
 
     test('server Ping is answered with Pong at once; seq numbers every client message', async () => {

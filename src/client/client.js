@@ -142,20 +142,26 @@ export class ScacelithClient {
         ws.on('close', (code, reason) => this._onClose(code, reason));
         ws.on('error', (e) => this._emit('error', e));
 
+        let timedOut = false;
         const welcome = new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
+                timedOut = true;
                 this._hello = null;
                 reject(new ScacelithError('client: no Welcome in time'));
                 ws.terminate();
             }, timeoutMs);
             this._hello = { resolve, reject, timer, error: null };
         });
+        // The timer can fire during the upgrade, when `welcome` is not returned yet (the rejection
+        // below reports it): it must not be an unhandled rejection.
+        welcome.catch(() => {});
         try {
             await ws.connect();
         } catch (e) {
             const h = this._hello;
             if (h) { clearTimeout(h.timer); this._hello = null; }
             this.state = 'closed';
+            if (timedOut) throw new ScacelithError('client: no Welcome in time');
             throw new ScacelithError(`client: ${e.message}`, { status: e.status });
         }
         this.state = 'hello';
