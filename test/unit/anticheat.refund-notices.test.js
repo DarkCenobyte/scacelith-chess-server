@@ -22,8 +22,8 @@ const T = Date.UTC(2026, 8, 1, 12);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const settle = () => new Promise((r) => setImmediate(r));
 
-// Shards whose 'conn.send' requests answer like the router: { ok } (ready says whether the
-// connection has had its Welcome).
+// Shards whose 'conn.send' requests answer like the router: { ok } (a connection not in ready
+// answers false, as one that closes before its Welcome does).
 class Shards {
     constructor() { this.sent = []; this.ready = new Set(); this.alloc = new GameIdAllocator(0); }
     notify(shard, type, payload) { this.sent.push({ type, payload }); }

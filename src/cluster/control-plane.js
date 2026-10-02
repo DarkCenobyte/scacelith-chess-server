@@ -40,8 +40,9 @@
 //   shard -> primary  'sanction.applied' also carries `refunds` (victims refunded): the refund
 //                     notices are looked for at once
 //   primary -> shard  'conn.send' is also sent as a request for the refund notices: its reply
-//                     { ok } tells whether the frames were written (a connection not ready yet,
-//                     or gone, answers ok: false)
+//                     { ok } tells whether the frames were written (a connection gone, or
+//                     closed before its Welcome, answers ok: false; the frames for a connection
+//                     whose claim is under way are written right after its Welcome)
 //   shard -> primary  'shard.load' { conns, games, lagP99, overloaded }   (every 2 s)
 //                     'shard.ready' { shard }   (after host.recover() and listen: re-attaches the
 //                     live connections of players whose game that shard hosts; after a crash, the
