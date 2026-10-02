@@ -72,9 +72,9 @@ password inline only to stay short.
   `Content-Type: application/json`. A `charset` parameter other than UTF-8 is refused, and so is
   any other content type (415 `unsupported_media_type`). An empty body counts as `{}`, which is
   what the endpoints without parameters take (`POST /auth/logout`, `DELETE /auth/sessions/:id`).
-  The body is limited to `HTTP_BODY_LIMIT` bytes (16384 by default; 413 `payload_too_large`) and
-  must arrive within 10 seconds (408 `request_timeout`). After either error the server closes the
-  connection.
+  The body is limited to `HTTP_BODY_LIMIT` bytes (16384 by default; `POST /gif` has a limit of its
+  own, 135,168 bytes, see [section 11](#post-gif); 413 `payload_too_large`) and must arrive within
+  10 seconds (408 `request_timeout`). After either error the server closes the connection.
 - **Strict schemas.** A field that the endpoint does not know is refused, a field without "optional"
   in this reference is required, and types and lengths are checked. Any of these failures answers
   400 `invalid_request`, with `field` naming the field. Strings may not contain control
@@ -131,7 +131,7 @@ Errors that any endpoint can give:
 | 404 | `not_found` | No such endpoint. Some endpoints also use it: no such game, player or session. |
 | 405 | `method_not_allowed` | The path exists for other methods (see `Allow`). |
 | 408 | `request_timeout` | The body did not arrive within 10 s. |
-| 413 | `payload_too_large` | The body exceeds `HTTP_BODY_LIMIT`. |
+| 413 | `payload_too_large` | The body exceeds `HTTP_BODY_LIMIT` (135,168 bytes for `POST /gif`). |
 | 414 | `uri_too_long` | The request target exceeds 4096 characters. |
 | 415 | `unsupported_media_type` | The body is not `application/json`, or its charset is not UTF-8. |
 | 429 | `rate_limited` | A rate limit (section 1.5): `retryAfter` plus a `Retry-After` header. |

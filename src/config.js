@@ -156,7 +156,8 @@ key('GESTURE_RATE', { section: 'limits', type: 'int', default: 4, min: 0, max: 6
     desc: 'Live gestures (the player\'s head, the piece in hand and where it is aimed) a client may send per second, sustained, announced in Welcome. The server relays each one to the opponent as it is and never stores it; it costs server CPU for every player in a game (docs/SIZING.md). A client beyond it has its gestures dropped silently, and only a gross excess closes the connection as a flood. 0 turns the relay off (the clients then send none).' });
 key('GESTURE_BURST', { section: 'limits', type: 'int', default: 8, min: 1, max: 120,
     desc: 'Gestures a client may send in a burst above GESTURE_RATE (the size of its own token bucket, apart from WS_MSG_RATE: gestures never delay or rate-limit moves).' });
-key('HTTP_BODY_LIMIT', { section: 'limits', type: 'int', default: 16384, min: 1024, desc: 'Largest API request body in bytes.' });
+key('HTTP_BODY_LIMIT', { section: 'limits', type: 'int', default: 16384, min: 1024,
+    desc: 'Largest API request body in bytes, except POST /api/v1/gif, which has its own fixed limit of 135,168 bytes (a PGN of up to 64 KiB as a JSON string, escapes included).' });
 key('AUTH_RATE_PER_IP', { section: 'limits', type: 'int', default: 20, min: 1, desc: 'Login / register / reset attempts per 10 minutes from one IP address (one IPv6 /64).' });
 key('AUTH_RATE_PER_PREFIX', { section: 'limits', type: 'int', default: 0, min: 0,
     desc: 'The AUTH_RATE_PER_IP limits (login / register / reset attempts, and account changes that ask for the password), per 10 minutes for one IPv6 /48 as a whole, on top of the limit of each of its /64 networks: a /48 holds 65536 of them, and one customer often gets a /56 or a /48. 0 means 5 x AUTH_RATE_PER_IP. Raise it for a site that brings many players at once over one IPv6 prefix (a campus, a club event). IPv4 addresses are only limited one by one.' });

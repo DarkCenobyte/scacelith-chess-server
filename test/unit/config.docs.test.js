@@ -6,7 +6,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
-import { CONFIG_KEYS } from '../../src/config.js';
+import { CONFIG_KEYS, testConfig } from '../../src/config.js';
+import { register as registerGif } from '../../src/http/routes/gif.js';
 
 const CLIENT = new URL('../../../src/net/online_client.cpp', import.meta.url);
 const haveClient = fs.existsSync(CLIENT);
@@ -30,4 +31,16 @@ test('USER_RATE_PER_MIN and API.md give the share of the account budget that eac
     assert.ok(desc.includes('max(1, min(this, ceil(2 x this / WORKERS)))'), desc);
     const api = fs.readFileSync(new URL('../../docs/API.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
     assert.ok(api.includes('its share, max(1, min(`USER_RATE_PER_MIN`, ceil(2 x `USER_RATE_PER_MIN` / `WORKERS`))) per minute'));
+});
+
+test('HTTP_BODY_LIMIT and API.md name the body limit of POST /gif, which HTTP_BODY_LIMIT does not set', () => {
+    let opts = null;
+    registerGif({ get: () => {}, post: (p, h, o) => { if (p === '/gif') opts = o; } }, { config: testConfig(), store: {}, log: {}, gifService: {} });
+    const bytes = opts.bodyLimit.toLocaleString('en-US');
+    assert.equal(bytes, '135,168');
+    const desc = CONFIG_KEYS.find((k) => k.name === 'HTTP_BODY_LIMIT').desc;
+    assert.ok(desc.includes(`except POST /api/v1/gif, which has its own fixed limit of ${bytes} bytes`), desc);
+    const api = fs.readFileSync(new URL('../../docs/API.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
+    assert.ok(api.includes(`\`POST /gif\` has a limit of its own, ${bytes} bytes`));
+    assert.ok(api.includes(`a body above ${bytes} bytes`));
 });

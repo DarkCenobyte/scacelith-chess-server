@@ -221,6 +221,17 @@ test('POST: the first game of the PGN, its tags in the header; invalid PGN with 
     // Above HTTP_BODY_LIMIT (16 KiB): the route's own body limit.
     r = await postGif(s, { pgn: `{${'x'.repeat(40000)}}\n1. d4 d5 *` }, { token: alice.token });
     assert.equal(r.status, 200);
+    // That limit is fixed, 135,168 bytes, whatever HTTP_BODY_LIMIT (src/config.js says so).
+    const small = await server({ HTTP_BODY_LIMIT: '1024' });
+    t.after(small.close);
+    const carol = await signedIn(small, 'carol');
+    const sized = (n) => ({ pgn: `{${'x'.repeat(n - '{"pgn":"{}\\n1. d4 d5 *"}'.length)}}\n1. d4 d5 *` });
+    assert.equal(JSON.stringify(sized(135168)).length, 135168);
+    assert.equal((await postGif(small, sized(40000), { token: carol.token })).status, 200, 'above HTTP_BODY_LIMIT');
+    r = await postGif(small, sized(135168), { token: carol.token });
+    assert.deepEqual([r.status, r.json.error], [400, 'invalid_pgn'], 'at the limit: read, and refused by the PGN reader (above 65536 bytes)');
+    r = await postGif(small, sized(135169), { token: carol.token });
+    assert.deepEqual([r.status, r.json.error], [413, 'payload_too_large']);
 
     // GIF_MAX_PLIES = 40: 41 plies answer 422 on both routes.
     const long = 'Nf3 Nf6 Ng1 Ng8 '.repeat(10).trim().split(' ');     // 40 plies
