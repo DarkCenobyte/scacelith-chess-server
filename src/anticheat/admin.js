@@ -636,7 +636,9 @@ export const COMMANDS = Object.freeze({
 export async function runAdmin(argv, { store, config = null, out = process.stdout, err = process.stderr, now = Date.now, moderator = 'admin', log = null, hashToken = null } = {}) {
     const args = parseArgs(argv);
     const [a, b] = args.positional;
-    const handler = COMMANDS[`${a} ${b}`] || COMMANDS[a];
+    // Own keys only: an inherited name (constructor, toString, __proto__) is not a command.
+    const key = Object.hasOwn(COMMANDS, `${a} ${b}`) ? `${a} ${b}` : Object.hasOwn(COMMANDS, a) ? a : null;
+    const handler = key ? COMMANDS[key] : null;
     if (!handler || args.flags.help) {
         (handler ? out : err).write(USAGE);
         return handler ? 0 : 2;

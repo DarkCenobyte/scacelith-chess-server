@@ -47,6 +47,13 @@ test('usage and unknown commands', async () => {
     const r = await run(store, ['nope']);
     assert.equal(r.code, 2);
     assert.match(r.err, /Usage/);
+    // Names inherited from Object.prototype are not commands either.
+    for (const name of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+        const x = await run(store, [name]);
+        assert.equal(x.code, 2, name);
+        assert.match(x.err, /Usage/);
+        assert.equal((await run(store, [name, '--help'])).code, 2, `${name} --help`);
+    }
     const e = await run(store, ['user', 'show', 'nobody']);
     assert.equal(e.code, 1);
     assert.match(e.err, /no user named "nobody"/);
