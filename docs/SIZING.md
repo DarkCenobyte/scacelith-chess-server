@@ -313,7 +313,7 @@ Every request and every connection first meets a per-address layer (README, [Pro
 |---|---|---|
 | A request from an IPv4 address (budget, a place among the requests in progress, and its release) | 0.14-0.26 µs | about 0.3-0.5 µs |
 | The same from an IPv6 address (its /64 and its /48) | 0.46-0.70 µs | about 0.8-1.3 µs |
-| The keys of an IPv6 address, once per connection (cached on the socket afterwards: 0.005-0.03 µs) | 0.74-0.86 µs | about 1.5 µs |
+| The keys of an IPv6 address, once per socket (cached on it afterwards: 0.005-0.03 µs; with native TLS twice per connection, for the raw socket at admission and the TLS socket at its first request) | 0.74-0.86 µs | about 1.5 µs |
 | A request from a blocked address | 0.02-0.04 µs | about 0.05 µs |
 | A new connection (rate, open counts) and its close | 0.52-0.61 µs | about 1 µs |
 | A whole connection reset before TLS (accept, the socket, the check, the reset); the same for one closed at a first record that is not TLS (`bad_hello`) | 26-30 µs | about 50-55 µs |
