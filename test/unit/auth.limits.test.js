@@ -1,8 +1,8 @@
 // The stricter limits of the auth family (abuse design 3.5 and the password recovery limits):
 // registration, resend and forgot per address with their IPv6 /48 ceilings, the reset form,
 // second factors per account (two workers sharing one primary), re-authentication per account,
-// the Google sign-in's /48 limits; and checkRates giving back the earlier tokens of a refused
-// request.
+// the password hashes one address can cause (`auth` and `reauth`), the Google sign-in's /48
+// limits; and checkRates giving back the earlier tokens of a refused request.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,6 +12,7 @@ import { register as registerAuth } from '../../src/http/routes/auth.js';
 import { register as registerAccount } from '../../src/http/routes/account.js';
 import { register as registerExport } from '../../src/http/routes/account-export.js';
 import { testConfig } from '../../src/config.js';
+import { createPasswordHasher } from '../../src/security/password.js';
 import { startTestServer, TEST_DEFAULTS } from './helpers/auth-fakes.js';
 
 const PW = 'correct horse battery';
@@ -243,6 +244,32 @@ test('re-authentication: AUTH_REAUTH_PER_USER per 10 minutes for the account, wh
     assert.equal((await change(a, bob, '203.0.113.1')).status, 403, 'another account from the same address');
     a.now.advance(21 * 60000);
     assert.equal((await change(b, alice, '203.0.113.1')).status, 403, 'once the 10-minute window has passed');
+});
+
+test('password hashes of one address: AUTH_RATE_PER_IP in `auth`, as many again in `reauth`, 2 per password change (docs/SIZING.md)', async (t) => {
+    const real = createPasswordHasher({ scrypt: { logN: 10 }, argon2: false });
+    let hashes = 0;
+    const counted = (fn) => (...a) => { hashes++; return fn(...a); };
+    const hasher = { ...real, hash: counted(real.hash), verify: counted(real.verify), verifyDummy: counted(real.verifyDummy) };
+    const s = await startTestServer({ env: { AUTH_RATE_PER_IP: '3' }, hasher });
+    t.after(s.close);
+    const names = ['alice', 'bob', 'carol'];
+    for (const n of names) await s.createUser({ username: n, password: PW });
+    const ip = '192.0.2.44';
+    hashes = 0;
+    const tokens = [];
+    for (const n of names) {
+        const r = await s.request('POST', '/api/v1/auth/login', { body: { login: n, password: PW }, ip });
+        assert.equal(r.status, 200);
+        tokens.push(r.json.token);
+    }
+    assert.equal((await s.request('POST', '/api/v1/auth/login', { body: { login: 'alice', password: PW }, ip })).status, 429, '`auth` spent');
+    assert.equal(hashes, 3);
+    const change = (token) => s.request('POST', '/api/v1/account/password', { token, ip, body: { currentPassword: PW, newPassword: 'ivory rook takes e5' } });
+    for (const token of tokens) assert.equal((await change(token)).status, 200, '`reauth` is a bucket of its own');
+    assert.equal(hashes, 3 + 3 * 2, 'a change checks the current password and hashes the new one');
+    assert.equal((await change(tokens[0])).status, 429, '`reauth` spent');
+    assert.equal(hashes, 9, 'so one address makes at most 3 times AUTH_RATE_PER_IP hashes per 10 minutes');
 });
 
 test('Google sign-in completion: the auth limit with its IPv6 /48 ceiling', async (t) => {
