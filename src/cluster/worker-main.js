@@ -58,6 +58,7 @@ export async function main() {
         config, shard, serverId, primary, host, auth, anticheat, store, apiHandler, bus, log, guard,
         onStopped: async () => {
             await apiHandler.close();   // the GIF rendering threads (src/http/routes/gif.js)
+            auth.close();               // its batched security events, while the store is open
             try { await journal.flush?.(); await journal.close?.(); } catch (e) { log.error('journal close failed', { err: e }); }
             anticheat.close();   // its buffered anomalies reach the writer before its close
             try { await writer.close(); } catch (e) { log.error('store writer close failed', { err: e }); }
