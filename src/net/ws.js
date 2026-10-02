@@ -15,18 +15,22 @@
 // (net/ipguard.js, the shard's protection per address), an upgrade request first takes its token
 // of the address's request budget like any HTTP request, before any other check and before the
 // admission IPC to the primary: a blocked address, or one over HTTP_RATE_PER_IP, gets HTTP 429
-// rate_limited with Retry-After (the game waits that long before it reconnects).
+// rate_limited with Retry-After. The game honours Retry-After when /api/v1/info answers 429; on a
+// refused upgrade it retries with its own backoff (reconnectDelayMs).
 //
 // Hot path (per message): no allocation for complete frames (the payload is unmasked in place and
 // handed out as a view of the socket chunk); a frame split across TCP reads is re-assembled with
 // at most two small copies, bounded by the header size + maxMessageBytes. Outgoing messages are
 // written as header + payload (the payload is never copied); writes made in the same tick are
-// corked and leave in one writev. The kernel send queue is watched: when the bytes queued for a
-// client exceed sendBufferLimit, the connection is closed with 4303 (SlowConsumer).
+// corked and leave in one writev. The bytes queued in user space for a client are watched
+// (socket.writableLength: bytes the kernel's send buffer has not accepted yet; the kernel buffer
+// comes on top): when a send would take them above sendBufferLimit, the connection is closed with
+// 4303 (SlowConsumer).
 //
-// The payload Buffer given to onMessage is only valid during the call if the consumer mutates
-// nothing; it stays valid afterwards (socket chunks are never reused), but keeping it retains the
-// whole chunk, so consumers that store data copy it.
+// The payload given to onMessage is a view of the received bytes (the socket chunk, a private
+// reassembly buffer, or a copy for fragmented messages). It stays valid after the call because
+// those buffers are never reused, but keeping it retains the whole underlying buffer, so a
+// consumer that stores data copies it.
 
 import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
