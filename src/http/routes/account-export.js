@@ -46,6 +46,7 @@
 
 import { historySummary } from './account-games.js';
 import { reauthRatesOf } from './account.js';
+import { CODE_FIELD, PASSWORD_FIELD } from './auth.js';
 
 export const EXPORT_FORMAT = 'scacelith-account-export';
 export const EXPORT_VERSION = 1;
@@ -213,9 +214,6 @@ export function exportFileName(username) {
     return `scacelith-account-${String(username).replace(/[^A-Za-z0-9_.-]/g, '_')}.json`;
 }
 
-const PASSWORD = { type: 'string', min: 1, max: 1024 };
-const CODE = { type: 'string', min: 1, max: 32 };
-
 /**
  * Registers POST /api/v1/account/export.
  * @param {import('../router.js').Router} router
@@ -239,6 +237,6 @@ export function register(router, { config, store, auth, log, now = Date.now }) {
         return { body: doc, headers: { 'Content-Disposition': `attachment; filename="${exportFileName(doc.account.username)}"` } };
     }, {
         auth: 'required', rate: [exportRate, ...reauthRatesOf(config)], timeoutMs: 60000,
-        body: { password: PASSWORD, code: { ...CODE, optional: true }, recoveryCode: { ...CODE, optional: true } },
+        body: { password: PASSWORD_FIELD, code: { ...CODE_FIELD, optional: true }, recoveryCode: { ...CODE_FIELD, optional: true } },
     });
 }
