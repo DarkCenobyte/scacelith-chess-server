@@ -51,6 +51,15 @@ describe('IpGuard: keys', () => {
         assert.notEqual(addressKeys('2001:db8:1:3::5').k64, a.k64);
         assert.deepEqual([addressKeys('').exempt, addressKeys(undefined).k64], [true, 'unknown'], 'an unreadable address is left alone');
     });
+    it('an IPv6 address written with a dotted IPv4 tail gets its real /64 and /48', () => {
+        const d = addressKeys('2001:db8:1:2:3:4:5.6.7.8');
+        assert.deepEqual([d.k64, d.k48], ['2001:db8:1:2::/64', '2001:db8:1::/48']);
+        assert.equal(ipGroupKey('2001:db8:1:2:3:4:5.6.7.8'), '2001:db8:1:2::/64');
+        assert.equal(ipGroupKey('2001:db8:1:2:3:4:5.6.7.8', 48), '2001:db8:1::/48');
+        // With '::' the tail is two groups, not one: the /64 is 2001:db8:0:1, not 2001:db8:0:0.
+        assert.equal(addressKeys('2001:db8::1:2:3:4.5.6.7').k64, '2001:db8:0:1::/64');
+        assert.equal(addressKeys('2001:db8::1:2:3:4.5.6.7').k64, addressKeys('2001:db8:0:1:2:3:405:607').k64);
+    });
 });
 
 describe('IpGuard: request budget', () => {
