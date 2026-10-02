@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import net from 'node:net';
 import { after, before, beforeEach, describe, it } from 'node:test';
 import { Registry } from '../../src/metrics.js';
-import { WsServer, isValidCloseCode } from '../../src/net/ws.js';
+import { WsConnection, WsServer, isValidCloseCode } from '../../src/net/ws.js';
 import { connectWs, encodeClientFrame } from '../../src/net/ws-raw-client.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -232,6 +234,73 @@ describe('ws frames', () => {
         c.destroy();
         await waitFor(() => closes.has(conns[0].id));
         assert.equal(closes.get(conns[0].id), 1006);
+    });
+});
+
+describe('ws: frames split across reads', () => {
+    // A connection on a fake socket, fed directly; records what it delivers and writes.
+    function feed(maxMessageBytes, pieces) {
+        const wss = new WsServer({ registry: new Registry(), maxMessageBytes, onConnection: () => {} });
+        const out = [];
+        const sock = new EventEmitter();
+        sock.writableLength = 0;
+        sock.cork = sock.uncork = sock.end = sock.destroy = () => {};
+        sock.write = (b) => { out.push(Buffer.from(b).toString('hex')); return true; };
+        const conn = new WsConnection(wss, sock, '192.0.2.1');
+        const msgs = [];
+        conn.onMessage = (c, b) => msgs.push(b);
+        for (const p of pieces) conn._onData(Buffer.from(p));
+        return { msgs, out, code: conn._closeCode, failed: conn._failed };
+    }
+    function cut(buf, size) {
+        const pieces = [];
+        for (let o = 0; o < buf.length; o += size) pieces.push(buf.subarray(o, o + size));
+        return pieces;
+    }
+    function random(seed) {
+        let s = seed;
+        return (n) => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s % n; };
+    }
+
+    it('re-assembles a 64 KB frame read one byte at a time, or in MSS-sized pieces', () => {
+        const payload = crypto.randomBytes(65000);
+        const f = encodeClientFrame(2, payload);
+        for (const size of [1, 7, 1448]) {
+            const r = feed(65536, cut(f, size));
+            assert.equal(r.msgs.length, 1, `pieces of ${size}`);
+            assert.ok(r.msgs[0].equals(payload), `pieces of ${size}`);
+        }
+    });
+
+    it('gives the same messages and the same close as one read, wherever the reads are cut', () => {
+        const rnd = random(4242);
+        for (let t = 0; t < 400; t++) {
+            const max = [125, 512, 65536][rnd(3)];
+            const frames = [];
+            for (let i = 1 + rnd(5); i > 0; i--) {
+                const k = rnd(10);
+                const p = crypto.randomBytes(rnd(k < 7 ? Math.min(max, 70000) + 10 : 130));
+                if (k < 5) frames.push(encodeClientFrame(2, p));                         // 7-, 16- and 64-bit lengths
+                else if (k < 7) frames.push(encodeClientFrame(2, p.subarray(0, p.length >> 1), { fin: false }), encodeClientFrame(0, p.subarray(p.length >> 1)));
+                else if (k < 8) frames.push(encodeClientFrame(9, p.subarray(0, Math.min(p.length, 125))));
+                else if (k < 9) frames.push(encodeClientFrame(2, p.subarray(0, 20), { mask: false }));
+                else frames.push(encodeClientFrame(2, Buffer.alloc(0), { fakeLength: max + 1 }));   // too big: refused from its header
+            }
+            const all = Buffer.concat(frames);
+            const whole = feed(max, [all]);
+            const pieces = [];
+            for (let o = 0; o < all.length;) { const n = 1 + rnd(rnd(2) ? 3 : 2000); pieces.push(all.subarray(o, o + n)); o += n; }
+            const split = feed(max, pieces);
+            assert.deepEqual(split.msgs.map((b) => b.toString('hex')), whole.msgs.map((b) => b.toString('hex')), `sequence ${t}`);
+            assert.deepEqual([split.out, split.code, split.failed], [whole.out, whole.code, whole.failed], `sequence ${t}`);
+        }
+    });
+
+    it('a payload handed out stays intact while the following frames are re-assembled', () => {
+        const a = crypto.randomBytes(300), b = crypto.randomBytes(300);
+        const r = feed(512, cut(Buffer.concat([encodeClientFrame(2, a), encodeClientFrame(2, b)]), 5));
+        assert.equal(r.msgs.length, 2);
+        assert.ok(r.msgs[0].equals(a) && r.msgs[1].equals(b));
     });
 });
 

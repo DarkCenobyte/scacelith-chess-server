@@ -19,13 +19,14 @@
 // refused upgrade it retries with its own backoff (reconnectDelayMs).
 //
 // Hot path (per message): no allocation for complete frames (the payload is unmasked in place and
-// handed out as a view of the socket chunk); a frame split across TCP reads is re-assembled with
-// at most two small copies, bounded by the header size + maxMessageBytes. Outgoing messages are
-// written as header + payload (the payload is never copied); writes made in the same tick are
-// corked and leave in one writev. The bytes queued in user space for a client are watched
-// (socket.writableLength: bytes the kernel's send buffer has not accepted yet; the kernel buffer
-// comes on top): when a send would take them above sendBufferLimit, the connection is closed with
-// 4303 (SlowConsumer).
+// handed out as a view of the socket chunk); a frame split across TCP reads is appended to a
+// private buffer that grows by doubling up to the frame size (linear copying; it holds at most
+// twice the bytes received, or 64, and never more than the header size + maxMessageBytes).
+// Outgoing messages are written as header + payload (the payload is never copied); writes made in
+// the same tick are corked and leave in one writev. The bytes queued in user space for a client
+// are watched (socket.writableLength: bytes the kernel's send buffer has not accepted yet; the
+// kernel buffer comes on top): when a send would take them above sendBufferLimit, the connection
+// is closed with 4303 (SlowConsumer).
 //
 // The payload given to onMessage is a view of the received bytes (the socket chunk, a private
 // reassembly buffer, or a copy for fragmented messages). It stays valid after the call because
@@ -172,6 +173,7 @@ export class WsConnection {
         this._server = server;
         this._socket = socket;
         this._rest = null;          // partial frame (copy), at most header + maxMessageBytes
+        this._restLen = 0;          // bytes of it received
         this._restNeed = 0;
         this._frag = null;          // fragments of a message in progress
         this._fragLen = 0;
@@ -286,20 +288,35 @@ export class WsConnection {
         this.lastRecvAt = clockNow();
         this._server._bytesIn.inc(chunk.length);
         while (this._rest !== null && chunk.length > 0) {
-            const rest = this._rest;
-            const take = Math.min(this._restNeed - rest.length, chunk.length);
-            const joined = Buffer.allocUnsafe(rest.length + take);
-            rest.copy(joined, 0);
-            chunk.copy(joined, rest.length, 0, take);
+            // Appended to the partial frame; parsed again only once the header or the frame it
+            // waits for is complete (nothing it checks changes in between). The buffer grows by
+            // doubling, never beyond what is needed, and is never written again once parsed (the
+            // payloads handed out are views of it).
+            let rest = this._rest;
+            const have = this._restLen, need = this._restNeed;
+            const take = Math.min(need - have, chunk.length);
+            if (have + take > rest.length) {
+                const grown = Buffer.allocUnsafe(Math.min(need, Math.max(2 * rest.length, have + take)));
+                rest.copy(grown, 0, 0, have);
+                rest = this._rest = grown;
+            }
+            chunk.copy(rest, have, 0, take);
+            this._restLen = have + take;
             chunk = chunk.subarray(take);
+            if (this._restLen < need) return;
             this._rest = null;
-            if (!this._parse(joined)) return;
+            if (!this._parse(rest.subarray(0, need))) return;
         }
         if (chunk.length > 0) this._parse(chunk);
     }
 
     _saveRest(buf, off, need) {
-        this._rest = Buffer.from(buf.subarray(off));    // copy (bounded: need <= 14 + maxMessageBytes)
+        // Copy (bounded: need <= 14 + maxMessageBytes), with room for what comes next but at most
+        // twice the bytes received: the announced length is not reserved before it arrives.
+        const n = buf.length - off;
+        this._rest = Buffer.allocUnsafe(Math.min(need, Math.max(64, 2 * n)));
+        buf.copy(this._rest, 0, off);
+        this._restLen = n;
         this._restNeed = need;
         return true;
     }
