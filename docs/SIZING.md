@@ -376,7 +376,7 @@ Restart at quiet hours, keep `SHUTDOWN_GRACE_MS` so clients receive the notice, 
 | `GESTURE_RATE` | 4 (default) while the peak stays under about 2,800 connected players, then 2 (up to about 4,700), then 1 (up to about 7,000), then 0 (the relay off, up to about 14,000) | 4 up to about 5,700, then 2 (up to about 9,500), then 1 (up to about 14,000), then 0 (up to about 28,400) | the opponent's live gestures cost CPU for every player in a game, at least one gesture per second each while the relay is on; these limits hold even if every player in a game moved all the time (inferred, [Gestures](#gestures)); once `scacelith_gestures_relayed_total` shows the real rate r, use the row of r instead |
 | `WORKERS` | auto | auto | one shard per vCore |
 | `LISTEN_REUSE_PORT` | true | true | each worker accepts its own connections; halves the primary's cost per connection |
-| `SHARD_OVERLOAD_LAG_MS` | 500 | 500 | the default 250 moves games for lag spikes already seen at 63-77 % CPU |
+| `SHARD_OVERLOAD_LAG_MS` | 500 | 500 | the default 250 moves games for lag spikes already seen at 63-77 % CPU; the delay it is compared with includes the 10 ms sampling period (an idle worker reads about 10 ms), so a value below about 20 marks every worker overloaded |
 | `DB_CACHE_MB` | 16 | 32 | the default 64 is per connection, 5 or 9 connections |
 | `DB_MMAP_MB` | 256 (default) | 512 | shared, reclaimable OS page cache |
 | `MAX_CONNECTIONS` | 10000 at first | 20000 at first | a memory guard (default 200000); raise it toward 20000 / 40000 once `s` is measured, never above the memory figure |
@@ -505,7 +505,7 @@ for i in 1 2 3 4 5; do node -e "const c=require('crypto');const t=process.cpuUsa
 
 | Metric | What to look for |
 |---|---|
-| `scacelith_process_cpu_ratio`, `scacelith_process_event_loop_delay_p99_ms` (per shard) | CPU above 55 % at the peak, a rising p99 |
+| `scacelith_process_cpu_ratio`, `scacelith_process_event_loop_delay_p99_ms` (per shard) | CPU above 55 % at the peak, a rising p99 (the delay includes the 10 ms sampling period: an idle worker reads about 10 ms) |
 | `scacelith_ws_connections`, `scacelith_process_rss_bytes` | connections and memory against the memory figure |
 | `scacelith_tls_refused_total{reason}`, `scacelith_tls_hello_waiting`, `scacelith_tls_handshakes_pending` | `handshakes` or `per_ip` refusals outside restarts (not enough CPU for handshakes, or a shared address), `hello_timeout` and `bad_hello` from scanners |
 | `scacelith_http_rate_limited_total{limit}`, `scacelith_tls_refused_total{reason}` (`blocked`, `conn_rate`, `conn_open`), `scacelith_abuse_blocks_total{scope,level}`, `scacelith_abuse_blocked{scope}` | the protection per address: `ip`, `inflight` or `conn_open` refusals of ordinary players (a school, a carrier's address: see [Players who share one address](#new-connections-the-tls-gate), `ABUSE_EXEMPT`), blocks at level 4 from the same sources (an edge rule, [Floods](#floods)); the primary logs each block (`ip blocked`) |
