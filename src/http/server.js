@@ -112,9 +112,9 @@ function rateLimited(ms, label) {
  * The budget of one signed-in account across every call that carries a valid session
  * (USER_RATE_PER_MIN, abuse design 3.6): each worker allows its share of the whole-server rate,
  * workerShare(L, WORKERS) (security/ratelimit.js: all of it with 1 or 2 workers, half with 4), as
- * a token bucket holding half a minute of that share. Local to the worker: no IPC per request; a client
- * spread over every worker gets at most twice the rate. A refusal is the account's problem, not
- * its network's: it never counts toward blocking an address.
+ * a token bucket holding half a minute of that share. Local to the worker: no IPC per request; a
+ * client spread over every worker gets at most twice the rate. A refusal is the account's problem,
+ * not its network's: it never counts toward blocking an address.
  * @param {object} config
  * @param {() => number} now
  */

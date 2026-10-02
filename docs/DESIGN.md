@@ -1294,9 +1294,9 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
     µs per IPv4 request (budget and in-flight place), 0.5-0.7 µs per IPv6 request, 0.02 µs for the
     request of a blocked address, 0.5 µs for a new connection and its close; the keys of an
     address are computed once per socket (0.8 µs for IPv6; twice per connection with native TLS:
-    the raw socket at admission, the TLS socket at its first request). Memory is bounded: 50,000 buckets
-    per limiter (an evicted bucket comes back full, which only makes the limit more lenient),
-    counters for open connections and requests in progress only, 20,000 blocks.
+    the raw socket at admission, the TLS socket at its first request). Memory is bounded: 50,000
+    buckets per limiter (an evicted bucket comes back full, which only makes the limit more
+    lenient), counters for open connections and requests in progress only, 20,000 blocks.
   * Metrics: `scacelith_http_rate_limited_total{limit}` (`ip`, `ip48`, `inflight`, `blocked`),
     `scacelith_tls_refused_total{reason}` (`blocked`, `conn_rate`, `conn_open`),
     `scacelith_tls_connections_open`, `scacelith_http_inflight`, `scacelith_abuse_blocked_keys`

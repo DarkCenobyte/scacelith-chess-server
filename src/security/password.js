@@ -291,9 +291,10 @@ export class PasswordBusyError extends Error {
  * once at least half of `queueMax` tasks wait: one source (a classroom behind one IPv4 address)
  * may use an idle queue, and, as long as `perSourceMax` is at most half of `queueMax`, it cannot
  * take more than half of it, so the other half stays open to the other sources (a larger
- * `perSourceMax` lets it hold that many). A waiting task gives up after `queueTimeoutMs`, or after its own shorter
- * `maxWaitMs` (it leaves the queue). All of these reject with PasswordBusyError. A finished task
- * (resolved, rejected or thrown) hands its slot straight to the oldest waiter.
+ * `perSourceMax` lets it hold that many). A waiting task gives up after `queueTimeoutMs`, or
+ * after its own shorter `maxWaitMs` (it leaves the queue). All of these reject with
+ * PasswordBusyError. A finished task (resolved, rejected or thrown) hands its slot straight to
+ * the oldest waiter.
  * @param {{ concurrency?: number, queueMax?: number, queueTimeoutMs?: number, perSourceMax?: number }} [opts]
  */
 export function createHashLimiter({ concurrency = 1, queueMax = 32, queueTimeoutMs = 10000, perSourceMax = Infinity } = {}) {
