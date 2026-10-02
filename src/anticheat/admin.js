@@ -452,11 +452,9 @@ function stats(ctx) {
     const counts = { suspected: 0, high_confidence: 0, confirmed: 0 };
     for (const r of safe(() => ctx.store.integrity.listFlagged('suspected', 100000), [])) if (r.level in counts) counts[r.level]++;
     const openReports = safe(() => ctx.store.reports.listOpen(100000), []).length;
-    const extra = typeof ctx.store.stats === 'function' ? safe(() => ctx.store.stats(), null) : null;
-    const data = { integrity: counts, openReports, store: extra };
+    const data = { integrity: counts, openReports, store: null };
     let t = `Integrity: ${counts.suspected} suspected, ${counts.high_confidence} high confidence, ${counts.confirmed} confirmed\n`;
     t += `Open reports: ${openReports}\n`;
-    if (extra) t += `Store: ${JSON.stringify(extra)}\n`;
     return { data, text: t };
 }
 
