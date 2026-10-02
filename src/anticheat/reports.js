@@ -69,6 +69,12 @@ export function cappedWeight(raw, received, now) {
         today += w;
         if (w < REPORT_RULES.lowCredibility) todayLow += w;
     }
+    return cappedWeightOfSums(raw, today, todayLow);
+}
+
+// cappedWeight from the sums of the weights received in the last 24 hours: all of them (today),
+// and those below REPORT_RULES.lowCredibility (todayLow).
+function cappedWeightOfSums(raw, today, todayLow) {
     let w = raw;
     if (raw < REPORT_RULES.lowCredibility) w = Math.min(w, Math.max(0, REPORT_RULES.lowCredDailyCap - todayLow));
     w = Math.min(w, Math.max(0, REPORT_RULES.dailyWeightCap - today));
@@ -235,9 +241,18 @@ export function handleReport(ctx, deps = {}) {
     const { actioned, dismissed } = outcomesOf(store, user.id);
     const level = readIntegrity(store, user.id).level;
     const raw = reporterWeight({ createdAt: accountCreatedAt(store, user), gamesPlayed: gamesPlayed(store, user.id), actioned, dismissed, level, now });
-    let received = [];
-    try { received = store.reports.forReported(opponentId) || []; } catch { received = []; }
-    const weight = cappedWeight(raw.weight, received, now);
+    // The sums over every report of the last 24 hours when the store has them (forReported returns
+    // only the newest reports: past them, the cap would start over).
+    let weight;
+    if (typeof store.reports.weightSince === 'function') {
+        let today = 0, todayLow = 0;
+        try { ({ total: today, low: todayLow } = store.reports.weightSince(opponentId, now - DAY_MS, REPORT_RULES.lowCredibility)); } catch { /* none counted */ }
+        weight = cappedWeightOfSums(raw.weight, today, todayLow);
+    } else {
+        let received = [];
+        try { received = store.reports.forReported(opponentId) || []; } catch { received = []; }
+        weight = cappedWeight(raw.weight, received, now);
+    }
     let id;
     try {
         id = store.reports.create({ reporterId: user.id, reportedId: opponentId, gameId, category, comment, weight, at: now });

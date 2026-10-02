@@ -135,6 +135,9 @@
 //         each with reportedName and `outcome` (null while open, else 'actioned' | 'dismissed').
 //         anticheat/reports.js reads the outcomes for the reporter's track record when this call
 //         exists: before it, every reporter of a real store had the neutral track record.
+//       reports.weightSince(reportedId, since, lowThreshold) -> { total, low }: the summed weights of
+//         the reports against the player since `since`, and of those below lowThreshold (the 24-hour
+//         cap of anticheat/reports.js, over every report rather than forReported's newest 200).
 //       reports.resolveOpenFor(reportedId, category, outcome, by, now) -> [ids]: every open report
 //         of that category against the player resolved in one statement (forReported returns only
 //         the newest 200: bin/admin.js integrity confirm / clear).
@@ -1415,6 +1418,12 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             if (outcome !== 'actioned' && outcome !== 'dismissed') throw new StoreError('invalid', "outcome must be 'actioned' or 'dismissed'");
             return Number(st(`UPDATE reports SET status = ?, resolved_at = ?, resolved_by = ? WHERE id = ? AND status = 'open'`)
                 .run(outcome, ms(now), by === null || by === undefined ? null : String(by), id).changes) === 1;
+        },
+        /** Summed weights of the reports against the player created at `since` or later: all, and those below lowThreshold. */
+        weightSince(reportedId, since, lowThreshold) {
+            const r = st(`SELECT coalesce(sum(weight), 0) AS total, coalesce(sum(CASE WHEN weight < ?3 THEN weight END), 0) AS low
+                FROM reports WHERE reported_id = ?1 AND created_at >= ?2`).get(reportedId, ms(since), +lowThreshold);
+            return { total: r.total, low: r.low };
         },
         /** Resolves every open report of `category` against the player in one statement; returns their ids. */
         resolveOpenFor(reportedId, category, outcome, by = null, now = Date.now()) {
