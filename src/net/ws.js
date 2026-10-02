@@ -18,9 +18,8 @@
 // rate_limited with Retry-After. The game honours Retry-After when /api/v1/info answers 429; on a
 // refused upgrade it retries with its own backoff (reconnectDelayMs). On the dedicated port, a
 // head handleSocket cannot read (400, a 408 timeout, 431 too large) is refused before that check
-// and is not counted toward a block of the address, unlike malformed HTTP on the API port: in
-// native mode IP_CONN_RATE already bounds those connections per address (behind a proxy, the
-// peer is the proxy).
+// and counts toward a block of the address like malformed HTTP on the API port (hardenHttp),
+// unless the peer is a trusted proxy (`isTrusted`).
 //
 // Hot path (per message): no allocation for complete frames (the payload is unmasked in place and
 // handed out as a view of the socket chunk); a frame split across TCP reads is appended to a
@@ -42,6 +41,7 @@ import { performance } from 'node:perf_hooks';
 import { now as clockNow } from '../game/clock.js';
 import { metrics as defaultRegistry } from '../metrics.js';
 import { CloseCode, WS_SUBPROTOCOL } from '../protocol/index.js';
+import { normalizeIp } from './ip.js';
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const KEY_RE = /^[A-Za-z0-9+/]{21}[AQgw]==$/;          // base64 of exactly 16 bytes
@@ -485,12 +485,15 @@ export class WsServer {
      * @param {object} [o.log] logger
      * @param {object} [o.registry] metrics registry
      * @param {import('./ipguard.js').IpGuard|null} [o.guard] protection per address, checked first
+     * @param {((ip: string) => boolean)|null} [o.isTrusted] trusted proxies (TLS_MODE=proxy): a
+     *        head handleSocket cannot read from one of them is not counted toward a block
      */
     constructor({
         maxMessageBytes = 512, subprotocol = WS_SUBPROTOCOL, allowOrigins = [], path = '/ws',
         sendBufferLimit = 262144, onConnection, admission = null, clientIp = null, messageLabel = null,
         upgradeHeaders = null, log = null, registry = defaultRegistry, handshakeTimeoutMs = 10000,
         maxHeaderBytes = 8192, closeTimeoutMs = 2000, pingRate = 2, pingBurst = 5, guard = null,
+        isTrusted = null,
     } = {}) {
         this.maxMessageBytes = maxMessageBytes;
         this.subprotocol = subprotocol;
@@ -506,6 +509,7 @@ export class WsServer {
         this.onConnection = onConnection;
         this.admission = admission;
         this.guard = guard;
+        this.isTrusted = isTrusted;
         this.clientIp = clientIp || ((req, socket) => socket.remoteAddress || '');
         this.log = log;
         this.handshakeTimeoutMs = handshakeTimeoutMs;
@@ -583,7 +587,7 @@ export class WsServer {
         let buf = null, len = 0;
         const timer = setTimeout(() => {
             socket.removeListener('data', onData);
-            this._reject(socket, 408, 'timeout', null);
+            this._rejectHead(socket, 408, 'timeout');
         }, this.handshakeTimeoutMs);
         timer.unref();
         // A client that leaves before the end of its head is no handshake timeout, and the socket
@@ -609,7 +613,7 @@ export class WsServer {
             if (end < 0) {
                 if (len > this.maxHeaderBytes) {
                     clearTimeout(timer); socket.removeListener('close', onClose); socket.removeListener('data', onData);
-                    this._reject(socket, 431, 'headers_too_large', null);
+                    this._rejectHead(socket, 431, 'headers_too_large');
                 }
                 return;
             }
@@ -617,9 +621,9 @@ export class WsServer {
             socket.removeListener('close', onClose);
             socket.removeListener('data', onData);
             socket.pause();
-            if (end + 4 > this.maxHeaderBytes) { this._reject(socket, 431, 'headers_too_large', null); return; }
+            if (end + 4 > this.maxHeaderBytes) { this._rejectHead(socket, 431, 'headers_too_large'); return; }
             const req = parseRequestHead(view.subarray(0, end));
-            if (!req) { this._reject(socket, 400, 'bad_request', null); return; }
+            if (!req) { this._rejectHead(socket, 400, 'bad_request'); return; }
             req.socket = socket;
             this.handleUpgrade(req, socket, view.subarray(end + 4));
         };
@@ -711,6 +715,15 @@ export class WsServer {
         if (head && head.length) conn._onData(Buffer.from(head));
         socket.resume();
         return conn;
+    }
+
+    // A head handleSocket cannot read counts toward a block of the address, like malformed HTTP on
+    // the API port (hardenHttp): behind a proxy the peer is the proxy, not the client.
+    _rejectHead(socket, status, error) {
+        if (this.guard !== null && !socket.destroyed && !(this.isTrusted !== null && this.isTrusted(socket.remoteAddress))) {
+            this.guard.noteRefusal(this.guard.keysOf(normalizeIp(socket.remoteAddress), socket), 1);
+        }
+        this._reject(socket, status, error, null);
     }
 
     _reject(socket, status, error, extraHeaders, body) {

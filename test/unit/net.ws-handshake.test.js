@@ -3,7 +3,10 @@ import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import net from 'node:net';
 import { after, before, describe, it } from 'node:test';
+import { testConfig } from '../../src/config.js';
 import { Registry } from '../../src/metrics.js';
+import { ipMatcher } from '../../src/net/ip.js';
+import { IpGuard } from '../../src/net/ipguard.js';
 import { WsServer, parseRequestHead, acceptKey } from '../../src/net/ws.js';
 import { connectWs } from '../../src/net/ws-raw-client.js';
 
@@ -230,6 +233,43 @@ describe('ws handshake on a raw socket: client gone, head in pieces', () => {
             for (let o = 0; o < all.length;) { const n = 1 + rnd(rnd(2) ? 5 : 200); pieces.push(all.subarray(o, o + n)); o += n; }
             assert.equal(run(pieces), run([all]), `head ${t}`);
         }
+    });
+});
+
+describe('ws handshake on a raw socket: unreadable heads and the address guard', () => {
+    // Malformed HTTP on the API port counts 1 toward a block of the address (hardenHttp); so does a
+    // head the dedicated port cannot read, unless the peer is a trusted proxy.
+    async function counted(isTrusted) {
+        const config = testConfig({ ABUSE_BLOCK_REFUSALS_PER_MIN: '100000' });
+        const guard = new IpGuard({ config, workers: 1, registry: new Registry(), report: () => {} });
+        const wss = new WsServer({
+            registry: new Registry(), handshakeTimeoutMs: 200, maxHeaderBytes: 512, onConnection: () => {}, guard, isTrusted,
+        });
+        const srv = await listenRaw(wss);
+        const port = srv.address().port;
+        try {
+            assert.match(await rawRequest(port, 'GET /ws HTTP/1.1\r\nBad Header\r\n\r\n'), /^HTTP\/1\.1 400/);
+            assert.match(await rawRequest(port, 'GET /ws HTTP/1.1\r\nX-Pad: ' + 'a'.repeat(600) + '\r\n\r\n'), /^HTTP\/1\.1 431/);
+            assert.match(await rawRequest(port, 'GET /ws HTTP/1.1\r\nHost: x\r\n'), /^HTTP\/1\.1 408/);
+            // A client that leaves before the end of its head is neither refused nor counted.
+            const s = net.connect(port, '127.0.0.1');
+            s.on('error', () => {});
+            await new Promise((r) => s.once('connect', r));
+            s.write('GET /ws HTTP/1.1\r\nHo');
+            await new Promise((r) => setTimeout(r, 50));
+            s.destroy();
+            await new Promise((r) => setTimeout(r, 300));
+            return guard.flushReports();
+        } finally { srv.close(); guard.close(); }
+    }
+
+    it('400, 431 and 408 count 1 each toward a block of the address', async () => {
+        assert.deepEqual(await counted(null), [['127.0.0.1', null, 3]]);
+    });
+
+    it('behind a proxy, only the peers outside TRUSTED_PROXIES are counted', async () => {
+        assert.deepEqual(await counted(ipMatcher(['127.0.0.1'])), []);
+        assert.deepEqual(await counted(ipMatcher(['10.0.0.1'])), [['127.0.0.1', null, 3]]);
     });
 });
 
