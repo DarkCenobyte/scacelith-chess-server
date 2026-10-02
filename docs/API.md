@@ -618,9 +618,11 @@ curl -sS -X POST "$API/auth/logout" -H "Authorization: Bearer $TOKEN"
 
 Sends the e-mail confirmation link again. **Auth** none. **Limits** `auth` and `auth_mail` (10
 per hour per client). Body: `{ "email": string 1-254 }`. Answer:
-**202 `{ "status": "accepted" }`**, always. A link is sent only for a signup waiting for its link
-(a new link, valid 24 h, replaces the previous one) or an active, unconfirmed account with that
-address, at most once every 5 minutes per address.
+**202 `{ "status": "accepted" }`**, always (a busy store included), and at most once every 5
+minutes per address it acts. A signup waiting with that address gets its 24 h again, whether or
+not another account uses the address, so that its username stays held as long in both cases. A
+link is sent only for that signup when the address has no account (a new link, valid 24 h,
+replaces the previous one), or for an active, unconfirmed account with that address.
 
 ### POST /auth/password/forgot
 

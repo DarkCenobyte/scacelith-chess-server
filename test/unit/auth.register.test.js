@@ -262,6 +262,45 @@ test('resend renews the link of a pending signup; it says nothing about the addr
     assert.equal(s.store.users.byUsername('Alice_1').emailVerified, true);
 });
 
+test('resend holds the username of a pending signup 24 h more whether or not the address has an account', async (t) => {
+    // Two identical servers, except that one has an account with the address.
+    const servers = [];
+    for (const withAccount of [false, true]) {
+        const s = await startTestServer();
+        t.after(s.close);
+        if (withAccount) await s.createUser({ username: 'owner', email: 'target@example.com' });
+        servers.push(s);
+    }
+    const resend = (s) => s.request('POST', '/api/v1/auth/verify-email/resend', { body: { email: 'TARGET@example.com' } });
+    const probes = [];
+    for (const s of servers) {
+        let transactions = 0;
+        s.store.transaction = (fn) => { transactions++; return fn(); };
+        assert.equal((await s.request('POST', REG, { body: good({ username: 'Prober', email: 'target@example.com' }) })).status, 202);
+        s.now.advance(23 * 3600000);
+        transactions = 0;
+        const r = await resend(s);
+        const { date, ...headers } = r.headers;
+        const work = transactions;
+        s.now.advance(2 * 3600000);
+        const again = await s.request('POST', REG, { body: good({ username: 'prober', email: 'other@example.com' }) });
+        probes.push([r.status, r.text, headers, work, again.status, again.json.error]);
+    }
+    assert.deepEqual(probes[0].slice(3), [1, 409, 'username_taken'], 'one transaction; still held 2 h after the first 24 h');
+    assert.deepEqual(probes[1], probes[0]);
+    // A busy store renews nothing; the answer is the same 202 for both.
+    const busy = [];
+    for (const s of servers) {
+        s.now.advance(5 * 60000);
+        s.store.transaction = () => { throw new StoreError('busy', 'database is locked'); };
+        const r = await resend(s);
+        const { date, ...headers } = r.headers;
+        busy.push([r.status, r.text, headers]);
+    }
+    assert.deepEqual(busy[0].slice(0, 2), [202, '{"status":"accepted"}']);
+    assert.deepEqual(busy[1], busy[0]);
+});
+
 test('the link of a pending signup whose username or address another account took meanwhile', async (t) => {
     const s = await startTestServer();
     t.after(s.close);

@@ -746,7 +746,7 @@ Endpoints (prefix `/api/v1`):
 | `POST /auth/login/mfa` | auth | `{ mfaToken, code? , recoveryCode? }` (401 `invalid_mfa_token` once the step expired or was used, or when the password was reset or changed since the first step). Every code checked here or in a re-authentication first takes `mfa:u<id>` from the primary (`AUTH_MFA_PER_ACCOUNT` 10 per 15 minutes per account, any address): beyond it 429 `too_many_attempts` before the check, a recovery code not spent |
 | `POST /auth/logout`, `POST /auth/logout-all` | auth | bearer |
 | `GET /auth/sessions`, `DELETE /auth/sessions/:id` | auth | |
-| `POST /auth/verify-email/resend` | auth | `{ email }` -> 202 always (a new link for a pending signup or an unconfirmed account). Rates `auth`, `auth_mail` (`AUTH_MAIL_PER_HOUR` 10 per hour per client, 3x per /48, shared) |
+| `POST /auth/verify-email/resend` | auth | `{ email }` -> 202 always (a pending signup gets its 24 h again, with a new link when the address has no account; an unconfirmed account gets a new link). Rates `auth`, `auth_mail` (`AUTH_MAIL_PER_HOUR` 10 per hour per client, 3x per /48, shared) |
 | `POST /auth/password/forgot` | auth | `{ email }` -> 202 always (a refusal is a 429, which says nothing about the address). Rates `auth`, `auth_forgot` (`AUTH_FORGOT_PER_HOUR` 3 per hour) and `auth_forgot_day` (`AUTH_FORGOT_PER_DAY` 10 per 24 h), per client, 3x per /48, shared; plus one mail per address every 5 minutes |
 | `POST /auth/password/reset` | auth | `{ token, newPassword }` (also the HTML form at `/reset-password`). Rates `auth`, `auth_reset` (`AUTH_RESET_PER_HOUR` 10 per hour per client, 3x per /48, shared, the form included) |
 | `POST /auth/sso/google/start` | auth | `{ codeChallenge }` -> `{ attemptId, authUrl, pollMs, expiresIn }`. Rate `sso_start` 30 per 10 min per client, 90 per /48, shared |
@@ -775,8 +775,8 @@ HTML pages outside `/api`: `GET/POST /verify-email?token=` (POST: 200, 400 for a
 409 when another account took the username or the address of a pending signup meanwhile),
 `GET/POST /reset-password?token=`, `GET/POST /confirm-email-change?token=` (POST: 200, 400 for
 an invalid link, 409 when another account took the address meanwhile),
-`GET /auth/sso/google/callback` (auth owner). GET only shows
-a confirmation button; the state change happens on POST (link scanners must not consume tokens).
+`GET /auth/sso/google/callback` (auth owner). GET only shows a confirmation button; the state
+change happens on POST (link scanners must not consume tokens).
 
 ## 6. Game policies
 
@@ -1220,16 +1220,19 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   notice), so that a second signup with the username (409 `username_taken` in both cases), a
   sign-in with it (401 `invalid_credentials`, no account), the public profile (404) and every
   other answer are the same in both cases; the request does the same work in both (one password
-  hash, one throttle call to the primary, one transaction). A new signup with the same address
-  replaces the waiting one; using the link creates the account, its address confirmed, and drops
-  the signup in one transaction (another account took the username or the address meanwhile: the
-  page says so, nothing is created). An expired signup frees its username at once and the
-  retention purge deletes it. A Google sign-in creating an account (`POST /auth/sso/complete`)
-  refuses a username held by the signup of another address like a taken one; an address that only
-  has a pending signup has no account to link. Accounts created unconfirmed before this design keep their `email_verify`
-  links and the 403 `email_unverified` sign-in answer. Without `REQUIRE_EMAIL_VERIFICATION` there
-  is no link: the account is created at once, as before, and register and the e-mail change
-  answer 409 `email_taken` (no link would confirm the address).
+  hash, one throttle call to the primary, one transaction). A resend for the address gives the
+  signup its 24 h again in both cases too (one transaction, 202 even when the store is busy; a
+  new link only when the address has no account), so the username is held as long. A new signup
+  with the same address replaces the waiting one; using the link creates the account, its address
+  confirmed, and drops the signup in one transaction (another account took the username or the
+  address meanwhile: the page says so, nothing is created). An expired signup frees its username
+  at once and the retention purge deletes it. A Google sign-in creating an account
+  (`POST /auth/sso/complete`) refuses a username held by the signup of another address like a
+  taken one; an address that only has a pending signup has no account to link. Accounts created
+  unconfirmed before this design keep their `email_verify` links and the 403 `email_unverified`
+  sign-in answer. Without `REQUIRE_EMAIL_VERIFICATION` there is no link: the account is created at
+  once, as before, and register and the e-mail change answer 409 `email_taken` (no link would
+  confirm the address).
 * **Account data export** (`POST /account/export`, password and second factor, 5 per hour): the
   player's own data only; never a password hash, TOTP secret, recovery code, token or token hash,
   the anti-cheat's data (integrity level, anomalies, analysis features, report weights), the reports

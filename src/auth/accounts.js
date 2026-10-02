@@ -16,13 +16,15 @@
 // (409 username_taken, here and in POST /auth/sso/complete); a new signup with the same address
 // replaces the pending one (its username is freed, its link stops working). Nothing else sees a
 // pending signup: no account row, so sign-in answers invalid_credentials, the public profile 404,
-// a password reset nothing. POST /auth/verify-email/resend for an address with no account renews
-// the link of its pending signup (a new token, 24 h again). Using the link (POST /verify-email,
-// confirmSignup) creates the account, its address confirmed, and deletes the pending signup in one
-// transaction; when another account took the username or the address meanwhile (Google sign-in),
-// the signup is dropped and the page says so. Expired pending signups free their username at once
-// and are deleted by the retention purge. Accounts created unconfirmed before pending signups
-// existed keep the `email_verify` links and the 403 email_unverified sign-in answer.
+// a password reset nothing. POST /auth/verify-email/resend gives the address's pending signup its
+// 24 h again whether or not the address has an account (the same transaction in both cases, best
+// effort: a busy store still answers 202), and a new link (a new token) only when it has none.
+// Using the link (POST /verify-email, confirmSignup) creates the account, its address confirmed,
+// and deletes the pending signup in one transaction; when another account took the username or the
+// address meanwhile (Google sign-in), the signup is dropped and the page says so. Expired pending
+// signups free their username at once and are deleted by the retention purge. Accounts created
+// unconfirmed before pending signups existed keep the `email_verify` links and the 403
+// email_unverified sign-in answer.
 //
 // E-mail change (POST /account/email { newEmail, password, code?, recoveryCode? }; the
 // re-authentication of deletion: password, plus a code or a recovery code when MFA is on):
@@ -292,21 +294,29 @@ export function createAccounts(svc) {
     async function resendVerification({ email, ip }) {
         const em = normalizeEmail(email);
         const fresh = await once(mailKey('verify', em), MAIL_THROTTLE_MS);
-        const user = isValidEmail(em) ? store.users.byEmail(em) : null;
-        if (fresh && user && user.status === 'active' && !user.emailVerified) {
+        if (!fresh || !isValidEmail(em)) return { status: 'accepted' };
+        const user = store.users.byEmail(em);
+        if (user && user.status === 'active' && !user.emailVerified) {
             sendVerification(user);
             events.record('verification_resent', { userId: user.id, ip });
-        } else if (fresh && !user && isValidEmail(em)) {
-            // The address's pending signup, if any: a new link replaces the previous one, for 24 h.
-            const token = randomToken('', 32);
-            const p = atomicallyOrBusy(() => {
+        }
+        // The address's pending signup, if any, gets its 24 h again whether or not the address has
+        // an account (how long its username stays held must not tell), with the same transaction in
+        // both cases; a new link replaces the previous one only when the address has no account (as
+        // at signup). Best effort: a busy store renews nothing and the answer is still 202.
+        const token = randomToken('', 32);
+        let p = null;
+        try {
+            p = svc.atomically(() => {
                 const row = store.signups.byEmail(em);
                 if (!row || row.expiresAt <= now()) return null;
-                store.signups.renew(row.id, { tokenHash: sha256Hex(token), expiresAt: now() + TOKEN_TTL_MS.email_verify });
+                store.signups.renew(row.id, { tokenHash: user ? row.tokenHash : sha256Hex(token), expiresAt: now() + TOKEN_TTL_MS.email_verify });
                 return row;
             });
-            if (p) mailSignupLink(p.username, p.email, token);
+        } catch (err) {
+            if (!(err && err.code === 'busy' && !err.expose)) throw err;
         }
+        if (p && !user) mailSignupLink(p.username, p.email, token);
         return { status: 'accepted' };
     }
 
