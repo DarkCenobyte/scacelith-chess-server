@@ -2,10 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { sha256Hex } from '../../src/security/keys.js';
 import { SESSION_CACHE_TTL_MS } from '../../src/auth/sessions.js';
-import { startTestServer } from './helpers/auth-fakes.js';
+import { createFakePrimary, linkIn, startTestServer } from './helpers/auth-fakes.js';
+import { startReal } from './helpers/real-auth.js';
 
 const PW = 'correct horse battery';
+const NEW = 'a brand new passphrase';
 const DAY = 86400000;
+
+// The `session.revoked` broadcasts (auth/sessions.js header): the hashes of the revoked sessions
+// close their connections, no list (null) closes the user's connection, [] closes nothing.
+const revokedCalls = (primary) => primary.calls.filter((c) => c.type === 'session.revoked').map((c) => c.payload);
 
 async function setup(env) {
     const s = await startTestServer({ env });
@@ -59,6 +65,50 @@ test('logout revokes the session everywhere (broadcast through the primary)', as
     const call = s.primary.calls.find((c) => c.type === 'session.revoked');
     assert.deepEqual(call.payload, { userId: u.id, tokenHashes: [sha256Hex(token)] });
     assert.equal((await s.request('POST', '/api/v1/auth/logout', { token })).status, 401);
+});
+
+test('revoking another session broadcasts its token hash (its connection is closed)', async (t) => {
+    const { s, u } = await setup();
+    t.after(s.close);
+    const a = await s.login('alice', PW, { clientLabel: 'Laptop' });
+    const b = await s.login('alice', PW, { clientLabel: 'Desktop' });
+    const other = (await s.request('GET', '/api/v1/auth/sessions', { token: a.token })).json.sessions.find((x) => !x.current);
+    assert.equal((await s.request('DELETE', `/api/v1/auth/sessions/${other.id}`, { token: a.token })).status, 200);
+    assert.deepEqual(revokedCalls(s.primary), [{ userId: u.id, tokenHashes: [sha256Hex(b.token)] }]);
+    assert.equal((await s.request('GET', '/api/v1/account/me', { token: b.token })).status, 401);
+});
+
+test('logout-all, a password reset and the deletion revoke every session: the broadcast has no list', async (t) => {
+    const { s, u } = await setup();
+    t.after(s.close);
+    let { token } = await s.login('alice', PW);
+    assert.equal((await s.request('POST', '/api/v1/auth/logout-all', { token })).status, 200);
+    assert.deepEqual(revokedCalls(s.primary), [{ userId: u.id, tokenHashes: null }]);
+
+    await s.login('alice', PW);
+    await s.request('POST', '/api/v1/auth/password/forgot', { body: { email: 'alice@example.com' } });
+    await s.mailer.idle();
+    const reset = new URL(linkIn(s.mailer.sent.at(-1).text)).searchParams.get('token');
+    assert.equal((await s.request('POST', '/api/v1/auth/password/reset', { body: { token: reset, newPassword: NEW } })).status, 200);
+    assert.deepEqual(revokedCalls(s.primary).slice(1), [{ userId: u.id, tokenHashes: null }]);
+
+    ({ token } = await s.login('alice', NEW));
+    assert.equal((await s.request('POST', '/api/v1/account/delete', { token, body: { password: NEW } })).status, 200);
+    assert.deepEqual(revokedCalls(s.primary).slice(2), [{ userId: u.id, tokenHashes: null }]);
+});
+
+test('on the real store: revoking one session broadcasts its hash, logout-all no list', async (t) => {
+    const primary = createFakePrimary();
+    const s = await startReal(t, {}, { primary });
+    const id = s.store.users.create({ username: 'alice', email: 'alice@example.org', passwordHash: await s.hasher.hash(PW), emailVerified: true });
+    const login = async () => (await s.request('POST', '/api/v1/auth/login', { body: { login: 'alice', password: PW } })).json.token;
+    const a = await login(), b = await login();
+    const other = (await s.request('GET', '/api/v1/auth/sessions', { token: a })).json.sessions.find((x) => !x.current);
+    assert.equal((await s.request('DELETE', `/api/v1/auth/sessions/${other.id}`, { token: a })).status, 200);
+    assert.deepEqual(revokedCalls(primary), [{ userId: id, tokenHashes: [sha256Hex(b)] }]);
+    assert.equal((await s.request('GET', '/api/v1/account/me', { token: a })).status, 200);
+    assert.equal((await s.request('POST', '/api/v1/auth/logout-all', { token: a })).status, 200);
+    assert.deepEqual(revokedCalls(primary).slice(1), [{ userId: id, tokenHashes: null }]);
 });
 
 test('logout-all', async (t) => {

@@ -98,7 +98,10 @@ test('tokens, sessions, security events, conduct, reports filed: the auth fake a
 
         const s1 = store.sessions.create({ userId: me, tokenHash: Buffer.from('s1'), createdAt: T, expiresAt: T + 1000, idleExpiresAt: T + 1000, ip: '203.0.113.7' });
         const s2 = store.sessions.create({ userId: me, tokenHash: Buffer.from('s2'), createdAt: T + 1, expiresAt: T + 1000, idleExpiresAt: T + 1000 });
-        store.sessions.revoke(s2, me, T + 2);
+        assert.ok(Buffer.from('s2').equals(store.sessions.revoke(s2, me, T + 2)));
+        assert.equal(store.sessions.revoke(s2, me, T + 3), null, 'already revoked');
+        assert.deepEqual(store.sessions.listForUser(me).map((s) => s.id), [s1]);
+        assert.deepEqual(Object.keys(store.sessions.listForUser(me)[0]).sort(), ['clientLabel', 'createdAt', 'expiresAt', 'id', 'idleExpiresAt', 'ip', 'lastSeenAt']);
         const all = store.sessions.allForUser(me);
         assert.deepEqual(all.map((s) => s.id), [s2, s1]);
         assert.equal(all[1].ip, '203.0.113.7');

@@ -991,7 +991,9 @@ export class Router {
 
     /**
      * 'auth.invalidate': drops the cached sessions and closes the user's connections opened with
-     * one of the revoked tokens (hashes as Buffers, hex or base64/base64url strings).
+     * one of the revoked tokens (hashes as Buffers, hex or base64/base64url strings); no list (null)
+     * means every session of the user was revoked: its connection is closed. An empty list only
+     * drops the cached sessions (auth/sessions.js header).
      */
     invalidateSessions({ userId, tokenHashes }) {
         try { this.auth.invalidate?.({ userId, tokenHashes }); } catch (e) { this.log?.error?.('auth.invalidate failed', { err: e }); }

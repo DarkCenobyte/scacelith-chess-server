@@ -191,8 +191,9 @@ Authorization: Bearer sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8
   - a password reset and the deletion of the account, which revoke every session;
   - an administrator (`bin/admin.js`).
 
-  A revocation from the API takes effect at once on every worker. Otherwise a worker may keep
-  using its record of a valid session for up to 30 s.
+  A revocation from the API takes effect at once on every worker, and the WebSocket opened with a
+  revoked session is closed (`Notice{SessionRevoked}`, then close 4003). Otherwise a worker may
+  keep using its record of a valid session for up to 30 s.
 - **Scope.** A token belongs to one server and opens its WebSocket too (`Hello.token`,
   [PROTOCOL.md](PROTOCOL.md)). Never send it to another server.
 

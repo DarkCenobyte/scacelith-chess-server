@@ -584,7 +584,7 @@ export function createAccounts(svc) {
     function revokeSession(ctxUser, id, ip = null) {
         const row = sessions.find(ctxUser.userId, id);
         if (!row) throw new AuthError(404, 'not_found', 'No such session.');
-        sessions.revoke(ctxUser.userId, row.id, row.tokenHash || null);
+        sessions.revoke(ctxUser.userId, row.id);
         events.record('session_revoked', { userId: ctxUser.userId, ip, detail: { reason: 'user' } });
         return { status: 'revoked' };
     }

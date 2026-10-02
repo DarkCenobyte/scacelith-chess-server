@@ -114,7 +114,14 @@ export function createFakeStore({ now = Date.now } = {}) {
             create(row) { const id = ++sessionSeq; sessions.set(id, { id, lastSeenAt: row.createdAt, revokedAt: null, ...row }); return id; },
             byTokenHash(h) { for (const s of sessions.values()) if (s.tokenHash === h) return copy(s); return null; },
             touch(id, t, idle) { calls.touch++; const s = sessions.get(id); if (s) { s.lastSeenAt = t; s.idleExpiresAt = idle; } },
-            revoke(id) { const s = sessions.get(id); if (s && !s.revokedAt) s.revokedAt = now(); },
+            // Like the real store: the revoked session's token hash, or null (unknown, already
+            // revoked, or not the session of `userId` when given).
+            revoke(id, userId) {
+                const s = sessions.get(id);
+                if (!s || s.revokedAt || (userId != null && s.userId !== userId)) return null;
+                s.revokedAt = now();
+                return s.tokenHash;
+            },
             revokeAllForUser(userId, exceptId) {
                 const out = [];
                 for (const s of sessions.values()) {
@@ -122,7 +129,12 @@ export function createFakeStore({ now = Date.now } = {}) {
                 }
                 return out;
             },
-            listForUser(userId) { return [...sessions.values()].filter((s) => s.userId === userId).map(copy); },
+            // Like the real store: the non-revoked sessions, without their token hash.
+            listForUser(userId) {
+                return [...sessions.values()].filter((s) => s.userId === userId && !s.revokedAt)
+                    .map((s) => ({ id: s.id, createdAt: s.createdAt, lastSeenAt: s.lastSeenAt, expiresAt: s.expiresAt,
+                        idleExpiresAt: s.idleExpiresAt, clientLabel: s.clientLabel ?? null, ip: s.ip ?? null }));
+            },
             allForUser(userId) {
                 return [...sessions.values()].filter((s) => s.userId === userId).sort((a, b) => b.createdAt - a.createdAt || b.id - a.id)
                     .map((s) => ({ id: s.id, createdAt: s.createdAt, lastSeenAt: s.lastSeenAt, expiresAt: s.expiresAt,

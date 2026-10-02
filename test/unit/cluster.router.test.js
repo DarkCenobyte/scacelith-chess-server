@@ -417,6 +417,17 @@ describe('router: primary and bus', () => {
         assert.equal(env.invalidated.length, 2);
     });
 
+    it('closes the user\'s connection when every session was revoked (no list); an empty list closes nothing', async () => {
+        const env = await setup();
+        const { c } = await env.login();
+        assert.deepEqual(await env.primary.request('auth.invalidate', { userId: 1, tokenHashes: [] }), { ok: true, closed: 0 });
+        assert.deepEqual(await env.primary.request('auth.invalidate', { userId: 1, tokenHashes: null }), { ok: true, closed: 1 });
+        assert.equal((await c.recv()).code, N.SessionRevoked);
+        assert.equal((await c.recv()).code, E.Unauthorized);
+        assert.equal(await c.closed(), 4003);
+        assert.deepEqual(env.invalidated, [{ userId: 1, tokenHashes: [] }, { userId: 1, tokenHashes: null }]);
+    });
+
     it('hosts remote players: attach, relay both ways, RTT, close, detach, shard down', async () => {
         const bus = new FakeBus();
         const env = await setup({ bus });

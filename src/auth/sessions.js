@@ -7,9 +7,13 @@
 // A revocation drops the local cache entries at once and asks the primary to broadcast
 // `session.revoked` so that every shard drops its entries (auth.invalidate on `auth.invalidate`).
 //
-// Broadcast convention (DESIGN 5.7 leaves it open): `tokenHashes` empty or absent means "every
-// cached session of `userId`" (used when the revoked hashes are not known, e.g. when
-// store.sessions.enforceLimit revoked the oldest sessions).
+// Broadcast convention (DESIGN 5.7 leaves it open): `tokenHashes` lists the revoked sessions (their
+// cache entries are dropped and the router closes the connection opened with one of them).
+// `null` or absent means "every session of `userId` was revoked" (revokeAll() of every session):
+// every cached session of the user is dropped and the router closes the user's connection. An
+// empty list means "read the account again" (refresh(), and revoke() when the store gave no
+// hash): every cached session of the user is dropped, no connection is closed
+// (router.invalidateSessions).
 
 import { LruMap } from '../security/ratelimit.js';
 import { randomToken, sha256Hex } from '../security/keys.js';
@@ -119,17 +123,25 @@ export function createSessionManager(svc) {
         return { userId: s.userId, username: e.username, sessionId: s.id, emailVerified: e.emailVerified, tokenHash: hash };
     }
 
-    /** Revokes one session of `userId`. */
+    /**
+     * Revokes one session of `userId`. The hash the store gives back (else `tokenHash`) closes
+     * that session's connection; without either, the user's cached sessions are read again.
+     */
     function revoke(userId, sessionId, tokenHash = null) {
-        store.sessions.revoke(sessionId);
-        broadcast(userId, tokenHash ? [tokenHash] : []);
+        const h = store.sessions.revoke(sessionId, userId);
+        const hex = h ? (Buffer.isBuffer(h) ? h.toString('hex') : String(h)) : tokenHash;
+        if (hex) broadcast(userId, [hex]);
+        else refresh(userId);
     }
 
-    /** Revokes every session of `userId` (but `exceptId`); returns the number revoked when known. */
+    /**
+     * Revokes every session of `userId` (but `exceptId`); returns the number revoked when known.
+     * Without `exceptId` the broadcast has no list (header): the user's connection is closed too.
+     */
     function revokeAll(userId, exceptId = undefined) {
         const hashes = store.sessions.revokeAllForUser(userId, exceptId);
         const list = Array.isArray(hashes) ? hashes.filter((h) => typeof h === 'string') : [];
-        broadcast(userId, exceptId === undefined ? [] : list);
+        broadcast(userId, exceptId === undefined ? null : list);
         return list.length;
     }
 

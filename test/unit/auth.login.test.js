@@ -19,7 +19,7 @@ test('login by username or e-mail (case-insensitive): session token, user view',
         assert.equal(r.json.expiresAt, s.now() + 90 * 86400000);
         assert.deepEqual(r.json.user, { id: u.id, username: 'Alice', email: 'alice@example.com', emailVerified: true, mfaEnabled: false, googleLinked: false, hasPassword: true, acceptChallenges: 'all', createdAt: s.now(), lastLoginAt: s.now(), pendingEmail: null });
     }
-    const rows = s.store.sessions.listForUser(u.id);
+    const rows = [...s.store._raw.sessions.values()];
     assert.equal(rows[0].clientLabel, 'Windows 11');
     assert.match(rows[0].tokenHash, /^[0-9a-f]{64}$/);
     assert.equal(s.store.users.byId(u.id).lastLoginAt, s.now());

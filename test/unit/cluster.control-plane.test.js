@@ -441,7 +441,9 @@ describe('control plane: games, sanctions, shards', () => {
         assert.deepEqual(recorded, [[1, 'abandon']]);
         assert.equal(shards.frames()[0].msg.code, N.MatchmakingCooldown);
         cp.sessionRevoked({ userId: 1, tokenHashes: ['ab'] });
-        assert.deepEqual(shards.of('auth.invalidate'), [{ shard: '*', type: 'auth.invalidate', payload: { userId: 1, tokenHashes: ['ab'] } }]);
+        cp.sessionRevoked({ userId: 1, tokenHashes: null });
+        assert.deepEqual(shards.of('auth.invalidate'), [{ shard: '*', type: 'auth.invalidate', payload: { userId: 1, tokenHashes: ['ab'] } },
+            { shard: '*', type: 'auth.invalidate', payload: { userId: 1, tokenHashes: null } }]);
     });
 
     it('shard ready re-attaches its games; shard down forgets its users and tells the others', () => {

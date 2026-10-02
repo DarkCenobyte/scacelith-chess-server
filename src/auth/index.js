@@ -244,7 +244,7 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
     return {
         /** Validates a session token (sync). */
         validateToken: (token) => svc.sessions.validate(token),
-        /** Drops cached sessions ({ userId, tokenHashes }: empty tokenHashes = every session of the user). */
+        /** Drops cached sessions ({ userId, tokenHashes }: null, absent or empty tokenHashes = every session of the user). */
         invalidate: (payload) => svc.sessions.invalidate(payload || {}),
 
         register: a.register,

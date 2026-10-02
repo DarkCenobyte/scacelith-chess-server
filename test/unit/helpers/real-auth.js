@@ -26,10 +26,11 @@ export function applyGame(white, black, score) {
 }
 
 /**
- * Starts the server pieces; everything is closed and deleted after the test `t`.
+ * Starts the server pieces; everything is closed and deleted after the test `t`. `primary`: the
+ * auth service's IPC client (e.g. auth-fakes.js createFakePrimary, which records the broadcasts).
  * @returns {Promise<{ config, store, auth, mailer, hasher, now, request, file }>}
  */
-export async function startReal(t, env = {}) {
+export async function startReal(t, env = {}, { primary = null } = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-realauth-'));
     const file = path.join(dir, 'scacelith.db');
     const config = testConfig({ DB_PATH: file, AUTH_RATE_PER_IP: '10000', HTTP_RATE_PER_IP: '100000', REQUIRE_EMAIL_VERIFICATION: '1',
@@ -42,7 +43,7 @@ export async function startReal(t, env = {}) {
     const log = logger.child('test');
     const mailer = createCaptureMailer(config, log);
     const hasher = createPasswordHasher({ scrypt: { logN: 10 }, argon2: false });
-    const auth = createAuth({ config, store, log, now, mailer, passwordHasher: hasher });
+    const auth = createAuth({ config, store, primary, log, now, mailer, passwordHasher: hasher });
     const handler = createApiHandler({ config, store, auth, log, now });
     const server = http.createServer(handler);
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
