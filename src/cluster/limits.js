@@ -3,13 +3,13 @@
 //
 // SlidingWindowLimiter: sliding-window counter (the previous fixed window weighted by how much
 // of it still overlaps the sliding window + the current window). Accurate to a few percent,
-// O(1) time below capacity and ~100 bytes per key. Keys expire two windows after their last use;
+// O(1) time below capacity and ~200 bytes per key. Keys expire two windows after their last use;
 // the map is bounded (maxKeys): beyond it the expired keys go first, then the least recently
 // inserted ones, which can only make the limiter more lenient for the evicted keys, never block
-// an innocent client. Each complete walk of the map for expired keys records the earliest expiry
-// of the keys it keeps, and no walk is made while no key can have expired since then: a flood of
-// fresh keys at capacity costs O(1) per key, not a walk of the whole map every 16 keys. While
-// keys keep expiring at capacity (about one per new key), each eviction still walks the map: O(n).
+// an innocent client. The expired keys are found through a min-heap of the keys by expiry, not a
+// walk of the map: a new key at capacity costs O(log n), whether no key has expired (a flood of
+// fresh keys) or about one per new key. Only when more than 64 have expired does a walk from the
+// oldest insertion pick the 64 to drop, and it then makes room for 64 new keys.
 //
 // OnceStore: remembers keys until their TTL (single-use tokens: proof-of-work challenges, TOTP
 // steps...). Bounded too; when full, the oldest insertions are evicted first. With the default
@@ -26,11 +26,12 @@ export class SlidingWindowLimiter {
     constructor({ maxKeys = 200000, now = Date.now } = {}) {
         this.maxKeys = maxKeys;
         this.now = now;
-        /** @type {Map<string, {start:number, cur:number, prev:number, windowMs:number, last:number}>} */
+        /** @type {Map<string, {start:number, cur:number, prev:number, windowMs:number, last:number, key:string, exp:number, hi:number}>} */
         this.entries = new Map();
         this.evicted = 0;
-        // No key expires before this time (a lower bound; -Infinity: unknown). See _evict.
-        this._noExpiryBefore = -Infinity;
+        // Every entry, as a min-heap on `exp`: a lower bound of its expiry (last + 2 windows), which
+        // take() lowers when the clock stepped back and _expired() raises; `hi` is its index here.
+        this._heap = [];
     }
 
     /**
@@ -45,14 +46,16 @@ export class SlidingWindowLimiter {
         let e = this.entries.get(key);
         if (!e || e.windowMs !== windowMs) {
             if (!e && this.entries.size >= this.maxKeys) this._evict();
-            e = { start: now - (now % windowMs), cur: 0, prev: 0, windowMs, last: now };
+            if (e) this._unfile(e);
+            e = { start: now - (now % windowMs), cur: 0, prev: 0, windowMs, last: now, key, exp: now + 2 * windowMs, hi: -1 };
             this.entries.set(key, e);
+            this._file(e);
         }
         this._advance(e, now);
         e.last = now;
-        // On every take: a clock that stepped back lowers this key's expiry.
-        const exp = now + 2 * windowMs - 1;
-        if (exp < this._noExpiryBefore) this._noExpiryBefore = exp;
+        // A later expiry waits for _expired(); an earlier one (the clock stepped back) moves up now.
+        const exp = now + 2 * windowMs;
+        if (exp < e.exp) { e.exp = exp; this._up(e.hi); }
         const elapsed = now - e.start;
         const weight = 1 - elapsed / windowMs;
         const estimate = e.prev * weight + e.cur;
@@ -122,39 +125,122 @@ export class SlidingWindowLimiter {
     }
 
     _evict() {
-        // Drop expired keys first; if none, the oldest insertions. A walk of the whole map records
-        // the earliest expiry of the keys it keeps (minus 1 ms for rounding): until then no key can
-        // have expired (take() lowers the bound for every key it touches), and the walk is skipped.
+        // Drop expired keys first, the first 64 in insertion order (every one when fewer have
+        // expired); if none, the oldest insertions.
         const now = this.now();
-        if (now >= this._noExpiryBefore) {
-            let removed = 0, minExp = Infinity;
+        const expired = this._expired(now, 65);
+        if (expired.length > 64) {
+            for (const e of expired) this._file(e);
+            let removed = 0;
             for (const [k, e] of this.entries) {
-                if (now - e.last > 2 * e.windowMs) { this.entries.delete(k); removed++; } else if (e.last + 2 * e.windowMs < minExp) minExp = e.last + 2 * e.windowMs;
+                if (now - e.last > 2 * e.windowMs) { this._drop(k, e); removed++; }
                 if (removed >= 64) break;
             }
-            this._noExpiryBefore = removed >= 64 ? -Infinity : minExp - 1;     // a walk cut short knows no bound
-            if (removed) return;
+            return;
         }
-        const it = this.entries.keys();
-        for (let i = 0; i < 16; i++) {
-            const r = it.next();
-            if (r.done) break;
-            this.entries.delete(r.value);
+        for (const e of expired) this.entries.delete(e.key);
+        if (expired.length) return;
+        let n = 0;
+        for (const [k, e] of this.entries) {
+            this._drop(k, e);
             this.evicted++;
+            if (++n >= 16) break;
         }
+    }
+
+    // Takes up to `max` expired entries out of the heap. The top entries whose bound has passed
+    // but which were used since are filed again at their expiry: each is seen about once per two
+    // windows of use. The bound never exceeds last + 2 windows, so once it is above `now` at the
+    // top (an exact comparison: rounding cannot make it pass a key the expiry test would drop),
+    // no key has expired.
+    _expired(now, max) {
+        const h = this._heap, out = [], live = [];
+        while (h.length && h[0].exp <= now && out.length < max) {
+            const e = h[0];
+            this._unfile(e);
+            if (now - e.last > 2 * e.windowMs) out.push(e);
+            else { e.exp = e.last + 2 * e.windowMs; live.push(e); }
+        }
+        for (const e of live) this._file(e);
+        return out;
     }
 
     /** Removes keys unused for two windows. Call periodically. */
     sweep(now = this.now()) {
+        // Past a sixteenth of the keys (after a lull), building the heap again costs less than
+        // taking each of them out.
+        const few = this.entries.size >> 4;
         let n = 0;
-        for (const [k, e] of this.entries) if (now - e.last > 2 * e.windowMs) { this.entries.delete(k); n++; }
+        for (const [k, e] of this.entries) {
+            if (now - e.last > 2 * e.windowMs) {
+                this.entries.delete(k);
+                if (++n <= few) this._unfile(e);
+            }
+        }
+        if (n > few) this._rebuild();
         return n;
     }
 
     /** Forgets a key's counts: its next take() starts from zero. */
-    forget(key) { this.entries.delete(key); }
+    forget(key) {
+        const e = this.entries.get(key);
+        if (e) this._drop(key, e);
+    }
 
     get size() { return this.entries.size; }
+
+    _drop(key, e) {
+        this.entries.delete(key);
+        this._unfile(e);
+    }
+
+    // ---- the heap (index `hi` kept in each entry) ----
+
+    _file(e) {
+        e.hi = this._heap.length;
+        this._heap.push(e);
+        this._up(e.hi);
+    }
+
+    _rebuild() {
+        const h = this._heap = [...this.entries.values()];
+        for (let i = 0; i < h.length; i++) h[i].hi = i;
+        for (let i = (h.length >> 1) - 1; i >= 0; i--) this._down(i);
+    }
+
+    _unfile(e) {
+        const h = this._heap, i = e.hi, last = h.pop();
+        e.hi = -1;
+        if (last === e) return;
+        h[i] = last;
+        last.hi = i;
+        this._up(i);
+        this._down(last.hi);
+    }
+
+    _up(i) {
+        const h = this._heap, e = h[i];
+        while (i > 0) {
+            const p = (i - 1) >> 1;
+            if (h[p].exp <= e.exp) break;
+            h[i] = h[p]; h[i].hi = i;
+            i = p;
+        }
+        h[i] = e; e.hi = i;
+    }
+
+    _down(i) {
+        const h = this._heap, n = h.length, e = h[i];
+        for (;;) {
+            let c = 2 * i + 1;
+            if (c >= n) break;
+            if (c + 1 < n && h[c + 1].exp < h[c].exp) c++;
+            if (h[c].exp >= e.exp) break;
+            h[i] = h[c]; h[i].hi = i;
+            i = c;
+        }
+        h[i] = e; e.hi = i;
+    }
 }
 
 /**
