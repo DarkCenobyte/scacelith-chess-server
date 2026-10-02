@@ -145,6 +145,7 @@ export function createFakeStore({ textColumns = false } = {}) {
                 jobs.set(Number(gameId), { ...(j || { gameId: Number(gameId), attempts: 0 }), status: 'queued', reason, priority });
                 return true;
             },
+            // The completed analyses only (forUser(userId, limit, { doneOnly: true }) of the real store).
             forUser(userId, limit = 30) {
                 const out = [];
                 for (const j of jobs.values()) {

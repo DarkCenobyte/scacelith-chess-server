@@ -413,7 +413,7 @@ const NOTABLE_SCORE = 2;
  */
 export function playerGames(store, userId, limit = MODEL.windowGames) {
     let rows = [];
-    try { rows = store.analysis.forUser(userId, limit) || []; } catch { rows = []; }
+    try { rows = store.analysis.forUser(userId, limit, { doneOnly: true }) || []; } catch { rows = []; }
     const out = [];
     for (const row of rows) {
         const f = parseMaybeJson(row?.features ?? row, null);

@@ -65,6 +65,8 @@
 //   - tokens.consume, mfa.consumeRecoveryCode and users.advanceMfaStep are single conditional
 //     statements (UPDATE/DELETE ... WHERE still-valid): atomic across processes without an
 //     explicit transaction (an autocommit write retries on the lock through busy_timeout).
+//   - analysis.forUser(userId, limit, { doneOnly }) lists the player's jobs of every status, newest
+//     game first; with doneOnly the completed analyses only (anticheat/scoring.js, bin/admin.js).
 //   - analysis: a job is claimed at most 3 times (ANALYSIS_MAX_ATTEMPTS); a running job claimed (or
 //     renewed by touch(gameId, workerId, now), the worker's heartbeat) more than 10 minutes ago is
 //     re-queued (or failed at the cap) by the next claim; fail() re-queues until the cap and
@@ -233,6 +235,18 @@ export const GAMES_FOR_USER_SQL = `SELECT ${GAME_SUMMARY_COLS} FROM games WHERE 
 /** games.countForUser with a filter (?2 unused, the other parameters: userGamesFilter). */
 export const GAMES_COUNT_FOR_USER_SQL = `SELECT (SELECT count(*) FROM games WHERE white_id = ?1 ${userGamesFilter('?5')})
     + (SELECT count(*) FROM games WHERE black_id = ?1 ${userGamesFilter('?6')}) AS n`;
+
+// analysis.forUser: ?1 the player, ?2 the limit. The done-only filter is written `+a.status` (no
+// index term): SQLite keeps walking the player's games newest first (games_white / games_black, a
+// primary-key probe of analysis_jobs each, stopped at the limit) instead of reading every done job
+// of the server through analysis_jobs_queue and sorting them.
+const analysisForUserSql = (doneOnly) => `SELECT a.game_id, a.status, a.attempts, a.finished_at, a.error, a.features, g.category,
+    g.white_id, g.ended_at, g.ply_count FROM games g JOIN analysis_jobs a ON a.game_id = g.id WHERE g.id IN (
+    SELECT id FROM games WHERE white_id = ?1 UNION SELECT id FROM games WHERE black_id = ?1)
+    ${doneOnly ? "AND +a.status = 'done' " : ''}ORDER BY g.id DESC LIMIT ?2`;
+
+/** analysis.forUser(userId, limit, { doneOnly: true }) (the tests check its query plan). */
+export const ANALYSED_FOR_USER_SQL = analysisForUserSql(true);
 
 // The status a result filter needs on each colour (index 0: as White, 1: as Black).
 const RESULT_STATUS = Object.freeze({
@@ -1272,11 +1286,13 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                 AS priority`).get(AnalysisPriority.ordinary, BACKLOG_COUNT_MAX);
             return { ordinary: r.ordinary, priority: r.priority };
         },
-        forUser(userId, limit = 50) {
-            return st(`SELECT a.game_id, a.status, a.attempts, a.finished_at, a.error, a.features, g.category, g.white_id, g.ended_at,
-                g.ply_count FROM games g JOIN analysis_jobs a ON a.game_id = g.id WHERE g.id IN (
-                SELECT id FROM games WHERE white_id = ?1 UNION SELECT id FROM games WHERE black_id = ?1)
-                ORDER BY g.id DESC LIMIT ?2`).all(userId, limit).map((r) => ({
+        /**
+         * The player's jobs, newest game first; with doneOnly, the completed analyses only (the
+         * scoring's window of their latest analysed games, which waiting or failed jobs must not
+         * take places in).
+         */
+        forUser(userId, limit = 50, { doneOnly = false } = {}) {
+            return st(analysisForUserSql(doneOnly)).all(userId, limit).map((r) => ({
                 gameId: r.game_id, status: r.status, attempts: r.attempts, finishedAt: r.finished_at, error: r.error,
                 features: fromJson(r.features), category: r.category, color: r.white_id === userId ? 'white' : 'black',
                 endedAt: r.ended_at, plyCount: r.ply_count,

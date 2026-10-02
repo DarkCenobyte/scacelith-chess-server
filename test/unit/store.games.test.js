@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Worker } from 'node:worker_threads';
-import { openStore, migrate, StoreError } from '../../src/store/index.js';
+import { openStore, migrate, StoreError, explainQueryPlan, ANALYSED_FOR_USER_SQL } from '../../src/store/index.js';
+import { playerGames } from '../../src/anticheat/scoring.js';
 import { testConfig } from '../../src/config.js';
 import { enums } from '../../src/protocol/schema.js';
 import { applyGame as fideApplyGame } from '../../src/match/elo.js';
@@ -342,6 +343,33 @@ test('analysis.touch: a job its worker keeps renewing is not taken for stale', (
     assert.equal(store.analysis.touch(gs[1].id, 'w1', t + 11 * 60000), false, 'claimed by another worker since');
     assert.equal(store.analysis.complete(gs[0].id, { n: 1 }, t + 12 * 60000), true);
     assert.equal(store.analysis.touch(gs[0].id, 'w1', t + 12 * 60000), false, 'done');
+    store.close();
+});
+
+test('analysis.forUser doneOnly: the latest analysed games, waiting and failed jobs take no place', () => {
+    const { store, ids: [a, b] } = setup();
+    const gs = Array.from({ length: 40 }, (_, i) => record(i % 2 ? b : a, i % 2 ? a : b));
+    store.games.finishBatch(gs);
+    const t = Date.now();
+    // The 25 oldest games are analysed, the next one failed for good, the 14 newest still wait.
+    for (const g of gs.slice(0, 26)) {
+        const [job] = store.analysis.next(1, 'w', t);
+        assert.equal(job.gameId, g.id);
+        if (g === gs[25]) {
+            for (let i = 0; i < 3; i++) { store.analysis.fail(g.id, 'engine crashed', t); if (i < 2) store.analysis.next(1, 'w', t); }
+        } else store.analysis.complete(g.id, { gameId: g.id, white: { userId: g.whiteId, n: 20 }, black: { userId: g.blackId, n: 20 } }, t);
+    }
+    assert.deepEqual(store.analysis.stats(), { queued: 14, running: 0, done: 25, failed: 1 });
+    assert.equal(store.analysis.forUser(a, 30).length, 30, 'every status');
+    const done = store.analysis.forUser(a, 30, { doneOnly: true });
+    assert.deepEqual(done.map((j) => j.gameId), gs.slice(0, 25).map((g) => g.id).reverse());
+    assert.ok(done.every((j) => j.status === 'done'));
+    assert.equal(playerGames(store, a, 30).length, 25);
+    assert.equal(playerGames(store, a, 10).length, 10);
+    // The plan walks the player's games newest first, never every done job of the server.
+    const plan = explainQueryPlan(store, ANALYSED_FOR_USER_SQL, [a, 30]).map((r) => r.detail).join(' | ');
+    assert.match(plan, /SEARCH a USING INTEGER PRIMARY KEY/);
+    assert.doesNotMatch(plan, /analysis_jobs_queue|TEMP B-TREE FOR ORDER BY/);
     store.close();
 });
 

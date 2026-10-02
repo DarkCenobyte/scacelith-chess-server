@@ -23,8 +23,9 @@
 //     <ratingBucket>') returns { <metric>: { n, mean, m2 } }; the analysis process (the only
 //     writer) sends one { key, value } observation per metric and game, which the store merges
 //     (Welford).
-//   * store.analysis.forUser(userId, limit) must return that player's completed analyses, newest
-//     first, each row carrying the `features` object given to complete() (or being it).
+//   * store.analysis.forUser(userId, limit, { doneOnly: true }) must return that player's completed
+//     analyses, newest first, each row carrying the `features` object given to complete() (or
+//     being it).
 //   * store.reports.forReporter(reporterId) (not in DESIGN) is used when present to weigh a
 //     reporter by the outcomes of their past reports; without it every reporter has a neutral
 //     track record. store.reports.forReported(userId) must return rows with { weight, createdAt,

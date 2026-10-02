@@ -567,8 +567,8 @@ header of `src/anticheat/index.js`):
   m2 } }`, and `integrity.updatePopulation([{ key: '<profile>|<category>|<bucket>|<metric>',
   value }], now)` sends one observation per metric and game, which the store merges (Welford);
   the analysis process is the only writer;
-* `analysis.forUser(userId, limit)` returns the player's completed analyses, newest first, each
-  row with the `features` given to `complete()`;
+* `analysis.forUser(userId, limit, { doneOnly: true })` returns the player's completed analyses,
+  newest first, each row with the `features` given to `complete()`;
 * `reports.forReported(userId)` rows carry `weight`, `createdAt` and `status`; the optional
   `reports.forReporter(userId)` (rows with `outcome`) feeds the reporter's track record;
 * the optional `analysis.request(gameId, 'report' | 'signal', now)` queues a reported game,

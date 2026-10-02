@@ -288,7 +288,7 @@ function integrityShow(ctx) {
     const integ = readIntegrity(s, u.id);
     const ev = integ.evidence || {};
     const games = [];
-    for (const row of safe(() => s.analysis.forUser(u.id, 30), [])) {
+    for (const row of safe(() => s.analysis.forUser(u.id, 30, { doneOnly: true }), [])) {
         const g = sideOf(parseMaybeJson(row?.features ?? row, null), u.id);
         if (g) games.push(g);
     }
