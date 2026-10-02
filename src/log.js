@@ -4,7 +4,8 @@
 // Privacy rules, enforced here so that no call site can forget them:
 //   - fields whose name looks like a credential (password, token, secret, code, otp, cookie,
 //     authorization, recovery, mfa...) are replaced by "[redacted]", at any depth;
-//   - strings that look like session tokens (sct_...) or bearer headers are masked;
+//   - strings that contain session-style tokens (sct_, swt_, mfa_, sso_ prefixes) are masked
+//     (credential headers are redacted by field name, above);
 //   - client IP addresses go through ipForLog() (LOG_IP: truncated / full / hashed).
 // Log what helps diagnosis and security (user id, game id, event kind, counts, durations), never
 // what would let someone log in or read a private message.
@@ -23,7 +24,11 @@ export function configureLogging({ level = 'info', format = 'json', ipMode = 'tr
 
 function scrub(v, depth = 0) {
     if (v == null) return v;
-    if (typeof v === 'string') return v.length > 2000 ? v.slice(0, 2000) + '…' : v.replace(TOKEN_LIKE, '$1_[redacted]');
+    if (typeof v === 'string') {
+        // Masked before the cut (a token across the cut is masked too); the window bounds the cost.
+        const s = (v.length > 4096 ? v.slice(0, 4096) : v).replace(TOKEN_LIKE, '$1_[redacted]');
+        return s.length > 2000 ? s.slice(0, 2000) + '…' : s;
+    }
     if (typeof v !== 'object') return v;
     if (depth > 4) return '[depth]';
     if (Buffer.isBuffer(v) || ArrayBuffer.isView(v)) return `[${v.length ?? v.byteLength} bytes]`;
@@ -72,7 +77,10 @@ export function expandIPv6(a) {
 
 function emit(level, component, msg, fields) {
     if (LEVELS[level] < state.level) return;
-    const rec = { t: new Date().toISOString(), level, c: component, msg, ...state.base, ...(fields ? scrub(fields) : null) };
+    const t = new Date().toISOString();
+    const rec = { t, level, c: component, msg, ...state.base, ...(fields ? scrub(fields) : null) };
+    // A field of the same name never replaces the record's own keys (which keep their place).
+    rec.t = t; rec.level = level; rec.c = component; rec.msg = msg;
     let line;
     if (state.format === 'pretty') {
         const extra = fields ? ' ' + JSON.stringify(scrub(fields)) : '';
@@ -90,8 +98,9 @@ export class Logger {
     info(msg, f) { emit('info', this.component, msg, f); }
     warn(msg, f) { emit('warn', this.component, msg, f); }
     error(msg, f) { emit('error', this.component, msg, f); }
-    // Security-relevant event (failed login, rate limit, anomaly, sanction...). Always logged at
-    // info level or above; persisted separately by the modules that need an audit trail.
+    // Security-relevant event (failed login, rate limit, anomaly, sanction...). Logged at level 35
+    // (between warn and error): dropped only with LOG_LEVEL=error; persisted separately by the
+    // modules that need an audit trail.
     security(event, f) { emit('security', this.component, event, f); }
     get debugEnabled() { return LEVELS.debug >= state.level; }
 }

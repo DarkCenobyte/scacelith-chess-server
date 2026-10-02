@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { logger } from '../../src/log.js';
 import { base32Decode, totp } from '../../src/security/totp.js';
 import { solvePow } from '../../src/security/pow.js';
 import { capturedLogs, linkIn, startTestServer } from './helpers/auth-fakes.js';
@@ -106,4 +107,25 @@ test('no credential, token, code or e-mail address appears in the logs', async (
     // The persisted security events carry no secret either.
     const stored = JSON.stringify(s.store._raw.securityEvents);
     for (const x of secrets) if (!x.includes('@')) assert.ok(!stored.includes(x), `leaked into security events: ${x.slice(0, 12)}...`);
+});
+
+// Strings longer than the 2000-character cut are masked too (before the cut), and a field named
+// like a key of the record never replaces it.
+test('long strings are masked before they are cut; fields never replace the record keys', () => {
+    const start = capturedLogs.length;
+    const tok = 'sct_' + 'Q'.repeat(43);
+    const log = logger.child('logtest');
+    log.info('long', { detail: 'x ' + tok + ' ' + 'y'.repeat(2100) });
+    log.error('err', { err: new Error('failed for ' + tok + ' ' + 'z'.repeat(2100)) });
+    log.info('edge', { detail: 'w '.repeat(995) + tok });           // the token straddles the cut
+    log.warn('x', { level: 3, msg: 'y', c: 'other', t: 0, n: 1 });
+    const lines = capturedLogs.slice(start).map((l) => JSON.parse(l));
+    assert.equal(lines.length, 4);
+    for (const l of lines.slice(0, 3)) assert.ok(!JSON.stringify(l).includes('sct_QQQQ'), `token leaked: ${l.msg}`);
+    assert.ok(lines[0].detail.includes('sct_[redacted]') && lines[0].detail.endsWith('…') && lines[0].detail.length === 2001);
+    assert.ok(lines[1].err.message.includes('sct_[redacted]'));
+    assert.ok(lines[2].detail.endsWith('sct_[redac…'));
+    const r = lines[3];
+    assert.deepEqual([r.level, r.msg, r.c, typeof r.t, r.n], ['warn', 'x', 'logtest', 'string', 1]);
+    assert.deepEqual(Object.keys(r).slice(0, 4), ['t', 'level', 'c', 'msg'], 'the record keys keep their place');
 });
