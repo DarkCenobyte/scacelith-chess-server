@@ -87,10 +87,16 @@ export function parseArgs(argv) {
 
 function iso(t) { return t ? new Date(Number(t)).toISOString().replace('.000Z', 'Z') : '-'; }
 
+// Control characters (C0, DEL, C1), line and paragraph separators and bidirectional controls are
+// printed as \uXXXX: a player's report comment cannot break a table or forge lines of the output.
+// eslint-disable-next-line no-control-regex
+const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+const cell = (v) => String(v ?? '-').replace(UNPRINTABLE, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+
 function table(rows, cols) {
     if (!rows.length) return '(none)\n';
-    const w = cols.map((c) => Math.max(c.length, ...rows.map((r) => String(r[c] ?? '-').length)));
-    const line = (vals) => vals.map((v, i) => String(v ?? '-').padEnd(w[i])).join('  ').trimEnd();
+    const w = cols.map((c) => Math.max(c.length, ...rows.map((r) => cell(r[c]).length)));
+    const line = (vals) => vals.map((v, i) => cell(v).padEnd(w[i])).join('  ').trimEnd();
     return [line(cols), line(w.map((n) => '-'.repeat(n))), ...rows.map((r) => line(cols.map((c) => r[c])))].join('\n') + '\n';
 }
 

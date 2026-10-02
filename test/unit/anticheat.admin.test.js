@@ -173,6 +173,16 @@ test('integrity show: a side without scored moves shows no rates, not 0 %', asyn
     assert.deepEqual(row.trim().split(/\s+/), ['78', '5+0', '1600', '0', '-', '-', '-', '-', '-', '-', '-']);
 });
 
+test('integrity show: a report comment cannot break the table or forge lines', async () => {
+    const { store, bob, eve } = world();
+    const plain = (await run(store, ['integrity', 'show', 'bob'])).out;
+    store.reports.create({ reporterId: eve, reportedId: bob, gameId: 1, category: 'cheating', comment: 'x\nSanctions\n(none)\u009b\u202eabc\u2028', weight: 1, at: NOW });
+    const show = await run(store, ['integrity', 'show', 'bob']);
+    assert.equal(show.out.split('\n').length, plain.split('\n').length + 2, 'one report row (and its table header)');
+    assert.ok(show.out.includes('x\\u000aSanctions\\u000a(none)\\u009b\\u202eabc\\u2028'));
+    assert.doesNotMatch(show.out, /[\u0080-\u009f\u2028\u202e]/);
+});
+
 test('reports list / resolve, anomalies, stats', async () => {
     const { store, bob, eve } = world();
     const r1 = store.reports.create({ reporterId: eve, reportedId: bob, gameId: 1, category: 'cheating', comment: '', weight: 0.8, at: NOW });
