@@ -15,7 +15,7 @@
 // the session's user object does not carry it (the HTTP server's does not; before, every report
 // sent through the API was weighed as from an account created that instant).
 
-import { DAY_MS, readIntegrity, parseMaybeJson } from './util.js';
+import { DAY_MS, readIntegrity } from './util.js';
 
 export const REPORT_RULES = Object.freeze({
     categories: Object.freeze(['cheating', 'abuse', 'other']),
@@ -252,11 +252,4 @@ export function handleReport(ctx, deps = {}) {
         try { store.analysis.request(gameId, reason, now); } catch (e) { log?.warn?.('analysis request of a reported game failed', { err: e, gameId }); }
     }
     return ACCEPTED;
-}
-
-/** Evidence-friendly summary of the reports a player received. */
-export function summariseReports(received, now) {
-    const rows = (received || []).map((r) => ({ ...r, detail: parseMaybeJson(r.detail, r.detail) }));
-    const open = rows.filter((r) => !(r.outcome ?? r.resolution));
-    return { total: rows.length, open: open.length, weight30d: recentReportWeight(rows, now, 30) };
 }
