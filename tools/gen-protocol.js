@@ -48,7 +48,9 @@ export function buildModel(s = defaultSchema) {
         if (!Number.isInteger(s[k]) || s[k] < 0 || s[k] > 0xffff) bad(`${k} must be a u16`);
     }
     if (s.PROTOCOL_MIN > s.PROTOCOL_VERSION) bad('PROTOCOL_MIN is above PROTOCOL_VERSION');
-    if (typeof s.WS_SUBPROTOCOL !== 'string' || !/^[\x21-\x7e]+$/.test(s.WS_SUBPROTOCOL)) bad('WS_SUBPROTOCOL must be a printable ASCII token');
+    // An RFC 7230 token, as Sec-WebSocket-Protocol requires: no double quote or backslash (the C++
+    // generator writes it into a string literal).
+    if (typeof s.WS_SUBPROTOCOL !== 'string' || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(s.WS_SUBPROTOCOL)) bad('WS_SUBPROTOCOL must be an RFC 7230 token');
 
     const enums = {};
     for (const [en, e] of Object.entries(s.enums)) {
