@@ -22,9 +22,9 @@
 //    OO (and the long forms), promotions as e8=Q, e8Q or e8/Q in movetext (parseSan also reads
 //    e8(Q), but in movetext its '(' opens a variation, as in the game's reader), captures with x,
 //    X, : or none, long algebraic (Ng1-f3, e2e4) and over-disambiguated moves (Nge2 when only one
-//    knight can go), a lower-case piece letter when it is not a pawn move (nf3, but bc4 is a
-//    b-pawn capture first), figurine SAN (♘f3), and plain UCI (e7e8q) as a last resort; a move
-//    must match exactly one legal move;
+//    knight can go), figurine SAN (♘f3), plain UCI (e7e8q), and a lower-case piece letter when
+//    the text is neither a pawn move nor legal UCI (nf3, but bc4 is a b-pawn capture first and
+//    b1d2 the b1 knight's move when it can go to d2); a move must match exactly one legal move;
 //  * the end of the first game: its termination marker, a tag pair after its movetext (the next
 //    game), or the end of the text.
 // Null moves ("--", "Z0") are refused. Moves after an automatic ending (fivefold repetition,
@@ -441,11 +441,11 @@ export function parseSan(pos, text) {
     const legal = pos.legalMoves();
     let m = parseSanStrict(pos, s, legal);
     if (m >= 0) return m;
-    if ('nbrqk'.includes(s[0])) {
-        m = parseSanStrict(pos, s[0].toUpperCase() + s.slice(1), legal);
-        if (m >= 0) return m;
-    }
-    return pos.parseUCI(s.toLowerCase());
+    // Plain UCI before the lower-case piece letter, so that "b1d2" is the knight and not "B1d2".
+    m = pos.parseUCI(s.toLowerCase());
+    if (m >= 0) return m;
+    if ('nbrqk'.includes(s[0])) return parseSanStrict(pos, s[0].toUpperCase() + s.slice(1), legal);
+    return -1;
 }
 
 // ---- Reader ------------------------------------------------------------------------------------

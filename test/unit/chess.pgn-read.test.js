@@ -172,6 +172,12 @@ test('lenient SAN', () => {
         ['4k3/8/8/8/8/2n5/1P1B4/4K3 w - - 0 1', ['Bxc3', 'Bdc3', 'Bd2xc3', 'B2c3'], 'd2c3'],
         // lower-case bishop only when no pawn move matches.
         ['4k3/8/8/8/8/8/8/4KB2 w - - 0 1', ['bc4', 'Bc4', 'bxc4'], 'f1c4'],
+        // Legal UCI comes before the lower-case piece letter: "b1d2" is the knight, not "B1d2".
+        ['rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2', ['b1d2', 'Nd2', 'Nbd2'], 'b1d2'],
+        ['rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2', ['bd2', 'Bd2', 'B1d2'], 'c1d2'],
+        ['rnbqkbnr/ppp1pppp/8/3p4/2PP4/8/PP2PPPP/RNBQKBNR b KQkq - 0 2', ['b8d7', 'Nd7'], 'b8d7'],
+        ['rnbqkbnr/ppp1pppp/8/3p4/2PP4/8/PP2PPPP/RNBQKBNR b KQkq - 0 2', ['bd7', 'B8d7'], 'c8d7'],
+        ['4k3/8/8/8/8/8/8/2B1K3 w - - 0 1', ['b1d2'], 'c1d2'],     // not UCI here: no piece on b1
         // En passant with or without "e.p.".
         ['4k3/8/8/2pP4/8/8/8/4K3 w - c6 0 1', ['dxc6', 'dxc6e.p.', 'dxc6 e.p.', 'dc6', 'd5c6'], 'd5c6'],
         // Disambiguation; over-disambiguated forms.
