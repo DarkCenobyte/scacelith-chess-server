@@ -275,6 +275,8 @@ class Journal {
                     snapshotFiles.add(file);
                 } else if (kind === JournalKind.Committed) {
                     committed.add(gameId);
+                    // Never recovered: its records need not stay in memory until the scan ends.
+                    perGame.delete(gameId);
                     this.markCommitted(gameId, seq);
                 }
             });
