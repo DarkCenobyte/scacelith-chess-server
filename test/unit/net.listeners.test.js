@@ -127,7 +127,9 @@ describe('listeners (shared port)', () => {
     after(() => { wss.closeAll(); lst.close(); });
 
     it('serves the API and the upgrade on one port', async () => {
-        assert.equal((await get(port, '/api/v1/readyz')).status, 503);
+        const notReady = await get(port, '/api/v1/readyz');
+        assert.equal(notReady.status, 503);
+        assert.deepEqual(JSON.parse(notReady.body), { status: 'not_ready' }, 'the body the API handler answers too (docs/API.md)');
         assert.equal((await get(port, '/api/v1/nothing')).status, 404);
         const c = await connectWs({ port });
         assert.equal(c.protocol, 'scacelith.v1');

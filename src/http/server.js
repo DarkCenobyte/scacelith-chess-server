@@ -418,7 +418,7 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
                 label = 'readyz';
                 if (method !== 'GET' && method !== 'HEAD') throw new HttpError(405, 'method_not_allowed', 'Method not allowed.', null, { Allow: 'GET, HEAD' });
                 if (ready()) send(req, res, 200, { body: { status: 'ready' } });
-                else send(req, res, 503, { body: { error: 'not_ready', message: 'The server is starting or stopping.' } });
+                else send(req, res, 503, { body: { status: 'not_ready' } });
                 return;
             }
 

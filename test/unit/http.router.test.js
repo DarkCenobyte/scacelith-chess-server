@@ -343,7 +343,9 @@ test('health and readiness', async (t) => {
     t.after(s.close);
     assert.deepEqual((await s.req('GET', '/healthz')).json, { status: 'ok' });
     assert.deepEqual((await s.req('GET', '/api/v1/healthz')).json, { status: 'ok' });
-    assert.equal((await s.req('GET', '/readyz')).status, 503);
+    const notReady = await s.req('GET', '/readyz');
+    assert.equal(notReady.status, 503);
+    assert.deepEqual(notReady.json, { status: 'not_ready' }, 'the body the listener answers too (docs/API.md)');
     ready = true;
     assert.equal((await s.req('GET', '/readyz')).status, 200);
     assert.equal((await s.req('POST', '/healthz')).status, 405);
