@@ -683,6 +683,8 @@ Which account the Google sign-in reaches:
 #### POST /auth/sso/google/start
 
 **Auth** none. **Limit** `sso_start`. Body: `{ "codeChallenge": string of exactly 43 [A-Za-z0-9_-] }`.
+The game's first releases also send `"codeChallengeMethod": "S256"`: accepted, and the only value
+accepted (S256 is the only method).
 Answer:
 
 ```json
