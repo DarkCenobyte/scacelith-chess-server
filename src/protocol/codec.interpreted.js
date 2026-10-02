@@ -3,11 +3,13 @@
 // `node tools/gen-protocol.js --bench`. Never import it from server code: it is several times
 // slower than the generated codec.
 //
-// Same API and semantics as the original placeholder, with two changes:
+// Same API and semantics as the original placeholder, with three changes:
 //   * createCodec(schema) builds the same API for any schema object (tests use synthetic
 //     schemas to exercise the generator on every type combination);
 //   * strings are decoded with ignoreBOM: a leading U+FEFF is part of the string, as in the
-//     generated JS codec and the C++ codec (the placeholder silently dropped it).
+//     generated JS codec and the C++ codec (the placeholder silently dropped it);
+//   * an f64 of ±Infinity is refused on encode ('not finite'), as in the generated codec (the
+//     placeholder wrote it, then refused it on decode).
 
 import * as schema from './schema.js';
 import { computeSchemaHash } from './schema-hash.js';
@@ -75,7 +77,11 @@ export function createCodec(s) {
             case 'u16': checkRange(name, v, 0, 0xffff, opts); buf.writeUInt16LE(v, o); return o + 2;
             case 'u32': checkRange(name, v, 0, 0xffffffff, opts); buf.writeUInt32LE(v, o); return o + 4;
             case 'i32': checkRange(name, v, -0x80000000, 0x7fffffff, opts); buf.writeInt32LE(v, o); return o + 4;
-            case 'f64': buf.writeDoubleLE(+v || 0, o); return o + 8;
+            case 'f64': {
+                const d = +v || 0;
+                if (!Number.isFinite(d)) throw new ProtocolError(`${name} not finite`);
+                buf.writeDoubleLE(d, o); return o + 8;
+            }
             case 'id53': {
                 const x = v || 0;
                 if (!Number.isSafeInteger(x) || x < 0) throw new ProtocolError(`${name} not an id53`);
