@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { solvePow, POW_TTL_MS } from '../../src/security/pow.js';
+import { StoreError } from '../../src/store/index.js';
 import { linkIn, startTestServer } from './helpers/auth-fakes.js';
+import { startReal } from './helpers/real-auth.js';
 
 const REG = '/api/v1/auth/register';
 const good = (over = {}) => ({ username: 'Alice_1', email: 'Alice@Example.com', password: 'ivory rook takes e5', ...over });
@@ -62,6 +64,24 @@ test('the GET confirmation page does not consume the token (link scanners)', asy
     assert.equal(s.store.users.byUsername('Alice_1').emailVerified, false);
     s.now.advance(24 * 3600000 + 1);
     assert.equal((await s.request('POST', '/verify-email', { raw: `token=${token}`, contentType: 'application/x-www-form-urlencoded' })).status, 400, 'expired after 24 h');
+});
+
+test('a busy store during the confirmation: 503, nothing changed, the same link works afterwards', async (t) => {
+    const s = await startReal(t);
+    assert.equal((await s.request('POST', REG, { body: good() })).status, 202);
+    await s.mailer.idle();
+    const token = new URL(linkIn(s.mailer.sent.at(-1).text)).searchParams.get('token');
+    const confirm = () => s.request('POST', '/verify-email', { raw: `token=${token}`, contentType: 'application/x-www-form-urlencoded' });
+    // The write lock is lost past the busy timeout once the link was used up.
+    const update = s.store.users.update;
+    s.store.users.update = () => { s.store.users.update = update; throw new StoreError('busy', 'database is locked'); };
+    const busy = await confirm();
+    assert.deepEqual([busy.status, busy.headers['retry-after']], [503, '1']);
+    assert.equal(s.store.users.byEmail('alice@example.com').emailVerified, false);
+    const done = await confirm();
+    assert.equal(done.status, 200);
+    assert.match(done.text, /confirmed/);
+    assert.equal(s.store.users.byEmail('alice@example.com').emailVerified, true);
 });
 
 test('username rules', async (t) => {

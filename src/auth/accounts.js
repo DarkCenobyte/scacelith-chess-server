@@ -178,14 +178,21 @@ export function createAccounts(svc) {
         }
     }
 
-    /** POST /verify-email: consumes the token and confirms the address. */
+    /**
+     * POST /verify-email: consumes the token and confirms the address, in one transaction (a busy
+     * store: 503 server_busy, the link still works).
+     */
     function verifyEmail(token, ip = null) {
         if (typeof token !== 'string' || !LINK_TOKEN_RE.test(token)) return false;
-        const row = store.tokens.consume('email_verify', sha256Hex(token), now());
-        if (!row || (row.expiresAt != null && row.expiresAt <= now())) return false;
-        const user = store.users.byId(row.userId);
-        if (!user || user.status !== 'active' || normalizeEmail(user.email) !== normalizeEmail(dataOf(row).email)) return false;
-        if (!user.emailVerified) store.users.update(user.id, { emailVerified: true });
+        const user = atomicallyOrBusy(() => {
+            const row = store.tokens.consume('email_verify', sha256Hex(token), now());
+            if (!row || (row.expiresAt != null && row.expiresAt <= now())) return null;
+            const u = store.users.byId(row.userId);
+            if (!u || u.status !== 'active' || normalizeEmail(u.email) !== normalizeEmail(dataOf(row).email)) return null;
+            if (!u.emailVerified) store.users.update(u.id, { emailVerified: true });
+            return u;
+        });
+        if (!user) return false;
         sessions.invalidate({ userId: user.id });
         events.record('email_verified', { userId: user.id, ip });
         return true;

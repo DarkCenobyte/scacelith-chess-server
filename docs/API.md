@@ -1600,7 +1600,7 @@ Pages for a browser, opened from the links of e-mails and by Google. Their links
 | Page | Answers |
 |---|---|
 | `GET /verify-email?token=` | 200: a "Confirm my e-mail address" button. 400: link invalid or expired. Limit `page`. |
-| `POST /verify-email` (form `token`) | 200: address confirmed. 400: link invalid, used or expired. Limit `auth`. |
+| `POST /verify-email` (form `token`) | 200: address confirmed. 400: link invalid, used or expired. 503 (`Retry-After: 1`): the database stayed locked; nothing changed and the link still works. Limit `auth`. |
 | `GET /reset-password?token=` | 200: the new password form (password twice). 400: link invalid (also when it was mailed to an address the account no longer has). Limit `page`. |
 | `POST /reset-password` (form `token`, `newPassword`, `confirmPassword`) | 200: password changed, and every device signed out. 400: the form again with the error (the passwords differ, a weak password), or link invalid. 503 / 429: the form again with `Retry-After` when the server is busy (the password hash queue, or the database stayed locked); the link stays valid. Limits `auth` and `auth_reset`. |
 | `GET /confirm-email-change?token=` | 200: shows the new address and the account's name, with a "Use this e-mail address" button. 400: link invalid or expired (also when the account's address changed since the request). Limit `page`. |

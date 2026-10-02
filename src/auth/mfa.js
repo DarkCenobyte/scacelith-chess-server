@@ -27,7 +27,7 @@ export const MFA_LIMIT_WINDOW_MS = 15 * 60000;
 
 /**
  * @param {{ config: object, store: object, now: () => number, box: object, keys: object, events: object,
- *   control: (type: string, payload: object) => Promise<object> }} svc
+ *   control: (type: string, payload: object) => Promise<object>, atomically: (fn: () => any) => any }} svc
  */
 export function createMfa(svc) {
     const { config, store, now, box, keys, events, control } = svc;
@@ -101,16 +101,22 @@ export function createMfa(svc) {
         const step = verifyTotp(secret, code, { now: now(), lastStep: -1 });
         if (step < 0) { secret.fill(0); return { ok: false }; }
         const codes = generateRecoveryCodes();
-        store.users.update(user.id, { mfaEnabled: true, mfaSecretEnc: box.seal(secret, aadActive(user.id)), pendingMfaSecretEnc: null, mfaLastStep: step });
+        const mfaSecretEnc = box.seal(secret, aadActive(user.id));
         secret.fill(0);
-        store.mfa.replaceRecoveryCodes(user.id, codes.map((c) => hashCode(user.id, c)));
+        // One transaction: MFA is never on without its recovery codes.
+        svc.atomically(() => {
+            store.users.update(user.id, { mfaEnabled: true, mfaSecretEnc, pendingMfaSecretEnc: null, mfaLastStep: step });
+            store.mfa.replaceRecoveryCodes(user.id, codes.map((c) => hashCode(user.id, c)));
+        });
         return { ok: true, recoveryCodes: codes };
     }
 
     /** Turns MFA off (the caller has checked the password and the second factor). */
     function disable(user) {
-        store.users.update(user.id, { mfaEnabled: false, mfaSecretEnc: null, pendingMfaSecretEnc: null });
-        store.mfa.replaceRecoveryCodes(user.id, []);
+        svc.atomically(() => {
+            store.users.update(user.id, { mfaEnabled: false, mfaSecretEnc: null, pendingMfaSecretEnc: null });
+            store.mfa.replaceRecoveryCodes(user.id, []);
+        });
     }
 
     /** New recovery codes (the old ones stop working). */

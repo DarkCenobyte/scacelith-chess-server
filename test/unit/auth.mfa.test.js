@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { base32Decode, hotp, totp, totpStep } from '../../src/security/totp.js';
+import { StoreError } from '../../src/store/index.js';
 import { linkIn, startTestServer } from './helpers/auth-fakes.js';
+import { startReal } from './helpers/real-auth.js';
 
 const PW = 'correct horse battery';
 
@@ -191,6 +193,30 @@ test('re-authentication failures are throttled per account', async (t) => {
     assert.deepEqual([r.status, r.json.error], [429, 'too_many_attempts']);
     s.now.advance(r.json.retryAfter * 1000);
     assert.equal((await s.request('POST', '/api/v1/account/mfa/totp/setup', { token, body: { password: PW } })).status, 200);
+});
+
+test('enable and disable write the MFA state and the recovery codes together (real store)', async (t) => {
+    const s = await startReal(t);
+    const id = s.store.users.create({ username: 'alice', email: 'alice@example.org', passwordHash: await s.hasher.hash(PW), emailVerified: true });
+    const { token } = (await s.request('POST', '/api/v1/auth/login', { body: { login: 'alice', password: PW } })).json;
+    const setup = await s.request('POST', '/api/v1/account/mfa/totp/setup', { token, body: { password: PW } });
+    const secret = base32Decode(setup.json.secret);
+    const codes = s.store.mfa.replaceRecoveryCodes;
+    const failOnce = () => { s.store.mfa.replaceRecoveryCodes = () => { s.store.mfa.replaceRecoveryCodes = codes; throw new StoreError('busy', 'database is locked'); }; };
+    failOnce();
+    let r = await s.request('POST', '/api/v1/account/mfa/totp/enable', { token, body: { code: totp(secret, s.now()) } });
+    assert.equal(r.status, 500);
+    assert.equal(s.store.users.byId(id).mfaEnabled, false, 'not enabled without its recovery codes');
+    r = await s.request('POST', '/api/v1/account/mfa/totp/enable', { token, body: { code: totp(secret, s.now()) } });
+    assert.equal(r.status, 200);
+    assert.equal(s.store.mfa.countRecoveryCodes(id), 10);
+
+    s.now.advance(30000);
+    failOnce();
+    r = await s.request('POST', '/api/v1/account/mfa/totp/disable', { token, body: { password: PW, code: totp(secret, s.now()) } });
+    assert.equal(r.status, 500);
+    assert.equal(s.store.users.byId(id).mfaEnabled, true, 'still on');
+    assert.equal(s.store.mfa.countRecoveryCodes(id), 10);
 });
 
 test('enable without setup', async (t) => {
