@@ -501,7 +501,7 @@ export class Matchmaker {
     }
 
     /**
-     * Queue sizes (for metrics and the admin CLI).
+     * Queue sizes, for the tests (no metric or admin command reads it).
      * @returns {{queued:number, queues:Array<{category:string, rated:boolean, size:number}>}}
      */
     stats() {

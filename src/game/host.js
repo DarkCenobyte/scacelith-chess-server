@@ -122,7 +122,8 @@
 //   anticheat.recordAnomaly: { userId, gameId, kind, detail (short text), posMatched }; its
 //     `certain` decides the sanction (the 6.5 table is the fallback when it answers nothing).
 // Complexity: a message costs O(1) besides the rules; a timer (re)schedule is O(1); one 10 ms
-// interval visits one wheel slot per call; a relayed gesture is one lookup and one 25-byte copy.
+// interval visits the wheel slots since the previous call (normally two: the previous one again
+// and the current one); a relayed gesture is one lookup and one 25-byte copy.
 
 import { performance } from 'node:perf_hooks';
 import { encode, enums, MSG, CloseCode } from '../protocol/index.js';
@@ -350,8 +351,9 @@ export class GameHost {
 
     /**
      * A decoded client->server game message (Move .. Rematch) from `userId`.
-     * O(1) apart from the rules' move validation; nothing is allocated per move beyond the
-     * outcome, the MoveMade buffer and the 32-byte journal record.
+     * O(1) apart from the rules' move validation; a move allocates only small fixed-size objects
+     * (the outcome and its arrays, the rules' result, the MoveMade buffer, the 32-byte journal
+     * record and its wrapper).
      */
     onClientMessage(gameId, userId, msg, endpoint) {
         const t0 = performance.now();
