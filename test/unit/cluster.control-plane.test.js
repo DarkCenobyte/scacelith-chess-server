@@ -467,6 +467,27 @@ describe('control plane: games, sanctions, shards', () => {
         assert.deepEqual(shards.of('shard.down').map((x) => x.shard), [0, 2]);
     });
 
+    it('a restarted shard that does not replay a game frees its players at its shard.ready', async () => {
+        const { cp, shards, online } = setup({ live: [0, 1] });
+        online(1, 'alice', 0); online(2, 'bob', 0); online(3, 'carl', 0); online(4, 'dan', 0);
+        const spec = (w, b) => ({ white: { userId: w, username: 'w' }, black: { userId: b, username: 'b' }, baseMs: 300000, incMs: 0, rated: true });
+        const lost = (await cp.createGame(spec(1, 2), 1, 'challenge')).gameId;
+        const kept = (await cp.createGame(spec(3, 4), 1, 'challenge')).gameId;
+        cp.shardDown(1);                                        // crashed before the journal had the first game
+        cp.handlers['game.recovered']({ gameId: kept, whiteId: 3, blackId: 4, shard: 1 }, 1);
+        cp.handlers['game.recovered']({ gameId: lost, whiteId: 1, blackId: 2, shard: 0 }, 0);   // not its host: ignored
+        shards.clear();
+        assert.deepEqual(cp.shardReady(1), { ok: true, reattached: 2 });
+        assert.deepEqual(shards.of('game.attach').map((x) => [x.payload.userId, x.payload.gameId]), [[3, kept], [4, kept]]);
+        assert.deepEqual([...cp.activeGames], [[3, kept], [4, kept]]);
+        assert.deepEqual(cp.mmJoin({ userId: 1, username: 'alice', category: '5+0', rated: true, rating: 1500, shard: 0, connId: 10 }, 0), { ok: true });
+        assert.equal(cp.presenceClaim({ userId: 2, username: 'bob', shard: 0, connId: 21 }, 0).activeGame, 0);
+        assert.equal(cp.presenceClaim({ userId: 3, username: 'carl', shard: 0, connId: 31 }, 0).activeGame, kept);
+        shards.clear();
+        cp.shardReady(1);                                       // a later shard.ready without a crash forgets nothing
+        assert.equal(cp.activeGames.size, 2);
+    });
+
     it('abuse.report leads to an abuse.block broadcast; a shard that becomes ready gets the running blocks; sweep ends them', () => {
         const { cp, shards, clock } = setup({ abuse: true, config: testConfig({ ABUSE_BLOCK_REFUSALS_PER_MIN: '50' }) });
         cp.handlers['abuse.report']({ entries: [['198.51.100.7', null, 30]] }, 0);

@@ -44,7 +44,8 @@
 //                     or gone, answers ok: false)
 //   shard -> primary  'shard.load' { conns, games, lagP99, overloaded }   (every 2 s)
 //                     'shard.ready' { shard }   (after host.recover() and listen: re-attaches the
-//                     live connections of players whose game that shard hosts)
+//                     live connections of players whose game that shard hosts; after a crash, the
+//                     games it hosted that its replay did not announce are forgotten first)
 //                     'game.recovered' { gameId, whiteId, blackId, shard }   (sent by the GameHost
 //                     for each game replayed from the journal: presence.claim returns it as
 //                     activeGame after a full restart; 'game.active' is an alias)
@@ -128,6 +129,8 @@ export class ControlPlane {
         this.activeGames = new Map();
         /** @type {Set<number>} users whose game is being created */
         this.starting = new Set();
+        /** @type {Map<number, Set<number>>} shard -> its games when it went down, not replayed yet */
+        this._unrecovered = new Map();
         /** @type {Map<number, {category:string, rated:boolean}>} users searching */
         this.queued = new Map();
         /** @type {Map<number, number>} userId -> ban end (sanction.applied) */
@@ -170,8 +173,8 @@ export class ControlPlane {
             'challenge.joinCode': (p) => this.challengeJoinCode(p),
             'game.ended': (p) => this.gameEnded(p),
             'game.rematch': (p) => this.gameRematch(p),
-            'game.active': (p) => this.gameActive(p),
-            'game.recovered': (p) => this.gameActive(p),
+            'game.active': (p, s) => this.gameActive(p, s),
+            'game.recovered': (p, s) => this.gameActive(p, s),
             'conduct.record': (p) => this.conductRecord(p),
             'ratelimit.take': (p) => this.limiter.take(p),
             'ratelimit.refund': (p) => this.limiter.refund(p),
@@ -619,8 +622,9 @@ export class ControlPlane {
         return { ok: true };
     }
 
-    gameActive({ gameId, whiteId, blackId }) {
+    gameActive({ gameId, whiteId, blackId }, from) {
         if (!isGameId(gameId)) return { ok: false };
+        if (shardOfGameId(gameId) === from) this._unrecovered.get(from)?.delete(gameId);   // replayed by its host
         for (const u of [whiteId, blackId]) if (u && !this.activeGames.has(u)) this.activeGames.set(u, gameId);
         return { ok: true };
     }
@@ -700,6 +704,11 @@ export class ControlPlane {
     /** A shard finished its start-up: re-attach the live players of the games it hosts, and give it the running blocks. */
     shardReady(shard) {
         this.readyShards.add(shard);
+        // Its games that the replay did not announce (lost before a journal flush, or dropped by
+        // the replay) would keep their players 'in game' for good.
+        const lost = this._unrecovered.get(shard);
+        this._unrecovered.delete(shard);
+        if (lost?.size) for (const [userId, gameId] of this.activeGames) if (lost.has(gameId)) this.activeGames.delete(userId);
         const blocks = this.abuse.snapshot();
         if (blocks.length) this.shards.notify(shard, 'abuse.block', { blocks });
         let n = 0;
@@ -719,6 +728,10 @@ export class ControlPlane {
         this.loads.delete(shard);
         const gone = this.presence.dropShard(shard);
         for (const u of gone) this._userGone(u);
+        // Its new process announces the games it replays (game.recovered) before its shard.ready.
+        const hosted = new Set();
+        for (const gameId of this.activeGames.values()) if (shardOfGameId(gameId) === shard) hosted.add(gameId);
+        this._unrecovered.set(shard, hosted);
         for (const s of this.shards.list()) if (s !== shard) this.shards.notify(s, 'shard.down', { shard });
         return gone.length;
     }
