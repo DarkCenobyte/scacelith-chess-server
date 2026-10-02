@@ -574,7 +574,9 @@ export class WsServer {
     handleSocket(socket) {
         socket.setNoDelay(true);
         socket.on('error', noop);
-        let buf = null;
+        // The head so far: the first chunk as it is, then a private copy grown by doubling (a head
+        // read a few bytes at a time costs linear copying, not one whole copy per read).
+        let buf = null, len = 0;
         const timer = setTimeout(() => {
             socket.removeListener('data', onData);
             this._reject(socket, 408, 'timeout', null);
@@ -585,10 +587,23 @@ export class WsServer {
         const onClose = () => { clearTimeout(timer); buf = null; };
         socket.once('close', onClose);
         const onData = (chunk) => {
-            buf = buf === null ? chunk : Buffer.concat([buf, chunk]);
-            const end = buf.indexOf('\r\n\r\n', Math.max(0, buf.length - chunk.length - 3), 'latin1');
+            if (buf === null) {
+                buf = chunk;
+                len = chunk.length;
+            } else {
+                // Never written into while it is still the socket's chunk: len === buf.length then.
+                if (len + chunk.length > buf.length) {
+                    const grown = Buffer.allocUnsafe(Math.max(2 * len, len + chunk.length, 256));
+                    buf.copy(grown, 0, 0, len);
+                    buf = grown;
+                }
+                chunk.copy(buf, len);
+                len += chunk.length;
+            }
+            const view = buf.subarray(0, len);
+            const end = view.indexOf('\r\n\r\n', Math.max(0, len - chunk.length - 3), 'latin1');
             if (end < 0) {
-                if (buf.length > this.maxHeaderBytes) {
+                if (len > this.maxHeaderBytes) {
                     clearTimeout(timer); socket.removeListener('close', onClose); socket.removeListener('data', onData);
                     this._reject(socket, 431, 'headers_too_large', null);
                 }
@@ -599,10 +614,10 @@ export class WsServer {
             socket.removeListener('data', onData);
             socket.pause();
             if (end + 4 > this.maxHeaderBytes) { this._reject(socket, 431, 'headers_too_large', null); return; }
-            const req = parseRequestHead(buf.subarray(0, end));
+            const req = parseRequestHead(view.subarray(0, end));
             if (!req) { this._reject(socket, 400, 'bad_request', null); return; }
             req.socket = socket;
-            this.handleUpgrade(req, socket, buf.subarray(end + 4));
+            this.handleUpgrade(req, socket, view.subarray(end + 4));
         };
         socket.on('data', onData);
     }
