@@ -120,6 +120,10 @@ function encodeSnapshot(records) {
     return Buffer.concat(parts);
 }
 
+test('the room and the journal number the record kinds alike', () => {
+    assert.deepEqual({ ...JournalKind }, { ...JK });
+});
+
 // ---- GameRoom: the snapshot record ------------------------------------------------------------
 
 test('journalSnapshot(): one record that replays to the same room, alone or followed by later records', () => {

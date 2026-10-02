@@ -172,7 +172,11 @@ test('matchmaker: repeat limit for rated pairings, with expiry', () => {
     for (let i = 0; i < cfg.matchRepeatLimit; i++) {
         m.join(player(1500, { userId: 1, joinedAt: i * 1000 }));
         m.join(player(1500, { userId: 2, joinedAt: i * 1000 }));
-        assert.equal(m.tick(i * 1000).length, 1);
+        const pairs = m.tick(i * 1000);
+        assert.equal(pairs.length, 1);
+        // A pairing counts once its game exists: the primary records it then.
+        assert.equal(m.repeatCount(1, 2, i * 1000), i);
+        m.recordPairing(pairs[0].white, pairs[0].black, i * 1000);
     }
     assert.equal(m.repeatCount(1, 2, 3000), 3);
     m.join(player(1500, { userId: 1, joinedAt: 3000 }));
@@ -192,7 +196,7 @@ test('matchmaker: repeat limit for rated pairings, with expiry', () => {
     assert.deepEqual(m.tick(H - 1), []);
     assert.equal(m.tick(H).length, 1);
 
-    // Rated games made elsewhere count too.
+    // recordPairing() takes user ids too.
     const n = mm();
     for (let i = 0; i < 3; i++) n.recordPairing({ userId: 7 }, 8, 0);
     n.join(player(1500, { userId: 7 }));
@@ -366,6 +370,7 @@ test('matchmaker: same pairs as a brute-force reference over a random simulation
             }
             const got = new Map();
             for (const p of m.tick(now)) {
+                if (p.rated) m.recordPairing(p.white, p.black, now);     // the primary, once the game exists
                 const key = p.category + (p.rated ? '|r' : '|c');
                 if (!got.has(key)) got.set(key, []);
                 got.get(key).push(ids(p));

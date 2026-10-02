@@ -45,7 +45,7 @@ export async function main() {
     const hostStore = { games: { finishBatch: (records) => writer.finishBatch(records) } };
     const host = new GameHost({
         shard, config, store: hostStore, journal, anticheat, bus, primary, log: logger.child('game'),
-        createChessGame: () => new ChessGame(),
+        createChessGame: () => new ChessGame(), lastGameId: store.games.lastId(),
     });
     // Replays the journal; the host announces each restored game to the primary
     // ('game.recovered'), which gives it back to the players as their activeGame.

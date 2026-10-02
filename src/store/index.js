@@ -899,7 +899,12 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         checkRecord(r);
         const existing = st('SELECT white_id, black_id, category, white_before, white_after, black_before, black_after FROM games WHERE id = ?')
             .get(r.id);
-        if (existing) return { gameId: r.id, duplicate: true, ratings: storedChanges(existing) };
+        if (existing) {
+            if (existing.white_id !== r.whiteId || existing.black_id !== r.blackId) {
+                log.warn('game id already stored for other players: this game is not stored', { gameId: r.id });
+            }
+            return { gameId: r.id, duplicate: true, ratings: storedChanges(existing) };
+        }
         const played = r.status !== GameStatus.Aborted;
         const rate = !!r.rated && played && r.category !== 'custom';
         let changes = null;
@@ -999,6 +1004,10 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         byId(id) {
             const r = st('SELECT * FROM games WHERE id = ?').get(id);
             return r ? toGame(r, true) : null;
+        },
+        /** The largest game id, 0 without games (a shard's new ids come after it: util/ids.js). */
+        lastId() {
+            return st('SELECT max(id) AS id FROM games').get().id ?? 0;
         },
         /** Newest first; `before` is a game id (exclusive cursor). */
         recentForUser(userId, limit = 20, before = Number.MAX_SAFE_INTEGER) {

@@ -32,6 +32,9 @@
 // AUTO_PRESS_CLOCK, for the queue, the challenges and the private games alike; a rematch keeps the
 // value of the game it follows, so a change of the setting applies to the games created after it.
 //
+// Colours: the matchmaker keeps each player's colour balance (DESIGN 5.4). A queue game counts at
+// its pairing (given back when the game cannot be created), any other game once it is created.
+//
 // Notifications (QueueStatus, ChallengeReceived, ChallengeStatus, Notice) are encoded here and
 // written by the shard of the user's live connection ('conn.send'); waiting players get a fresh
 // QueueStatus every 3 s.
@@ -77,6 +80,12 @@ const CS = enums.ChallengeState;
 const CP = enums.ColorPref;
 const QUEUE_REFRESH_MS = 3000;
 const LOAD_STALE_MS = 10000;
+// Per player and minute: direct challenges withdrawn or declined (each one popped up on its
+// target's screen, and no game came of it), and wrong private game codes tried (a code must not be
+// guessable).
+const UNPLAYED_CHALLENGE_LIMIT = 5;
+const JOIN_CODE_FAILURE_LIMIT = 10;
+const PLAYER_LIMIT_WINDOW_MS = 60000;
 
 const u16 = (v) => Math.max(0, Math.min(65535, Math.round(+v || 0)));
 const u32 = (v) => Math.max(0, Math.min(0xffffffff, Math.round(+v || 0)));
@@ -258,6 +267,11 @@ export class ControlPlane {
 
     _busy(userId) { return this.activeGames.has(userId) || this.starting.has(userId); }
 
+    // The matchmaker's colour balances (DESIGN 5.4) count the games made outside the queue too.
+    _recordColors(whiteId, blackId) {
+        try { this.mm.recordColors?.(whiteId, blackId); } catch (e) { this.log?.error?.('mm.recordColors failed', { err: e }); }
+    }
+
     _player(p, category) {
         const out = { userId: p.userId, username: p.username || this.presence.get(p.userId)?.username || '', rating: p.rating, provisional: p.provisional, shard: p.shard, connId: p.connId };
         if (out.rating === undefined) {
@@ -331,6 +345,7 @@ export class ControlPlane {
         }
         const gameId = r.gameId;
         this._created.labels(source).inc();
+        if (source !== 'queue') this._recordColors(spec.white.userId, spec.black.userId);   // the pairing counted a queue game
         for (const u of ids) {
             this.activeGames.set(u, gameId);
             this._leaveQueue(u, source !== 'queue');
@@ -397,7 +412,7 @@ export class ControlPlane {
         if (this.queued.has(p.userId) || this.mm.has?.(p.userId)) this.mm.leave(p.userId);
         const entry = {
             userId: p.userId, username: p.username, category: p.category, rated: !!p.rated, rating: p.rating,
-            provisional: !!p.provisional, shard: p.shard ?? from, connId: p.connId, colorBalance: p.colorBalance ?? 0, joinedAt: now,
+            provisional: !!p.provisional, shard: p.shard ?? from, connId: p.connId, colorBalance: p.colorBalance, joinedAt: now,
         };
         const r = this.mm.join(entry);
         if (!r || r.error) return { error: r && r.error ? toErrorCode(r.error) : E.QueueNotAllowed };
@@ -468,7 +483,14 @@ export class ControlPlane {
             white: this._info(white), black: this._info(black), createdAt: now,
         };
         const r = await this.createGame(spec, preferred, 'queue');
-        if (r.ok) return;
+        if (r.ok) {
+            // MATCH_REPEAT_LIMIT counts the rated games that exist, not the pairings.
+            if (rated) {
+                try { this.mm.recordPairing?.(white.userId, black.userId, this.now()); } catch (e) { this.log?.error?.('mm.recordPairing failed', { err: e }); }
+            }
+            return;
+        }
+        this._recordColors(black.userId, white.userId);    // gives back the colours of the pairing
         // Back to the queue with their original waiting time.
         for (const e of [white, black]) {
             const p = this.presence.get(e.userId);
@@ -495,6 +517,7 @@ export class ControlPlane {
         if (this._banned(from.userId, now)) return { error: E.Banned };
         let targetUser = null;
         if (target) {
+            if (this.limiter.peek(`challenge:u${from.userId}`) + 1 > UNPLAYED_CHALLENGE_LIMIT) return { error: E.ChallengeLimit };
             const tid = this.presence.userIdByName(target);
             if (tid) {
                 let accepts = true;
@@ -523,7 +546,10 @@ export class ControlPlane {
 
     async challengeAccept({ id, by }) {
         const pending = this.ch.get?.(id);
-        if (this._busy(by.userId) || (pending && this._busy(pending.from.userId))) return { error: E.AlreadyInGame };
+        if (this._busy(by.userId)) return { error: E.AlreadyInGame };
+        // A busy creator is told to the challenge's target only: anyone else gets ch.accept's
+        // ChallengeNotFound (challenges.js: nothing leaks).
+        if (pending && pending.kind === 'direct' && pending.targetUserId === by.userId && this._busy(pending.from.userId)) return { error: E.AlreadyInGame };
         let r;
         try { r = this.ch.accept(id, by, this.now()); } catch (e) { this.log?.error?.('challenge.accept failed', { err: e }); return { error: E.Internal }; }
         if (!r || r.error || !r.challenge) return { error: r && r.error ? toErrorCode(r.error) : E.ChallengeNotFound };
@@ -532,9 +558,15 @@ export class ControlPlane {
 
     async challengeJoinCode({ code, by }) {
         if (this._busy(by.userId)) return { error: E.AlreadyInGame };
+        const limitKey = `joincode:u${by.userId}`;
+        if (this.limiter.peek(limitKey) + 1 > JOIN_CODE_FAILURE_LIMIT) return { error: E.RateLimited };
         let r;
         try { r = this.ch.joinCode(code, by, this.now()); } catch (e) { this.log?.error?.('challenge.joinCode failed', { err: e }); return { error: E.Internal }; }
-        if (!r || r.error || !r.challenge) return { error: r && r.error ? toErrorCode(r.error) : E.CodeInvalid };
+        if (!r || r.error || !r.challenge) {
+            const error = r && r.error ? toErrorCode(r.error) : E.CodeInvalid;
+            if (error === E.CodeInvalid) this.limiter.take({ key: limitKey, limit: JOIN_CODE_FAILURE_LIMIT, windowMs: PLAYER_LIMIT_WINDOW_MS });
+            return { error };
+        }
         return this._startChallengeGame(r.challenge, r.game, by);
     }
 
@@ -572,7 +604,10 @@ export class ControlPlane {
         let r;
         try { r = this.ch.decline(id, userId, this.now()); } catch (e) { this.log?.error?.('challenge.decline failed', { err: e }); return { error: E.Internal }; }
         if (!r || r.error) return { error: r && r.error ? toErrorCode(r.error) : E.ChallengeNotFound };
-        if (r.challenge) this._sendUser(r.challenge.from.userId, [this._statusFrame(r.challenge, CS.Declined)]);
+        if (r.challenge) {
+            this._unplayed(r.challenge);
+            this._sendUser(r.challenge.from.userId, [this._statusFrame(r.challenge, CS.Declined)]);
+        }
         return { ok: true };
     }
 
@@ -581,8 +616,17 @@ export class ControlPlane {
         try { r = this.ch.cancel(id, userId, this.now()); } catch (e) { this.log?.error?.('challenge.cancel failed', { err: e }); return { error: E.Internal }; }
         if (!r || r.error) return { error: r && r.error ? toErrorCode(r.error) : E.ChallengeNotFound };
         const c = r.challenge;
-        if (c && c.targetUserId) this._sendUser(c.targetUserId, [this._statusFrame(c, CS.Cancelled)]);
+        if (c && c.targetUserId) {
+            this._unplayed(c);
+            this._sendUser(c.targetUserId, [this._statusFrame(c, CS.Cancelled)]);
+        }
         return { ok: true };
+    }
+
+    // A direct challenge withdrawn or declined counts toward its creator's UNPLAYED_CHALLENGE_LIMIT:
+    // create/cancel cycles cannot flood a target with popups.
+    _unplayed(c) {
+        this.limiter.take({ key: `challenge:u${c.from.userId}`, limit: UNPLAYED_CHALLENGE_LIMIT, windowMs: PLAYER_LIMIT_WINDOW_MS });
     }
 
     /** Expires challenges and private codes, and tells both sides. */

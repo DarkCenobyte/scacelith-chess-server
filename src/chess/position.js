@@ -12,7 +12,8 @@ import {
     WHITE, BLACK, PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING,
     F_CAPTURE, F_EP, F_CASTLE_K, F_CASTLE_Q, F_DOUBLE, F_PROMO, F_CHECK, F_MATE,
     CR_WK, CR_WQ, CR_BK, CR_BQ,
-    S88, S64, KNIGHT_STEPS, KING_STEPS, DIR, STEP, CASTLE_MASK, SQ_NAMES, PIECE_CHAR, PIECE_ASCII,
+    S88, S64, KNIGHT_STEPS, KING_STEPS, ORTH_STEPS, DIAG_STEPS, DIR, STEP, CASTLE_MASK,
+    SQ_NAMES, PIECE_CHAR, PIECE_ASCII,
     ZP_LO, ZP_HI, ZC_LO, ZC_HI, ZEP_LO, ZEP_HI, ZSIDE_LO, ZSIDE_HI,
 } from './tables.js';
 
@@ -423,11 +424,12 @@ export class Position {
             if (flags & F_PROMO) s += '=' + UPPER[(im >> 12) & 7];
         } else {
             s = UPPER[t];
-            const n = this._generate(SCRATCH, false);
+            // Only the other pieces of the same code can make the move ambiguous: validate theirs
+            // instead of generating every legal move.
+            const piece = this._b[S88[from64]];
             let ambiguous = false, sameFile = false, sameRank = false;
-            for (let i = 0; i < n; i++) {
-                const o = SCRATCH[i], of = o & 63;
-                if (((o >> 6) & 63) !== to64 || of === from64 || (this._b[S88[of]] & 7) !== t) continue;
+            for (let of = 0; of < 64; of++) {
+                if (of === from64 || this._b[S88[of]] !== piece || this._validate(of | (to64 << 6)) < 0) continue;
                 ambiguous = true;
                 if ((of & 7) === (from64 & 7)) sameFile = true;
                 if ((of >> 3) === (from64 >> 3)) sameRank = true;
@@ -1015,7 +1017,7 @@ export class Position {
     }
 }
 
-const QUEEN_STEPS = [15, 17, -15, -17, 1, -1, 16, -16];   // diagonals then orthogonals
+const QUEEN_STEPS = [...DIAG_STEPS, ...ORTH_STEPS];   // diagonals then orthogonals
 
 const START = Position.fromFEN('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1');
 

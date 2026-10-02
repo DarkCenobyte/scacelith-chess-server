@@ -6,7 +6,7 @@ import { GameRoom, JournalKind, RecordFlag, REMATCH_WINDOW_MS } from '../../src/
 import { FakeChessGame, fakeMove, MemoryJournal, FakeStore, FakeAnticheat, FakePrimary, FakeEndpoint, silentLog } from '../../src/game/testing.js';
 import { decode, encode, enums, MSG, CloseCode } from '../../src/protocol/index.js';
 import { Registry } from '../../src/metrics.js';
-import { shardOfGameId } from '../../src/util/ids.js';
+import { GameIdAllocator, shardOfGameId } from '../../src/util/ids.js';
 import { testConfig } from '../../src/config.js';
 
 const { GameStatus: GS, EndReason: ER, ErrorCode: EC, GameEventKind: EV } = enums;
@@ -27,7 +27,7 @@ function mkHost(o = {}) {
     const host = new GameHost({
         shard: 3, config: o.config || CFG, store: deps.store, journal: deps.journal, anticheat: deps.anticheat,
         primary: deps.primary, log: silentLog, createChessGame: () => new FakeChessGame(o.script || {}),
-        now: () => clock.t, metrics: deps.registry, autoStart: false,
+        now: () => clock.t, metrics: deps.registry, autoStart: false, lastGameId: o.lastGameId,
     });
     return { host, clock, ...deps };
 }
@@ -390,6 +390,30 @@ test('recovery: a journal that cannot be replayed ends ServerAborted; an unreada
     assert.equal(b.store.batches[0][0].rated, false);
 });
 
+test('game ids are never given again after a restart with the clock behind (journal and database seeds)', () => {
+    const used = new GameIdAllocator(9).next(T0);                // another shard's id
+    const ids = new GameIdAllocator(3);
+    ids.seed(used);
+    for (const t of [T0 - 120000, T0, T0 + 0.5]) assert.ok(ids.next(t) > used);
+    for (const bad of [0, -1, 1.5, NaN]) ids.seed(bad);
+    assert.ok(ids.next(T0 + 1) > used);
+    // A restart in the same millisecond, then two minutes behind: after every game of the journal.
+    const journal = new MemoryJournal();
+    const a = mkHost({ journal });
+    const g1 = newGame(a.host, 1, 2), g2 = newGame(a.host, 3, 4);
+    for (const dt of [0, -120000]) {
+        const b = mkHost({ journal, t: a.clock.t + dt });
+        b.host.recover();
+        assert.ok(newGame(b.host, 5, 6) > Math.max(g1, g2));
+    }
+    // The database's largest id (a committed game is no longer in the journal).
+    const c = mkHost({ t: a.clock.t - 120000, lastGameId: g2 });
+    assert.ok(newGame(c.host, 5, 6) > g2);
+    // A clock ahead of the seeds gives the same ids as without them.
+    const d = mkHost({ t: a.clock.t + 1000, lastGameId: g2 }), e = mkHost({ t: a.clock.t + 1000 });
+    assert.equal(newGame(d.host, 5, 6), newGame(e.host, 5, 6));
+});
+
 test('rematch agreement is sent to the primary with colours swapped', async () => {
     const { host, clock, primary } = mkHost({ handlers: { 'game.rematch': () => ({ error: 'user_unavailable' }) } });
     const id = newGame(host, 1, 2);
@@ -404,6 +428,30 @@ test('rematch agreement is sent to the primary with colours swapped', async () =
     assert.deepEqual([req.gameId, req.white.userId, req.black.userId, req.baseMs, req.incMs, req.rated, req.category], [id, 2, 1, 180000, 2000, true, '3+2']);
     await new Promise((r) => setImmediate(r));
     assert.deepEqual([last(ew).type, last(ew).code], [MSG.Error, EC.RematchUnavailable]);
+});
+
+test('declineRematch (a queue join) closes the rematch window and counts no refusal, whatever the game\'s state', () => {
+    const { host, clock, registry } = mkHost();
+    const id = newGame(host, 1, 2);
+    const ew = new FakeEndpoint(1), eb = new FakeEndpoint(2);
+    host.attach(id, 1, ew); host.attach(id, 2, eb);
+    play(host, id, clock); play(host, id, clock);
+    host.declineRematch(id, 1);                                  // still running
+    assert.equal(host.room(id).isOver, false);
+    host.onClientMessage(id, 1, { type: MSG.Resign, seq: 3, game: id }, ew);
+    ew.clear(); eb.clear();
+    host.declineRematch(id, 1);
+    assert.deepEqual(frames(eb).map((m) => [m.type, m.kind]), [[MSG.GameEvent, EV.RematchDeclined]]);
+    assert.equal(ew.sent.length, 1, 'only the broadcast');
+    assert.equal(host.room(id).rematchOpen, false);
+    host.declineRematch(id, 2);                                  // window closed
+    host.pollCommits(clock.t + 1000);
+    host.runTimers(clock.t + REMATCH_WINDOW_MS + 30);
+    assert.equal(host.room(id), null);
+    host.declineRematch(id, 1);                                  // game gone
+    assert.equal(metricValue(registry, 'scacelith_game_rejects_total'), undefined);
+    host.onClientMessage(id, 1, { type: MSG.Rematch, seq: 4, game: id, accept: false }, ew);
+    assert.equal(metricValue(registry, 'scacelith_game_rejects_total', 'NotInGame'), 1, 'a client\'s request still counts');
 });
 
 test('asynchronous store (writer thread): one bad record does not block the batch either', async () => {

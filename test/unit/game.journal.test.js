@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { GameRoom, JournalKind, JournalEvent, JournalError, RecordFlag, RECOVERY_GSEQ_JUMP } from '../../src/game/room.js';
+import { GameRoom, JournalKind, JournalEvent, JournalError, RecordFlag, RECOVERY_GSEQ_JUMP, MAX_PLIES } from '../../src/game/room.js';
 import { FakeChessGame, fakeMove } from '../../src/game/testing.js';
 import { decode, enums, MSG } from '../../src/protocol/index.js';
 import { testConfig } from '../../src/config.js';
@@ -216,6 +216,23 @@ test('recover() ends a game whose ended record was torn off', () => {
     assert.deepEqual([copy.result.status, copy.result.reason, copy.result.endedAt], [GS.WhiteWins, ER.Checkmate, t]);
     assert.equal(out.journal[0].kind, JournalKind.Ended);
     assert.equal(copy.rematchOpen, false);
+});
+
+test('recover() ends a game at the ply limit whose ended record was torn off, as live play did', () => {
+    const j = journaled();
+    let t = T0;
+    while (!j.room.isOver) j.mv(j.room.ply & 1, (t += 100));
+    assert.equal(j.room.ply, MAX_PLIES);
+    const ended = j.log.at(-1);
+    assert.equal(ended.kind, JournalKind.Ended);
+    const copy = GameRoom.fromJournal(j.log.slice(0, -1), opts());
+    assert.equal(copy.isOver, false);
+    const out = copy.recover(t + 99999);
+    assert.equal(out.ended, true);
+    assert.deepEqual(copy.result, j.room.result);
+    assert.deepEqual([copy.result.status, copy.result.reason, copy.result.endedAt], [GS.Aborted, ER.ServerAborted, t]);
+    assert.equal(copy.record().rated, false);
+    assert.deepEqual(out.journal.map((r) => [r.kind, r.at, Buffer.from(r.payload)]), [[ended.kind, ended.at, ended.payload]]);
 });
 
 test('bad journals: strict replay throws, lenient replay stops at the bad record', () => {

@@ -7,6 +7,7 @@ import { OnceStore, SlidingWindowLimiter } from '../../src/cluster/limits.js';
 import { Presence } from '../../src/cluster/presence.js';
 import { testConfig } from '../../src/config.js';
 import { Challenges } from '../../src/match/challenges.js';
+import { Matchmaker } from '../../src/match/matchmaker.js';
 import { Registry } from '../../src/metrics.js';
 import { CloseCode, decode, enums, messageName } from '../../src/protocol/index.js';
 import { GameIdAllocator, shardOfGameId } from '../../src/util/ids.js';
@@ -55,11 +56,11 @@ class FakeShards {
     clear() { this.sent.length = 0; this.requests.length = 0; }
 }
 
-function setup({ config = cfg, activeBan = null, conduct = null, ratingOf = null, acceptsChallenges = null, live, abuse = false } = {}) {
+function setup({ config = cfg, activeBan = null, conduct = null, ratingOf = null, acceptsChallenges = null, live, abuse = false, realMatchmaker = false } = {}) {
     let t = Date.UTC(2026, 5, 1, 12);
     const clock = { now: () => t, advance: (ms) => { t += ms; } };
     const shards = new FakeShards(live);
-    const mm = new FakeMatchmaker();
+    const mm = realMatchmaker ? new Matchmaker({ config, now: clock.now, random: () => 0.1 }) : new FakeMatchmaker();
     const ch = new Challenges({ config, now: clock.now, randomInt: () => 0 });
     const presence = new Presence({ maxConnections: config.maxConnections, maxPerIp: config.maxConnectionsPerIp });
     const cp = new ControlPlane({
@@ -227,6 +228,71 @@ describe('control plane: matchmaking', () => {
         assert.equal(shards.requests[0].shard, 1);
     });
 
+    it('colours alternate over queue games, a failed creation gives them back, challenges and rematches count', async () => {
+        const { cp, shards, mm, clock, online } = setup({ realMatchmaker: true });
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1);
+        const whites = [];
+        const playQueueGame = async () => {
+            cp.mmJoin({ ...a, category: '5+0', rated: false, rating: 1500 }, 0);
+            cp.mmJoin({ ...b, category: '5+0', rated: false, rating: 1500 }, 1);
+            clock.advance(250);
+            shards.clear();
+            cp.matchTick();
+            await tick();
+            const gameId = shards.of('game.attach')[0]?.payload.gameId;
+            if (gameId) {
+                whites.push(shards.requests[0].payload.spec.white.userId);
+                cp.gameEnded({ gameId, whiteId: 1, blackId: 2 });
+            }
+            return gameId;
+        };
+        for (let i = 0; i < 4; i++) await playQueueGame();
+        assert.deepEqual(whites, [1, 2, 1, 2]);
+        assert.deepEqual([mm.colorBalanceOf(1), mm.colorBalanceOf(2)], [0, 0]);
+        shards.create = () => ({ error: E.Internal });
+        assert.equal(await playQueueGame(), undefined);
+        assert.deepEqual([mm.colorBalanceOf(1), mm.colorBalanceOf(2)], [0, 0], 'the failed game counts for nobody');
+        cp.mmLeave({ userId: 1 }); cp.mmLeave({ userId: 2 });
+        shards.create = null;
+        // Alice White in a challenge: Black in the next queue game.
+        const c = cp.challengeCreate({ from: a, target: 'bob', baseSec: 300, incSec: 0, rated: false, color: enums.ColorPref.White });
+        const acc = await cp.challengeAccept({ id: c.id, by: b });
+        assert.equal(acc.ok, true);
+        assert.deepEqual([mm.colorBalanceOf(1), mm.colorBalanceOf(2)], [1, -1]);
+        cp.gameEnded({ gameId: acc.gameId, whiteId: 1, blackId: 2 });
+        await playQueueGame();
+        assert.equal(whites.at(-1), 2);
+        // Alice Black in a rematch: White in the next queue game.
+        const rm = await cp.gameRematch({ gameId: acc.gameId, white: 2, black: 1, category: '5+0', baseMs: 300000, incMs: 0, rated: false });
+        assert.equal(rm.ok, true);
+        assert.deepEqual([mm.colorBalanceOf(1), mm.colorBalanceOf(2)], [-1, 1]);
+        cp.gameEnded({ gameId: rm.gameId, whiteId: 2, blackId: 1 });
+        await playQueueGame();
+        assert.equal(whites.at(-1), 1);
+    });
+
+    it('a rated pairing counts toward MATCH_REPEAT_LIMIT only once its game exists', async () => {
+        const { cp, shards, mm, clock, online } = setup({ realMatchmaker: true });
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1);
+        cp.mmJoin({ ...a, category: '5+0', rated: true, rating: 1500 }, 0);
+        cp.mmJoin({ ...b, category: '5+0', rated: true, rating: 1500 }, 1);
+        shards.create = () => ({ error: E.Internal });
+        for (let i = 0; i <= cfg.matchRepeatLimit; i++) {
+            clock.advance(250);
+            shards.clear();
+            cp.matchTick();
+            await tick();
+            assert.equal(shards.requests.length, 1, `pairing ${i} tried`);
+            assert.equal(mm.repeatCount(1, 2), 0);
+        }
+        shards.create = null;
+        clock.advance(250);
+        cp.matchTick();
+        await tick();
+        assert.equal(cp.activeGames.size, 2);
+        assert.equal(mm.repeatCount(1, 2), 1);
+    });
+
     it('requeues both players when the host refuses the game', async () => {
         const { cp, shards, mm, online } = setup();
         const a = online(1, 'alice', 0), b = online(2, 'bob', 1);
@@ -268,6 +334,17 @@ describe('control plane: challenges', () => {
         assert.deepEqual(await cp.challengeAccept({ id: again.id, by: b }), { error: E.AlreadyInGame });
     });
 
+    it('a busy creator is told to the challenge\'s target only; another player learns nothing', async () => {
+        const { cp, ch, online } = setup();
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1), c = online(3, 'carl', 1);
+        const direct = cp.challengeCreate({ from: a, target: 'bob', baseSec: 300, incSec: 0, rated: false });
+        const priv = cp.challengeCreate({ from: a, target: '', baseSec: 300, incSec: 0, rated: false });
+        cp.gameActive({ gameId: new GameIdAllocator(0).next(), whiteId: 1, blackId: 9 });
+        for (const id of [direct.id, priv.id]) assert.deepEqual(await cp.challengeAccept({ id, by: c }), { error: E.ChallengeNotFound });
+        assert.deepEqual(await cp.challengeAccept({ id: direct.id, by: b }), { error: E.AlreadyInGame });
+        assert.equal(ch.size, 2, 'nothing consumed');
+    });
+
     it('decline, cancel, expiry and a creator going offline notify the other side', () => {
         const { cp, shards, clock, online } = setup({ acceptsChallenges: (u) => u !== 4 });
         const a = online(1, 'alice', 0), b = online(2, 'bob', 1);
@@ -293,6 +370,49 @@ describe('control plane: challenges', () => {
         shards.clear();
         cp.presenceRelease({ userId: 2, connId: 20 }, 1);
         assert.deepEqual(states(), [[10, CS.Cancelled]]);
+    });
+
+    it('direct challenges: five withdrawn or declined a minute per creator, so create/cancel cycles cannot flood a target', async () => {
+        const { cp, shards, clock, online } = setup();
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1);
+        online(3, 'carl', 1);
+        clock.advance(1000);
+        // Accepted challenges (games) and refused attempts are not counted.
+        for (let i = 0; i < 6; i++) {
+            const c = cp.challengeCreate({ from: a, target: 'bob', baseSec: 60, incSec: 0, rated: false });
+            const acc = await cp.challengeAccept({ id: c.id, by: b });
+            assert.equal(acc.ok, true, `game ${i}`);
+            cp.gameEnded({ gameId: acc.gameId, whiteId: 1, blackId: 2 });
+        }
+        assert.deepEqual(cp.challengeCreate({ from: a, target: 'nobody', baseSec: 60, incSec: 0, rated: false }), { error: E.UserUnavailable });
+        for (let i = 0; i < 5; i++) {
+            const c = cp.challengeCreate({ from: a, target: i & 1 ? 'carl' : 'bob', baseSec: 60, incSec: 0, rated: false });
+            assert.equal(c.ok, true, `challenge ${i}`);
+            if (i === 4) assert.deepEqual(cp.challengeDecline({ id: c.id, userId: 2 }), { ok: true });
+            else assert.deepEqual(cp.challengeCancel({ id: c.id, userId: 1 }), { ok: true });
+        }
+        shards.clear();
+        assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', baseSec: 60, incSec: 0, rated: false }), { error: E.ChallengeLimit });
+        assert.deepEqual(shards.frames(), [], 'nothing reaches the target');
+        assert.equal(cp.challengeCreate({ from: a, target: '', baseSec: 60, incSec: 0, rated: false }).ok, true, 'private games are not counted');
+        clock.advance(120000);
+        assert.equal(cp.challengeCreate({ from: a, target: 'bob', baseSec: 60, incSec: 0, rated: false }).ok, true);
+    });
+
+    it('private codes: ten wrong ones a minute per player, then RateLimited; a code that works costs nothing', async () => {
+        const { cp, clock, online } = setup();
+        const a = online(1, 'alice', 0), c = online(3, 'carl', 1), d = online(4, 'dora', 1);
+        clock.advance(1000);
+        const r = cp.challengeCreate({ from: a, target: '', baseSec: 180, incSec: 2, rated: false });
+        for (let i = 0; i < 9; i++) assert.deepEqual(await cp.challengeJoinCode({ code: 'XXXXXX', by: c }), { error: E.CodeInvalid });
+        assert.deepEqual(await cp.challengeJoinCode({ code: r.code, by: a }), { error: E.CannotChallengeSelf });
+        assert.equal((await cp.challengeJoinCode({ code: r.code, by: c })).ok, true);
+        const r2 = cp.challengeCreate({ from: d, target: '', baseSec: 180, incSec: 2, rated: false });
+        const e = online(5, 'emil', 0);
+        for (let i = 0; i < 10; i++) assert.deepEqual(await cp.challengeJoinCode({ code: 'XXXXXX', by: e }), { error: E.CodeInvalid });
+        assert.deepEqual(await cp.challengeJoinCode({ code: r2.code, by: e }), { error: E.RateLimited });
+        clock.advance(120000);
+        assert.equal((await cp.challengeJoinCode({ code: r2.code, by: e })).ok, true);
     });
 
     it('private game: a code, joined by anyone with it', async () => {

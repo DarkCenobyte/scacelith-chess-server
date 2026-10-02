@@ -56,8 +56,8 @@
 //   * When finishBatch throws for one record (err.gameId set), the batch is committed one game at a
 //     time so that only the bad game stays pending (and in the journal).
 //   * extra methods: onRtt(gameId, userId, rttMs), forfeitUser(userId) (the active game of a
-//     sanctioned user on this shard ends Forfeit), activeGameOf(userId), room(gameId),
-//     runTimers(now), pollCommits(now).
+//     sanctioned user on this shard ends Forfeit), declineRematch(gameId, userId) (the player
+//     joined a queue), activeGameOf(userId), room(gameId), runTimers(now), pollCommits(now).
 //   * onClientMessage for a game whose sender has no endpoint attached binds that endpoint
 //     (a player coming back after a restart may only send Resync); a message for an unknown
 //     game gets Error{NotInGame} without an anomaly (it may be an old, already dropped game);
@@ -122,7 +122,8 @@
 //   anticheat.recordAnomaly: { userId, gameId, kind, detail (short text), posMatched }; its
 //     `certain` decides the sanction (the 6.5 table is the fallback when it answers nothing).
 // Complexity: a message costs O(1) besides the rules; a timer (re)schedule is O(1); one 10 ms
-// interval visits one wheel slot per call; a relayed gesture is one lookup and one 25-byte copy.
+// interval visits the wheel slots since the previous call (normally two: the previous one again
+// and the current one); a relayed gesture is one lookup and one 25-byte copy.
 
 import { performance } from 'node:perf_hooks';
 import { encode, enums, MSG, CloseCode } from '../protocol/index.js';
@@ -130,7 +131,7 @@ import { logger } from '../log.js';
 import { metrics as processMetrics } from '../metrics.js';
 import { GameIdAllocator } from '../util/ids.js';
 import { now as clockNow } from './clock.js';
-import { GameRoom, JournalKind, CERTAIN_KINDS } from './room.js';
+import { GameRoom, CERTAIN_KINDS } from './room.js';
 import { TimerWheel } from './timer-wheel.js';
 
 const { ErrorCode: EC, EndReason: ER, GameStatus: GS } = enums;
@@ -191,9 +192,10 @@ export class GameHost {
      * @param {object} [opts.metrics] metrics registry
      * @param {boolean} [opts.autoStart=true] start the 10 ms interval
      * @param {number} [opts.commitBatchMax=500]
+     * @param {number} [opts.lastGameId] the largest game id of the database: new ids come after it
      */
     constructor({ shard = 0, config = {}, store = null, journal = null, anticheat = null, bus = null, primary = null, log = null,
-        createChessGame, now = clockNow, metrics = processMetrics, autoStart = true, commitBatchMax = 500 } = {}) {
+        createChessGame, now = clockNow, metrics = processMetrics, autoStart = true, commitBatchMax = 500, lastGameId = 0 } = {}) {
         if (typeof createChessGame !== 'function') throw new TypeError('GameHost: createChessGame is required');
         this.shard = shard;
         this.config = config;
@@ -224,6 +226,7 @@ export class GameHost {
         this.byUser = new Map();         // userId -> gameId of the running game on this shard
         this.pending = new Map();        // gameId -> RoomEntry (ended, not committed yet)
         this.ids = new GameIdAllocator(shard);
+        this.ids.seed(lastGameId);
         this.wheel = new TimerWheel({ slotMs: SLOT_MS, slots: 4096, startAt: now() });
         this.activeCount = 0;
         this.nextCommitAt = Infinity;
@@ -350,8 +353,9 @@ export class GameHost {
 
     /**
      * A decoded client->server game message (Move .. Rematch) from `userId`.
-     * O(1) apart from the rules' move validation; nothing is allocated per move beyond the
-     * outcome, the MoveMade buffer and the 32-byte journal record.
+     * O(1) apart from the rules' move validation; a move allocates only small fixed-size objects
+     * (the outcome and its arrays, the rules' result, the MoveMade buffer, the 32-byte journal
+     * record and its wrapper).
      */
     onClientMessage(gameId, userId, msg, endpoint) {
         const t0 = performance.now();
@@ -402,6 +406,23 @@ export class GameHost {
             if (out.moved) { this.m.moves.inc(); this.counts.moves++; }
             this.m.moveUs.observe((performance.now() - t0) * 1000);
         }
+    }
+
+    /**
+     * The player joined a queue: its finished game's rematch window closes, as with a
+     * Rematch{accept: false} (DESIGN 6.3; the router, on every QueueJoin). This is no client
+     * request: nothing is sent back, and a game already gone or a window already closed counts no
+     * refusal.
+     */
+    declineRematch(gameId, userId) {
+        const entry = this.rooms.get(gameId);
+        const color = entry ? entry.room.colorOf(userId) : -1;
+        if (color < 0) return;
+        const t = this.now(), from = this.stallStart(t);
+        const te = t - this.stallCredit(t, from);
+        const out = entry.room.onRematch(color, false, t, 0, te, from);
+        out.rejected = 0;
+        this._process(entry, out, null, color, 0, te, from);
     }
 
     /**
@@ -608,6 +629,7 @@ export class GameHost {
         const t = this.now();
         let count = 0;
         for (const [gameId, records] of map) {
+            this.ids.seed(gameId);                    // never given again, even with the clock behind
             if (this.rooms.has(gameId)) continue;
             let room = null, broken = null;
             try {
@@ -748,8 +770,6 @@ export class GameHost {
         const e0 = entry.ep[0], e1 = entry.ep[1];
         const b = out.broadcast;
         for (let i = 0; i < b.length; i++) { this._send(e0, b[i]); this._send(e1, b[i]); }
-        for (let i = 0; i < out.toWhite.length; i++) this._send(e0, out.toWhite[i]);
-        for (let i = 0; i < out.toBlack.length; i++) this._send(e1, out.toBlack[i]);
         if (ep) for (let i = 0; i < out.reply.length; i++) this._send(ep, out.reply[i]);
         const j = out.journal;
         for (let i = 0; i < j.length; i++) this._append(room.id, j[i]);
@@ -1095,5 +1115,3 @@ export class GameHost {
         this.log.error('commit of finished games failed; retrying', { err, games: n, retryInMs: this.backoffMs });
     }
 }
-
-export { JournalKind };

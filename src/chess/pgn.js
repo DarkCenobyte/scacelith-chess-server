@@ -484,7 +484,7 @@ function startPosition(tags, tagAt) {
  * Reads the first game of a PGN text.
  * @param {string|Uint8Array} input the text (bytes are read as UTF-8, or Latin-1 when not UTF-8)
  * @param {{ maxBytes?: number, maxPlies?: number, maxTags?: number, maxTagName?: number,
- *   maxTagValue?: number, maxDepth?: number }} [limits] see PGN_LIMITS
+ *   maxTagValue?: number, maxDepth?: number, maxToken?: number }} [limits] see PGN_LIMITS
  * @returns {{ tags: Array<[string, string]>, startFen: string|null, moves: number[], result: string }}
  * @throws {PgnError}
  */

@@ -219,7 +219,8 @@ counts `Welcome.heartbeatMs` as 60 s at most.
   `.security(event, fields)`. Redaction is automatic; pass IPs through `ipForLog(ip)`.
 * `metrics` in `src/metrics.js`: `counter / gauge / gaugeFn / histogram`, pre-bound `labels()`.
   Metric names are `scacelith_<area>_<what>[_unit][_total]`.
-* `GameIdAllocator(shard).next()`, `shardOfGameId(id)` in `src/util/ids.js`.
+* `GameIdAllocator(shard).next()`, `.seed(id)` (the next ids come after `id`), `shardOfGameId(id)` in
+  `src/util/ids.js`.
 
 ## 5. Contracts
 
@@ -321,11 +322,11 @@ room.isOver; room.result          // { status, reason, whiteMs, blackMs, endedAt
 room.record() -> finished game record for store.games.finishBatch (section 5.5)
 room.journalState() / GameRoom.fromJournal(records)   // see 5.6
 ```
-`Outcome = { broadcast: [Buffer], toWhite: [Buffer], toBlack: [Buffer], reply: [Buffer] (to the
-sender), anomaly: null | { color, kind, detail, posMatched }, ended: bool, journal: [records],
-clockStarted: colour | 2 }`. Buffers are already encoded with the codec; the host sends them as
-they are. `clockStarted` names a clock held since a recovery that has just started (6.4): the host
-then sends the other player a new `GameSnapshot`, unless the outcome holds a move or the end.
+`Outcome = { broadcast: [Buffer], reply: [Buffer] (to the sender), anomaly: null | { color, kind,
+detail, posMatched }, ended: bool, journal: [records], clockStarted: colour | 2 }`. Buffers are
+already encoded with the codec; the host sends them as they are. `clockStarted` names a clock held
+since a recovery that has just started (6.4): the host then sends the other player a new
+`GameSnapshot`, unless the outcome holds a move or the end.
 
 `GameHost` (one per shard):
 ```js
@@ -361,7 +362,7 @@ new Matchmaker({ config, now })
 mm.join({ userId, username, category, rated, rating, provisional, shard, connId, colorBalance, joinedAt }) -> { ok } | { error: ErrorCode }
 mm.leave(userId) -> bool ; mm.has(userId) ; mm.statusOf(userId, now) -> QueueStatus fields
 mm.tick(now) -> [{ category, rated, white: entry, black: entry }]
-mm.recordPairing(a, b, now)  // repeat limit bookkeeping (done by tick itself)
+mm.recordPairing(a, b, now)  // repeat limit bookkeeping (the primary, once a rated queue game exists)
 // challenges.js (primary)
 new Challenges({ config, now })
 ch.create({ from: {userId, username, rating, provisional, shard, connId}, target /* username | '' */, baseSec, incSec, rated, color }) -> { ok, challenge } | { error }
@@ -411,7 +412,7 @@ store.games.finishBatch(records) -> [{ gameId, ratings: null | { white: RatingCh
   //           rematchOf, flags }
   // flags: 1 rated requested, 2 recovered after a restart, 4 forfeit, 8 manual clock press (autoPress
   // false; records of older builds never have it)
-store.games.byId(id) ; recentForUser(userId, limit, before?) ; countBetween(a, b, since)
+store.games.byId(id) ; lastId() ; recentForUser(userId, limit, before?) ; countBetween(a, b, since)
 store.conduct.record(userId, kind, at) ; store.conduct.countSince(userId, since) -> { abandon, abort, noshow } ; store.conduct.cooldown(userId) / setCooldown(userId, until, level)
 store.sanctions.create({ userId, kind /* 'ban'|'mm_block'|'warning' */, reason, source /* 'auto'|'moderator' */, gameId, startsAt, endsAt, createdBy }) -> id
   // a ban for cheating: source 'auto' and reason 'certain_cheat:<kind>', or source 'moderator' and reason

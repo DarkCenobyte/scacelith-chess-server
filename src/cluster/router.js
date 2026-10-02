@@ -63,8 +63,8 @@
 //     rttMs) is called on every measurement.
 //   - forged_type with AUTO_SANCTION_CERTAIN_CHEATS: host.forfeitUser(userId) on the host shard of
 //     the connection's games (local call or bus Forfeit), then Error{CheatDetected} + 4302.
-//   - QueueJoin closes the rematch window of the connection's last game: a Rematch{accept:false}
-//     is given to its host without a reply endpoint (no error goes back when no window is open).
+//   - QueueJoin closes the rematch window of the connection's last game: host.declineRematch on
+//     its host shard (local call or bus RematchDecline), with no reply even when no window is open.
 //   - primary -> shard 'game.forfeit' { userId } -> host.forfeitUser(userId) (bans decided on the
 //     primary).
 //   - Extra IPC: shard -> primary 'shard.load' { shard, conns, games, lagP99, overloaded }
@@ -693,7 +693,7 @@ export class Router {
 
     _declineRematchLocal(gameId, userId) {
         try {
-            this.host.onClientMessage(gameId, userId, { type: MSG.Rematch, seq: 0, game: gameId, accept: false }, null);
+            this.host.declineRematch(gameId, userId);
         } catch (e) {
             this.log?.error?.('rematch decline failed', { gameId, err: e });
         }
