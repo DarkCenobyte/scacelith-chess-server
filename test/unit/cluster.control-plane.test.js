@@ -372,17 +372,24 @@ describe('control plane: challenges', () => {
         assert.deepEqual(states(), [[10, CS.Cancelled]]);
     });
 
-    it('direct challenges: five a minute per creator, so create/cancel cycles cannot flood a target', () => {
+    it('direct challenges: five withdrawn or declined a minute per creator, so create/cancel cycles cannot flood a target', async () => {
         const { cp, shards, clock, online } = setup();
-        const a = online(1, 'alice', 0);
-        online(2, 'bob', 1);
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1);
         online(3, 'carl', 1);
         clock.advance(1000);
+        // Accepted challenges (games) and refused attempts are not counted.
+        for (let i = 0; i < 6; i++) {
+            const c = cp.challengeCreate({ from: a, target: 'bob', baseSec: 60, incSec: 0, rated: false });
+            const acc = await cp.challengeAccept({ id: c.id, by: b });
+            assert.equal(acc.ok, true, `game ${i}`);
+            cp.gameEnded({ gameId: acc.gameId, whiteId: 1, blackId: 2 });
+        }
         assert.deepEqual(cp.challengeCreate({ from: a, target: 'nobody', baseSec: 60, incSec: 0, rated: false }), { error: E.UserUnavailable });
         for (let i = 0; i < 5; i++) {
             const c = cp.challengeCreate({ from: a, target: i & 1 ? 'carl' : 'bob', baseSec: 60, incSec: 0, rated: false });
             assert.equal(c.ok, true, `challenge ${i}`);
-            assert.deepEqual(cp.challengeCancel({ id: c.id, userId: 1 }), { ok: true });
+            if (i === 4) assert.deepEqual(cp.challengeDecline({ id: c.id, userId: 2 }), { ok: true });
+            else assert.deepEqual(cp.challengeCancel({ id: c.id, userId: 1 }), { ok: true });
         }
         shards.clear();
         assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', baseSec: 60, incSec: 0, rated: false }), { error: E.ChallengeLimit });

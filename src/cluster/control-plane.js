@@ -80,9 +80,10 @@ const CS = enums.ChallengeState;
 const CP = enums.ColorPref;
 const QUEUE_REFRESH_MS = 3000;
 const LOAD_STALE_MS = 10000;
-// Per player and minute: direct challenges sent (each one pops up on its target's screen), and
-// wrong private game codes tried (a code must not be guessable).
-const CHALLENGE_CREATE_LIMIT = 5;
+// Per player and minute: direct challenges withdrawn or declined (each one popped up on its
+// target's screen, and no game came of it), and wrong private game codes tried (a code must not be
+// guessable).
+const UNPLAYED_CHALLENGE_LIMIT = 5;
 const JOIN_CODE_FAILURE_LIMIT = 10;
 const PLAYER_LIMIT_WINDOW_MS = 60000;
 
@@ -514,10 +515,9 @@ export class ControlPlane {
     challengeCreate({ from, target = '', baseSec, incSec, rated, color }) {
         const now = this.now();
         if (this._banned(from.userId, now)) return { error: E.Banned };
-        const limitKey = `challenge:u${from.userId}`;
         let targetUser = null;
         if (target) {
-            if (this.limiter.peek(limitKey) + 1 > CHALLENGE_CREATE_LIMIT) return { error: E.ChallengeLimit };
+            if (this.limiter.peek(`challenge:u${from.userId}`) + 1 > UNPLAYED_CHALLENGE_LIMIT) return { error: E.ChallengeLimit };
             const tid = this.presence.userIdByName(target);
             if (tid) {
                 let accepts = true;
@@ -536,7 +536,6 @@ export class ControlPlane {
         const c = r.challenge;
         this._sendUser(from.userId, [this._statusFrame(c, CS.Pending)]);
         if (c.targetUserId) {
-            this.limiter.take({ key: limitKey, limit: CHALLENGE_CREATE_LIMIT, windowMs: PLAYER_LIMIT_WINDOW_MS });
             this._sendUser(c.targetUserId, [encode.ChallengeReceived({
                 id: c.id >>> 0, from: this._info(c.from), baseSec: c.baseSec, incSec: c.incSec, rated: !!c.rated,
                 yourColor: c.receiverColor ?? CP.Random, expiresMs: u32(c.expiresAt - now),
@@ -605,7 +604,10 @@ export class ControlPlane {
         let r;
         try { r = this.ch.decline(id, userId, this.now()); } catch (e) { this.log?.error?.('challenge.decline failed', { err: e }); return { error: E.Internal }; }
         if (!r || r.error) return { error: r && r.error ? toErrorCode(r.error) : E.ChallengeNotFound };
-        if (r.challenge) this._sendUser(r.challenge.from.userId, [this._statusFrame(r.challenge, CS.Declined)]);
+        if (r.challenge) {
+            this._unplayed(r.challenge);
+            this._sendUser(r.challenge.from.userId, [this._statusFrame(r.challenge, CS.Declined)]);
+        }
         return { ok: true };
     }
 
@@ -614,8 +616,17 @@ export class ControlPlane {
         try { r = this.ch.cancel(id, userId, this.now()); } catch (e) { this.log?.error?.('challenge.cancel failed', { err: e }); return { error: E.Internal }; }
         if (!r || r.error) return { error: r && r.error ? toErrorCode(r.error) : E.ChallengeNotFound };
         const c = r.challenge;
-        if (c && c.targetUserId) this._sendUser(c.targetUserId, [this._statusFrame(c, CS.Cancelled)]);
+        if (c && c.targetUserId) {
+            this._unplayed(c);
+            this._sendUser(c.targetUserId, [this._statusFrame(c, CS.Cancelled)]);
+        }
         return { ok: true };
+    }
+
+    // A direct challenge withdrawn or declined counts toward its creator's UNPLAYED_CHALLENGE_LIMIT:
+    // create/cancel cycles cannot flood a target with popups.
+    _unplayed(c) {
+        this.limiter.take({ key: `challenge:u${c.from.userId}`, limit: UNPLAYED_CHALLENGE_LIMIT, windowMs: PLAYER_LIMIT_WINDOW_MS });
     }
 
     /** Expires challenges and private codes, and tells both sides. */

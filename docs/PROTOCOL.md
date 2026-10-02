@@ -333,9 +333,9 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
   beyond it, so that such a player can reach `Hello`.
 * A client that does not read its messages (more than `WS_SEND_BUFFER_LIMIT` bytes queued) is closed
   with 4303 (`SlowConsumer`); it reconnects and resynchronises from the snapshot.
-* Challenges, private games and queue joins have their own limits (`ChallengeLimit`, also beyond
-  5 direct challenges sent per minute; `RateLimited` for `ChallengeJoinCode` after 10 wrong codes
-  in a minute; `MatchmakingCooldown` with `Notice{MatchmakingCooldown, arg = until}`).
+* Challenges, private games and queue joins have their own limits (`ChallengeLimit`, also after 5
+  direct challenges withdrawn or declined in a minute; `RateLimited` for `ChallengeJoinCode` after
+  10 wrong codes in a minute; `MatchmakingCooldown` with `Notice{MatchmakingCooldown, arg = until}`).
 
 ## Error handling
 
