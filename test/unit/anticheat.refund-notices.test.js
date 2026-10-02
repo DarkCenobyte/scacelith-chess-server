@@ -139,18 +139,21 @@ test('a notice never written: RETRIES tries, then one per poll, a new series at 
         source: 'moderator', createdBy: 'mod', notifiedAt: null });
     let sends = 0;
     const n = new RefundNotices({ refunds: store.refunds, canNotify: () => true, now: () => T, retryMs: 1, send: async () => { sends++; return false; } });
+    // Waits for the expected count (a loaded machine may be slow), then a little longer so that
+    // one try too many would be counted.
+    const sendsAfter = async (want) => {
+        for (const end = Date.now() + 5000; sends < want && Date.now() < end;) await sleep(5);
+        await sleep(50);
+        return sends;
+    };
     n.poll();
-    await sleep(200);
-    assert.equal(sends, 21, 'the first try and RETRIES (20) more');
+    assert.equal(await sendsAfter(21), 21, 'the first try and RETRIES (20) more');
     n.poll();
-    await sleep(100);
-    assert.equal(sends, 22, 'one try per poll once the series is used up');
+    assert.equal(await sendsAfter(22), 22, 'one try per poll once the series is used up');
     n.poll();
-    await sleep(100);
-    assert.equal(sends, 23);
+    assert.equal(await sendsAfter(23), 23);
     n.connected(7, null);
-    await sleep(200);
-    assert.equal(sends, 43, 'a new series of RETRIES after a new connection');
+    assert.equal(await sendsAfter(43), 43, 'a new series of RETRIES after a new connection');
     assert.equal(store._.refunds[0].notifiedAt, null);
     n.stop();
 });
