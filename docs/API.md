@@ -757,7 +757,8 @@ and "Forgot password" gives it one. Errors:
 - 403 `registration_closed`;
 - 400 `invalid_username`;
 - 410 `sso_expired`;
-- 409 `username_taken`;
+- 409 `username_taken`: an account has the username, or a waiting signup of another address
+  holds it;
 - 409 `sso_already_linked`;
 - 409 `email_taken`.
 

@@ -1094,7 +1094,7 @@ minute after the start):
 | Data | Deleted or erased |
 |---|---|
 | Sessions | as soon as they expire (absolute or idle limit); revoked ones a day after the revocation; the IP address of a live session `RETENTION_IP_DAYS` (30) after the login, the row stays |
-| Single-use tokens (some carry the e-mail address), pending signups | once expired (24 hours at most; an expired pending signup also frees its username at once) |
+| Single-use tokens (some carry the e-mail address), pending signups | once expired (tokens: 24 hours at most; a pending signup 24 hours after the signup or its last resend, and it frees its username at once) |
 | Security events | after `RETENTION_SECURITY_DAYS` (90); their IP address after `RETENTION_IP_DAYS`, the row stays |
 | Anomalies | `info` and `suspicious` ones after `RETENTION_SECURITY_DAYS`; `certain` ones (the evidence of an automatic sanction) are kept |
 | Conduct events | after 30 days (the conduct rules look back 3 days at most) |
