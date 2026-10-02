@@ -321,11 +321,11 @@ room.isOver; room.result          // { status, reason, whiteMs, blackMs, endedAt
 room.record() -> finished game record for store.games.finishBatch (section 5.5)
 room.journalState() / GameRoom.fromJournal(records)   // see 5.6
 ```
-`Outcome = { broadcast: [Buffer], toWhite: [Buffer], toBlack: [Buffer], reply: [Buffer] (to the
-sender), anomaly: null | { color, kind, detail, posMatched }, ended: bool, journal: [records],
-clockStarted: colour | 2 }`. Buffers are already encoded with the codec; the host sends them as
-they are. `clockStarted` names a clock held since a recovery that has just started (6.4): the host
-then sends the other player a new `GameSnapshot`, unless the outcome holds a move or the end.
+`Outcome = { broadcast: [Buffer], reply: [Buffer] (to the sender), anomaly: null | { color, kind,
+detail, posMatched }, ended: bool, journal: [records], clockStarted: colour | 2 }`. Buffers are
+already encoded with the codec; the host sends them as they are. `clockStarted` names a clock held
+since a recovery that has just started (6.4): the host then sends the other player a new
+`GameSnapshot`, unless the outcome holds a move or the end.
 
 `GameHost` (one per shard):
 ```js

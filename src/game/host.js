@@ -750,8 +750,6 @@ export class GameHost {
         const e0 = entry.ep[0], e1 = entry.ep[1];
         const b = out.broadcast;
         for (let i = 0; i < b.length; i++) { this._send(e0, b[i]); this._send(e1, b[i]); }
-        for (let i = 0; i < out.toWhite.length; i++) this._send(e0, out.toWhite[i]);
-        for (let i = 0; i < out.toBlack.length; i++) this._send(e1, out.toBlack[i]);
         if (ep) for (let i = 0; i < out.reply.length; i++) this._send(ep, out.reply[i]);
         const j = out.journal;
         for (let i = 0; i < j.length; i++) this._append(room.id, j[i]);
