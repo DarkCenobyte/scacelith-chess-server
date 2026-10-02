@@ -137,6 +137,24 @@ test('finishBatch is idempotent: a re-committed game id changes nothing and repo
     store.close();
 });
 
+test('games.lastId; a game id stored for other players stays a duplicate, with a warning', () => {
+    const warned = [];
+    const log = { debug() {}, info() {}, warn: (msg, f) => warned.push(f.gameId), error() {}, security() {}, child: () => log };
+    const store = openStore(testConfig({ DB_PATH: ':memory:' }), { applyGame, log });
+    migrate(store);
+    const [a, b, c] = ['Ann', 'Ben', 'Cid'].map((n) => store.users.create({ username: n, email: `${n}@example.org` }));
+    assert.equal(store.games.lastId(), 0);
+    const g = record(a, b);
+    store.games.finishBatch([g, record(b, a)]);
+    assert.equal(store.games.lastId(), nextId);
+    store.games.finishBatch([g]);                                // a crash recovery's re-commit
+    assert.deepEqual(warned, []);
+    const [r] = store.games.finishBatch([{ ...record(a, c), id: g.id }]);
+    assert.equal(r.duplicate, true);
+    assert.deepEqual(warned, [g.id]);
+    store.close();
+});
+
 test('finishBatch is atomic: a failing record rolls the whole batch back', () => {
     const { store, ids: [a, b] } = setup();
     const ok1 = record(a, b);

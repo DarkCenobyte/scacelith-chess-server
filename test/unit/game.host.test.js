@@ -6,7 +6,7 @@ import { GameRoom, JournalKind, RecordFlag, REMATCH_WINDOW_MS } from '../../src/
 import { FakeChessGame, fakeMove, MemoryJournal, FakeStore, FakeAnticheat, FakePrimary, FakeEndpoint, silentLog } from '../../src/game/testing.js';
 import { decode, encode, enums, MSG, CloseCode } from '../../src/protocol/index.js';
 import { Registry } from '../../src/metrics.js';
-import { shardOfGameId } from '../../src/util/ids.js';
+import { GameIdAllocator, shardOfGameId } from '../../src/util/ids.js';
 import { testConfig } from '../../src/config.js';
 
 const { GameStatus: GS, EndReason: ER, ErrorCode: EC, GameEventKind: EV } = enums;
@@ -27,7 +27,7 @@ function mkHost(o = {}) {
     const host = new GameHost({
         shard: 3, config: o.config || CFG, store: deps.store, journal: deps.journal, anticheat: deps.anticheat,
         primary: deps.primary, log: silentLog, createChessGame: () => new FakeChessGame(o.script || {}),
-        now: () => clock.t, metrics: deps.registry, autoStart: false,
+        now: () => clock.t, metrics: deps.registry, autoStart: false, lastGameId: o.lastGameId,
     });
     return { host, clock, ...deps };
 }
@@ -388,6 +388,30 @@ test('recovery: a journal that cannot be replayed ends ServerAborted; an unreada
     b.host.pollCommits(b.clock.t + 50);
     assert.deepEqual(b.store.committedIds, [g1]);
     assert.equal(b.store.batches[0][0].rated, false);
+});
+
+test('game ids are never given again after a restart with the clock behind (journal and database seeds)', () => {
+    const used = new GameIdAllocator(9).next(T0);                // another shard's id
+    const ids = new GameIdAllocator(3);
+    ids.seed(used);
+    for (const t of [T0 - 120000, T0, T0 + 0.5]) assert.ok(ids.next(t) > used);
+    for (const bad of [0, -1, 1.5, NaN]) ids.seed(bad);
+    assert.ok(ids.next(T0 + 1) > used);
+    // A restart in the same millisecond, then two minutes behind: after every game of the journal.
+    const journal = new MemoryJournal();
+    const a = mkHost({ journal });
+    const g1 = newGame(a.host, 1, 2), g2 = newGame(a.host, 3, 4);
+    for (const dt of [0, -120000]) {
+        const b = mkHost({ journal, t: a.clock.t + dt });
+        b.host.recover();
+        assert.ok(newGame(b.host, 5, 6) > Math.max(g1, g2));
+    }
+    // The database's largest id (a committed game is no longer in the journal).
+    const c = mkHost({ t: a.clock.t - 120000, lastGameId: g2 });
+    assert.ok(newGame(c.host, 5, 6) > g2);
+    // A clock ahead of the seeds gives the same ids as without them.
+    const d = mkHost({ t: a.clock.t + 1000, lastGameId: g2 }), e = mkHost({ t: a.clock.t + 1000 });
+    assert.equal(newGame(d.host, 5, 6), newGame(e.host, 5, 6));
 });
 
 test('rematch agreement is sent to the primary with colours swapped', async () => {

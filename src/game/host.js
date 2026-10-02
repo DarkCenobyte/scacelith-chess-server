@@ -192,9 +192,10 @@ export class GameHost {
      * @param {object} [opts.metrics] metrics registry
      * @param {boolean} [opts.autoStart=true] start the 10 ms interval
      * @param {number} [opts.commitBatchMax=500]
+     * @param {number} [opts.lastGameId] the largest game id of the database: new ids come after it
      */
     constructor({ shard = 0, config = {}, store = null, journal = null, anticheat = null, bus = null, primary = null, log = null,
-        createChessGame, now = clockNow, metrics = processMetrics, autoStart = true, commitBatchMax = 500 } = {}) {
+        createChessGame, now = clockNow, metrics = processMetrics, autoStart = true, commitBatchMax = 500, lastGameId = 0 } = {}) {
         if (typeof createChessGame !== 'function') throw new TypeError('GameHost: createChessGame is required');
         this.shard = shard;
         this.config = config;
@@ -225,6 +226,7 @@ export class GameHost {
         this.byUser = new Map();         // userId -> gameId of the running game on this shard
         this.pending = new Map();        // gameId -> RoomEntry (ended, not committed yet)
         this.ids = new GameIdAllocator(shard);
+        this.ids.seed(lastGameId);
         this.wheel = new TimerWheel({ slotMs: SLOT_MS, slots: 4096, startAt: now() });
         this.activeCount = 0;
         this.nextCommitAt = Infinity;
@@ -627,6 +629,7 @@ export class GameHost {
         const t = this.now();
         let count = 0;
         for (const [gameId, records] of map) {
+            this.ids.seed(gameId);                    // never given again, even with the clock behind
             if (this.rooms.has(gameId)) continue;
             let room = null, broken = null;
             try {

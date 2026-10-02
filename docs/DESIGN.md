@@ -219,7 +219,8 @@ counts `Welcome.heartbeatMs` as 60 s at most.
   `.security(event, fields)`. Redaction is automatic; pass IPs through `ipForLog(ip)`.
 * `metrics` in `src/metrics.js`: `counter / gauge / gaugeFn / histogram`, pre-bound `labels()`.
   Metric names are `scacelith_<area>_<what>[_unit][_total]`.
-* `GameIdAllocator(shard).next()`, `shardOfGameId(id)` in `src/util/ids.js`.
+* `GameIdAllocator(shard).next()`, `.seed(id)` (the next ids come after `id`), `shardOfGameId(id)` in
+  `src/util/ids.js`.
 
 ## 5. Contracts
 
@@ -411,7 +412,7 @@ store.games.finishBatch(records) -> [{ gameId, ratings: null | { white: RatingCh
   //           rematchOf, flags }
   // flags: 1 rated requested, 2 recovered after a restart, 4 forfeit, 8 manual clock press (autoPress
   // false; records of older builds never have it)
-store.games.byId(id) ; recentForUser(userId, limit, before?) ; countBetween(a, b, since)
+store.games.byId(id) ; lastId() ; recentForUser(userId, limit, before?) ; countBetween(a, b, since)
 store.conduct.record(userId, kind, at) ; store.conduct.countSince(userId, since) -> { abandon, abort, noshow } ; store.conduct.cooldown(userId) / setCooldown(userId, until, level)
 store.sanctions.create({ userId, kind /* 'ban'|'mm_block'|'warning' */, reason, source /* 'auto'|'moderator' */, gameId, startsAt, endsAt, createdBy }) -> id
   // a ban for cheating: source 'auto' and reason 'certain_cheat:<kind>', or source 'moderator' and reason
