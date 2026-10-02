@@ -1,8 +1,8 @@
 // Primary process bootstrap: configuration, database migrations, server id, the match module
 // objects, the shard workers (cluster, 'advanced' IPC serialization, env SHARD=<n>), the
-// anti-cheat analysis process (when the anti-cheat module exports startAnalysisProcess), the
-// control plane, the metrics endpoint, the retention purge (retention.js) and the analysis
-// backlog gauges, signals (SIGTERM/SIGINT graceful stop, SIGHUP certificate reload).
+// anti-cheat analysis process, the control plane, the metrics endpoint, the retention purge
+// (retention.js) and the analysis backlog gauges, signals (SIGTERM/SIGINT graceful stop, SIGHUP
+// certificate reload).
 //
 // This file and worker-main.js are the only places that import the other modules of the server
 // (store, match, anticheat...). Everything below them receives its dependencies as parameters.
@@ -11,10 +11,10 @@ import cluster from 'node:cluster';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import * as anticheatModule from '../anticheat/index.js';
+import { startAnalysisProcess } from '../anticheat/index.js';
 import { configureLogging, logger } from '../log.js';
 import { loadConfig, describe, configWarnings } from '../config.js';
-import * as conductModule from '../match/conduct.js';
+import { Conduct } from '../match/conduct.js';
 import { Challenges } from '../match/challenges.js';
 import { applyGame } from '../match/elo.js';
 import { Matchmaker } from '../match/matchmaker.js';
@@ -24,13 +24,6 @@ import { startPrimary } from './primary.js';
 import { startRetention } from './retention.js';
 
 const WORKER_MAIN = fileURLToPath(new URL('./worker-main.js', import.meta.url));
-
-function makeConduct(config, store, log) {
-    const now = Date.now;
-    if (typeof conductModule.Conduct === 'function') return new conductModule.Conduct({ config, store, now, log });
-    if (typeof conductModule.createConduct === 'function') return conductModule.createConduct({ config, store, now, log });
-    return null;
-}
 
 /**
  * Makes sure the database has a server id (uuid, created at the first start).
@@ -63,8 +56,7 @@ export async function main() {
 
     const matchmaker = new Matchmaker({ config, now: Date.now });
     const challenges = new Challenges({ config, now: Date.now });
-    const conduct = makeConduct(config, store, logger.child('conduct'));
-    if (!conduct) log.warn('match/conduct.js exports no Conduct: conduct cooldowns disabled');
+    const conduct = new Conduct({ config, store, now: Date.now, log: logger.child('conduct') });
 
     cluster.setupPrimary({ exec: WORKER_MAIN, args: [], serialization: 'advanced' });
     const fork = (shard) => cluster.fork({ SHARD: String(shard), SCACELITH_SERVER_ID: serverId });
@@ -87,12 +79,10 @@ export async function main() {
     });
     log.info('primary ready', { serverId, workers: config.workers, shardBase: config.shardBase, metricsPort: primary.metricsPort });
 
-    if (typeof anticheatModule.startAnalysisProcess === 'function') {
-        try {
-            analysis = await anticheatModule.startAnalysisProcess(config);
-        } catch (e) {
-            log.error('analysis process failed to start', { err: e });
-        }
+    try {
+        analysis = startAnalysisProcess(config);
+    } catch (e) {
+        log.error('analysis process failed to start', { err: e });
     }
 
     const retention = startRetention({ config, store, log: logger.child('retention') });
@@ -116,12 +106,7 @@ export async function main() {
         stopping = true;
         log.info('shutting down', { signal, graceMs: config.shutdownGraceMs });
         try { await retention.stop(); } catch (e) { log.error('retention stop failed', { err: e }); }
-        try {
-            if (analysis) {
-                if (typeof analysis.stop === 'function') await analysis.stop();
-                else if (typeof analysis.kill === 'function') analysis.kill('SIGTERM');
-            }
-        } catch (e) { log.error('analysis stop failed', { err: e }); }
+        try { await analysis?.stop(); } catch (e) { log.error('analysis stop failed', { err: e }); }
         await primary.stop(config.shutdownGraceMs);
         try { store.close(); } catch (e) { log.error('store close failed', { err: e }); }
         log.info('stopped');
