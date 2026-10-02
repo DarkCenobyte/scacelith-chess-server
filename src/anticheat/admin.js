@@ -324,7 +324,11 @@ function integrityShow(ctx) {
     })), ['game', 'cat', 'rating', 'moves', 'acc', 'acpl', 't1%', 'fast%', 'cx%', 'time~cx', 'cv']);
     if (games.some(other)) t += '  * analysed with another profile (engine, network, depths or hash): not in the scores above\n';
     t += '\nAnomalies (latest 50)\n' + table(anomalies.map((a) => ({ at: iso(a.at), kind: a.kind, severity: a.severity, game: a.gameId || '' })), ['at', 'kind', 'severity', 'game']);
-    t += '\nReports received\n' + table(reports.map((r) => ({ id: r.id, at: iso(r.at), category: r.category, weight: r.weight, game: r.gameId, outcome: r.outcome ?? r.resolution ?? 'open', comment: String(r.comment || '').slice(0, 60) })), ['id', 'at', 'category', 'weight', 'game', 'outcome', 'comment']);
+    // The store's report rows carry createdAt and status ('open' until resolved).
+    t += '\nReports received\n' + table(reports.map((r) => ({
+        id: r.id, at: iso(r.createdAt ?? r.at), category: r.category, weight: r.weight, game: r.gameId,
+        outcome: r.outcome ?? r.resolution ?? (r.status && r.status !== 'open' ? r.status : 'open'), comment: String(r.comment || '').slice(0, 60),
+    })), ['id', 'at', 'category', 'weight', 'game', 'outcome', 'comment']);
     t += '\nSanctions\n' + table(sanctions.map((x) => ({ id: x.id, kind: x.kind, source: x.source, until: iso(x.endsAt), reason: x.reason })), ['id', 'kind', 'source', 'until', 'reason']);
     return { data, text: t };
 }
@@ -425,7 +429,7 @@ function reportsList(ctx) {
             priority: reviewPriority({ level: integ.level, score: integ.score, reportWeight: w30 }),
             open: g.reports.length, weight: Math.round(g.weight * 1000) / 1000,
             categories: [...new Set(g.reports.map((r) => r.category))].join(','),
-            ids: g.reports.map((r) => r.id), latest: Math.max(...g.reports.map((r) => Number(r.at) || 0)),
+            ids: g.reports.map((r) => r.id), latest: Math.max(...g.reports.map((r) => Number(r.createdAt ?? r.at) || 0)),
         });
     }
     rows.sort((a, b) => b.priority - a.priority || b.weight - a.weight);

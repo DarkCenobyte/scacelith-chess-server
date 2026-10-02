@@ -13,6 +13,9 @@ const PRIORITY = Object.freeze({ ordinary: 0, signal: 1, report: 2, manual: 3 })
 // The GameStatus a result filter needs as White and as Black (games.listForUser of the real store).
 const RESULT_STATUS = Object.freeze({ win: [1, 2], loss: [2, 1], draw: [3, 3] });
 
+// A report as the real store returns it.
+const asStored = ({ at, outcome, ...r }) => ({ ...r, createdAt: at, status: outcome ?? 'open' });
+
 function gameOf(g, userId, { category = null, rated = null, result = null } = {}) {
     if (g.whiteId !== userId && g.blackId !== userId) return false;
     if (category !== null && g.category !== category) return false;
@@ -178,8 +181,10 @@ export function createFakeStore({ textColumns = false } = {}) {
             create(r) { const id = seq++; reports.push({ id, outcome: null, resolvedBy: null, resolvedAt: null, ...r }); return id; },
             countByReporterSince(reporterId, since) { return reports.filter((r) => r.reporterId === reporterId && r.at >= since).length; },
             exists(reporterId, reportedId, gameId) { return reports.some((r) => r.reporterId === reporterId && r.reportedId === reportedId && r.gameId === gameId); },
-            listOpen(limit = 100) { return reports.filter((r) => !r.outcome).slice(0, limit); },
-            forReported(userId) { return reports.filter((r) => r.reportedId === userId); },
+            // The rows of listOpen and forReported have the real store's shape: createdAt and status
+            // ('open' until an outcome) in place of `at` and `outcome`.
+            listOpen(limit = 100) { return reports.filter((r) => !r.outcome).slice(0, limit).map(asStored); },
+            forReported(userId) { return reports.filter((r) => r.reportedId === userId).map(asStored); },
             // As the real store: newest first, with the reported name, createdAt and status ('open'
             // until an outcome); `outcome` is what the reporter weighting reads.
             forReporter(userId, limit = 500) {

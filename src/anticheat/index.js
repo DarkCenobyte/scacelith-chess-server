@@ -27,7 +27,8 @@
 //     first, each row carrying the `features` object given to complete() (or being it).
 //   * store.reports.forReporter(reporterId) (not in DESIGN) is used when present to weigh a
 //     reporter by the outcomes of their past reports; without it every reporter has a neutral
-//     track record. store.reports.forReported(userId) must return rows with { weight, at }.
+//     track record. store.reports.forReported(userId) must return rows with { weight, createdAt,
+//     status }.
 //   * store.analysis.request(gameId, 'report' | 'signal', now) is used when present to queue a
 //     reported game for analysis ahead of the ordinary ones ('signal' for a low-credibility report;
 //     reports.js; the queue policy is the store's). store.analysis.next() returns each job with its

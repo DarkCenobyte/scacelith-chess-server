@@ -567,7 +567,7 @@ header of `src/anticheat/index.js`):
   the analysis process is the only writer;
 * `analysis.forUser(userId, limit)` returns the player's completed analyses, newest first, each
   row with the `features` given to `complete()`;
-* `reports.forReported(userId)` rows carry `weight` and `at`; the optional
+* `reports.forReported(userId)` rows carry `weight`, `createdAt` and `status`; the optional
   `reports.forReporter(userId)` (rows with `outcome`) feeds the reporter's track record;
 * the optional `analysis.request(gameId, 'report' | 'signal', now)` queues a reported game,
   at `report` priority for a credible report and `signal` for a low-credibility one (without it

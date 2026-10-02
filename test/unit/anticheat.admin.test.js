@@ -194,6 +194,25 @@ test('reports list / resolve, anomalies, stats', async () => {
     assert.equal(st.json.openReports, 1);
 });
 
+test('integrity show / reports list on the real store: report dates and outcomes', async (t) => {
+    const store = openStore(testConfig({ DB_PATH: ':memory:' }));
+    t.after(() => store.close());
+    migrate(store);
+    const bob = store.users.create({ username: 'bob', email: 'bob@example.org' });
+    const eve = store.users.create({ username: 'eve', email: 'eve@example.org' });
+    const ann = store.users.create({ username: 'ann', email: 'ann@example.org' });
+    const r1 = store.reports.create({ reporterId: eve, reportedId: bob, gameId: 0, category: 'cheating', comment: 'first', weight: 1, at: NOW - 7200000 });
+    const r2 = store.reports.create({ reporterId: ann, reportedId: bob, gameId: 0, category: 'cheating', comment: 'second', weight: 0.5, at: NOW - 3600000 });
+    store.reports.resolve(r1, 'dismissed', 'mod', NOW - 60000);
+    const show = await run(store, ['integrity', 'show', 'bob']);
+    assert.equal(show.code, 0, show.err);
+    const row = (id) => show.out.split('\n').find((l) => l.startsWith(`${id} `)).trim().split(/\s+/);
+    assert.deepEqual([row(r1)[1], row(r1)[5]], [new Date(NOW - 7200000).toISOString().replace('.000Z', 'Z'), 'dismissed']);
+    assert.deepEqual([row(r2)[1], row(r2)[5]], [new Date(NOW - 3600000).toISOString().replace('.000Z', 'Z'), 'open']);
+    const list = await run(store, ['reports', 'list', '--json']);
+    assert.deepEqual(list.json.map((r) => [r.username, r.ids, r.latest]), [['bob', [r2], NOW - 3600000]]);
+});
+
 test('bench-accounts: refused without the test-server flag; creates verified accounts with sessions', async (t) => {
     const { store } = world();
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bench-'));
