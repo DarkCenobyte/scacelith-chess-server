@@ -150,6 +150,9 @@ import { metrics } from '../metrics.js';
 import { enums } from '../protocol/schema.js';
 
 const { DatabaseSync } = loadSqlite();
+// For the other connections of a process that uses the store (bin/admin.js backup): importing
+// node:sqlite directly would print the warning loadSqlite() filters.
+export { DatabaseSync };
 
 // node:sqlite prints an ExperimentalWarning on Node 22 when it is first loaded. Only that notice
 // is filtered, only while the module loads; every other warning goes through unchanged.

@@ -246,6 +246,14 @@ test('bin/admin.js refuses to run on a missing database instead of creating an e
     assert.deepEqual(fs.readdirSync(dir), [], 'no data directory, no database, no backup');
 });
 
+test('bin/admin.js does not print the node:sqlite ExperimentalWarning the store filters', () => {
+    const bin = fileURLToPath(new URL('../../bin/admin.js', import.meta.url));
+    const r = spawnSync(process.execPath, [bin, '--help'], { env: { PATH: process.env.PATH }, encoding: 'utf8', timeout: 30000 });
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /Usage/);
+    assert.equal(r.stderr, '');
+});
+
 test('backup: consistent copy with VACUUM INTO, mode 600, never overwrites', async (t) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-backup-'));
     t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

@@ -10,7 +10,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync } from '../store/index.js';
 import { readIntegrity, writeIntegrity, writeStructured, parseMaybeJson, levelRank, LEVELS, HOUR_MS, DAY_MS } from './util.js';
 import { CheatBanReason, isCheatingBan, refundVictims, refundWindowStart, victimTotals } from './refunds.js';
 import { reviewPriority, recentReportWeight } from './reports.js';
