@@ -346,12 +346,13 @@ function integrityConfirm(ctx) {
     const ev = { ...prev.evidence };
     pushReview(ev, { action: 'confirm', by: ctx.moderator, at: now, reason, previousLevel: prev.level, score: prev.score });
     ev.review = { ...(ev.review || {}), confirmedAt: now, by: ctx.moderator };
-    writeIntegrity(ctx.store, u.id, { level: 'confirmed', score: prev.score, evidence: ev, updatedAt: now, reviewedBy: ctx.moderator });
     const until = now + hours * HOUR_MS;
     // The reason tells the store whether the games recorded during the ban are refunded
     // (refunds.js banRefunds): not after --no-refund.
     const banReason = `${noRefund ? CheatBanReason.confirmedNoRefund : CheatBanReason.confirmed}${reason}`;
+    // The ban first: when it cannot be stored, the level is left as it was.
     const id = ctx.store.sanctions.create({ userId: u.id, kind: 'ban', reason: banReason, source: 'moderator', gameId: null, startsAt: now, endsAt: until, createdBy: ctx.moderator });
+    writeIntegrity(ctx.store, u.id, { level: 'confirmed', score: prev.score, evidence: ev, updatedAt: now, reviewedBy: ctx.moderator });
     const resolved = ctx.args.flags['keep-reports'] ? 0 : resolveOpenCheatingReports(ctx, u.id, 'actioned');
     const from = noRefund ? null : since ?? refundWindowStart(ctx.config, now);
     // The ban stands whatever happens to the refunds (one transaction of their own): a failure is

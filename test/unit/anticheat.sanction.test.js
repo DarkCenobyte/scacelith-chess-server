@@ -62,6 +62,29 @@ test('idempotency across processes: an existing ban of the same game is reused',
     assert.equal(store.integrity.get(9).evidence.certain.length, 3, 'every sanction call adds evidence');
 });
 
+test('a ban that cannot be stored writes nothing else, and the next certain anomaly of the game tries again', async () => {
+    const store = createFakeStore();
+    const primary = fakePrimary();
+    const t = 1_800_000_000_000;
+    const ac = createAnticheat({ config: testConfig(), store, primary, log: quiet, now: () => t });
+    const create = store.sanctions.create;
+    store.sanctions.create = () => { throw Object.assign(new Error('database is locked'), { code: 'busy' }); };
+    const a = ac.sanctionCertain({ userId: 5, gameId: 77, kind: 'illegal_move' });
+    assert.deepEqual(a, { banUntil: 0, applied: false, refunds: 0 });
+    assert.equal(store.integrity.get(5), null, 'not confirmed without the ban');
+    assert.equal(store._.security.length, 0);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(primary.sent.length, 0);
+    store.sanctions.create = create;
+    const b = ac.sanctionCertain({ userId: 5, gameId: 77, kind: 'illegal_move' });
+    assert.equal(b.applied, true, 'retried');
+    assert.equal(store._.sanctions.length, 1);
+    assert.equal(store.integrity.get(5).level, 'confirmed');
+    await new Promise((r) => setImmediate(r));
+    assert.equal(primary.sent.length, 1);
+    ac.close();
+});
+
 test('a longer ban stands for the automatic one only when it is a ban for cheating that refunds', () => {
     const t = 1_800_000_000_000;
     const long = { kind: 'ban', source: 'moderator', gameId: null, startsAt: t - 1000, endsAt: t + 30 * 24 * 3600000, createdBy: 'mod' };

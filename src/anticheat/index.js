@@ -223,6 +223,12 @@ export function createAnticheat({ config, store, primary = null, log = null, now
         const s = { userId, gameId: gameId || 0, kind, at: t };
 
         const done = (r) => {
+            if (r.failed) {
+                // The ban was not stored (logged, nothing else written): a later certain anomaly of
+                // this game tries again.
+                sanctioned.delete(key);
+                return { banUntil: 0, applied: false, refunds: 0 };
+            }
             sanctioned.set(key, r.until);
             if (r.created) {
                 sanctionCounter.labels(kind in ANOMALY_KINDS ? kind : 'unknown').inc();

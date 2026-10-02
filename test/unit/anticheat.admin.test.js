@@ -183,6 +183,15 @@ test('integrity show: a report comment cannot break the table or forge lines', a
     assert.doesNotMatch(show.out, /[\u0080-\u009f\u2028\u202e]/);
 });
 
+test('integrity confirm: a ban that cannot be stored leaves the level as it was', async () => {
+    const { store, bob } = world();
+    store.integrity.set(bob, { level: 'suspected', score: 3.8, evidence: {}, updatedAt: NOW });
+    store.sanctions.create = () => { throw new Error('database is locked'); };
+    await assert.rejects(run(store, ['integrity', 'confirm', 'bob', '--reason', 'engine', '--no-refund']), /locked/);
+    assert.equal(store.integrity.get(bob).level, 'suspected');
+    assert.deepEqual(moderatorEvents(store), []);
+});
+
 test('reports list / resolve, anomalies, stats', async () => {
     const { store, bob, eve } = world();
     const r1 = store.reports.create({ reporterId: eve, reportedId: bob, gameId: 1, category: 'cheating', comment: '', weight: 0.8, at: NOW });
