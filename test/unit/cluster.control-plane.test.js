@@ -5,6 +5,7 @@ import { ControlPlane } from '../../src/cluster/control-plane.js';
 import { Ipc, channelPair } from '../../src/cluster/ipc.js';
 import { OnceStore, SlidingWindowLimiter } from '../../src/cluster/limits.js';
 import { Presence } from '../../src/cluster/presence.js';
+import { startPrimary } from '../../src/cluster/primary.js';
 import { testConfig } from '../../src/config.js';
 import { Challenges } from '../../src/match/challenges.js';
 import { Registry } from '../../src/metrics.js';
@@ -482,5 +483,29 @@ describe('control plane: games, sanctions, shards', () => {
         const { cp, shards } = setup({ config: testConfig({ ABUSE_BLOCK_REFUSALS_PER_MIN: '5' }) });
         cp.handlers['abuse.report']({ entries: [['2001:db8::/64', '2001:db8::/48', 5]] }, 0);
         assert.deepEqual(shards.of('abuse.block').map((x) => [x.shard, x.payload.blocks.map(([k, , l]) => [k, l])]), [['*', [['2001:db8::/64', 1]]]]);
+    });
+});
+
+describe('primary assembly', () => {
+    it('the global rate limiter runs on a monotonic clock: a step back of the wall clock locks no key out', async (t) => {
+        const silent = { child: () => silent, debug() {}, info() {}, warn() {}, error() {}, security() {} };
+        const wall = Date.now;
+        let step = 0;
+        Date.now = () => wall() + step;                     // the system clock, as the primary reads it
+        t.after(() => { Date.now = wall; });
+        const primary = await startPrimary({
+            config: testConfig(), log: silent, fork: () => { throw new Error('no worker in this test'); }, shards: [],
+            matchmaker: new FakeMatchmaker(), challenges: new Challenges({ config: cfg }), registry: new Registry(),
+        });
+        t.after(() => primary.stop(0));
+        const limiter = primary.controlPlane.limiter;
+        const k = { key: 'auth:ip:192.0.2.1', limit: 2, windowMs: 100 };
+        assert.ok(limiter.take(k).allowed && limiter.take(k).allowed);
+        assert.equal(limiter.take(k).allowed, false);
+        step = -3600000;                                    // the wall clock steps back an hour
+        await new Promise((r) => setTimeout(r, 250));       // two windows of real time
+        assert.equal(limiter.take(k).allowed, true);
+        primary.controlPlane.sweep();
+        assert.equal(limiter.take(k).allowed, true);
     });
 });

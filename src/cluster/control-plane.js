@@ -724,7 +724,7 @@ export class ControlPlane {
 
     sweep() {
         const now = this.now();
-        this.limiter.sweep(now);
+        this.limiter.sweep();               // on its own clock (primary.js: monotonic)
         this.once.sweep(now);
         for (const [u, until] of this.bans) if (until <= now) this.bans.delete(u);
         this.abuse.sweep();

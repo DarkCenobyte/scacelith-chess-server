@@ -1,6 +1,12 @@
 // Assembly of the primary from its dependencies (primary-main.js imports the real modules and
 // calls this; tests call it with fakes): shard supervisor, control plane, metrics endpoint.
+//
+// The global rate limiter runs on the monotonic clock of the game hosts (game/clock.js): a step
+// back of the wall clock would otherwise hold every key's window open and refuse its users until
+// the clock caught up (the values exchanged with the shards are durations). The single-use keys
+// stay on the wall clock, which their users' expiries (proof-of-work challenges) are written in.
 
+import { now as clockNow } from '../game/clock.js';
 import { metrics as defaultRegistry } from '../metrics.js';
 import { ControlPlane } from './control-plane.js';
 import { OnceStore, SlidingWindowLimiter } from './limits.js';
@@ -45,7 +51,7 @@ export async function startPrimary({ config, log, fork, matchmaker, challenges, 
         list: () => supervisor.list().filter((s) => cp.readyShards.has(s)),
     };
     cp = new ControlPlane({
-        config, presence, matchmaker, challenges, conduct, limiter: new SlidingWindowLimiter(), once: new OnceStore(),
+        config, presence, matchmaker, challenges, conduct, limiter: new SlidingWindowLimiter({ now: clockNow }), once: new OnceStore(),
         shards: directory, activeBan, ratingOf, acceptsChallenges, refunds, log: log.child('control'), registry,
     });
     registry.gaugeFn('scacelith_shards_ready', 'Shards ready', () => cp.readyShards.size);
