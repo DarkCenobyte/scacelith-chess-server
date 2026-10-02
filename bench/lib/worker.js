@@ -13,7 +13,7 @@
 //     (burst) the replies of one event-loop turn are sent together from one setImmediate;
 //   - both players of a direct-challenge game live in the same process and share one Position.
 //
-// Commands from the coordinator (process.send): init, connect, games, stop, close, exit.
+// Commands from the coordinator (process.send): init, connect, games, halt, stop, close, exit.
 
 import crypto from 'node:crypto';
 import net from 'node:net';

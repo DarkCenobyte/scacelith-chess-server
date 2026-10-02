@@ -23,7 +23,7 @@ for (let i = 0; i < args.length; i++) {
     else files.push(args[i]);
 }
 if (!files.length) {
-    process.stdout.write('usage: node bench/profile-summary.js [--top N] [--stalls N] [--min-stall-ms N] FILE.cpuprofile...\n');
+    process.stdout.write('usage: node bench/profile-summary.js [--top N] [--stalls N] [--min-stall-ms N] [--callers FUNCTION [--depth N]] FILE.cpuprofile...\n');
     process.exit(2);
 }
 
