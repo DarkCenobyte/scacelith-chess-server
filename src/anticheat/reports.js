@@ -238,7 +238,15 @@ export function handleReport(ctx, deps = {}) {
     let received = [];
     try { received = store.reports.forReported(opponentId) || []; } catch { received = []; }
     const weight = cappedWeight(raw.weight, received, now);
-    const id = store.reports.create({ reporterId: user.id, reportedId: opponentId, gameId, category, comment, weight, at: now });
+    let id;
+    try {
+        id = store.reports.create({ reporterId: user.id, reportedId: opponentId, gameId, category, comment, weight, at: now });
+    } catch (e) {
+        // The same report filed at the same moment through another shard (separate connections:
+        // both passed exists()); the UNIQUE index kept one, and a duplicate gets the same answer.
+        if (e?.code === 'duplicate') return ACCEPTED;
+        throw e;
+    }
     log?.security?.('report.filed', { reportId: id, reporterId: user.id, reportedId: opponentId, gameId, category, weight, rawWeight: raw.weight });
     // The reported game is analysed ahead of the ordinary ones, even when the queue policy left
     // it out (ANALYSIS_QUEUE_MAX, ANALYSIS_SAMPLE_RATE): at 'report' priority when the report is
