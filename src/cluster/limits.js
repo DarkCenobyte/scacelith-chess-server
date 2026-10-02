@@ -150,6 +150,9 @@ export class SlidingWindowLimiter {
         return n;
     }
 
+    /** Forgets a key's counts: its next take() starts from zero. */
+    forget(key) { this.entries.delete(key); }
+
     get size() { return this.entries.size; }
 }
 

@@ -69,6 +69,17 @@ describe('AbuseTracker', () => {
         assert.deepEqual(flood(), [['192.0.2.9', 60000, 1]]);
     });
 
+    it('after a block the key counts from zero: T new refusals block it again, not a few', () => {
+        const { t, now } = tracker();
+        now.set(1020000 + 1);                     // just after the start of a fixed minute
+        assert.deepEqual(t.report([['192.0.2.7', '2001:db8::/48', 99]]), []);
+        assert.deepEqual(t.report([['192.0.2.7', '2001:db8::/48', 1]]), [['192.0.2.7', 60000, 1]]);
+        now.advance(60000);                       // the block ends; the refusals before it are a minute old
+        assert.ok(!t.isBlocked('192.0.2.7'));
+        assert.deepEqual(t.report([['192.0.2.7', null, 99]]), [], 'T - 1 refusals after the block');
+        assert.deepEqual(t.report([['192.0.2.7', null, 1]]), [['192.0.2.7', 240000, 2]], 'the T-th escalates');
+    });
+
     it('ABUSE_BLOCK_BASE_SEC and ABUSE_BLOCK_MAX_SEC shape the ladder', () => {
         const { t, now } = tracker({ ABUSE_BLOCK_BASE_SEC: '10', ABUSE_BLOCK_MAX_SEC: '100' });
         const ttls = [];

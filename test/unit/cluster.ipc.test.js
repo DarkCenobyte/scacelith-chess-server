@@ -187,7 +187,7 @@ describe('global rate limiter', () => {
                 else if (op < 0.9) { const q = { ...p, ageMs: rnd() * 2000 }; assert.deepEqual(a.refund(q), b.refund(q)); }
                 else if (op < 0.95) assert.equal(a.peek(key), b.peek(key));
                 else if (op < 0.952) assert.equal(a.sweep(), b.sweep());
-                else { a.entries.delete(key); b.entries.delete(key); }
+                else { a.forget(key); b.forget(key); }
                 assert.equal(a.evicted, b.evicted);
                 if (i % 50 === 0) assert.deepEqual([...a.entries], [...b.entries]);
             }
