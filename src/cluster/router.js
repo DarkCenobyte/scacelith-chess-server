@@ -799,7 +799,15 @@ export class Router {
             this._fatal(conn, 1, code, CloseCode.Policy);
             return;
         }
-        c.claimed = true;
+        c.claimed = true;               // from here, the close releases the claim
+        // Encoded while the connection is still in 'hello': a failure closes it (Internal, 1011).
+        const activeGame = isGameId(r.activeGame) ? r.activeGame : 0;
+        const welcome = encode.Welcome({
+            proto: msg.proto, serverTime: clockNow(), userId: conn.userId, username: conn.username,
+            serverName: this.config.serverName, heartbeatMs: this.config.heartbeatIntervalMs,
+            clientPingMs: this.config.clientPingIntervalMs, maxMsgPerSec: Math.min(65535, this.rate), activeGame,
+            gestureRate: this.gRate, gestureBurst: this.gRate > 0 ? this.gBurst : 0,
+        });
         conn.state = 'ready';
         const prev = this.byUser.get(conn.userId);
         this.byUser.set(conn.userId, conn);
@@ -809,13 +817,7 @@ export class Router {
             prev.sendFrame(encode.Notice({ code: N.ReplacedByNewConnection, arg: 0 }));
             prev.close(CloseCode.Replaced, '');
         }
-        const activeGame = isGameId(r.activeGame) ? r.activeGame : 0;
-        conn.sendFrame(encode.Welcome({
-            proto: msg.proto, serverTime: clockNow(), userId: conn.userId, username: conn.username,
-            serverName: this.config.serverName, heartbeatMs: this.config.heartbeatIntervalMs,
-            clientPingMs: this.config.clientPingIntervalMs, maxMsgPerSec: Math.min(65535, this.rate), activeGame,
-            gestureRate: this.gRate, gestureBurst: this.gRate > 0 ? this.gBurst : 0,
-        }));
+        conn.sendFrame(welcome);
         this._hello.labels('ok').inc();
         this._helloMs.observe(clockNow() - conn.openedAt);
         if (activeGame) this.attach(activeGame, conn.userId, conn.id);

@@ -182,6 +182,19 @@ describe('router: hello', () => {
         assert.equal(await c.closed(), 4004);
     });
 
+    it('closes 1011 and releases the claim when the Welcome cannot be encoded', async () => {
+        // A server name over the 64 bytes of Welcome.serverName (loadConfig refuses it since).
+        const env = await setup();
+        env.router.config = { ...env.cfg, serverName: 'é'.repeat(40) };
+        const c = await env.connect();
+        c.hello();
+        const m = await c.recv();
+        assert.deepEqual([m.name, m.code, m.fatal], ['Error', E.Internal, true]);
+        assert.equal(await c.closed(), 1011);
+        await waitFor(() => env.seen.some((x) => x.type === 'presence.release'));
+        assert.equal(env.router.byUser.size, 0);
+    });
+
     it('closes 4006 when the server is full', async () => {
         const env = await setup({ claim: { error: 'ServerFull' } });
         const c = await env.connect();
