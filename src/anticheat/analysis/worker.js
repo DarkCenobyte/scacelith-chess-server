@@ -128,7 +128,9 @@ export function createAnalysisWorker({ config, store, log = null, engineFactory 
                 try { updatePlayerIntegrity({ store, userId: uid, population, now: now(), log }); } catch (e) { log?.error('integrity update failed', { err: e, userId: uid }); }
             }
             if (job?.priority === ORDINARY_PRIORITY) {
-                updatePopulationFromGame(population, features, (uid) => readIntegrity(store, uid).level);
+                // The job is done: a failed write loses this sample, it does not send the game
+                // back to the queue.
+                try { updatePopulationFromGame(population, features, (uid) => readIntegrity(store, uid).level); } catch (e) { log?.error('population update failed', { err: e, gameId }); }
             }
             stats.analysed++;
             okGames.inc();

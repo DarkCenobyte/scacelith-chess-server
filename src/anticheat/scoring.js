@@ -178,10 +178,10 @@ export class Population {
             observations.push({ key: `${key}|${m}`, value });
         }
         if (!observations.length) return false;
-        this.cache.set(key, { at: this.now(), stats });
         // The store merges the observations into what it holds (it is the source of truth when
-        // the cache is reloaded or the process restarts).
+        // the cache is reloaded or the process restarts); the cache only takes those it accepted.
         this.store?.integrity?.updatePopulation?.(observations, this.now());
+        this.cache.set(key, { at: this.now(), stats });
         return true;
     }
 }

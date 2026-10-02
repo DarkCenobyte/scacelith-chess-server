@@ -5,7 +5,8 @@ import { createAnalysisWorker } from '../../src/anticheat/analysis/worker.js';
 import { EngineError } from '../../src/anticheat/analysis/engine.js';
 import { createFakeStore } from '../../src/anticheat/testing/fake-store.js';
 import { AnalysisPriority } from '../../src/store/index.js';
-import { MODEL } from '../../src/anticheat/scoring.js';
+import { MODEL, Population } from '../../src/anticheat/scoring.js';
+import { StoreError } from '../../src/store/index.js';
 import { metrics } from '../../src/metrics.js';
 
 const config = testConfig({ ANALYSIS_ENGINE_PATH: '/fake/engine', ANALYSIS_DEPTH_FAST: '4', ANALYSIS_DEPTH_DEEP: '8', ANALYSIS_POLL_MS: '100' });
@@ -105,6 +106,40 @@ test('only games claimed at ordinary priority (the random sample) feed the popul
     assert.deepEqual([job.gameId, job.priority], [45, P.ordinary]);
     const f = await worker.processJob(engine, job);
     assert.equal(store._.population.get(`${f.profile}|5+0|1500|accuracy`).n, 2);
+});
+
+test('a population write that fails after complete() leaves the job done, analysed once, without the sample', async () => {
+    const store = createFakeStore();
+    const { moves } = addGame(store, 46);
+    const { moveToUci } = await import('../../src/anticheat/analysis/moves.js');
+    const engine = fakeEngine((ply) => (ply < moves.length ? moveToUci(moves[ply]) : null));
+    const updatePopulation = store.integrity.updatePopulation;
+    let busy = 1;
+    store.integrity.updatePopulation = (...a) => {
+        if (busy-- > 0) throw new StoreError('busy', 'database is locked');
+        return updatePopulation(...a);
+    };
+    const errors = [];
+    const log = { info() {}, warn() {}, error: (m) => errors.push(m) };
+    const worker = createAnalysisWorker({ config, store, engineFactory: () => engine, workerId: 't', log });
+    const f = await worker.processJob(engine, store.analysis.next(1, 't', Date.now())[0]);
+    assert.ok(f);
+    assert.equal(store._.jobs.get(46).status, 'done', 'not sent back to the queue');
+    assert.deepEqual([worker.stats.analysed, worker.stats.failed], [1, 0]);
+    assert.deepEqual(errors, ['population update failed']);
+    assert.equal(store._.population.size, 0);
+    // The next sample joins as usual.
+    addGame(store, 47);
+    await worker.processJob(engine, store.analysis.next(1, 't', Date.now())[0]);
+    assert.equal(store._.population.get(`${f.profile}|5+0|1500|accuracy`).n, 2);
+});
+
+test('Population.update: the cache only takes the observations the store accepted', () => {
+    const store = createFakeStore();
+    store.integrity.updatePopulation = () => { throw new StoreError('busy', 'database is locked'); };
+    const pop = new Population(store, { profile: 'p', now: () => 1000 });
+    assert.throws(() => pop.update('5+0', 1500, { accuracy: 80 }, 'blitz'), /locked/);
+    assert.deepEqual(pop.raw('5+0', 1500), {});
 });
 
 test('another engine restarts the statistics: its own population, players scored on its games, levels kept until judged', async () => {
