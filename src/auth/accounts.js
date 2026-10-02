@@ -386,12 +386,18 @@ export function createAccounts(svc) {
         return { recoveryCodes };
     }
 
-    /** POST /account/delete: anonymises the account and revokes every session. */
+    /**
+     * POST /account/delete: anonymises the account and revokes every session. The security events
+     * still waiting in this process's batch (this request's recovery_code_used, the last second's
+     * logins) are written first, so that the anonymisation erases their IP addresses too; the
+     * deletion's own event, recorded once it is done, has none.
+     */
     async function deleteAccount(ctxUser, { password, code, recoveryCode, ip }) {
         const user = await reauth(ctxUser.userId, { password, code, recoveryCode }, { secondFactor: 'any', ip });
+        events.flush();
         store.users.anonymize(user.id);
         sessions.revokeAll(user.id);
-        events.record('account_deleted', { userId: user.id, ip });
+        events.record('account_deleted', { userId: user.id });
         return { status: 'deleted' };
     }
 

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { base32Decode, totp } from '../../src/security/totp.js';
 import { PROTOCOL_MIN, PROTOCOL_VERSION, SCHEMA_HASH, WS_SUBPROTOCOL } from '../../src/protocol/index.js';
 import { startTestServer } from './helpers/auth-fakes.js';
+import { startReal } from './helpers/real-auth.js';
 
 const PW = 'correct horse battery';
 
@@ -89,6 +90,30 @@ test('account deletion: password (+ second factor when enabled), anonymisation, 
     assert.equal((await s.request('POST', '/api/v1/auth/login', { body: { login: 'alice', password: PW } })).status, 401);
     s.auth.events.flush();
     assert.ok(s.store._raw.securityEvents.some((e) => e.kind === 'account_deleted' && e.userId === u.id));
+});
+
+test('the deletion erases the IP addresses of the security events, the ones still batched included (real store)', async (t) => {
+    const s = await startReal(t);
+    const login = async (username) => (await s.request('POST', '/api/v1/auth/login', { body: { login: username, password: PW } })).json.token;
+    const alice = s.store.users.create({ username: 'alice', email: 'alice@example.org', passwordHash: await s.hasher.hash(PW), emailVerified: true });
+    let token = await login('alice');
+    assert.equal((await s.request('POST', '/api/v1/account/delete', { token, body: { password: PW } })).status, 200);
+
+    // With a recovery code: its recovery_code_used event comes from the deletion's own request.
+    const bob = s.store.users.create({ username: 'bob', email: 'bob@example.org', passwordHash: await s.hasher.hash(PW), emailVerified: true });
+    token = await login('bob');
+    const setup = await s.request('POST', '/api/v1/account/mfa/totp/setup', { token, body: { password: PW } });
+    const enable = await s.request('POST', '/api/v1/account/mfa/totp/enable', { token, body: { code: totp(base32Decode(setup.json.secret), s.now()) } });
+    const r = await s.request('POST', '/api/v1/account/delete', { token, body: { password: PW, recoveryCode: enable.json.recoveryCodes[0] } });
+    assert.equal(r.status, 200);
+
+    s.auth.events.flush();
+    for (const id of [alice, bob]) {
+        const events = s.store.security.forUser(id);
+        assert.ok(events.some((e) => e.kind === 'login') && events.some((e) => e.kind === 'account_deleted'));
+        assert.deepEqual(events.filter((e) => e.ip !== null).map((e) => e.kind), [], `user ${id}`);
+    }
+    assert.ok(s.store.security.forUser(bob).some((e) => e.kind === 'recovery_code_used'));
 });
 
 test('an account without password (Google only) is told to set one first', async (t) => {
