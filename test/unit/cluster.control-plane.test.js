@@ -7,6 +7,7 @@ import { OnceStore, SlidingWindowLimiter } from '../../src/cluster/limits.js';
 import { Presence } from '../../src/cluster/presence.js';
 import { testConfig } from '../../src/config.js';
 import { Challenges } from '../../src/match/challenges.js';
+import { Matchmaker } from '../../src/match/matchmaker.js';
 import { Registry } from '../../src/metrics.js';
 import { CloseCode, decode, enums, messageName } from '../../src/protocol/index.js';
 import { GameIdAllocator, shardOfGameId } from '../../src/util/ids.js';
@@ -55,11 +56,11 @@ class FakeShards {
     clear() { this.sent.length = 0; this.requests.length = 0; }
 }
 
-function setup({ config = cfg, activeBan = null, conduct = null, ratingOf = null, acceptsChallenges = null, live, abuse = false } = {}) {
+function setup({ config = cfg, activeBan = null, conduct = null, ratingOf = null, acceptsChallenges = null, live, abuse = false, realMatchmaker = false } = {}) {
     let t = Date.UTC(2026, 5, 1, 12);
     const clock = { now: () => t, advance: (ms) => { t += ms; } };
     const shards = new FakeShards(live);
-    const mm = new FakeMatchmaker();
+    const mm = realMatchmaker ? new Matchmaker({ config, now: clock.now, random: () => 0.1 }) : new FakeMatchmaker();
     const ch = new Challenges({ config, now: clock.now, randomInt: () => 0 });
     const presence = new Presence({ maxConnections: config.maxConnections, maxPerIp: config.maxConnectionsPerIp });
     const cp = new ControlPlane({
@@ -225,6 +226,49 @@ describe('control plane: matchmaking', () => {
         const r = await cp.createGame({ category: '5+0', baseMs: 300000, incMs: 0, rated: true, white, black }, 0, 'queue');
         assert.equal(r.ok, true);
         assert.equal(shards.requests[0].shard, 1);
+    });
+
+    it('colours alternate over queue games, a failed creation gives them back, challenges and rematches count', async () => {
+        const { cp, shards, mm, clock, online } = setup({ realMatchmaker: true });
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1);
+        const whites = [];
+        const playQueueGame = async () => {
+            cp.mmJoin({ ...a, category: '5+0', rated: false, rating: 1500 }, 0);
+            cp.mmJoin({ ...b, category: '5+0', rated: false, rating: 1500 }, 1);
+            clock.advance(250);
+            shards.clear();
+            cp.matchTick();
+            await tick();
+            const gameId = shards.of('game.attach')[0]?.payload.gameId;
+            if (gameId) {
+                whites.push(shards.requests[0].payload.spec.white.userId);
+                cp.gameEnded({ gameId, whiteId: 1, blackId: 2 });
+            }
+            return gameId;
+        };
+        for (let i = 0; i < 4; i++) await playQueueGame();
+        assert.deepEqual(whites, [1, 2, 1, 2]);
+        assert.deepEqual([mm.colorBalanceOf(1), mm.colorBalanceOf(2)], [0, 0]);
+        shards.create = () => ({ error: E.Internal });
+        assert.equal(await playQueueGame(), undefined);
+        assert.deepEqual([mm.colorBalanceOf(1), mm.colorBalanceOf(2)], [0, 0], 'the failed game counts for nobody');
+        cp.mmLeave({ userId: 1 }); cp.mmLeave({ userId: 2 });
+        shards.create = null;
+        // Alice White in a challenge: Black in the next queue game.
+        const c = cp.challengeCreate({ from: a, target: 'bob', baseSec: 300, incSec: 0, rated: false, color: enums.ColorPref.White });
+        const acc = await cp.challengeAccept({ id: c.id, by: b });
+        assert.equal(acc.ok, true);
+        assert.deepEqual([mm.colorBalanceOf(1), mm.colorBalanceOf(2)], [1, -1]);
+        cp.gameEnded({ gameId: acc.gameId, whiteId: 1, blackId: 2 });
+        await playQueueGame();
+        assert.equal(whites.at(-1), 2);
+        // Alice Black in a rematch: White in the next queue game.
+        const rm = await cp.gameRematch({ gameId: acc.gameId, white: 2, black: 1, category: '5+0', baseMs: 300000, incMs: 0, rated: false });
+        assert.equal(rm.ok, true);
+        assert.deepEqual([mm.colorBalanceOf(1), mm.colorBalanceOf(2)], [-1, 1]);
+        cp.gameEnded({ gameId: rm.gameId, whiteId: 2, blackId: 1 });
+        await playQueueGame();
+        assert.equal(whites.at(-1), 1);
     });
 
     it('requeues both players when the host refuses the game', async () => {

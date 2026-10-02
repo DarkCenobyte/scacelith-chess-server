@@ -32,6 +32,9 @@
 // AUTO_PRESS_CLOCK, for the queue, the challenges and the private games alike; a rematch keeps the
 // value of the game it follows, so a change of the setting applies to the games created after it.
 //
+// Colours: the matchmaker keeps each player's colour balance (DESIGN 5.4). A queue game counts at
+// its pairing (given back when the game cannot be created), any other game once it is created.
+//
 // Notifications (QueueStatus, ChallengeReceived, ChallengeStatus, Notice) are encoded here and
 // written by the shard of the user's live connection ('conn.send'); waiting players get a fresh
 // QueueStatus every 3 s.
@@ -258,6 +261,11 @@ export class ControlPlane {
 
     _busy(userId) { return this.activeGames.has(userId) || this.starting.has(userId); }
 
+    // The matchmaker's colour balances (DESIGN 5.4) count the games made outside the queue too.
+    _recordColors(whiteId, blackId) {
+        try { this.mm.recordColors?.(whiteId, blackId); } catch (e) { this.log?.error?.('mm.recordColors failed', { err: e }); }
+    }
+
     _player(p, category) {
         const out = { userId: p.userId, username: p.username || this.presence.get(p.userId)?.username || '', rating: p.rating, provisional: p.provisional, shard: p.shard, connId: p.connId };
         if (out.rating === undefined) {
@@ -331,6 +339,7 @@ export class ControlPlane {
         }
         const gameId = r.gameId;
         this._created.labels(source).inc();
+        if (source !== 'queue') this._recordColors(spec.white.userId, spec.black.userId);   // the pairing counted a queue game
         for (const u of ids) {
             this.activeGames.set(u, gameId);
             this._leaveQueue(u, source !== 'queue');
@@ -397,7 +406,7 @@ export class ControlPlane {
         if (this.queued.has(p.userId) || this.mm.has?.(p.userId)) this.mm.leave(p.userId);
         const entry = {
             userId: p.userId, username: p.username, category: p.category, rated: !!p.rated, rating: p.rating,
-            provisional: !!p.provisional, shard: p.shard ?? from, connId: p.connId, colorBalance: p.colorBalance ?? 0, joinedAt: now,
+            provisional: !!p.provisional, shard: p.shard ?? from, connId: p.connId, colorBalance: p.colorBalance, joinedAt: now,
         };
         const r = this.mm.join(entry);
         if (!r || r.error) return { error: r && r.error ? toErrorCode(r.error) : E.QueueNotAllowed };
@@ -469,6 +478,7 @@ export class ControlPlane {
         };
         const r = await this.createGame(spec, preferred, 'queue');
         if (r.ok) return;
+        this._recordColors(black.userId, white.userId);    // gives back the colours of the pairing
         // Back to the queue with their original waiting time.
         for (const e of [white, black]) {
             const p = this.presence.get(e.userId);
