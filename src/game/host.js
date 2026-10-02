@@ -458,6 +458,17 @@ export class GameHost {
         return true;
     }
 
+    /**
+     * Ends a game the primary gave up creating (its game.create reply came after the timeout):
+     * ServerAborted, which records no conduct incident, before anyone could join it.
+     */
+    cancelGame(gameId) {
+        const entry = this.rooms.get(gameId);
+        if (!entry || entry.room.isOver) return false;
+        this._process(entry, entry.room.serverAbort(this.now()), null, -1, 0);
+        return true;
+    }
+
     /** Id of the running game of `userId` on this shard, or 0. */
     activeGameOf(userId) { return this.byUser.get(userId) || 0; }
 

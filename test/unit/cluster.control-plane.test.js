@@ -6,7 +6,7 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import { AbuseTracker } from '../../src/cluster/abuse.js';
 import { ControlPlane } from '../../src/cluster/control-plane.js';
-import { Ipc, channelPair } from '../../src/cluster/ipc.js';
+import { Ipc, IpcTimeoutError, channelPair } from '../../src/cluster/ipc.js';
 import { OnceStore, SlidingWindowLimiter } from '../../src/cluster/limits.js';
 import { Presence } from '../../src/cluster/presence.js';
 import { startPrimary } from '../../src/cluster/primary.js';
@@ -42,10 +42,10 @@ class FakeShards {
     notify(shard, type, payload) { this.sent.push({ shard, type, payload }); }
     broadcast(type, payload) { this.sent.push({ shard: '*', type, payload }); }
     list() { return this.live; }
-    async request(shard, type, payload) {
+    async request(shard, type, payload, opts) {
         this.requests.push({ shard, type, payload });
         if (type !== 'game.create') return null;
-        if (this.create) return this.create(shard, payload);
+        if (this.create) return this.create(shard, payload, opts);
         if (!this.alloc.has(shard)) this.alloc.set(shard, new GameIdAllocator(shard));
         return { ok: true, gameId: this.alloc.get(shard).next() };
     }
@@ -490,6 +490,29 @@ describe('control plane: games, sanctions, shards', () => {
         const { cp, shards } = setup({ config: testConfig({ ABUSE_BLOCK_REFUSALS_PER_MIN: '5' }) });
         cp.handlers['abuse.report']({ entries: [['2001:db8::/64', '2001:db8::/48', 5]] }, 0);
         assert.deepEqual(shards.of('abuse.block').map((x) => [x.shard, x.payload.blocks.map(([k, , l]) => [k, l])]), [['*', [['2001:db8::/64', 1]]]]);
+    });
+});
+
+describe('control plane: game.create after its timeout', () => {
+    it('cancels the game a host created after the primary gave up waiting', async () => {
+        const { cp, shards } = setup();
+        const gameId = new GameIdAllocator(1).next();
+        shards.create = (shard, payload, opts) => {
+            setImmediate(() => opts.onLate({ ok: true, gameId }));          // the late reply
+            throw new IpcTimeoutError('game.create', 5000);
+        };
+        const spec = { white: { userId: 1, username: 'a' }, black: { userId: 2, username: 'b' }, baseMs: 300000, incMs: 0, rated: true };
+        assert.deepEqual(await cp.createGame(spec, 1, 'challenge'), { error: E.Internal });
+        await tick();
+        assert.deepEqual(shards.of('game.cancel').map((x) => [x.shard, x.payload.gameId]), [[1, gameId]]);
+        assert.equal(cp.activeGames.size, 0);
+        shards.create = (shard, payload, opts) => {                       // a late refusal created nothing
+            setImmediate(() => opts.onLate({ error: E.Internal }));
+            throw new IpcTimeoutError('game.create', 5000);
+        };
+        await cp.createGame(spec, 1, 'challenge');
+        await tick();
+        assert.equal(shards.of('game.cancel').length, 1);
     });
 });
 

@@ -315,7 +315,12 @@ export class ControlPlane {
         const load = this.loads.get(shard);
         if (load) load.games = (load.games || 0) + 1;
         try {
-            if (shard >= 0) r = await this.shards.request(shard, 'game.create', { spec }, { timeoutMs: 5000 });
+            // A game created after the timeout (a stall of the host shard) would wait for players
+            // nobody attaches, then end as a no-show of White: the host cancels it.
+            const onLate = (late) => {
+                if (late && late.ok && isGameId(late.gameId)) this.shards.notify(shard, 'game.cancel', { gameId: late.gameId });
+            };
+            if (shard >= 0) r = await this.shards.request(shard, 'game.create', { spec }, { timeoutMs: 5000, onLate });
         } catch (e) {
             this.log?.error?.('game.create failed', { shard, err: e });
         } finally {

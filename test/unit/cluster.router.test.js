@@ -40,6 +40,7 @@ class FakeHost {
     relayGesture(gameId, userId, frame) { this.calls.push(['gesture', gameId, userId, Buffer.from(frame)]); return true; }
     stallDuring() { return this.stalled; }
     forfeitUser(userId) { this.calls.push(['forfeit', userId]); return true; }
+    cancelGame(gameId) { this.calls.push(['cancel', gameId]); return true; }
     stats() { return { games: this.games }; }
     of(kind) { return this.calls.filter((c) => c[0] === kind); }
 }
@@ -421,13 +422,15 @@ describe('router: ready connections', () => {
 });
 
 describe('router: primary and bus', () => {
-    it('serves game.create, conn.send, conn.kick and game.forfeit from the primary', async () => {
+    it('serves game.create, game.cancel, conn.send, conn.kick and game.forfeit from the primary', async () => {
         const env = await setup();
         const { c } = await env.login();
         const r = await env.primary.request('game.create', { spec: { category: '5+0' } });
         assert.equal(r.ok, true);
         assert.equal(env.host.of('createGame')[0][1].category, '5+0');
         assert.deepEqual(await env.primary.request('game.forfeit', { userId: 1, gameId: r.gameId }), { ok: true });
+        assert.deepEqual(await env.primary.request('game.cancel', { gameId: r.gameId }), { ok: true });
+        assert.deepEqual(env.host.of('cancel'), [['cancel', r.gameId]]);
         const id = env.conn().id;
         assert.deepEqual(await env.primary.request('conn.send', { connId: id, frames: [encode.Notice({ code: N.Motd, arg: 1 })] }), { ok: true });
         assert.equal((await c.recv()).code, N.Motd);

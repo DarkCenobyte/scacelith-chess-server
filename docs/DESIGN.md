@@ -554,6 +554,7 @@ Primary -> shard:
 | type | payload | effect |
 |---|---|---|
 | `game.create` | `{ spec }` | host creates the room, replies `{ ok, gameId }` |
+| `game.cancel` | `{ gameId }` | ends a game whose `game.create` reply came after the primary's timeout (ServerAborted, no conduct incident) |
 | `game.attach` | `{ gameId, userId, connId }` | the shard binds that connection to the game (local or via bus) |
 | `conn.send` | `{ connId, frames: [Buffer] }` | writes encoded S2C frames (QueueStatus, Challenge*, Notice); as a request (refund notices) it replies `{ ok }`, false when the connection is gone or has not had its Welcome yet |
 | `conn.kick` | `{ connId, closeCode, frames }` | sends then closes |

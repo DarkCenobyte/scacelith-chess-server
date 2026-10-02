@@ -356,6 +356,7 @@ export class Router {
                 return { error: E.Internal };
             }
         });
+        ipc.on('game.cancel', ({ gameId }) => ({ ok: this.host.cancelGame(gameId) }));
         ipc.on('game.attach', ({ gameId, userId, connId }) => this.attach(gameId, userId, connId));
         ipc.on('conn.send', ({ connId, frames }) => this.sendTo(connId, frames));
         ipc.on('conn.kick', ({ connId, closeCode, frames }) => this.kick(connId, closeCode, frames));
