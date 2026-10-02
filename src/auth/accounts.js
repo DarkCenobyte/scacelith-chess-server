@@ -45,7 +45,7 @@
 // credentials, lets the caller build the document (http/routes/account-export.js) and records
 // an account_exported security event.
 //
-// Deviations (documented in the report):
+// Deviations (also in docs/API.md sections 4 and 6, and docs/DESIGN.md section 8):
 //  * REQUIRE_EMAIL_VERIFICATION=false: an account is ready at once (201 { status: 'ready' }) and an
 //    existing e-mail is answered 409 email_taken (without confirmation e-mails the "same answer"
 //    would only hide the failure from honest users; the owner still gets the notice e-mail).
