@@ -103,7 +103,7 @@ Sections:
 | `SMTP_PORT` | port (0-65535) | `587` | SMTP port (587 STARTTLS, 465 implicit TLS). |
 | `SMTP_SECURITY` | one of starttls, tls, none | `starttls` | starttls (required, not opportunistic), tls (implicit, port 465) or none (local relay only). |
 | `SMTP_USER` | text | (empty) | SMTP user name (empty = no authentication). |
-| `SMTP_PASSWORD` | secretText | (empty) | SMTP password. |
+| `SMTP_PASSWORD`<br>`SMTP_PASSWORD_FILE` | secretText | (empty) | SMTP password. |
 
 ## Google single sign-on
 
@@ -111,7 +111,7 @@ Sections:
 | --- | --- | --- | --- |
 | `SSO_GOOGLE_ENABLED` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Offers "Sign in with Google" (OpenID Connect, authorization code + PKCE through the system browser). |
 | `GOOGLE_CLIENT_ID` | text | (empty) | OAuth client ID of a "Web application" client in Google Cloud Console. |
-| `GOOGLE_CLIENT_SECRET` | secretText | (empty) | OAuth client secret. Never commit it. |
+| `GOOGLE_CLIENT_SECRET`<br>`GOOGLE_CLIENT_SECRET_FILE` | secretText | (empty) | OAuth client secret. Never commit it. |
 | `GOOGLE_REDIRECT_URI` | text | (empty) | Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST/auth/sso/google/callback, with :PUBLIC_API_PORT after the host when that port is not 443). |
 
 ## Protection per address (background layer)
@@ -245,7 +245,7 @@ Sections:
 | --- | --- | --- | --- |
 | `METRICS_PORT` | port (0-65535) | `9464` | Prometheus metrics and health endpoint (plain HTTP; 0 disables it). |
 | `METRICS_BIND` | text | `127.0.0.1` | Keep it private: 127.0.0.1 or an internal address. |
-| `METRICS_TOKEN`<br>`METRICS_TOKEN_FILE` | secret | (unset) | Optional bearer token required to read the metrics. |
+| `METRICS_TOKEN`<br>`METRICS_TOKEN_FILE` | secretText | (empty) | Optional bearer token required to read the metrics: /metrics then needs the header "Authorization: Bearer &lt;token&gt;" with this exact text (no spaces). |
 | `LOG_LEVEL` | one of debug, info, warn, error | `info` | Log verbosity. |
 | `LOG_FORMAT` | one of json, pretty | `json` | JSON lines (for log collectors) or readable text. |
 | `LOG_IP` | one of truncated, full, hashed | `truncated` | How client addresses appear in the logs: truncated (IPv4 /24, IPv6 /48), full, or hashed (keyed HMAC, rotated daily). |

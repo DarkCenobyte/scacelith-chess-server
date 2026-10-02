@@ -88,7 +88,7 @@ function typeText(k) {
 }
 
 const isSecret = (k) => k.type === 'secret';
-const takesFile = (k) => k.type === 'secret';
+const takesFile = (k) => k.type === 'secret' || k.type === 'secretText';
 
 /** @returns {string} the .env.example text */
 export function renderEnvExample(keys = CONFIG_KEYS) {

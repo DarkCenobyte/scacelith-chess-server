@@ -286,7 +286,8 @@ key('GIF_IP_RENDERS_PER_HOUR', { section: 'gif', type: 'int', default: 120, min:
 // ---- Observability -------------------------------------------------------------------------------------
 key('METRICS_PORT', { section: 'observability', type: 'port', default: 9464, desc: 'Prometheus metrics and health endpoint (plain HTTP; 0 disables it).' });
 key('METRICS_BIND', { section: 'observability', type: 'string', default: '127.0.0.1', desc: 'Keep it private: 127.0.0.1 or an internal address.' });
-key('METRICS_TOKEN', { section: 'observability', type: 'secret', default: '', desc: 'Optional bearer token required to read the metrics.' });
+key('METRICS_TOKEN', { section: 'observability', type: 'secretText', default: '',
+    desc: 'Optional bearer token required to read the metrics: /metrics then needs the header "Authorization: Bearer <token>" with this exact text (no spaces).' });
 key('LOG_LEVEL', { section: 'observability', type: 'enum', values: ['debug', 'info', 'warn', 'error'], default: 'info', desc: 'Log verbosity.' });
 key('LOG_FORMAT', { section: 'observability', type: 'enum', values: ['json', 'pretty'], default: 'json', desc: 'JSON lines (for log collectors) or readable text.' });
 key('LOG_IP', { section: 'observability', type: 'enum', values: ['truncated', 'full', 'hashed'], default: 'truncated',
