@@ -28,7 +28,6 @@ const SESSIONS = {
     [TOKEN]: { userId: 1, username: 'alice', emailVerified: true, sessionId: 5 },
     ['b'.repeat(43)]: { userId: 2, username: 'bob', emailVerified: true },
     ['c'.repeat(43)]: { userId: 3, username: 'carl', emailVerified: false },
-    ['d'.repeat(43)]: { userId: 4, username: 'dan', emailVerified: true, bannedUntil: Date.UTC(2099, 0, 1) },
 };
 
 class FakeHost {
@@ -173,20 +172,14 @@ describe('router: hello', () => {
         });
     }
 
-    it('closes a banned session with the ban end (session or primary)', async () => {
-        const env = await setup();
+    it('closes a player the primary finds banned with the ban end', async () => {
+        const env = await setup({ claim: { error: E.Banned, until: 12345 } });
         const c = await env.connect();
-        c.hello('d'.repeat(43));
+        c.hello();
         assert.equal((await c.recv()).code, E.Banned);
         const n = await c.recv();
-        assert.deepEqual([n.name, n.code, n.arg], ['Notice', N.Banned, Date.UTC(2099, 0, 1)]);
+        assert.deepEqual([n.name, n.code, n.arg], ['Notice', N.Banned, 12345]);
         assert.equal(await c.closed(), 4004);
-        const env2 = await setup({ claim: { error: E.Banned, until: 12345 } });
-        const c2 = await env2.connect();
-        c2.hello();
-        assert.equal((await c2.recv()).code, E.Banned);
-        assert.equal((await c2.recv()).arg, 12345);
-        assert.equal(await c2.closed(), 4004);
     });
 
     it('closes 4006 when the server is full', async () => {

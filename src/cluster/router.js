@@ -768,9 +768,6 @@ export class Router {
         if (conn.state !== 'hello') return;
         if (session === undefined) { this._hello.labels('internal').inc(); this._fatal(conn, 1, E.Internal, CloseCode.Internal); return; }
         if (!session) { this._hello.labels('unauthorized').inc(); this._fatal(conn, 1, E.Unauthorized, CloseCode.Unauthorized); return; }
-        const nowWall = Date.now();
-        const banUntil = session.bannedUntil || session.banUntil || 0;
-        if (banUntil > nowWall) { this._banned(conn, banUntil); return; }
         if (this.config.requireEmailVerification && !session.emailVerified) {
             this._hello.labels('email_unverified').inc();
             this._fatal(conn, 1, E.EmailUnverified, CloseCode.Unauthorized);
