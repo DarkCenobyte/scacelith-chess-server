@@ -133,7 +133,9 @@ export class RefundNotices {
     _retry(userId) {
         const r = this.retries.get(userId) || { left: RETRIES, timer: null };
         if (r.timer) return;
-        if (r.left <= 0) { this.retries.delete(userId); return; }
+        // An exhausted budget is kept (until the notice is written or the victim connects again):
+        // the polls then try once each, they do not start a new series of RETRIES.
+        if (r.left <= 0) return;
         r.left--;
         r.timer = setTimeout(() => {
             r.timer = null;

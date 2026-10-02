@@ -133,6 +133,28 @@ test('an offline victim is told right after Welcome at the next connection; a co
     cp.stop();
 });
 
+test('a notice never written: RETRIES tries, then one per poll, a new series at the next connection', async () => {
+    const store = createFakeStore();
+    store._.refunds.push({ id: 1, gameId: 5, victimId: 7, cheaterId: 9, category: '3+2', points: 4, createdAt: T, sanctionId: null,
+        source: 'moderator', createdBy: 'mod', notifiedAt: null });
+    let sends = 0;
+    const n = new RefundNotices({ refunds: store.refunds, canNotify: () => true, now: () => T, retryMs: 1, send: async () => { sends++; return false; } });
+    n.poll();
+    await sleep(200);
+    assert.equal(sends, 21, 'the first try and RETRIES (20) more');
+    n.poll();
+    await sleep(100);
+    assert.equal(sends, 22, 'one try per poll once the series is used up');
+    n.poll();
+    await sleep(100);
+    assert.equal(sends, 23);
+    n.connected(7, null);
+    await sleep(200);
+    assert.equal(sends, 43, 'a new series of RETRIES after a new connection');
+    assert.equal(store._.refunds[0].notifiedAt, null);
+    n.stop();
+});
+
 test('a notice that is not written is not marked notified and is tried again', async () => {
     const store = createFakeStore();
     store._.refunds.push({ id: 1, gameId: 5, victimId: 7, cheaterId: 9, category: '3+2', points: 4, createdAt: T, sanctionId: null,
