@@ -130,13 +130,16 @@ function textFlag(ctx, name, { required = false, max = 300 } = {}) {
 }
 
 // A date option: YYYY-MM-DD (00:00 UTC) or an ISO 8601 time with its offset (2026-05-01T18:30Z),
-// not in the future.
+// not in the future. The typed calendar date must exist: Date.parse rolls a day past the end of
+// the month over (2026-02-31 would be 2026-03-03).
 function dateFlag(ctx, name) {
     const v = ctx.args.flags[name];
     if (v === undefined) return null;
     const s = String(v).trim();
     const valid = /^\d{4}-\d{2}-\d{2}$/.test(s) || /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(s);
-    const t = valid ? Date.parse(s) : NaN;
+    const [y, mo, d] = s.slice(0, 10).split('-').map(Number);
+    const exists = mo >= 1 && mo <= 12 && d >= 1 && d <= new Date(Date.UTC(y, mo, 0)).getUTCDate();
+    const t = valid && exists ? Date.parse(s) : NaN;
     if (!Number.isFinite(t)) throw new AdminError(`--${name} expects a date: YYYY-MM-DD (UTC) or an ISO 8601 time with its offset`);
     if (t > ctx.now()) throw new AdminError(`--${name} is in the future`);
     return t;
