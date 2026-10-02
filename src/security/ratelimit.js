@@ -12,7 +12,7 @@
 //
 // Complexity: every operation is O(1) (amortised), no timers: expiry is lazy.
 
-import { expandIPv6 } from '../log.js';
+import { ipGroupKey, normalizeIp as normalizeAddress } from '../net/ip.js';
 
 /** Map with a maximum size; get() refreshes an entry, set() evicts the least recently used. */
 export class LruMap {
@@ -45,18 +45,14 @@ export class LruMap {
 
 /**
  * Normalises a client address for rate limiting: IPv4-mapped IPv6 becomes IPv4, IPv6 is reduced
- * to its /64 (one customer network), everything else is kept as is. See also prefixKey().
+ * to its /64 (one customer network; net/ip.js ipGroupKey), anything that is not an address is
+ * kept as is. See also prefixKey().
  * @param {string} ip
  * @returns {string}
  */
 export function ipKey(ip) {
-    let a = String(ip || '');
-    if (a.startsWith('::ffff:') && a.includes('.')) a = a.slice(7);
-    if (a.includes(':')) {
-        const parts = expandIPv6(a);
-        if (parts) return parts.slice(0, 4).join(':') + '::/64';
-    }
-    return a;
+    const a = normalizeAddress(ip);
+    return a ? ipGroupKey(a, 64) : String(ip || '');
 }
 
 /**
@@ -67,22 +63,18 @@ export function ipKey(ip) {
  * @returns {string}
  */
 export function prefixKey(ip) {
-    const a = normalizeIp(ip);
-    if (a.includes(':')) {
-        const parts = expandIPv6(a);
-        if (parts) return parts.slice(0, 3).join(':') + '::/48';
-    }
-    return a;
+    const a = normalizeAddress(ip);
+    return a ? ipGroupKey(a, 48) : String(ip || '');
 }
 
 /**
- * Normalises the address itself (IPv4-mapped IPv6 -> IPv4).
+ * Normalises the address itself (net/ip.js normalizeIp: IPv4-mapped IPv6 -> IPv4, IPv6
+ * lower-cased); anything that is not an address is kept as is.
  * @param {string} ip
  * @returns {string}
  */
 export function normalizeIp(ip) {
-    const a = String(ip || '');
-    return a.startsWith('::ffff:') && a.includes('.') ? a.slice(7) : a;
+    return normalizeAddress(ip) || String(ip || '');
 }
 
 /**

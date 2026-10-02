@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
     FailureCounter, LruMap, SlidingWindowCounter, TokenBucketLimiter, createLocalControl, ipKey, normalizeIp, prefixKey, workerShare,
 } from '../../src/security/ratelimit.js';
+import { ipGroupKey, normalizeIp as normalizeAddress } from '../../src/net/ip.js';
 import { createClock } from './helpers/auth-fakes.js';
 
 test('LruMap evicts the least recently used entry', () => {
@@ -136,6 +137,22 @@ test('client source keys: IPv4 address, IPv6 /48', () => {
     assert.equal(prefixKey('2001:db8:aa:ffff::9'), '2001:db8:aa::/48', 'every /64 of the /48 has the same key');
     assert.equal(prefixKey('2001:DB8:0AA::1'), '2001:db8:aa::/48');
     assert.notEqual(prefixKey('2001:db8:ab::1'), prefixKey('2001:db8:aa::1'));
+});
+
+test('the rate-limit keys are those of net/ip.js; what is not an address is kept as is', () => {
+    let s = 11;
+    const rnd = (n) => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s % n; };
+    for (let i = 0; i < 2000; i++) {
+        const g = Array.from({ length: 8 }, () => (rnd(3) ? rnd(65536) : 0).toString(16));
+        const a = rnd(2) ? g.join(':') : g.slice(0, 2).join(':') + '::' + g.slice(5).join(':');
+        for (const ip of [normalizeAddress(a), `${rnd(256)}.${rnd(256)}.${rnd(256)}.${rnd(256)}`]) {
+            assert.equal(ipKey(ip), ipGroupKey(ip, 64), ip);
+            assert.equal(prefixKey(ip), ipGroupKey(ip, 48), ip);
+            assert.equal(normalizeIp(ip), ip);
+        }
+    }
+    assert.deepEqual([ipKey(''), prefixKey(undefined), normalizeIp(null)], ['', '', '']);
+    assert.deepEqual([ipKey('garbage'), prefixKey('garbage'), normalizeIp('garbage')], ['garbage', 'garbage', 'garbage']);
 });
 
 test('workerShare: all of a limit on 1 or 2 workers, 2 L / N beyond, never 0', () => {
