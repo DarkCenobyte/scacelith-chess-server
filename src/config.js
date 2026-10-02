@@ -56,7 +56,7 @@ key('TLS_CERT_FILE', { section: 'tls', type: 'path', default: '', desc: 'PEM cer
 key('TLS_KEY_FILE', { section: 'tls', type: 'path', default: '', secretFile: true, desc: 'PEM private key. Never commit it.' });
 key('TLS_MIN_VERSION', { section: 'tls', type: 'enum', values: ['TLSv1.2', 'TLSv1.3'], default: 'TLSv1.2', desc: 'Oldest TLS version accepted.' });
 key('TRUSTED_PROXIES', { section: 'tls', type: 'list', default: '127.0.0.1,::1',
-    desc: 'With TLS_MODE=proxy: addresses whose X-Forwarded-For / X-Forwarded-Proto headers are trusted.' });
+    desc: 'With TLS_MODE=proxy: addresses whose X-Forwarded-For header is trusted.' });
 key('ALLOW_INSECURE_DEV', { section: 'tls', type: 'bool', default: false, desc: 'Allows TLS_MODE=off. Development only; never on a public server.' });
 
 // ---- Storage -------------------------------------------------------------------------------------

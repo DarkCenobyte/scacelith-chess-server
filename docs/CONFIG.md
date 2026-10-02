@@ -56,7 +56,7 @@ Sections:
 | `TLS_CERT_FILE` | path (relative to the working directory) | (empty) | PEM certificate chain (fullchain). Reloaded on SIGHUP and when the file changes. |
 | `TLS_KEY_FILE` | path (relative to the working directory) | (empty) | PEM private key. Never commit it. |
 | `TLS_MIN_VERSION` | one of TLSv1.2, TLSv1.3 | `TLSv1.2` | Oldest TLS version accepted. |
-| `TRUSTED_PROXIES` | comma-separated list | `127.0.0.1,::1` | With TLS_MODE=proxy: addresses whose X-Forwarded-For / X-Forwarded-Proto headers are trusted. |
+| `TRUSTED_PROXIES` | comma-separated list | `127.0.0.1,::1` | With TLS_MODE=proxy: addresses whose X-Forwarded-For header is trusted. |
 | `ALLOW_INSECURE_DEV` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Allows TLS_MODE=off. Development only; never on a public server. |
 
 ## Storage
