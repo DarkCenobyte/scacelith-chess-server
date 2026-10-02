@@ -84,7 +84,7 @@ key('MFA_ENCRYPTION_KEY', { section: 'secrets', type: 'secret', default: '', min
 // ---- Accounts ------------------------------------------------------------------------------------
 key('REGISTRATION', { section: 'accounts', type: 'enum', values: ['open', 'closed'], default: 'open', desc: 'Whether new accounts can be created from the game.' });
 key('REQUIRE_EMAIL_VERIFICATION', { section: 'accounts', type: 'bool', default: true,
-    desc: 'Accounts must confirm their e-mail address before playing online.' });
+    desc: 'An account is created only once its e-mail address is confirmed with the link sent to it (24 h). false: created at once, with no link.' });
 key('USERNAME_MIN', { section: 'accounts', type: 'int', default: 3, min: 2, max: 24, desc: 'Shortest username.' });
 key('USERNAME_MAX', { section: 'accounts', type: 'int', default: 20, min: 3, max: 24, desc: 'Longest username (the scoresheet has room for 24 characters).' });
 key('PASSWORD_MIN_LENGTH', { section: 'accounts', type: 'int', default: 10, min: 8, max: 64, desc: 'Shortest password.' });

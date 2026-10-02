@@ -96,6 +96,11 @@ test('first Google sign-in: authorization request, callback page, verifier-bound
     assert.deepEqual([c.status, c.json.error], [409, 'username_taken']);
     c = await s.request('POST', '/api/v1/auth/sso/complete', { body: { ssoTicket: r.json.ssoTicket, username: '_x' } });
     assert.equal(c.json.error, 'invalid_username');
+    // A username held by the pending signup of another address is taken too.
+    const signup = { username: 'Magnus_C', email: 'carlsen@example.com', password: 'ivory rook takes e5' };
+    assert.equal((await s.request('POST', '/api/v1/auth/register', { body: signup })).status, 202);
+    c = await s.request('POST', '/api/v1/auth/sso/complete', { body: { ssoTicket: r.json.ssoTicket, username: 'magnus_c' } });
+    assert.deepEqual([c.status, c.json.error], [409, 'username_taken']);
     c = await s.request('POST', '/api/v1/auth/sso/complete', { body: { ssoTicket: r.json.ssoTicket, username: 'MagnusH' } });
     assert.equal(c.status, 200);
     assert.match(c.json.token, /^sct_/);

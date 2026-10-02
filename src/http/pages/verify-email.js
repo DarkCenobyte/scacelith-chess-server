@@ -1,5 +1,6 @@
 // E-mail confirmation page: GET /verify-email?token= shows a button (link scanners must not
-// consume the token), POST /verify-email performs the confirmation.
+// consume the token), POST /verify-email performs the confirmation (and creates the account of a
+// pending signup, auth/accounts.js).
 
 import { escapeHtml, renderMessage, renderPage } from './layout.js';
 
@@ -23,6 +24,16 @@ export function verifyForm({ serverName, token }) {
 export function verifyDone({ serverName }) {
     return renderMessage({ serverName, title: 'E-mail address confirmed', tone: 'ok',
         message: 'Thank you, your e-mail address is confirmed.', note: 'You can go back to Scacelith and log in.' });
+}
+
+/**
+ * Another account took the username or the address of a pending signup before its link was used.
+ * @param {{ serverName: string }} p
+ */
+export function verifyTaken({ serverName }) {
+    return renderMessage({ serverName, title: 'Account not created', tone: 'error',
+        message: 'Another account took this username or this e-mail address before the link was used.',
+        note: 'Create your account again from Scacelith, with another username, or sign in if this address already has an account.' });
 }
 
 /** @param {{ serverName: string }} p */

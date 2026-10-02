@@ -397,6 +397,8 @@ store.sessions.create({ userId, tokenHash, createdAt, expiresAt, idleExpiresAt, 
 store.sessions.byTokenHash(hash) -> { id, userId, createdAt, lastSeenAt, expiresAt, idleExpiresAt, revokedAt } | null
 store.sessions.touch(id, now, idleExpiresAt) ; revoke(id) ; revokeAllForUser(userId, exceptId?) -> [tokenHash] ; listForUser(userId) ; enforceLimit(userId, max)
 store.tokens.create({ kind, tokenHash, userId, data, expiresAt }) ; consume(kind, tokenHash, now) -> row | null (atomic single use) ; get(kind, tokenHash) ; update(kind, tokenHash, data)
+store.signups.create({ username, email, passwordHash, tokenHash, createdAt, expiresAt }) -> id ; byUsername(name) / byEmail(email) / byTokenHash(hash) ; renew(id, { tokenHash, expiresAt }) ; delete(id)
+  // pending signups (section 8): no account before the link is used
 store.sso.find(provider, subject) -> { userId } | null ; link(userId, provider, subject, email)
 store.ratings.get(userId, category) -> { rating, games, wins, draws, losses, peak, reachedSenior, rated, countedGames, unratedGames,
   unratedOpponents, unratedHalfPoints }  // defaults when absent: unrated at INITIAL_RATING
@@ -739,12 +741,12 @@ Endpoints (prefix `/api/v1`):
 | Method and path | Owner | Notes |
 |---|---|---|
 | `GET /info` | auth | `{ name, serverId, motd, protocol: {min, max, schema, subprotocol}, wsPort, wsPath: '/ws', registration, emailVerification, sso: { google }, mfa: true, pow: { register }, categories: [{id, baseSec, incSec}], limits }` |
-| `POST /auth/register` | auth | `{ username, email, password, pow? }` -> 202 `{ status: 'verification_sent' }` (same answer when the e-mail exists); without `REQUIRE_EMAIL_VERIFICATION`: 201 `{ status: 'ready' }`, or 409 `email_taken`. Rates `auth`, then `auth_register` (`AUTH_REGISTER_PER_HOUR` 10 per hour per client, 3x per /48, shared) |
+| `POST /auth/register` | auth | `{ username, email, password, pow? }` -> 202 `{ status: 'verification_sent' }` (same answer when the e-mail exists; the account is created when the link is used, section 8); without `REQUIRE_EMAIL_VERIFICATION`: 201 `{ status: 'ready' }`, or 409 `email_taken`. Rates `auth`, then `auth_register` (`AUTH_REGISTER_PER_HOUR` 10 per hour per client, 3x per /48, shared) |
 | `POST /auth/login` | auth | `{ login, password, clientLabel?, pow? }` -> `{ token, expiresAt, user }` or `{ mfaRequired: true, mfaToken }` |
 | `POST /auth/login/mfa` | auth | `{ mfaToken, code? , recoveryCode? }` (401 `invalid_mfa_token` once the step expired or was used, or when the password was reset or changed since the first step). Every code checked here or in a re-authentication first takes `mfa:u<id>` from the primary (`AUTH_MFA_PER_ACCOUNT` 10 per 15 minutes per account, any address): beyond it 429 `too_many_attempts` before the check, a recovery code not spent |
 | `POST /auth/logout`, `POST /auth/logout-all` | auth | bearer |
 | `GET /auth/sessions`, `DELETE /auth/sessions/:id` | auth | |
-| `POST /auth/verify-email/resend` | auth | `{ email }` -> 202 always. Rates `auth`, `auth_mail` (`AUTH_MAIL_PER_HOUR` 10 per hour per client, 3x per /48, shared) |
+| `POST /auth/verify-email/resend` | auth | `{ email }` -> 202 always (a new link for a pending signup or an unconfirmed account). Rates `auth`, `auth_mail` (`AUTH_MAIL_PER_HOUR` 10 per hour per client, 3x per /48, shared) |
 | `POST /auth/password/forgot` | auth | `{ email }` -> 202 always (a refusal is a 429, which says nothing about the address). Rates `auth`, `auth_forgot` (`AUTH_FORGOT_PER_HOUR` 3 per hour) and `auth_forgot_day` (`AUTH_FORGOT_PER_DAY` 10 per 24 h), per client, 3x per /48, shared; plus one mail per address every 5 minutes |
 | `POST /auth/password/reset` | auth | `{ token, newPassword }` (also the HTML form at `/reset-password`). Rates `auth`, `auth_reset` (`AUTH_RESET_PER_HOUR` 10 per hour per client, 3x per /48, shared, the form included) |
 | `POST /auth/sso/google/start` | auth | `{ codeChallenge }` -> `{ attemptId, authUrl, pollMs, expiresIn }`. Rate `sso_start` 30 per 10 min per client, 90 per /48, shared |
@@ -769,9 +771,11 @@ Endpoints (prefix `/api/v1`):
 | `POST /reports` | anticheat | `{ gameId, reported, category: 'cheating'|'abuse'|'other', comment }`. Rate `reports` 30 per hour per account (`by: 'user'`) |
 | `GET /healthz`, `GET /readyz` | net | also on the metrics port |
 
-HTML pages outside `/api`: `GET/POST /verify-email?token=`, `GET/POST /reset-password?token=`,
-`GET/POST /confirm-email-change?token=` (POST: 200, 400 for an invalid link, 409 when another
-account took the address meanwhile), `GET /auth/sso/google/callback` (auth owner). GET only shows
+HTML pages outside `/api`: `GET/POST /verify-email?token=` (POST: 200, 400 for an invalid link,
+409 when another account took the username or the address of a pending signup meanwhile),
+`GET/POST /reset-password?token=`, `GET/POST /confirm-email-change?token=` (POST: 200, 400 for
+an invalid link, 409 when another account took the address meanwhile),
+`GET /auth/sso/google/callback` (auth owner). GET only shows
 a confirmation button; the state change happens on POST (link scanners must not consume tokens).
 
 ## 6. Game policies
@@ -1090,7 +1094,7 @@ minute after the start):
 | Data | Deleted or erased |
 |---|---|
 | Sessions | as soon as they expire (absolute or idle limit); revoked ones a day after the revocation; the IP address of a live session `RETENTION_IP_DAYS` (30) after the login, the row stays |
-| Single-use tokens (some carry the e-mail address) | once expired (24 hours at most) |
+| Single-use tokens (some carry the e-mail address), pending signups | once expired (24 hours at most; an expired pending signup also frees its username at once) |
 | Security events | after `RETENTION_SECURITY_DAYS` (90); their IP address after `RETENTION_IP_DAYS`, the row stays |
 | Anomalies | `info` and `suspicious` ones after `RETENTION_SECURITY_DAYS`; `certain` ones (the evidence of an automatic sanction) are kept |
 | Conduct events | after 30 days (the conduct rules look back 3 days at most) |
@@ -1188,7 +1192,8 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   `invalid_mfa_token` when the stored hash is no longer that one. So a password reset always wins
   against a login (both of its steps), a rehash or a password change that was in flight, and no
   session is opened with a password the reset has replaced.
-* **Tokens**: 32 random bytes, only their SHA-256 is stored; e-mail verification (24 h),
+* **Tokens**: 32 random bytes, only their SHA-256 is stored; e-mail verification (24 h; the link
+  of a pending signup is kept with the signup, `pending_signups.token_hash`),
   password reset (1 h, revokes all sessions; it works only while the account still has the
   address it was mailed to, and a password reset or change ends the account's other reset
   links), e-mail change (24 h, sent to the new address, at most one link per
@@ -1209,8 +1214,22 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   e-mail change (`POST /account/email` answers 202 and shows the address as pending whether or not
   another account uses it; the owner of a taken address gets a notice, never a link); login errors
   are the same for an unknown account and a wrong password; usernames are public anyway (the
-  "taken" answer is rate limited). Without `REQUIRE_EMAIL_VERIFICATION`, register and the e-mail
-  change answer 409 `email_taken` (no link would confirm the address).
+  "taken" answer is rate limited). Registration creates no account before its link is used: the
+  signup waits in `pending_signups` (migration 007) for the 24 h of the link and holds its
+  username, whether or not the address has an account (then without a link, the owner gets a
+  notice), so that a second signup with the username (409 `username_taken` in both cases), a
+  sign-in with it (401 `invalid_credentials`, no account), the public profile (404) and every
+  other answer are the same in both cases; the request does the same work in both (one password
+  hash, one throttle call to the primary, one transaction). A new signup with the same address
+  replaces the waiting one; using the link creates the account, its address confirmed, and drops
+  the signup in one transaction (another account took the username or the address meanwhile: the
+  page says so, nothing is created). An expired signup frees its username at once and the
+  retention purge deletes it. A Google sign-in creating an account (`POST /auth/sso/complete`)
+  refuses a username held by the signup of another address like a taken one; an address that only
+  has a pending signup has no account to link. Accounts created unconfirmed before this design keep their `email_verify`
+  links and the 403 `email_unverified` sign-in answer. Without `REQUIRE_EMAIL_VERIFICATION` there
+  is no link: the account is created at once, as before, and register and the e-mail change
+  answer 409 `email_taken` (no link would confirm the address).
 * **Account data export** (`POST /account/export`, password and second factor, 5 per hour): the
   player's own data only; never a password hash, TOTP secret, recovery code, token or token hash,
   the anti-cheat's data (integrity level, anomalies, analysis features, report weights), the reports

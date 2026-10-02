@@ -327,7 +327,10 @@ limit, the better layout for a server that expects to be full.
 ## Accounts, e-mail and Google sign-in
 
 - `REGISTRATION=open|closed`, `REQUIRE_EMAIL_VERIFICATION`, username and password rules: see
-  [docs/CONFIG.md](docs/CONFIG.md).
+  [docs/CONFIG.md](docs/CONFIG.md). With e-mail confirmation (the default) an account is created
+  only when the link sent to its address is used (within 24 h; the username is held meanwhile), so
+  that registering never tells whether an address already has an account; without it the
+  account is created at once.
 - E-mail: `MAIL_TRANSPORT=smtp` with `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` and
   `SMTP_SECURITY` (`starttls` on 587 by default, `tls` for implicit TLS on 465; with `starttls`
   the upgrade is mandatory). `MAIL_TRANSPORT=log` writes the messages
@@ -567,11 +570,12 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
   step and kept in memory only, so that neither `SERVER_SECRET` nor a later memory dump decrypts
   recorded sessions of the past days. A restarted worker gets the current keys from the primary.
 - Retention: every `RETENTION_INTERVAL_MS` (one hour; the first run about a minute after the
-  start) the server deletes expired and revoked sessions, expired tokens, security events older
-  than `RETENTION_SECURITY_DAYS` (90), non-certain anomalies of the same age, conduct events and
-  failed analysis jobs older than 30 days, and erases stored IP addresses older than
-  `RETENTION_IP_DAYS` (30). It works in small slices while the server runs, pausing between
-  them so that the workers can write, and logs one `retention purge done` line with the counts.
+  start) the server deletes expired and revoked sessions, expired tokens and pending signups,
+  security events older than `RETENTION_SECURITY_DAYS` (90), non-certain anomalies of the same
+  age, conduct events and failed analysis jobs older than 30 days, and erases stored IP addresses
+  older than `RETENTION_IP_DAYS` (30). It works in small slices while the server runs, pausing
+  between them so that the workers can write, and logs one `retention purge done` line with the
+  counts.
   Games, ratings, analysed games, sanctions and reports are kept. The database overwrites deleted
   and erased data with zeros (`secure_delete`), so it does not stay readable in the file. SQLite
   reuses the freed pages; the file only shrinks after a `VACUUM` (server stopped). The full table

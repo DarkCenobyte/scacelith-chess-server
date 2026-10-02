@@ -38,6 +38,12 @@
 //     sessions.enforceLimit(userId, max, now?) -> [tokenHash] revoked (oldest first go);
 //     sessions.listForUser returns the non-revoked sessions (with clientLabel and ip).
 //   - tokens.consume(kind, hash, now) refuses expired tokens as well as consumed ones.
+//   - signups (pending signups, migration 007; auth/accounts.js): create({ username, email,
+//     passwordHash, tokenHash, createdAt, expiresAt }) -> id (StoreError 'username_taken' /
+//     'email_taken' when another pending signup has the name or the address; nothing is checked
+//     against the accounts, the caller does it in its transaction), byUsername(name),
+//     byEmail(email), byTokenHash(hash) (expired rows included), renew(id, { tokenHash,
+//     expiresAt }), delete(id). The retention deletes the expired ones (counted with the tokens).
 //   - sso.link throws StoreError 'sso_taken' when the identity belongs to another account;
 //     sso.forUser(userId) lists an account's identities.
 //   - ratings.leaderboard(category, limit, minGames) ranks the records with at least minGames
@@ -690,6 +696,44 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                 WHERE user_id = ? AND kind = ? AND consumed_at IS NULL AND expires_at > ? ORDER BY created_at DESC, id DESC LIMIT 1`)
                 .get(userId, kind, ms(now))));
         },
+    };
+
+    // ---- pending signups (migration 007) ----------------------------------------------------------
+
+    const SIGNUP_COLS = 'id, username, email, password_hash, token_hash, created_at, expires_at';
+    const toSignup = (r) => (r ? {
+        id: r.id, username: r.username, email: r.email, passwordHash: r.password_hash, tokenHash: r.token_hash,
+        createdAt: r.created_at, expiresAt: r.expires_at,
+    } : null);
+
+    const signups = {
+        /** StoreError 'username_taken' / 'email_taken' when another pending signup has the name or the address. */
+        create({ username, email, passwordHash, tokenHash = null, createdAt = Date.now(), expiresAt }) {
+            requireName(username);
+            try {
+                return Number(st(`INSERT INTO pending_signups (username, username_lower, email, email_normalized, password_hash, token_hash,
+                    created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+                    .run(username, username.toLowerCase(), cleanEmail(email), normalizeEmail(email), passwordHash, orNull(tokenHash),
+                        ms(createdAt), ms(expiresAt)).lastInsertRowid);
+            } catch (e) {
+                throw mapUserError(e);
+            }
+        },
+        byUsername(name) {
+            if (typeof name !== 'string') return null;
+            return toSignup(st(`SELECT ${SIGNUP_COLS} FROM pending_signups WHERE username_lower = ?`).get(name.toLowerCase()));
+        },
+        byEmail(email) {
+            const n = normalizeEmail(email);
+            return n ? toSignup(st(`SELECT ${SIGNUP_COLS} FROM pending_signups WHERE email_normalized = ?`).get(n)) : null;
+        },
+        byTokenHash(hash) { return toSignup(st(`SELECT ${SIGNUP_COLS} FROM pending_signups WHERE token_hash = ?`).get(hash)); },
+        /** A new link (tokenHash, null for none) and expiry; returns true when the signup exists. */
+        renew(id, { tokenHash, expiresAt }) {
+            return Number(guard(() => st('UPDATE pending_signups SET token_hash = ?, expires_at = ? WHERE id = ?')
+                .run(orNull(tokenHash), ms(expiresAt), id)).changes) > 0;
+        },
+        delete(id) { return Number(st('DELETE FROM pending_signups WHERE id = ?').run(id).changes) > 0; },
     };
 
     // ---- single sign-on identities ----------------------------------------------------------------
@@ -1556,6 +1600,9 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             { count: 'sessions', arg: t - REVOKED_SESSION_TTL_MS, sql: `DELETE FROM sessions WHERE id IN (SELECT id FROM sessions
                 WHERE revoked_at IS NOT NULL AND revoked_at <= ?1 LIMIT ?2)` },
             { count: 'tokens', arg: t, sql: 'DELETE FROM tokens WHERE id IN (SELECT id FROM tokens WHERE expires_at <= ?1 LIMIT ?2)' },
+            // Expired pending signups count with the tokens (their link has expired with them).
+            { count: 'tokens', arg: t, sql: `DELETE FROM pending_signups WHERE id IN (SELECT id FROM pending_signups
+                WHERE expires_at <= ?1 LIMIT ?2)` },
             { count: 'securityEvents', arg: securityBefore, sql: SECURITY_DELETE_SQL },
             { count: 'anomalies', arg: securityBefore, sql: `DELETE FROM anomalies WHERE id IN (SELECT id FROM anomalies
                 WHERE severity <> 'certain' AND at < ?1 LIMIT ?2)` },
@@ -1645,7 +1692,7 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
     };
 
     const store = {
-        meta, users, mfa, sessions, tokens, sso, ratings, games, conduct, sanctions, anomalies, security, analysis, integrity,
+        meta, users, mfa, sessions, tokens, signups, sso, ratings, games, conduct, sanctions, anomalies, security, analysis, integrity,
         reports, refunds, retention,
         readonly,
         path: file,
