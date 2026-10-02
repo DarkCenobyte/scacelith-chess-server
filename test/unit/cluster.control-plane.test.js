@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
 import { AbuseTracker } from '../../src/cluster/abuse.js';
 import { ControlPlane } from '../../src/cluster/control-plane.js';
@@ -7,7 +11,8 @@ import { OnceStore, SlidingWindowLimiter } from '../../src/cluster/limits.js';
 import { Presence } from '../../src/cluster/presence.js';
 import { startPrimary } from '../../src/cluster/primary.js';
 import { stopPrimary } from '../../src/cluster/primary-main.js';
-import { testConfig } from '../../src/config.js';
+import { shardConfig } from '../../src/cluster/worker-main.js';
+import { describe as describeConfig, loadConfig, testConfig } from '../../src/config.js';
 import { Challenges } from '../../src/match/challenges.js';
 import { Registry } from '../../src/metrics.js';
 import { CloseCode, decode, enums, messageName } from '../../src/protocol/index.js';
@@ -526,5 +531,42 @@ describe('primary assembly', () => {
         });
         assert.deepEqual(events, [`drain ${cfg.shutdownGraceMs}`, 'retention.stop', 'analysis.stop', 'retention stopped', 'shards gone', 'analysis stopped', 'store.close']);
         assert.deepEqual(errors, ['analysis stop failed']);
+    });
+
+    it('a shard started after an edit of .env or of a secret file runs the configuration the primary loaded', async (t) => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-cfg-'));
+        t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+        const envFile = path.join(dir, '.env'), secretFile = path.join(dir, 'secret');
+        fs.writeFileSync(envFile, `SERVER_MOTD=before\nSERVER_SECRET_FILE=${secretFile}\n`);
+        fs.writeFileSync(secretFile, Buffer.alloc(32, 1).toString('base64'));
+        // The server's environment, which its workers inherit.
+        const env = { SCACELITH_ENV_FILE: envFile, TLS_MODE: 'off', ALLOW_INSECURE_DEV: '1', WORKERS: '1', MAIL_TRANSPORT: 'none', LOG_LEVEL: 'error', METRICS_PORT: '0' };
+        const saved = { ...process.env };
+        Object.assign(process.env, env);
+        t.after(() => { for (const k of Object.keys(env)) if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; });
+        const config = loadConfig();
+        // A worker: its IPC channel, and an exit when the primary tells it to stop.
+        const workers = [];
+        const fork = () => {
+            const [a, b] = channelPair();
+            const w = Object.assign(new EventEmitter(), { send: (...args) => a.send(...args), kill() {} });
+            a.on('message', (m) => w.emit('message', m));
+            new Ipc(b).on('shutdown', () => setImmediate(() => w.emit('exit', 0, null)));
+            workers.push(b);
+            return w;
+        };
+        const silent = { child: () => silent, debug() {}, info() {}, warn() {}, error() {}, security() {} };
+        const primary = await startPrimary({
+            config, log: silent, fork, shards: [0], matchmaker: new FakeMatchmaker(), challenges: new Challenges({ config: cfg }), registry: new Registry(),
+        });
+        t.after(() => primary.stop(0));
+        // The operator edits .env and rotates the secret, to apply them at the next restart.
+        fs.writeFileSync(envFile, `SERVER_MOTD=after\nSERVER_SECRET_FILE=${secretFile}\n`);
+        fs.writeFileSync(secretFile, Buffer.alloc(32, 2).toString('base64'));
+        assert.equal(loadConfig().serverMotd, 'after');
+        const shard = await shardConfig(new Ipc(workers[0]));
+        assert.equal(shard.serverMotd, 'before');
+        assert.deepEqual(shard.serverSecret, Buffer.alloc(32, 1));
+        assert.deepEqual(describeConfig(shard), describeConfig(config));
     });
 });

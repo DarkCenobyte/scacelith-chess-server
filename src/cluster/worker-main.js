@@ -5,6 +5,7 @@
 // shard itself (bus, router, WebSocket server, listeners). Stops gracefully on
 // the primary's 'shutdown' message or SIGTERM, and at once if the primary disappears; a graceful
 // stop also closes the API handler (its GIF rendering threads) before the journal and the store.
+// The configuration is the primary's (shardConfig), not read again from the environment and files.
 
 import cluster from 'node:cluster';
 import { createAnticheat } from '../anticheat/index.js';
@@ -21,18 +22,31 @@ import { startStoreWriter } from '../store/writer.js';
 import { Ipc } from './ipc.js';
 import { createBus, createShardGuard, startShard } from './shard.js';
 
+/**
+ * The shard's configuration: the one the primary loaded at its start (environment, .env and the
+ * *_FILE secrets as it read them then). A shard restarted after an edit of .env or of a secret file
+ * keeps the settings of the primary and of its peers (bus token, journal, database) until the
+ * whole server restarts.
+ * @param {Ipc} primary
+ */
+export async function shardConfig(primary) {
+    const snapshot = await primary.request('config.snapshot');
+    if (!snapshot || typeof snapshot !== 'object') throw new Error('the primary sent no configuration');
+    return loadConfig({ env: snapshot, envFile: '' });
+}
+
 /** Starts this worker's shard. */
 export async function main() {
-    const config = loadConfig();
     const shard = Number(process.env.SHARD);
     const serverId = String(process.env.SCACELITH_SERVER_ID || '');
     if (!Number.isInteger(shard) || shard < 0 || shard > 63 || !serverId) throw new Error('worker started without SHARD / SCACELITH_SERVER_ID');
-    configureLogging({ level: config.logLevel, format: config.logFormat, ipMode: config.logIp, secret: config.serverSecret, base: { inst: config.instanceId, shard } });
     const log = logger.child(`shard${shard}`);
+    const primary = new Ipc(process, { log: log.child('ipc') });
+    const config = await shardConfig(primary);
+    configureLogging({ level: config.logLevel, format: config.logFormat, ipMode: config.logIp, secret: config.serverSecret, base: { inst: config.instanceId, shard } });
     process.on('uncaughtException', (e) => { log.error('uncaught exception: the shard restarts', { err: e }); process.exit(1); });
     process.on('unhandledRejection', (e) => { log.error('unhandled rejection', { err: e }); });
 
-    const primary = new Ipc(process, { log: log.child('ipc') });
     const store = openStore(config, { applyGame });
     const journal = await openJournal({ dir: config.journalDir, shard, flushMs: config.journalFlushMs, fsync: config.journalFsync,
         compactSegments: config.journalCompactSegments });

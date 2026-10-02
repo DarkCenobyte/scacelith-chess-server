@@ -357,13 +357,17 @@ function toCamel(name) {
 // Returns the frozen configuration. 'env' defaults to process.env; 'envFile' (default: the
 // SCACELITH_ENV_FILE variable, else ./.env when it exists) supplies values the environment does
 // not set. Values are exposed in camelCase (API_PORT -> apiPort); secrets as Buffers (keys of
-// type secret) and never appear in describe()/toJSON().
+// type secret) and never appear in describe()/toJSON(). `rawValues` (not enumerable) holds the
+// text of every key that was set, *_FILE contents included: loadConfig({ env: rawValues,
+// envFile: '' }) gives the same configuration without reading any file again (the shards'
+// configuration, cluster/worker-main.js).
 export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } = {}) {
     const named = envFile ?? env.SCACELITH_ENV_FILE;            // '' = no file
     const fileName = named ?? path.join(cwd, '.env');
     const cfg = {};
     const errors = [];
     const notes = [];           // configWarnings sentences found while loading
+    const rawValues = {};
     let fileVars = {};
     if (named) {
         // A file named explicitly must be there: a typo would start the server on the defaults.
@@ -392,6 +396,7 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
                 continue;
             }
         }
+        if (raw !== undefined) rawValues[k.name] = raw;
         const has = raw !== undefined && raw !== '';
         let v;
         if (!has) {
@@ -514,6 +519,7 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     if (errors.length) throw new ConfigError('Invalid configuration:\n  - ' + errors.join('\n  - '));
     Object.defineProperty(cfg, 'toJSON', { value: () => describe(cfg), enumerable: false });
     Object.defineProperty(cfg, 'loadNotes', { value: Object.freeze(notes), enumerable: false });
+    Object.defineProperty(cfg, 'rawValues', { value: Object.freeze(rawValues), enumerable: false });
     return Object.freeze(cfg);
 }
 
