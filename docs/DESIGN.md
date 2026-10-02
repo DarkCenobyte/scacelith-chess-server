@@ -555,7 +555,7 @@ Primary -> shard:
 | `game.create` | `{ spec }` | host creates the room, replies `{ ok, gameId }` |
 | `game.attach` | `{ gameId, userId, connId }` | the shard binds that connection to the game (local or via bus) |
 | `conn.send` | `{ connId, frames: [Buffer] }` | writes encoded S2C frames (QueueStatus, Challenge*, Notice); as a request (refund notices) it replies `{ ok }`, false when the connection is gone or has not had its Welcome yet |
-| `conn.kick` | `{ connId, code, closeCode, frames }` | sends then closes |
+| `conn.kick` | `{ connId, closeCode, frames }` | sends then closes |
 | `auth.invalidate` | `{ userId, tokenHashes }` | drops cached sessions |
 | `metrics.snapshot` | - | replies `registry.snapshot()` |
 | `shutdown` | `{ graceMs }` | drain: Notice{ServerShutdown}, stop accepting, flush |

@@ -225,11 +225,11 @@ export class ControlPlane {
         return !!(r && r.ok);
     }
 
-    _kick(userId, reason, code, closeCode, frames) {
+    _kick(userId, reason, closeCode, frames) {
         const p = this.presence.get(userId);
         if (!p) return false;
         this._kicks.labels(reason).inc();
-        this.shards.notify(p.shard, 'conn.kick', { connId: p.connId, code, closeCode, frames });
+        this.shards.notify(p.shard, 'conn.kick', { connId: p.connId, closeCode, frames });
         return true;
     }
 
@@ -356,7 +356,7 @@ export class ControlPlane {
         if (previous) {
             this._kicks.labels('replaced').inc();
             this.shards.notify(previous.shard, 'conn.kick', {
-                connId: previous.connId, code: E.Replaced, closeCode: CloseCode.Replaced,
+                connId: previous.connId, closeCode: CloseCode.Replaced,
                 frames: [errorFrame(E.Replaced, true), encode.Notice({ code: N.ReplacedByNewConnection, arg: 0 })],
             });
             this._leaveQueue(userId, false);
@@ -683,7 +683,7 @@ export class ControlPlane {
     // their challenges.
     _enforceBan(userId, end, reason) {
         this.log?.security?.('sanction applied', { userId, until: end, reason });
-        this._kick(userId, 'banned', E.Banned, CloseCode.Banned, [errorFrame(E.Banned, true), encode.Notice({ code: N.Banned, arg: end })]);
+        this._kick(userId, 'banned', CloseCode.Banned, [errorFrame(E.Banned, true), encode.Notice({ code: N.Banned, arg: end })]);
         const gameId = this.activeGames.get(userId);
         if (gameId) this.shards.notify(shardOfGameId(gameId), 'game.forfeit', { userId, gameId });
         this._userGone(userId);
@@ -728,12 +728,5 @@ export class ControlPlane {
         this.once.sweep(now);
         for (const [u, until] of this.bans) if (until <= now) this.bans.delete(u);
         this.abuse.sweep();
-    }
-
-    stats() {
-        return {
-            online: this.presence.size, connections: this.presence.connections, searching: this.queued.size,
-            challenges: this.ch.size ?? 0, playing: this.activeGames.size, shardsReady: this.readyShards.size,
-        };
     }
 }

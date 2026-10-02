@@ -1070,9 +1070,4 @@ export class Router {
             overloaded: lag > (this.config.shardOverloadLagMs || 250),
         });
     }
-
-    /** Diagnostics. */
-    stats() {
-        return { conns: this.conns.size, players: this.byUser.size, remoteEndpoints: this.remote.size };
-    }
 }

@@ -27,7 +27,8 @@
 //   transport.close() -> Promise<void>
 //   transport.describe(shard) -> string                               for logs
 // unixTransport (Unix domain sockets in runDir, named pipes on Windows) is the single-machine
-// implementation; tcpTransport (plain TCP or mutual TLS) the multi-machine one.
+// implementation; tcpTransport (plain TCP or mutual TLS) the multi-machine one, which no
+// configuration key selects yet (the shards run unixTransport, shard.js createBus; tests use both).
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';

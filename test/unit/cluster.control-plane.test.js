@@ -368,7 +368,8 @@ describe('control plane: games, sanctions, shards', () => {
         const until = clock.now() + 3600000;
         cp.sanctionApplied({ userId: 1, until, reason: 'engine' });
         const [kick] = shards.of('conn.kick');
-        assert.deepEqual([kick.shard, kick.payload.connId, kick.payload.closeCode, kick.payload.code], [0, 10, 4004, E.Banned]);
+        assert.deepEqual([kick.shard, kick.payload.connId, kick.payload.closeCode], [0, 10, 4004]);
+        assert.equal(shards.frames().find((f) => f.name === 'Error').msg.code, E.Banned);
         assert.ok(shards.frames().some((f) => f.name === 'Notice' && f.msg.code === N.Banned && f.msg.arg === until));
         assert.deepEqual(shards.of('game.forfeit').map((x) => [x.shard, x.payload.userId, x.payload.gameId]), [[1, 1, gameId]]);
         assert.deepEqual(cp.presenceClaim({ userId: 1, username: 'alice', shard: 0, connId: 11 }, 0), { error: E.Banned, until });

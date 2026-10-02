@@ -7,7 +7,7 @@
 //   const ipc = new Ipc(process);
 //   ipc.on('conn.send', ({ connId, frames }) => { ... });            // handler returns the reply (or a promise)
 //   const r = await ipc.request('presence.claim', { userId, ... });  // rejects on timeout (5 s) or remote exception
-//   ipc.notify('presence.release', { userId, connId });              // fire and forget (alias: send)
+//   ipc.notify('presence.release', { userId, connId });              // fire and forget
 //
 // Application-level refusals are ordinary replies ({ error: ErrorCode }); a rejected promise
 // means the transport failed (timeout, closed channel) or the handler threw (IpcRemoteError).
@@ -70,9 +70,6 @@ export class Ipc {
         return this;
     }
 
-    /** Removes a handler. */
-    off(type) { this.handlers.delete(type); return this; }
-
     /**
      * Sends a request and resolves with the peer's reply.
      * @param {string} type
@@ -101,9 +98,6 @@ export class Ipc {
         this._post({ $ipc: NOTE, t: type, p: payload });
         return true;
     }
-
-    /** Alias of notify(). */
-    send(type, payload = null) { return this.notify(type, payload); }
 
     /** Sends everything queued now (normally done once per event-loop turn). */
     flush() { if (this._queue.length) this._flushQueue(); }
