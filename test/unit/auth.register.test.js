@@ -71,7 +71,9 @@ test('the GET confirmation page does not consume the token (link scanners)', asy
     for (let i = 0; i < 3; i++) assert.equal((await s.request('GET', `/verify-email?token=${token}`)).status, 200);
     assert.equal(s.store.users.byUsername('Alice_1'), null);
     s.now.advance(24 * 3600000 + 1);
-    assert.equal((await s.request('GET', `/verify-email?token=${token}`)).status, 400);
+    const expired = await s.request('GET', `/verify-email?token=${token}`);
+    assert.equal(expired.status, 400);
+    assert.match(expired.text, /create your account again from Scacelith \(the same username and address work\)/);
     assert.equal((await confirmPost(s, token)).status, 400, 'expired after 24 h');
     assert.equal(s.store.users.byUsername('Alice_1'), null);
 });
