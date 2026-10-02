@@ -1,6 +1,6 @@
 // HTTPS JSON client of the account API (docs/DESIGN.md section 5.9), for tests, bots and the load
 // generator. One keep-alive Agent per ApiClient; proof of work (HTTP 428 pow_required) is solved
-// and the request retried once, transparently.
+// and the request retried once, transparently (up to maxPowBits; a harder one is returned as is).
 //
 //   const api = new ApiClient({ host: '127.0.0.1', port: srv.apiPort, ca: srv.ca });
 //   await api.register({ username: 'alice', email: 'alice@example.test', password });
@@ -32,6 +32,8 @@ export class ApiClient {
      * @param {number} [o.maxSockets] keep-alive pool size (default 16)
      * @param {object} [o.headers] headers added to every request
      * @param {http.Agent} [o.agent] shared agent (then ca/rejectUnauthorized are the agent's business)
+     * @param {number} [o.maxPowBits] hardest proof of work solved (default 28, the server issues at
+     *        most 26): the 428 of a harder one is returned as it is, as the solve blocks the thread
      */
     constructor(o = {}) {
         this.host = o.host ?? '127.0.0.1';
@@ -46,6 +48,7 @@ export class ApiClient {
         this.agent = o.agent ?? (this.insecure
             ? new http.Agent({ keepAlive: true, maxSockets: o.maxSockets ?? 16 })
             : new https.Agent({ keepAlive: true, maxSockets: o.maxSockets ?? 16, ca: o.ca, rejectUnauthorized: o.rejectUnauthorized !== false, servername: o.servername }));
+        this.maxPowBits = o.maxPowBits ?? 28;
         this.powSolved = 0;   // proofs of work solved by this client
     }
 
@@ -64,7 +67,9 @@ export class ApiClient {
         let res = await this._once(method, full, body, opts);
         if (opts.pow !== false && res.status === 428 && res.body && res.body.error === 'pow_required' && res.body.pow) {
             const { challenge, bits } = res.body.pow;
-            const nonce = solvePow(String(challenge), Number(bits));
+            const b = Number(bits);
+            if (!Number.isInteger(b) || b < 0 || b > this.maxPowBits) return res;
+            const nonce = solvePow(String(challenge), b);
             this.powSolved++;
             res = await this._once(method, full, { ...(body || {}), pow: { challenge, nonce } }, opts);
         }
