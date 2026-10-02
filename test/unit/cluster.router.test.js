@@ -423,6 +423,28 @@ describe('router: primary and bus', () => {
         assert.equal(env.invalidated.length, 2);
     });
 
+    it('closes a hello whose session is revoked while its presence.claim is under way', async () => {
+        // The revocation reaches the shard before the claim reply (the same batch), when the
+        // connection is not in byUser yet; a revocation of another session keeps it.
+        for (const [revokeMine, tokenHashes] of [[true, null], [false, [crypto.createHash('sha256').update('x'.repeat(43)).digest('hex')]]]) {
+            let env, revoked = false;
+            env = await setup({ primaryHandlers: { 'presence.claim': () => {
+                revoked = revokeMine;                           // committed before the broadcast
+                env.primary.notify('auth.invalidate', { userId: 1, tokenHashes });
+                return { ok: true, activeGame: 0 };
+            } } });
+            env.router.auth = { validateToken: async (t) => (revoked ? null : SESSIONS[t] || null), invalidate: () => {} };
+            const c = await env.connect();
+            c.hello();
+            if (!revokeMine) { assert.equal((await c.recv()).name, 'Welcome'); continue; }
+            assert.equal((await c.recv()).code, N.SessionRevoked);
+            assert.equal((await c.recv()).code, E.Unauthorized);
+            assert.equal(await c.closed(), 4003);
+            await waitFor(() => env.seen.some((x) => x.type === 'presence.release'));
+            assert.equal(env.router.byUser.size, 0);
+        }
+    });
+
     it('hosts remote players: attach, relay both ways, RTT, close, detach, shard down', async () => {
         const bus = new FakeBus();
         const env = await setup({ bus });

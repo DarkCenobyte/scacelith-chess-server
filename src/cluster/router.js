@@ -8,7 +8,8 @@
 //          schema == SCHEMA_HASH, else Error{UnsupportedProtocol} + 4002. The token is validated by
 //          the auth service (Unauthorized + 4003), e-mail verification enforced (EmailUnverified +
 //          4003), then the primary's presence.claim (Banned: Error + Notice{Banned, until} + 4004;
-//          ServerFull: + 4006) -> Welcome, then the active game (if any) is attached. Up to 8
+//          ServerFull: + 4006), the token again (revoked meanwhile: Notice{SessionRevoked} +
+//          Unauthorized + 4003) -> Welcome, then the active game (if any) is attached. Up to 8
 //          messages pipelined behind Hello wait for the Welcome.
 //   ready  Per message: token bucket (WS_MSG_RATE / WS_MSG_BURST; over it the message is dropped
 //          with Error{RateLimited} at most once a second, and more than max(10, burst) drops in
@@ -800,6 +801,17 @@ export class Router {
             return;
         }
         c.claimed = true;               // from here, the close releases the claim
+        // A revocation that reached this shard during the claim did not find the connection (not
+        // in byUser yet, invalidateSessions): the token is checked again, the revoked sessions
+        // being out of the auth cache by now.
+        const still = await this.auth.validateToken(msg.token);
+        if (conn.state !== 'hello') return;
+        if (!still) {
+            this._hello.labels('unauthorized').inc();
+            conn.sendFrame(encode.Notice({ code: N.SessionRevoked, arg: 0 }));
+            this._fatal(conn, 1, E.Unauthorized, CloseCode.Unauthorized);
+            return;
+        }
         // Encoded while the connection is still in 'hello': a failure closes it (Internal, 1011).
         const activeGame = isGameId(r.activeGame) ? r.activeGame : 0;
         const welcome = encode.Welcome({
