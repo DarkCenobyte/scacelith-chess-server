@@ -208,7 +208,9 @@ process.on('message', (m) => { if (m.type === 'shutdown') { ipc.close(); process
 
 test('the analysis process runs the configuration the primary loaded, not .env and the secret files as they are at its start', async (t) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ac-proc-'));
-    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    let h = null;
+    // The process and its engine run in `dir`: stopped first when an assertion failed.
+    t.after(async () => { await h?.stop(3000); fs.rmSync(dir, { recursive: true, force: true }); });
     // A UCI engine that starts at once (helpers/fake-uci-engine.js).
     const engine = path.join(dir, 'engine.sh');
     const fake = fileURLToPath(new URL('./helpers/fake-uci-engine.js', import.meta.url));
@@ -226,8 +228,7 @@ test('the analysis process runs the configuration the primary loaded, not .env a
     // The operator edits .env and removes the secret file, to apply them at the next restart.
     fs.writeFileSync(envFile, dotEnv(1));
     fs.rmSync(secretFile);
-    const h = startAnalysisProcess(config, { log: quiet, env });
-    t.after(() => h.stop(3000));
+    h = startAnalysisProcess(config, { log: quiet, env });
     let engines = null;
     for (const end = Date.now() + 15000; engines !== 2 && Date.now() < end;) {
         const snapshot = await h.metricsSnapshot(500);
@@ -236,6 +237,7 @@ test('the analysis process runs the configuration the primary loaded, not .env a
     }
     assert.equal(engines, 2, 'the ANALYSIS_WORKERS the primary loaded');
     assert.equal(h.restarts, 0);
+    await h.stop(3000);
 });
 
 test('startAnalysisProcess restarts a crashing worker with backoff and stops cleanly', async (t) => {
