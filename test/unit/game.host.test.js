@@ -89,6 +89,26 @@ test('create, attach (snapshot), moves broadcast as one buffer, journal appends,
     assert.equal(host.wheel.deadlineOf(host.rooms.get(id)), clock.t + 30000 + 150);
 });
 
+test('a spec without a category takes elo.categoryOf, the result of the host\'s former loop, and only an official one is rated', () => {
+    // The loop GameHost._categoryOf used before.
+    const former = (cfg, baseMs, incMs) => {
+        for (const c of cfg.categories || []) if (c.baseMs === baseMs && c.incMs === incMs) return c.id;
+        return 'custom';
+    };
+    let u = 0;
+    for (const config of [CFG, testConfig({ RATED_CATEGORIES: '4+4,1+0' })]) {
+        const { host } = mkHost({ config });
+        const tcs = [[15000, 0], [420000, 1000], [180000.9, 2000.2]];
+        for (const c of [...CFG.categories, ...config.categories]) tcs.push([c.baseMs, c.incMs], [c.baseMs + 60000, c.incMs], [c.baseMs, c.incMs + 1000]);
+        for (const [baseMs, incMs] of tcs) {
+            const room = host.room(host.createGame({ white: player(++u), black: player(++u), rated: true, baseMs, incMs }));
+            const expected = former(config, Math.floor(baseMs), Math.floor(incMs));
+            assert.equal(room.category, expected, `${baseMs}:${incMs}`);
+            assert.equal(room.rated, expected !== 'custom');
+        }
+    }
+});
+
 test('unknown game and unroutable messages: Error{NotInGame}', () => {
     const { host, anticheat } = mkHost();
     const ep = new FakeEndpoint();

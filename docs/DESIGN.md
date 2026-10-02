@@ -379,7 +379,8 @@ Official categories come from `cfg.categories`; `categoryOf(baseMs, incMs)` retu
 ### 5.5 Store (`src/store/index.js`)
 
 `openStore(config, { readonly = false, applyGame }) -> Store` (`applyGame` is
-`match/elo.js`'s, passed in by the bootstrap so the store does not import the match module). Synchronous (`node:sqlite`). WAL,
+`match/elo.js`'s, passed in by the bootstrap; the store imports only elo.js's `isProvisional`, the
+rule of the provisional mark). Synchronous (`node:sqlite`). WAL,
 `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`. Prepared statements cached. All
 times are epoch ms integers. `migrate(store)` applies `migrations/NNN_*.sql` in order inside
 transactions, recorded in `schema_migrations`.
