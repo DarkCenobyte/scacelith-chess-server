@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from '../store/index.js';
-import { readIntegrity, writeIntegrity, writeStructured, parseMaybeJson, levelRank, LEVELS, HOUR_MS, DAY_MS } from './util.js';
+import { readIntegrity, writeIntegrity, writeStructured, inTx, parseMaybeJson, levelRank, LEVELS, HOUR_MS, DAY_MS } from './util.js';
 import { CheatBanReason, isCheatingBan, refundVictims, refundWindowStart, victimTotals } from './refunds.js';
 import { reviewPriority, recentReportWeight } from './reports.js';
 import { sideOf } from './scoring.js';
@@ -342,17 +342,21 @@ function integrityConfirm(ctx) {
     const since = dateFlag(ctx, 'refund-since');
     if (noRefund && since !== null) throw new AdminError('--refund-since and --no-refund exclude each other');
     const now = ctx.now();
-    const prev = readIntegrity(ctx.store, u.id);
-    const ev = { ...prev.evidence };
-    pushReview(ev, { action: 'confirm', by: ctx.moderator, at: now, reason, previousLevel: prev.level, score: prev.score });
-    ev.review = { ...(ev.review || {}), confirmedAt: now, by: ctx.moderator };
     const until = now + hours * HOUR_MS;
     // The reason tells the store whether the games recorded during the ban are refunded
     // (refunds.js banRefunds): not after --no-refund.
     const banReason = `${noRefund ? CheatBanReason.confirmedNoRefund : CheatBanReason.confirmed}${reason}`;
-    // The ban first: when it cannot be stored, the level is left as it was.
-    const id = ctx.store.sanctions.create({ userId: u.id, kind: 'ban', reason: banReason, source: 'moderator', gameId: null, startsAt: now, endsAt: until, createdBy: ctx.moderator });
-    writeIntegrity(ctx.store, u.id, { level: 'confirmed', score: prev.score, evidence: ev, updatedAt: now, reviewedBy: ctx.moderator });
+    // The record is read and written back in one transaction (util.js inTx), with the ban.
+    const { prev, id } = inTx(ctx.store, () => {
+        const prev = readIntegrity(ctx.store, u.id, true);
+        const ev = { ...prev.evidence };
+        pushReview(ev, { action: 'confirm', by: ctx.moderator, at: now, reason, previousLevel: prev.level, score: prev.score });
+        ev.review = { ...(ev.review || {}), confirmedAt: now, by: ctx.moderator };
+        // The ban first: when it cannot be stored, the level is left as it was.
+        const id = ctx.store.sanctions.create({ userId: u.id, kind: 'ban', reason: banReason, source: 'moderator', gameId: null, startsAt: now, endsAt: until, createdBy: ctx.moderator });
+        writeIntegrity(ctx.store, u.id, { level: 'confirmed', score: prev.score, evidence: ev, updatedAt: now, reviewedBy: ctx.moderator });
+        return { prev, id };
+    });
     const resolved = ctx.args.flags['keep-reports'] ? 0 : resolveOpenCheatingReports(ctx, u.id, 'actioned');
     const from = noRefund ? null : since ?? refundWindowStart(ctx.config, now);
     // The ban stands whatever happens to the refunds (one transaction of their own): a failure is
@@ -396,12 +400,16 @@ function integrityClear(ctx) {
     const u = requireUser(ctx, ctx.args.positional[2]);
     const reason = textFlag(ctx, 'reason');
     const now = ctx.now();
-    const prev = readIntegrity(ctx.store, u.id);
-    const ev = { ...prev.evidence };
-    pushReview(ev, { action: 'clear', by: ctx.moderator, at: now, reason, previousLevel: prev.level, score: prev.score });
-    // The automatic model only raises the level again on new evidence (scoring.js).
-    ev.review = { clearedAt: now, clearedScore: prev.score, by: ctx.moderator };
-    writeIntegrity(ctx.store, u.id, { level: 'none', score: prev.score, evidence: ev, updatedAt: now, reviewedBy: ctx.moderator });
+    // The record is read and written back in one transaction (util.js inTx).
+    const prev = inTx(ctx.store, () => {
+        const prev = readIntegrity(ctx.store, u.id, true);
+        const ev = { ...prev.evidence };
+        pushReview(ev, { action: 'clear', by: ctx.moderator, at: now, reason, previousLevel: prev.level, score: prev.score });
+        // The automatic model only raises the level again on new evidence (scoring.js).
+        ev.review = { clearedAt: now, clearedScore: prev.score, by: ctx.moderator };
+        writeIntegrity(ctx.store, u.id, { level: 'none', score: prev.score, evidence: ev, updatedAt: now, reviewedBy: ctx.moderator });
+        return prev;
+    });
     const dismissed = ctx.args.flags['dismiss-reports'] ? resolveOpenCheatingReports(ctx, u.id, 'dismissed') : 0;
     audit(ctx, 'integrity_clear', u.id, { reason, previousLevel: prev.level, score: prev.score, reportsDismissed: dismissed });
     return { data: { level: 'none', previous: prev.level, reportsDismissed: dismissed },

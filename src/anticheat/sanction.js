@@ -4,7 +4,7 @@
 // not load the rest of the anti-cheat module.
 
 import { banRefunds, CheatBanReason, refundVictims, refundWindowStart, victimTotals } from './refunds.js';
-import { readIntegrity, writeIntegrity, writeStructured, HOUR_MS } from './util.js';
+import { readIntegrity, writeIntegrity, writeStructured, inTx, HOUR_MS } from './util.js';
 
 const MAX_EVIDENCE_ITEMS = 50;
 
@@ -55,10 +55,13 @@ export function applyCertainSanction(store, config, { userId, gameId = 0, kind, 
     }
 
     try {
-        const prev = readIntegrity(store, userId);
-        const ev = { ...prev.evidence };
-        ev.certain = [...(Array.isArray(ev.certain) ? ev.certain : []), { kind, gameId: gameId || 0, at, banUntil: until }].slice(-MAX_EVIDENCE_ITEMS);
-        writeIntegrity(store, userId, { level: 'confirmed', score: prev.score, evidence: ev, updatedAt: at });
+        // Read and written back in one transaction (util.js inTx).
+        inTx(store, () => {
+            const prev = readIntegrity(store, userId, true);
+            const ev = { ...prev.evidence };
+            ev.certain = [...(Array.isArray(ev.certain) ? ev.certain : []), { kind, gameId: gameId || 0, at, banUntil: until }].slice(-MAX_EVIDENCE_ITEMS);
+            writeIntegrity(store, userId, { level: 'confirmed', score: prev.score, evidence: ev, updatedAt: at });
+        });
     } catch (e) {
         log?.error?.('integrity not updated after a certain cheat', { err: e, userId });
     }

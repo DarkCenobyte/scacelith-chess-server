@@ -45,7 +45,7 @@
 
 import { priorFor, timeClass, timeClassOfCategory, PRIOR_GAMES, PRIOR_METRICS } from './priors.js';
 import { welfordAdd, clamp, mean } from './analysis/stats.js';
-import { parseMaybeJson, levelRank, readIntegrity, writeIntegrity } from './util.js';
+import { parseMaybeJson, levelRank, readIntegrity, writeIntegrity, inTx } from './util.js';
 
 /** 100-point rating bucket (lower bound), clamped to 500..2900. */
 export function bucketOfRating(rating) {
@@ -437,9 +437,18 @@ export function playerGames(store, userId, limit = MODEL.windowGames) {
  * @returns {{ level: string, previous: string, score: number, result: object }}
  */
 export function updatePlayerIntegrity({ store, userId, population, now = Date.now(), log = null }) {
-    const prev = readIntegrity(store, userId);
     const games = playerGames(store, userId, MODEL.windowGames);
     const result = scorePlayer(games, population);
+    // The rules start from the record as it is when it is written back, in one transaction: a ban
+    // or a review committed meanwhile by another process is not overwritten with an older view.
+    const { level, prev } = inTx(store, () => writePlayerLevel(store, userId, population, games, result, now));
+    if (level !== prev.level) log?.security?.('integrity.level', { userId, from: prev.level, to: level, score: result.score, groups: result.groups });
+    return { level, previous: prev.level, score: result.score, result };
+}
+
+// The rules of updatePlayerIntegrity applied to the stored record, which is written back.
+function writePlayerLevel(store, userId, population, games, result, now) {
+    const prev = readIntegrity(store, userId, true);
     const restarted = games.some((g) => !population.holds(g));
     let level = result.level;
     const ev = { ...prev.evidence };
@@ -468,8 +477,7 @@ export function updatePlayerIntegrity({ store, userId, population, now = Date.no
         : { model: MODEL.version, profile, computedAt: now, level: result.level, score: result.score, groups: result.groups, games: result.games, moves: result.moves };
     if (notable && (!ev.peak || result.score > (ev.peak.score || 0))) ev.peak = { at: now, score: result.score, level: result.level, trigger: result.trigger, groups: result.groups, reasons: result.reasons };
     writeIntegrity(store, userId, { level, score: Math.max(result.score, 0), evidence: ev, updatedAt: now });
-    if (level !== prev.level) log?.security?.('integrity.level', { userId, from: prev.level, to: level, score: result.score, groups: result.groups });
-    return { level, previous: prev.level, score: result.score, result };
+    return { level, prev };
 }
 
 /**
