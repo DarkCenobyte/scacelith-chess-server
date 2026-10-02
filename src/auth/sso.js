@@ -18,7 +18,7 @@
 // that e-mail is refused (clear page); otherwise a new account (needs a username).
 
 import { AuthError } from './errors.js';
-import { SSO_TOKEN_RE, TOKEN_TTL_MS, dataOf, isLive } from './tokens.js';
+import { LINK_TOKEN_RE, SSO_TOKEN_RE, TOKEN_TTL_MS, dataOf, isLive } from './tokens.js';
 import { checkUsername, normalizeEmail, suggestUsername } from './identity.js';
 import { pkceChallenge } from './oidc.js';
 import { randomToken, safeEqual, sha256Hex } from '../security/keys.js';
@@ -94,7 +94,7 @@ export function createSso(svc) {
      */
     async function callback({ code, state, error, ip }) {
         if (!enabled()) return { ok: false, title: 'Google sign-in disabled', message: 'Google sign-in is not enabled on this server.' };
-        if (typeof state !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(state)) return { ok: false, message: 'This sign-in link is invalid.' };
+        if (typeof state !== 'string' || !LINK_TOKEN_RE.test(state)) return { ok: false, message: 'This sign-in link is invalid.' };
         const st = store.tokens.consume('sso_state', sha256Hex(state), now());
         if (!st || (st.expiresAt != null && st.expiresAt <= now())) return { ok: false, title: 'Sign-in expired', message: 'This sign-in has expired or was already completed.' };
         const sd = dataOf(st);

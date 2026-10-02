@@ -54,6 +54,7 @@ import { endReasonText, readPgn, PgnError } from '../../chess/index.js';
 import { normalizeResult } from '../../chess/pgn.js';
 import { enums } from '../../protocol/schema.js';
 import { metrics } from '../../metrics.js';
+import { randomRetryAfter } from '../../security/ratelimit.js';
 
 /** The thread module of the pool: src/gif/worker.js at the lowest priority (routes/gif-thread.js). */
 export const GIF_THREAD_URL = new URL('./gif-thread.js', import.meta.url);
@@ -331,7 +332,7 @@ export function register(router, deps) {
             }
         } catch (err) {
             if (err && err.code === 'busy' && !err.expose) {
-                const s = GIF_BUSY_RETRY_SEC.min + Math.floor(Math.random() * (GIF_BUSY_RETRY_SEC.max - GIF_BUSY_RETRY_SEC.min + 1));
+                const s = randomRetryAfter(GIF_BUSY_RETRY_SEC);
                 return { ...error(503, 'server_busy', 'The server is busy making other GIFs; try again in a few seconds.', { retryAfter: s }),
                     headers: { 'Retry-After': String(s) }, refundRate: true };
             }

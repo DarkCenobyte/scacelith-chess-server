@@ -5,6 +5,7 @@
 //   FailureCounter         per-key failure counter with exponential delay (login brute force)
 //   SlidingWindowCounter   approximate count of events over the last window (failure-rate detector)
 //   workerShare()          the part of a whole-server per-address limit one worker enforces
+//   randomRetryAfter()     a Retry-After drawn at random in a range (refused clients spread out)
 //   createLocalControl()   in-process implementation of the primary's `ratelimit.take`,
 //                          `ratelimit.refund` and `once.consume` IPC requests (docs/DESIGN.md
 //                          5.7). Used when no primary is available (single process, tests) and as
@@ -101,6 +102,16 @@ export function workerShare(limit, workers) {
     const l = Math.max(0, Math.floor(+limit || 0));
     const n = Math.max(1, Math.floor(+workers || 1));
     return Math.max(1, Math.min(l, Math.ceil(2 * l / n)));
+}
+
+/**
+ * A Retry-After in seconds, an integer drawn at random in [min, max], so that the clients refused
+ * during one burst do not all come back together.
+ * @param {{ min: number, max: number }} range
+ * @returns {number}
+ */
+export function randomRetryAfter({ min, max }) {
+    return min + Math.floor(Math.random() * (max - min + 1));
 }
 
 /**
