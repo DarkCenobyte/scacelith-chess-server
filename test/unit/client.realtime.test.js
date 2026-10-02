@@ -547,6 +547,21 @@ describe('ScacelithClient', () => {
         await fake.close();
     });
 
+    test('a message the encoder refuses uses no seq: the next one follows without a gap', async () => {
+        const { fake, c, s } = await connected();
+        const before = c.seq;
+        assert.throws(() => c.move(GAME, 0, 70000, 0xdeadbeef), /move out of range/);
+        assert.throws(() => c.joinCode('x'.repeat(300)), /code bad length/);
+        assert.throws(() => c.send('NoSuch', {}), /unknown message/);
+        assert.equal(c.seq, before);
+        assert.equal(c.resign(GAME), before + 1);
+        await s.peer.until(() => s.received.length === 2);
+        assert.equal(s.received[1].seq, before + 1);
+        assert.equal(s.badSeq, 0);
+        await c.close();
+        await fake.close();
+    });
+
     test('ping() measures the round trip and the server clock offset', async () => {
         const { fake, c } = await connected({ clockAhead: 5000 });
         const r = await c.ping();

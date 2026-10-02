@@ -240,17 +240,24 @@ export class ScacelithClient {
         return this.ws.send(buf);
     }
 
+    // Takes seq (this.seq + 1) once its message is encoded: a message the encoder refuses must not
+    // use up a seq, or the server would drop the next valid one (seq gap).
+    _commit(seq, buf) {
+        this.seq = seq;
+        this._send(buf);
+        return seq;
+    }
+
     /**
      * Encodes and sends a client message with the next seq; returns that seq.
      * @param {string} name encode name ('Move', 'C_Ping'...)
      * @param {object} fields every field but seq
      */
     send(name, fields = {}) {
-        const seq = ++this.seq;
         const enc = encode[name] ?? encode['C_' + name];
         if (!enc) throw new Error(`client: unknown message ${name}`);
-        this._send(enc({ ...fields, seq }));
-        return seq;
+        const seq = this.seq + 1;
+        return this._commit(seq, enc({ ...fields, seq }));
     }
 
     /** Sends bytes as one binary message, untouched (seq not consumed): protocol-abuse tests. */
@@ -259,8 +266,8 @@ export class ScacelithClient {
     /** Sends a text message (a protocol violation). */
     sendText(text) { return this._send(String(text)); }
 
-    joinQueue(category, rated = true) { const seq = ++this.seq; this._send(encode.QueueJoin({ seq, category, rated })); return seq; }
-    leaveQueue() { const seq = ++this.seq; this._send(encode.QueueLeave({ seq })); return seq; }
+    joinQueue(category, rated = true) { const seq = this.seq + 1; return this._commit(seq, encode.QueueJoin({ seq, category, rated })); }
+    leaveQueue() { const seq = this.seq + 1; return this._commit(seq, encode.QueueLeave({ seq })); }
 
     /**
      * Challenges a player (target = username) or creates a private game (target = '').
@@ -268,31 +275,29 @@ export class ScacelithClient {
      */
     challenge(target, baseSec, incSec, rated = false, color = enums.ColorPref.Random) {
         if (target && typeof target === 'object') ({ target = '', baseSec, incSec, rated = false, color = enums.ColorPref.Random } = target);
-        const seq = ++this.seq;
-        this._send(encode.ChallengeCreate({ seq, target: target ?? '', baseSec, incSec, rated, color }));
-        return seq;
+        const seq = this.seq + 1;
+        return this._commit(seq, encode.ChallengeCreate({ seq, target: target ?? '', baseSec, incSec, rated, color }));
     }
 
     createPrivateGame(baseSec, incSec, rated = false, color = enums.ColorPref.Random) { return this.challenge('', baseSec, incSec, rated, color); }
-    acceptChallenge(id) { const seq = ++this.seq; this._send(encode.ChallengeAccept({ seq, id })); return seq; }
-    declineChallenge(id) { const seq = ++this.seq; this._send(encode.ChallengeDecline({ seq, id })); return seq; }
-    cancelChallenge(id) { const seq = ++this.seq; this._send(encode.ChallengeCancel({ seq, id })); return seq; }
-    joinCode(code) { const seq = ++this.seq; this._send(encode.ChallengeJoinCode({ seq, code })); return seq; }
+    acceptChallenge(id) { const seq = this.seq + 1; return this._commit(seq, encode.ChallengeAccept({ seq, id })); }
+    declineChallenge(id) { const seq = this.seq + 1; return this._commit(seq, encode.ChallengeDecline({ seq, id })); }
+    cancelChallenge(id) { const seq = this.seq + 1; return this._commit(seq, encode.ChallengeCancel({ seq, id })); }
+    joinCode(code) { const seq = this.seq + 1; return this._commit(seq, encode.ChallengeJoinCode({ seq, code })); }
 
     /** Move intent (u16 move, posHash of the position it is played in). Returns its seq. */
     move(game, ply, move, posHash, thinkMs = 0, drawOffer = false) {
-        const seq = ++this.seq;
-        this._send(encode.Move({ seq, game, ply, move, posHash, thinkMs, drawOffer }));
-        return seq;
+        const seq = this.seq + 1;
+        return this._commit(seq, encode.Move({ seq, game, ply, move, posHash, thinkMs, drawOffer }));
     }
 
-    resign(game) { const seq = ++this.seq; this._send(encode.Resign({ seq, game })); return seq; }
-    offerDraw(game) { const seq = ++this.seq; this._send(encode.DrawOffer({ seq, game })); return seq; }
-    answerDraw(game, accept) { const seq = ++this.seq; this._send(encode.DrawAnswer({ seq, game, accept })); return seq; }
-    claimDraw(game) { const seq = ++this.seq; this._send(encode.DrawClaim({ seq, game })); return seq; }
-    abort(game) { const seq = ++this.seq; this._send(encode.Abort({ seq, game })); return seq; }
-    resync(game) { const seq = ++this.seq; this._send(encode.Resync({ seq, game })); return seq; }
-    rematch(game, accept = true) { const seq = ++this.seq; this._send(encode.Rematch({ seq, game, accept })); return seq; }
+    resign(game) { const seq = this.seq + 1; return this._commit(seq, encode.Resign({ seq, game })); }
+    offerDraw(game) { const seq = this.seq + 1; return this._commit(seq, encode.DrawOffer({ seq, game })); }
+    answerDraw(game, accept) { const seq = this.seq + 1; return this._commit(seq, encode.DrawAnswer({ seq, game, accept })); }
+    claimDraw(game) { const seq = this.seq + 1; return this._commit(seq, encode.DrawClaim({ seq, game })); }
+    abort(game) { const seq = this.seq + 1; return this._commit(seq, encode.Abort({ seq, game })); }
+    resync(game) { const seq = this.seq + 1; return this._commit(seq, encode.Resync({ seq, game })); }
+    rematch(game, accept = true) { const seq = this.seq + 1; return this._commit(seq, encode.Rematch({ seq, game, accept })); }
 
     /**
      * Live gesture (C_Gesture), relayed to the opponent as it is and never stored. Omitted fields
@@ -304,9 +309,8 @@ export class ScacelithClient {
      * @param {{ply?:number, touch?:number, aim?:number, placed?:number, flags?:number, yaw?:number, pitch?:number, lean?:number}} [fields]
      */
     gesture(game, { ply = 0, touch = 64, aim = 64, placed = 0, flags = 0, yaw = 0, pitch = 0, lean = 0 } = {}) {
-        const seq = ++this.seq;
-        this._send(encode.C_Gesture({ seq, game, ply, touch, aim, placed, flags, yaw, pitch, lean }));
-        return seq;
+        const seq = this.seq + 1;
+        return this._commit(seq, encode.C_Gesture({ seq, game, ply, touch, aim, placed, flags, yaw, pitch, lean }));
     }
 
     /**
