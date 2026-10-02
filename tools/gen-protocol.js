@@ -1180,8 +1180,9 @@ the generator. The HTTPS account API is described in \`docs/DESIGN.md\` section 
   beyond it, so that such a player can reach \`Hello\`.
 * A client that does not read its messages (more than \`WS_SEND_BUFFER_LIMIT\` bytes queued) is closed
   with 4303 (\`SlowConsumer\`); it reconnects and resynchronises from the snapshot.
-* Challenges, private games and queue joins have their own limits (\`ChallengeLimit\`,
-  \`MatchmakingCooldown\` with \`Notice{MatchmakingCooldown, arg = until}\`).`,
+* Challenges, private games and queue joins have their own limits (\`ChallengeLimit\`, also beyond
+  5 direct challenges sent per minute; \`RateLimited\` for \`ChallengeJoinCode\` after 10 wrong codes
+  in a minute; \`MatchmakingCooldown\` with \`Notice{MatchmakingCooldown, arg = until}\`).`,
 
     errors: `* \`Error{ref, code, fatal, game}\`: \`ref\` is the \`seq\` of the refused request (0 when none), \`game\`
   the game concerned (0 when none). \`fatal\` = the server closes the connection right after it, with

@@ -372,6 +372,42 @@ describe('control plane: challenges', () => {
         assert.deepEqual(states(), [[10, CS.Cancelled]]);
     });
 
+    it('direct challenges: five a minute per creator, so create/cancel cycles cannot flood a target', () => {
+        const { cp, shards, clock, online } = setup();
+        const a = online(1, 'alice', 0);
+        online(2, 'bob', 1);
+        online(3, 'carl', 1);
+        clock.advance(1000);
+        assert.deepEqual(cp.challengeCreate({ from: a, target: 'nobody', baseSec: 60, incSec: 0, rated: false }), { error: E.UserUnavailable });
+        for (let i = 0; i < 5; i++) {
+            const c = cp.challengeCreate({ from: a, target: i & 1 ? 'carl' : 'bob', baseSec: 60, incSec: 0, rated: false });
+            assert.equal(c.ok, true, `challenge ${i}`);
+            assert.deepEqual(cp.challengeCancel({ id: c.id, userId: 1 }), { ok: true });
+        }
+        shards.clear();
+        assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', baseSec: 60, incSec: 0, rated: false }), { error: E.ChallengeLimit });
+        assert.deepEqual(shards.frames(), [], 'nothing reaches the target');
+        assert.equal(cp.challengeCreate({ from: a, target: '', baseSec: 60, incSec: 0, rated: false }).ok, true, 'private games are not counted');
+        clock.advance(120000);
+        assert.equal(cp.challengeCreate({ from: a, target: 'bob', baseSec: 60, incSec: 0, rated: false }).ok, true);
+    });
+
+    it('private codes: ten wrong ones a minute per player, then RateLimited; a code that works costs nothing', async () => {
+        const { cp, clock, online } = setup();
+        const a = online(1, 'alice', 0), c = online(3, 'carl', 1), d = online(4, 'dora', 1);
+        clock.advance(1000);
+        const r = cp.challengeCreate({ from: a, target: '', baseSec: 180, incSec: 2, rated: false });
+        for (let i = 0; i < 9; i++) assert.deepEqual(await cp.challengeJoinCode({ code: 'XXXXXX', by: c }), { error: E.CodeInvalid });
+        assert.deepEqual(await cp.challengeJoinCode({ code: r.code, by: a }), { error: E.CannotChallengeSelf });
+        assert.equal((await cp.challengeJoinCode({ code: r.code, by: c })).ok, true);
+        const r2 = cp.challengeCreate({ from: d, target: '', baseSec: 180, incSec: 2, rated: false });
+        const e = online(5, 'emil', 0);
+        for (let i = 0; i < 10; i++) assert.deepEqual(await cp.challengeJoinCode({ code: 'XXXXXX', by: e }), { error: E.CodeInvalid });
+        assert.deepEqual(await cp.challengeJoinCode({ code: r2.code, by: e }), { error: E.RateLimited });
+        clock.advance(120000);
+        assert.equal((await cp.challengeJoinCode({ code: r2.code, by: e })).ok, true);
+    });
+
     it('private game: a code, joined by anyone with it', async () => {
         const { cp, shards, online } = setup();
         const a = online(1, 'alice', 0), c = online(3, 'carl', 1);

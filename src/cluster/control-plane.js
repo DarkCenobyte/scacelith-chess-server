@@ -80,6 +80,11 @@ const CS = enums.ChallengeState;
 const CP = enums.ColorPref;
 const QUEUE_REFRESH_MS = 3000;
 const LOAD_STALE_MS = 10000;
+// Per player and minute: direct challenges sent (each one pops up on its target's screen), and
+// wrong private game codes tried (a code must not be guessable).
+const CHALLENGE_CREATE_LIMIT = 5;
+const JOIN_CODE_FAILURE_LIMIT = 10;
+const PLAYER_LIMIT_WINDOW_MS = 60000;
 
 const u16 = (v) => Math.max(0, Math.min(65535, Math.round(+v || 0)));
 const u32 = (v) => Math.max(0, Math.min(0xffffffff, Math.round(+v || 0)));
@@ -509,8 +514,10 @@ export class ControlPlane {
     challengeCreate({ from, target = '', baseSec, incSec, rated, color }) {
         const now = this.now();
         if (this._banned(from.userId, now)) return { error: E.Banned };
+        const limitKey = `challenge:u${from.userId}`;
         let targetUser = null;
         if (target) {
+            if (this.limiter.peek(limitKey) + 1 > CHALLENGE_CREATE_LIMIT) return { error: E.ChallengeLimit };
             const tid = this.presence.userIdByName(target);
             if (tid) {
                 let accepts = true;
@@ -529,6 +536,7 @@ export class ControlPlane {
         const c = r.challenge;
         this._sendUser(from.userId, [this._statusFrame(c, CS.Pending)]);
         if (c.targetUserId) {
+            this.limiter.take({ key: limitKey, limit: CHALLENGE_CREATE_LIMIT, windowMs: PLAYER_LIMIT_WINDOW_MS });
             this._sendUser(c.targetUserId, [encode.ChallengeReceived({
                 id: c.id >>> 0, from: this._info(c.from), baseSec: c.baseSec, incSec: c.incSec, rated: !!c.rated,
                 yourColor: c.receiverColor ?? CP.Random, expiresMs: u32(c.expiresAt - now),
@@ -551,9 +559,15 @@ export class ControlPlane {
 
     async challengeJoinCode({ code, by }) {
         if (this._busy(by.userId)) return { error: E.AlreadyInGame };
+        const limitKey = `joincode:u${by.userId}`;
+        if (this.limiter.peek(limitKey) + 1 > JOIN_CODE_FAILURE_LIMIT) return { error: E.RateLimited };
         let r;
         try { r = this.ch.joinCode(code, by, this.now()); } catch (e) { this.log?.error?.('challenge.joinCode failed', { err: e }); return { error: E.Internal }; }
-        if (!r || r.error || !r.challenge) return { error: r && r.error ? toErrorCode(r.error) : E.CodeInvalid };
+        if (!r || r.error || !r.challenge) {
+            const error = r && r.error ? toErrorCode(r.error) : E.CodeInvalid;
+            if (error === E.CodeInvalid) this.limiter.take({ key: limitKey, limit: JOIN_CODE_FAILURE_LIMIT, windowMs: PLAYER_LIMIT_WINDOW_MS });
+            return { error };
+        }
         return this._startChallengeGame(r.challenge, r.game, by);
     }
 
