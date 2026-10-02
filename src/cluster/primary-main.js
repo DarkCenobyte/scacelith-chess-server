@@ -76,6 +76,10 @@ export async function main() {
 
     cluster.setupPrimary({ exec: WORKER_MAIN, args: [], serialization: 'advanced' });
     const busDir = makeBusFallbackDir(config.runDir);         // for the bus sockets too long for runDir
+    const removeBusDir = () => {
+        if (!busDir) return;
+        try { fs.rmSync(busDir, { recursive: true, force: true }); } catch (e) { log.warn('bus socket directory not removed', { dir: busDir, err: e }); }
+    };
     const fork = (shard) => cluster.fork({ SHARD: String(shard), SCACELITH_SERVER_ID: serverId, SCACELITH_BUS_DIR: busDir });
 
     let analysis = null;
@@ -93,7 +97,7 @@ export async function main() {
         ratingOf: (userId, category) => store.ratings.get(userId, category),
         acceptsChallenges: (userId) => store.users.byId(userId)?.acceptChallenges !== false,
         refunds: store.refunds,
-    });
+    }).catch((e) => { removeBusDir(); throw e; });
     log.info('primary ready', { serverId, workers: config.workers, shardBase: config.shardBase, metricsPort: primary.metricsPort });
 
     try {
@@ -123,14 +127,14 @@ export async function main() {
         stopping = true;
         log.info('shutting down', { signal, graceMs: config.shutdownGraceMs });
         await stopPrimary({ config, log, primary, retention, analysis, store });
-        if (busDir) fs.rmSync(busDir, { recursive: true, force: true });
+        removeBusDir();
         log.info('stopped');
         process.exit(0);
     };
     process.on('SIGTERM', () => { shutdown('SIGTERM'); });
     process.on('SIGINT', () => { shutdown('SIGINT'); });
     process.on('SIGHUP', () => { log.info('SIGHUP: reloading certificates'); primary.reloadTls(); });
-    process.on('uncaughtException', (e) => { log.error('uncaught exception in the primary', { err: e }); process.exit(1); });
+    process.on('uncaughtException', (e) => { log.error('uncaught exception in the primary', { err: e }); removeBusDir(); process.exit(1); });
     process.on('unhandledRejection', (e) => { log.error('unhandled rejection in the primary', { err: e }); });
     return primary;
 }
