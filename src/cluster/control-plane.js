@@ -342,7 +342,7 @@ export class ControlPlane {
 
     // ---- presence -------------------------------------------------------------------------------
 
-    presenceClaim({ userId, username = '', shard, connId, ip = '' }, from) {
+    presenceClaim({ userId, username = '', shard, connId }, from) {
         const now = this.now();
         const until = this._banUntil(userId, now);
         if (until > now) return { error: E.Banned, until };
@@ -352,7 +352,7 @@ export class ControlPlane {
         // abandonment. Their number is bounded by the live games.
         const full = this.presence.size >= this.config.maxConnections;
         if (full && !existing && !this.activeGames.has(userId)) return { error: E.ServerFull };
-        const { previous } = this.presence.claim({ userId, username, shard: shard ?? from, connId, ip });
+        const { previous } = this.presence.claim({ userId, username, shard: shard ?? from, connId });
         if (previous) {
             this._kicks.labels('replaced').inc();
             this.shards.notify(previous.shard, 'conn.kick', {

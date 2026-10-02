@@ -779,7 +779,7 @@ export class Router {
         c.tokenHash = crypto.createHash('sha256').update(msg.token).digest();
         let r;
         try {
-            r = await this.primary.request('presence.claim', { userId: conn.userId, username: conn.username, shard: this.shard, connId: conn.id, ip: conn.ip });
+            r = await this.primary.request('presence.claim', { userId: conn.userId, username: conn.username, shard: this.shard, connId: conn.id });
         } catch (e) {
             this.log?.warn?.('presence.claim failed', { err: e });
             r = null;

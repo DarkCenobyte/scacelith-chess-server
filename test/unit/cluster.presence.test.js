@@ -54,10 +54,10 @@ describe('presence', () => {
         assert.equal(p.connections, 3);
         p.claim({ userId: 1, username: 'a', shard: 1, connId: 1 });
         p.claim({ userId: 2, username: 'b', shard: 0, connId: 1 });
-        assert.equal(p.shardConnections(1), 2);
+        assert.deepEqual([...p.shardIps.get(1).values()], [1, 1]);
         assert.deepEqual(p.dropShard(1), [1]);
         assert.equal(p.connections, 1);
-        assert.equal(p.shardConnections(1), 0);
+        assert.equal(p.shardIps.has(1), false);
         assert.equal(p.ipCount('10.0.0.2'), 0);
         assert.equal(p.get(1), undefined);
         assert.equal(p.get(2).shard, 0);

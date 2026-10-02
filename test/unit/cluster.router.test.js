@@ -107,7 +107,7 @@ describe('router: hello', () => {
         assert.equal(w.clientPingMs, 10000);          // CLIENT_PING_INTERVAL_MS default
         assert.equal(w.activeGame, 0);
         const claim = env.seen.find((x) => x.type === 'presence.claim').p;
-        assert.deepEqual([claim.userId, claim.username, claim.shard, claim.ip], [1, 'alice', 0, '127.0.0.1']);
+        assert.deepEqual([claim.userId, claim.username, claim.shard], [1, 'alice', 0]);
         assert.ok(env.seen.some((x) => x.type === 'conn.ipAcquire' && x.p.ip === '127.0.0.1'));
         c.ws.close(1000);
         await waitFor(() => env.seen.some((x) => x.type === 'presence.release'));
