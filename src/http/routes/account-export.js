@@ -162,7 +162,7 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
  */
 export async function buildAccountExport({ store, config, user, account, now }) {
     const id = user.id;
-    const google = (typeof store.sso.forUser === 'function' ? store.sso.forUser(id) || [] : []).find((l) => l.provider === 'google') || null;
+    const google = (store.sso.forUser(id) || []).find((l) => l.provider === 'google') || null;
 
     const list = [];
     for (let before = null; ;) {

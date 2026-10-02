@@ -184,7 +184,6 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
      * @returns {string|null}
      */
     svc.pendingEmail = (userId) => {
-        if (typeof store.tokens.liveForUser !== 'function') return null;
         const row = store.tokens.liveForUser(userId, 'email_change', now());
         const email = row ? dataOf(row).email : null;
         return typeof email === 'string' && email ? email : null;
@@ -196,9 +195,7 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
      */
     svc.accountView = (user) => {
         let googleLinked = !!user.googleLinked;
-        if (typeof store.sso.forUser === 'function') {
-            try { googleLinked = (store.sso.forUser(user.id) || []).some((l) => l.provider === 'google'); } catch { /* keep default */ }
-        }
+        try { googleLinked = (store.sso.forUser(user.id) || []).some((l) => l.provider === 'google'); } catch { /* keep default */ }
         let pendingEmail = null;
         try { pendingEmail = svc.pendingEmail(user.id); } catch { /* informative only */ }
         return {

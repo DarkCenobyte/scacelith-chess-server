@@ -395,7 +395,7 @@ export function createAccounts(svc) {
 
     /** Drops the user's pending e-mail change (its link stops working). */
     function cancelEmailChange(userId) {
-        if (typeof store.tokens.deleteForUser === 'function') store.tokens.deleteForUser(userId, 'email_change');
+        store.tokens.deleteForUser(userId, 'email_change');
     }
 
     function emailTaken() {
@@ -405,9 +405,7 @@ export function createAccounts(svc) {
     // The links sent to the former address stop working: run in the transaction that changes the
     // address, so that the change never commits without it.
     function dropAddressLinks(userId) {
-        for (const kind of ['email_change', 'password_reset', 'email_verify']) {
-            if (typeof store.tokens.deleteForUser === 'function') store.tokens.deleteForUser(userId, kind);
-        }
+        for (const kind of ['email_change', 'password_reset', 'email_verify']) store.tokens.deleteForUser(userId, kind);
     }
 
     // Once the address of `user` changed from `from` to `email` (committed): the cached sessions are
@@ -483,7 +481,7 @@ export function createAccounts(svc) {
         const linkFresh = await once(mailKey('emailchange-link', em), MAIL_THROTTLE_MS);
         const token = randomToken('', 32);
         await withPassword(() => {
-            if (!linkFresh && typeof store.tokens.liveForUser === 'function') {
+            if (!linkFresh) {
                 const live = dataOf(store.tokens.liveForUser(user.id, 'email_change', now()));
                 if (normalizeEmail(live.email) === em && normalizeEmail(live.from) === normalizeEmail(from)) return;
             }
