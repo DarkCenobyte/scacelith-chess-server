@@ -32,8 +32,8 @@
 // primary (tests, an API handler used alone) runs its own AbuseTracker (IpGuard).
 //
 // Cost: one sliding-window update per reported key (at most 512 per worker and second), O(1),
-// except a new key when the window holds maxKeys keys: the eviction then costs O(log n), through
-// the window's heap by expiry (limits.js).
+// except a new key when the window holds maxKeys keys: the eviction then costs O(log n) amortized,
+// through the window's heap by expiry, and never more than one walk of its map (limits.js).
 
 import { performance } from 'node:perf_hooks';
 import { ipForLog } from '../log.js';

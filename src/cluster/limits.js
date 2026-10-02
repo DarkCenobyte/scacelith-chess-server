@@ -6,10 +6,14 @@
 // O(1) time below capacity and ~200 bytes per key. Keys expire two windows after their last use;
 // the map is bounded (maxKeys): beyond it the expired keys go first, then the least recently
 // inserted ones, which can only make the limiter more lenient for the evicted keys, never block
-// an innocent client. The expired keys are found through a min-heap of the keys by expiry, not a
-// walk of the map: a new key at capacity costs O(log n), whether no key has expired (a flood of
-// fresh keys) or about one per new key. Only when more than 64 have expired does a walk from the
-// oldest insertion pick the 64 to drop, and it then makes room for 64 new keys.
+// an innocent client. The expired keys are found through a min-heap of the keys on a lower bound
+// of their expiry, not a walk of the map: a new key at capacity costs O(log n) amortized, whether
+// no key has expired (a flood of fresh keys) or about one per new key. The bounds of the keys in
+// use are raised lazily, by the eviction that finds them passed; one that would file more than
+// n/64 of them again (their bounds passed together) raises them all in a walk of the map instead,
+// so that no single eviction costs more than O(n), as one did before the heap. Only when more
+// than 64 keys have expired does a walk from the oldest insertion pick the 64 to drop, and it
+// then makes room for 64 new keys.
 //
 // OnceStore: remembers keys until their TTL (single-use tokens: proof-of-work challenges, TOTP
 // steps...). Bounded too; when full, the oldest insertions are evicted first. With the default
@@ -154,12 +158,25 @@ export class SlidingWindowLimiter {
     // top (an exact comparison: rounding cannot make it pass a key the expiry test would drop),
     // no key has expired.
     _expired(now, max) {
-        const h = this._heap, out = [], live = [];
+        const out = [], live = [];
+        let h = this._heap, many = this.entries.size >> 6;
         while (h.length && h[0].exp <= now && out.length < max) {
             const e = h[0];
             this._unfile(e);
-            if (now - e.last > 2 * e.windowMs) out.push(e);
-            else { e.exp = e.last + 2 * e.windowMs; live.push(e); }
+            if (now - e.last > 2 * e.windowMs) { out.push(e); continue; }
+            e.exp = e.last + 2 * e.windowMs;
+            if (live.push(e) <= many) continue;
+            // The bounds of many keys in use passed together (keys created in a burst, or a stay
+            // below capacity): one walk of the map raises them all, and the heap is built again
+            // with every entry, those taken out so far included. Only keys at the very edge of
+            // their expiry can still be filed again, one by one.
+            for (const x of this.entries.values()) {
+                if (x.exp <= now && now - x.last <= 2 * x.windowMs) x.exp = x.last + 2 * x.windowMs;
+            }
+            this._rebuild();
+            h = this._heap;
+            out.length = live.length = 0;
+            many = Infinity;
         }
         for (const e of live) this._file(e);
         return out;

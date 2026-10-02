@@ -171,11 +171,12 @@ describe('global rate limiter', () => {
         // the expired keys). Long random sequences of every operation, mostly at capacity: fresh keys
         // while none expire (flood), while some expire between new keys (sparse, trickle), after a
         // lull (more than 64 expired: the walk picks them), with a clock that steps back,
-        // fractional times and keys whose window changes.
+        // fractional times and keys whose window changes. Many bounds of keys in use pass together
+        // too (raised: one walk of the map raises them).
         let seed = 20261003;
         const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
         const windows = [100, 1000, 7000, 60000];
-        const seen = { expired: 0, walk: 0, lru: 0, refiled: 0, rebuilt: 0 };
+        const seen = { expired: 0, walk: 0, lru: 0, refiled: 0, raised: 0, rebuilt: 0 };
         const spy = (l) => {
             const expired = l._expired.bind(l), file = l._file.bind(l), rebuild = l._rebuild.bind(l);
             let inExpired = false;
@@ -187,7 +188,7 @@ describe('global rate limiter', () => {
                 return r;
             };
             l._file = (e) => { if (inExpired) seen.refiled++; file(e); };
-            l._rebuild = () => { seen.rebuilt++; rebuild(); };
+            l._rebuild = () => { seen[inExpired ? 'raised' : 'rebuilt']++; rebuild(); };
         };
         // Every entry once in the heap, at its index, never above its parent, with a bound no later
         // than its expiry.
@@ -215,6 +216,12 @@ describe('global rate limiter', () => {
                 else if (step < 0.008) {                                          // a lull: many keys expire at once
                     t += 20000 + rnd() * 100000;
                     if (rnd() < 0.3) assert.equal(a.sweep(), b.sweep());
+                }
+                else if (step < 0.01) {                                           // every key in use again
+                    for (const e of [...a.entries.values()]) {
+                        const q = { key: e.key, limit: 5, windowMs: e.windowMs };
+                        assert.deepEqual(a.take(q), b.take(q));
+                    }
                 }
                 else t += rnd() * pace + (rnd() < 0.5 ? 0.001 : 0);               // fractional times
                 const key = `k${Math.floor(rnd() * (rnd() < 0.7 ? 1e6 : 300))}`;
@@ -247,6 +254,32 @@ describe('global rate limiter', () => {
         for (const l of [a, b]) l.take({ key: 'z', limit: 1, windowMs: 1000 });
         assert.deepEqual([...a.entries.keys()], ['z']);
         assert.deepEqual([[...a.entries.keys()], a.evicted], [[...b.entries.keys()], b.evicted]);
+    });
+
+    it('raises in one walk the bounds of many keys in use that passed together, not one heap step each', () => {
+        // 4096 keys created together, below capacity: 8 expire at 200, and the bounds of the others,
+        // used since, all pass at 2000. The first new key at capacity takes out the 8 expired keys
+        // and n/64 + 1 of the others, then raises the rest in a walk of the map, builds the heap
+        // again and takes the 8 expired keys out of it: they go, as with the limiter before the heap.
+        let t = 0;
+        const n = 4096;
+        const a = new SlidingWindowLimiter({ now: () => t, maxKeys: n }), b = new ReferenceSlidingWindowLimiter({ now: () => t, maxKeys: n });
+        for (const l of [a, b]) {
+            for (let i = 0; i < 8; i++) l.take({ key: `s${i}`, limit: 5, windowMs: 100 });
+            for (let i = 8; i < n; i++) l.take({ key: `k${i}`, limit: 5, windowMs: 1000 });
+        }
+        t = 1500;
+        for (const l of [a, b]) for (let i = 8; i < n; i++) l.take({ key: `k${i}`, limit: 5, windowMs: 1000 });
+        t = 2500;
+        let steps = 0;
+        const unfile = a._unfile.bind(a);
+        a._unfile = (e) => { steps++; unfile(e); };
+        for (const l of [a, b]) l.take({ key: 'new', limit: 5, windowMs: 1000 });
+        assert.equal(steps, 8 + (n >> 6) + 1 + 8);
+        assert.deepEqual([[...a.entries.keys()], a.evicted], [[...b.entries.keys()], b.evicted]);
+        assert.deepEqual([a.size, a.evicted, a.entries.has('s0')], [n - 8 + 1, 0, false]);
+        assert.equal(a._heap.length, a.size);
+        assert.ok(a._heap.every((e, i) => e.hi === i && (i === 0 || a._heap[(i - 1) >> 1].exp <= e.exp) && e.exp === e.last + 2000));
     });
 });
 
