@@ -145,22 +145,5 @@ export function render(snapshot) {
     return s;
 }
 
-// Quantile estimate from a histogram child (for the benchmark report and admin stats).
-export function histogramQuantile(buckets, counts, q) {
-    const total = counts.reduce((a, b) => a + b, 0);
-    if (!total) return 0;
-    let rank = q * total, cum = 0;
-    for (let i = 0; i < counts.length; i++) {
-        const prev = cum;
-        cum += counts[i];
-        if (cum >= rank) {
-            const lo = i === 0 ? 0 : buckets[i - 1];
-            const hi = i < buckets.length ? buckets[i] : buckets[buckets.length - 1] * 2;
-            return lo + (hi - lo) * ((rank - prev) / (counts[i] || 1));
-        }
-    }
-    return buckets[buckets.length - 1];
-}
-
 // The process registry.
 export const metrics = new Registry();

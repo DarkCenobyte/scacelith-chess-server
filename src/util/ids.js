@@ -31,5 +31,4 @@ export class GameIdAllocator {
 }
 
 export function shardOfGameId(id) { return Math.floor(id / SHARD_MUL) % 64; }
-export function timeOfGameId(id) { return Math.floor(id / TIME_MUL) + ID_EPOCH_MS; }
 export function isGameId(id) { return Number.isSafeInteger(id) && id > 0; }
