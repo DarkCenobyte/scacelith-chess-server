@@ -201,14 +201,16 @@ export function createLogin(svc) {
         if (!ok) {
             mfaFailures.fail(fkey);
             // Counted on the step as it is now: other codes for it may have been counted while
-            // this one was checked (an await), and the last of its 5 may have ended it.
+            // this one was checked (an await), and the last of its 5 may have ended it. A code
+            // checked for a step that ended meanwhile is still recorded.
             const current = store.tokens.get('mfa_login', h);
-            if (!isLive(current, now())) throw invalidMfaToken();
-            const counted = dataOf(current);
+            const live = isLive(current, now());
+            const counted = current ? dataOf(current) : data;
             const attempts = (counted.attempts | 0) + 1;
-            if (attempts >= MFA_TOKEN_ATTEMPTS) store.tokens.consume('mfa_login', h, now());
-            else store.tokens.update('mfa_login', h, { ...counted, attempts });
+            if (live && attempts >= MFA_TOKEN_ATTEMPTS) store.tokens.consume('mfa_login', h, now());
+            else if (live) store.tokens.update('mfa_login', h, { ...counted, attempts });
             events.record('mfa_failed', { userId: user.id, ip, detail: { attempts } });
+            if (!live) throw invalidMfaToken();
             throw new AuthError(401, 'invalid_code', 'Wrong or already used code.');
         }
         if (!store.tokens.consume('mfa_login', h, now())) throw invalidMfaToken();

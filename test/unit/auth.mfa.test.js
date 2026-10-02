@@ -154,6 +154,8 @@ test('the MFA token: wrong codes sent at once still end it after 5', async (t) =
     const errors = answers.map((r) => r.json.error);
     assert.equal(errors.filter((e) => e === 'invalid_code').length, 5, errors.join());
     assert.equal(errors.filter((e) => e === 'invalid_mfa_token').length, 4, errors.join());
+    s.auth.events.flush();
+    assert.equal(s.store._raw.securityEvents.filter((e) => e.kind === 'mfa_failed').length, 9, 'every checked code is recorded');
     const r = await s.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: tok, code: totp(secret, s.now()) } });
     assert.equal(r.json.error, 'invalid_mfa_token', 'ended');
 });
