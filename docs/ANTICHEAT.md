@@ -162,7 +162,9 @@ the human stand-ins' ACPL 26 % higher than Stockfish 16 at 10/18, and scores 16 
 the statistics never mix them (section 4).
 
 **Queue policy** (docs/DESIGN.md 6.5). The engine takes the highest priority first, then the
-oldest job: a moderator request, then a game a credible player reported (`cheating` or `other`,
+oldest job: a moderator request (priority `manual`, made through the store API
+`store.analysis.enqueue(gameId)`: no `scacelith-admin` command exposes it yet), then a game a
+credible player reported (`cheating` or `other`,
 stored weight 0.5 or more), then a game with a suspicion signal at its end (either player's
 integrity level above `none`, an open `cheating` or `other` report of weight 0.5 or more against
 either player in the last 30 days, a `suspicious` or `certain` anomaly in that game) or a report
