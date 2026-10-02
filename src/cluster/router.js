@@ -280,7 +280,10 @@ export class Router {
         this._fullAt = -Infinity;
         this._admitAt = -Infinity;
         this.admission = {
-            acquire: (ip) => this.primary.request('conn.ipAcquire', { ip, shard: this.shard }).then(
+            // A count the primary took after this side gave up (a stall of either) is given back.
+            acquire: (ip) => this.primary.request('conn.ipAcquire', { ip, shard: this.shard }, {
+                onLate: (res) => { if (res && res.ok) this.admission.release(ip); },
+            }).then(
                 (res) => {
                     if (res && res.ok) { this._admitAt = performance.now(); return true; }
                     const global = res && res.reason === 'global';
@@ -786,6 +789,9 @@ export class Router {
         } catch (e) {
             this.log?.warn?.('presence.claim failed', { err: e });
             r = null;
+            // The primary may have applied it all the same (a reply after the timeout): the release
+            // follows the claim on the channel and removes only this connection's claim.
+            this.primary.notify('presence.release', { userId: conn.userId, connId: conn.id });
         }
         if (conn.state !== 'hello') {
             if (r && r.ok) this.primary.notify('presence.release', { userId: conn.userId, connId: conn.id });

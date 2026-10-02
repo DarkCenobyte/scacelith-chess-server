@@ -31,6 +31,27 @@ describe('ipc', () => {
         assert.equal(left.pending.size, 0);
     });
 
+    it('hands a reply that comes after the timeout to onLate, once, and only a reply', async () => {
+        const [a, b] = channelPair();
+        const left = new Ipc(a, { timeoutMs: 20 }), right = new Ipc(b);
+        const after = (ms, fn) => () => new Promise((resolve, reject) => setTimeout(() => fn(resolve, reject), ms));
+        right.on('slow', after(60, (resolve) => resolve({ ok: true })));
+        right.on('slowBoom', after(60, (_, reject) => reject(new Error('kaput'))));
+        const late = [];
+        await Promise.all([
+            assert.rejects(left.request('slow', null, { onLate: (r) => late.push(r) }), IpcTimeoutError),
+            assert.rejects(left.request('slowBoom', null, { onLate: (r) => late.push(r) }), IpcTimeoutError),
+            assert.rejects(left.request('slow'), IpcTimeoutError),                  // no onLate: dropped
+        ]);
+        assert.equal(left.late.size, 2);
+        await new Promise((r) => setTimeout(r, 100));
+        assert.deepEqual(late, [{ ok: true }]);
+        assert.equal(left.late.size, 0);
+        await assert.rejects(left.request('slow', null, { onLate: (r) => late.push(r) }), IpcTimeoutError);
+        left.close();
+        assert.equal(left.late.size, 0);
+    });
+
     it('delivers notifications and batches messages of one turn', async () => {
         const [a, b] = channelPair();
         let sends = 0;

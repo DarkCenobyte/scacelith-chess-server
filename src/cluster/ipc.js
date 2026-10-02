@@ -11,6 +11,7 @@
 //
 // Application-level refusals are ordinary replies ({ error: ErrorCode }); a rejected promise
 // means the transport failed (timeout, closed channel) or the handler threw (IpcRemoteError).
+// A reply that comes after the timeout is dropped, or given to the request's onLate.
 //
 // Messages posted during one event-loop turn are batched into a single process.send (one
 // serialisation, one write): QueueStatus refreshes, conn.send bursts and presence traffic under
@@ -23,6 +24,7 @@
 import v8 from 'node:v8';
 
 const REQ = 1, REP = 2, NOTE = 3, BATCH = 4;
+const LATE_REPLY_MS = 60000;            // how long a timed-out request with onLate waits for its reply
 
 /** The peer did not answer in time. */
 export class IpcTimeoutError extends Error {
@@ -50,6 +52,8 @@ export class Ipc {
         this.name = name;
         this.handlers = new Map();
         this.pending = new Map();
+        /** Timed-out requests that take a late reply (onLate): id -> { onLate, timer }. */
+        this.late = new Map();
         this.closed = false;
         this._nextId = 1;
         this._queue = [];
@@ -74,10 +78,12 @@ export class Ipc {
      * Sends a request and resolves with the peer's reply.
      * @param {string} type
      * @param {any} [payload]
-     * @param {{ timeoutMs?: number }} [o]
+     * @param {{ timeoutMs?: number, onLate?: (reply: any) => void }} [o] onLate receives the reply
+     *        that arrives after the timeout (within a minute), so that the caller can undo what the
+     *        peer did for a request it gave up on
      * @returns {Promise<any>}
      */
-    request(type, payload = null, { timeoutMs } = {}) {
+    request(type, payload = null, { timeoutMs, onLate } = {}) {
         if (this.closed) return Promise.reject(new IpcClosedError());
         const id = this._nextId;
         this._nextId = id >= Number.MAX_SAFE_INTEGER ? 1 : id + 1;
@@ -85,6 +91,11 @@ export class Ipc {
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
                 this.pending.delete(id);
+                if (onLate) {
+                    const t = setTimeout(() => this.late.delete(id), LATE_REPLY_MS);
+                    t.unref?.();
+                    this.late.set(id, { onLate, timer: t });
+                }
                 reject(new IpcTimeoutError(type, ms));
             }, ms);
             this.pending.set(id, { resolve, reject, timer });
@@ -114,6 +125,8 @@ export class Ipc {
         const err = new IpcClosedError(reason);
         for (const [, p] of this.pending) { clearTimeout(p.timer); p.reject(err); }
         this.pending.clear();
+        for (const [, l] of this.late) clearTimeout(l.timer);
+        this.late.clear();
     }
 
     _post(msg) {
@@ -180,7 +193,16 @@ export class Ipc {
             }
             case REP: {
                 const p = this.pending.get(m.i);
-                if (!p) return;                                 // late reply after a timeout
+                if (!p) {                                       // late reply after a timeout
+                    const l = this.late.get(m.i);
+                    if (!l) return;
+                    this.late.delete(m.i);
+                    clearTimeout(l.timer);
+                    if (m.e === undefined) {
+                        try { l.onLate(m.p); } catch (e) { this.log?.error?.('ipc late reply handler failed', { err: e }); }
+                    }
+                    return;
+                }
                 this.pending.delete(m.i);
                 clearTimeout(p.timer);
                 if (m.e !== undefined) p.reject(new IpcRemoteError(m.e, m.c));

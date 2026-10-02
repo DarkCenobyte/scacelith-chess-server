@@ -62,7 +62,7 @@ class Client {
 }
 
 const envs = [];
-function setup({ config = {}, claim = null, host = new FakeHost(), bus = null, primaryHandlers = {}, store = null } = {}) {
+function setup({ config = {}, claim = null, host = new FakeHost(), bus = null, primaryHandlers = {}, store = null, ipcTimeoutMs = 5000 } = {}) {
     const cfg = testConfig({ WS_HELLO_TIMEOUT_MS: '1000', HEARTBEAT_INTERVAL_MS: '1000', HEARTBEAT_TIMEOUT_MS: '3000', REQUIRE_EMAIL_VERIFICATION: 'true', ...config });
     const [a, b] = channelPair();
     const primary = new Ipc(b);
@@ -80,7 +80,7 @@ function setup({ config = {}, claim = null, host = new FakeHost(), bus = null, p
     const anticheat = { recordAnomaly: (x) => { anomalies.push(x); }, sanctionCertain: (x) => { sanctions.push(x); } };
     const auth = { validateToken: async (t) => SESSIONS[t] || null, invalidate: (p) => invalidated.push(p) };
     const registry = new Registry();
-    const shardSide = new Ipc(a);
+    const shardSide = new Ipc(a, { timeoutMs: ipcTimeoutMs });
     const router = new Router({
         config: cfg, shard: 0, host, auth, primary: shardSide, bus, anticheat, store, registry, isShard: (s) => s < 4,
     });
@@ -193,6 +193,27 @@ describe('router: hello', () => {
         assert.equal(await c.closed(), 1011);
         await waitFor(() => env.seen.some((x) => x.type === 'presence.release'));
         assert.equal(env.router.byUser.size, 0);
+    });
+
+    it('gives back the counts and claims the primary took after the shard gave up waiting', async () => {
+        // The primary answers after the shard's IPC timeout (a stall of either side): an upgrade
+        // counted late is released, one refused late is not, and a late claim is released.
+        const late = (reply) => () => new Promise((r) => setTimeout(() => r(reply), 150));
+        const env = await setup({ ipcTimeoutMs: 50, primaryHandlers: { 'conn.ipAcquire': late({ ok: true }) } });
+        await assert.rejects(env.connect(), (e) => e.status === 503);
+        await waitFor(() => env.seen.some((x) => x.type === 'conn.ipRelease'));
+        assert.deepEqual(env.seen.find((x) => x.type === 'conn.ipRelease').p, { ip: '127.0.0.1', shard: 0 });
+        env.primary.on('conn.ipAcquire', late({ ok: false, reason: 'per_ip' }));
+        await assert.rejects(env.connect(), (e) => e.status === 503);
+        await sleep(250);
+        assert.equal(env.seen.filter((x) => x.type === 'conn.ipRelease').length, 1);
+        env.primary.on('conn.ipAcquire', () => ({ ok: true }));
+        env.primary.on('presence.claim', late({ ok: true, activeGame: 0 }));
+        const c = await env.connect();
+        c.hello();
+        assert.equal((await c.recv()).code, E.Internal);
+        await waitFor(() => env.seen.some((x) => x.type === 'presence.release'));
+        assert.equal(env.seen.find((x) => x.type === 'presence.release').p.userId, 1);
     });
 
     it('closes 4006 when the server is full', async () => {
