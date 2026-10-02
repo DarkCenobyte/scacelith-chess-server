@@ -171,14 +171,18 @@ test('a job whose game is missing, or whose engine crashes, is marked failed', a
     store._.enqueue(5);
     const engine = fakeEngine(() => 'e2e4');
     const worker = createAnalysisWorker({ config, store, engineFactory: () => engine });
-    assert.equal(await worker.processJob(engine, { gameId: 5 }), null);
-    assert.equal(store._.jobs.get(5).status, 'failed');
+    // Re-queued until it was claimed three times (ANALYSIS_MAX_ATTEMPTS), then failed.
+    for (let i = 1; i <= 3; i++) {
+        assert.equal(await worker.processJob(engine, store.analysis.next(1, 'x', 0)[0]), null);
+        assert.equal(store._.jobs.get(5).status, i < 3 ? 'queued' : 'failed', `after ${i} failures`);
+    }
     assert.match(store._.jobs.get(5).error, /not found/);
     addGame(store, 6);
     const crashing = { ...fakeEngine(() => 'e2e4'), async analyse() { throw new EngineError('crashed', 'engine exited'); } };
     assert.equal(await worker.processJob(crashing, store.analysis.next(1, 'x', 0)[0]), null);
     assert.match(store._.jobs.get(6).error, /engine crashed/);
-    assert.equal(worker.stats.failed, 2);
+    assert.equal(store._.jobs.get(6).status, 'queued');
+    assert.equal(worker.stats.failed, 4);
 });
 
 test('an engine that cannot start never claims jobs; stop() ends the loop', async () => {

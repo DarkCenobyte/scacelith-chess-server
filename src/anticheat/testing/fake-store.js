@@ -7,8 +7,9 @@
 
 import { LEVELS } from '../util.js';
 
-// AnalysisPriority of src/store/index.js.
+// AnalysisPriority and ANALYSIS_MAX_ATTEMPTS of src/store/index.js.
 const PRIORITY = Object.freeze({ ordinary: 0, signal: 1, report: 2, manual: 3 });
+const MAX_ATTEMPTS = 3;
 
 // The GameStatus a result filter needs as White and as Black (games.listForUser of the real store).
 const RESULT_STATUS = Object.freeze({ win: [1, 2], loss: [2, 1], draw: [3, 3] });
@@ -126,7 +127,15 @@ export function createFakeStore({ textColumns = false } = {}) {
                 return out;
             },
             complete(gameId, features) { bind(features); const j = jobs.get(Number(gameId)) || { gameId }; j.status = 'done'; j.features = features; j.completedAt = Date.now(); jobs.set(Number(gameId), j); },
-            fail(gameId, error) { const j = jobs.get(Number(gameId)); if (j) { j.status = 'failed'; j.error = error; } },
+            // As the real store: re-queued until it was claimed MAX_ATTEMPTS times, then failed;
+            // returns the new status (null for an unknown job).
+            fail(gameId, error) {
+                const j = jobs.get(Number(gameId));
+                if (!j) return null;
+                j.status = (j.attempts ?? 0) >= MAX_ATTEMPTS ? 'failed' : 'queued';
+                j.error = error;
+                return j.status;
+            },
             // Game eligibility (rated, length...) is not modelled: any known game can be requested.
             request(gameId, reason = 'report') {
                 rec('analysis.request', [gameId, reason]);
@@ -184,7 +193,10 @@ export function createFakeStore({ textColumns = false } = {}) {
             // The rows of listOpen and forReported have the real store's shape: createdAt and status
             // ('open' until an outcome) in place of `at` and `outcome`.
             listOpen(limit = 100) { return reports.filter((r) => !r.outcome).slice(0, limit).map(asStored); },
-            forReported(userId) { return reports.filter((r) => r.reportedId === userId).map(asStored); },
+            // As the real store: the newest `limit` reports.
+            forReported(userId, limit = 200) {
+                return reports.filter((r) => r.reportedId === userId).sort((a, b) => (b.at ?? 0) - (a.at ?? 0) || b.id - a.id).slice(0, limit).map(asStored);
+            },
             // As the real store: newest first, with the reported name, createdAt and status ('open'
             // until an outcome); `outcome` is what the reporter weighting reads.
             forReporter(userId, limit = 500) {
