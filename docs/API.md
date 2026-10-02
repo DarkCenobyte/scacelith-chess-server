@@ -242,10 +242,10 @@ README, "Protection against abuse".
 **Account budget.** Every request that carries a valid session token (on the endpoints marked
 **session** or **optional** in section 2) also counts against its account: `USER_RATE_PER_MIN`
 (120) requests per minute, all endpoints together, whatever the address. Each worker process
-allows its share, max(1, ceil(2 x `USER_RATE_PER_MIN` / `WORKERS`)) per minute (all of it with 1
-or 2 workers, half of it with 4), with a burst of half a minute of that share. It is counted in
-each worker only (no round trip to the primary per request), so a client spread over every
-worker gets at most twice the rate. Beyond it: 429 `rate_limited`. The game's busiest use, paging
+allows its share, max(1, min(`USER_RATE_PER_MIN`, ceil(2 x `USER_RATE_PER_MIN` / `WORKERS`))) per
+minute (all of it with 1 or 2 workers, half of it with 4), with a burst of half a minute of that
+share. It is counted in each worker only (no round trip to the primary per request), so a client
+spread over every worker gets at most twice the rate. Beyond it: 429 `rate_limited`. The game's busiest use, paging
 through the history, is about one request per second.
 
 | Limit | Default | Counted per | Endpoints |
