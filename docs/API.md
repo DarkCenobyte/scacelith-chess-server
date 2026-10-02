@@ -647,6 +647,7 @@ with the page: each attempt hashes a password).
 Answer: 200 `{ "status": "password_reset" }`. The password reset has these effects:
 
 - every session is revoked, and a pending e-mail change is cancelled;
+- the other reset links of the account stop working;
 - the address counts as confirmed (the link proved it);
 - the owner gets a mail;
 - two-step verification is not touched.
@@ -843,7 +844,7 @@ needed, but no second factor, even with two-step verification on.
 Answer: 200 `{ "status": "password_changed" }`. The change has these effects:
 
 - every other session is revoked, and this one stays signed in;
-- a pending e-mail change is cancelled;
+- a pending e-mail change is cancelled, and the account's password reset links stop working;
 - the owner gets a mail.
 
 Errors: the re-authentication errors (section 1.7) and 400 `weak_password` (checked after the

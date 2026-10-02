@@ -1184,15 +1184,16 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   session is opened with a password the reset has replaced.
 * **Tokens**: 32 random bytes, only their SHA-256 is stored; e-mail verification (24 h),
   password reset (1 h, revokes all sessions; it works only while the account still has the
-  address it was mailed to), e-mail change (24 h, sent to the new address, at most one link per
+  address it was mailed to, and a password reset or change ends the account's other reset
+  links), e-mail change (24 h, sent to the new address, at most one link per
   new address every 5 minutes whoever asks; a new request replaces it, a password change or reset
   cancels it, and a request that one of them overtakes gets 403 `invalid_password`: its write is a
   compare-and-set on the password hash it checked), MFA login challenge (5 min), SSO attempt
   (10 min), all single-use. The confirmation of an e-mail change (the link used, the new address,
   the end of the reset and verification links of the former address) and a password reset (the
-  link used, the new password, the pending e-mail change cancelled) are each one transaction; a
-  store that stays locked answers 503 `server_busy` with `retryAfter: 1`, nothing changed and
-  the link still valid.
+  link used, the new password, the pending e-mail change and the other reset links cancelled) are
+  each one transaction; a store that stays locked answers 503 `server_busy` with
+  `retryAfter: 1`, nothing changed and the link still valid.
 * **TOTP**: RFC 6238 (SHA-1, 6 digits, 30 s, +-1 step), secret 20 bytes, AES-256-GCM at rest with
   a key derived from SERVER_SECRET (or MFA_ENCRYPTION_KEY), replay refused (last used step
   stored). 10 recovery codes (`xxxx-xxxx-xx`, 50 bits) stored as HMAC-SHA256 with a derived

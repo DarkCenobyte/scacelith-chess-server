@@ -39,7 +39,8 @@
 //  * A password change or reset cancels a pending e-mail change (whoever requested it knew the
 //    password the owner just replaced). A request racing it gets 403 invalid_password: its token
 //    (or its immediate change) is written only while the password it checked is still the stored
-//    one, in the same transaction (compare and set, as POST /account/password does).
+//    one, in the same transaction (compare and set, as POST /account/password does). It also ends
+//    the account's other password reset links (one of them would replace the new password).
 //
 // Data export (POST /account/export, same re-authentication): exportAccount() checks the
 // credentials, lets the caller build the document (http/routes/account-export.js) and records
@@ -242,12 +243,14 @@ export function createAccounts(svc) {
         if (policy) throw weak(policy);
         const passwordHash = await hasher.hash(newPassword, svc.hashBudget(ip).next());
         // One transaction: no change of address can land between the check of the link's address
-        // and the new password, and the pending e-mail change goes with the old password.
+        // and the new password, and the pending e-mail change and the other reset links go with the
+        // old password.
         const done = atomicallyOrBusy(() => {
             const used = store.tokens.consume('password_reset', sha256Hex(token), now());
             if (!used || !sentToCurrentAddress(used)) return false;
             store.users.update(user.id, { passwordHash, emailVerified: true });
             cancelEmailChange(user.id);
+            dropResetLinks(user.id);
             return true;
         });
         if (!done) throw invalidResetToken();
@@ -315,6 +318,7 @@ export function createAccounts(svc) {
         }
         sessions.revokeAll(user.id, sessionId);
         cancelEmailChange(user.id);
+        dropResetLinks(user.id);
         events.record('password_changed', { userId: user.id, ip });
         svc.mail('passwordChanged', user.email, { username: user.username, when: new Date(now()), byReset: false });
         return { status: 'password_changed' };
@@ -403,6 +407,11 @@ export function createAccounts(svc) {
     /** Drops the user's pending e-mail change (its link stops working). */
     function cancelEmailChange(userId) {
         store.tokens.deleteForUser(userId, 'email_change');
+    }
+
+    /** Drops the user's password reset links (after a password reset or change). */
+    function dropResetLinks(userId) {
+        store.tokens.deleteForUser(userId, 'password_reset');
     }
 
     function emailTaken() {

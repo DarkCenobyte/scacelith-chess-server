@@ -71,6 +71,32 @@ test('reset through the API: policy, single use, every session revoked, MFA unto
     assert.ok(s.mailer.sent.some((m) => /password was changed/.test(m.subject) && /reset with an e-mail link/.test(m.text)));
 });
 
+test('a reset or a password change ends the other reset links of the account', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    await s.createUser({ username: 'alice', password: PW });
+    const forgot = async () => {
+        await s.request('POST', '/api/v1/auth/password/forgot', { body: { email: 'alice@example.com' } });
+        const token = await resetToken(s);
+        s.now.advance(5 * 60000 + 1);         // the next link mail of the address
+        return token;
+    };
+    const reset = (token, newPassword) => s.request('POST', '/api/v1/auth/password/reset', { body: { token, newPassword } });
+    const older = await forgot();
+    const used = await forgot();
+    assert.equal((await reset(used, NEW)).status, 200);
+    let r = await reset(older, 'the attacker keeps this one');
+    assert.deepEqual([r.status, r.json.error], [400, 'invalid_token']);
+
+    const before = await forgot();
+    const { token } = await s.login('alice', NEW);
+    r = await s.request('POST', '/api/v1/account/password', { token, body: { currentPassword: NEW, newPassword: PW } });
+    assert.equal(r.status, 200);
+    r = await reset(before, 'the attacker keeps this one');
+    assert.deepEqual([r.status, r.json.error], [400, 'invalid_token']);
+    assert.equal((await s.request('POST', '/api/v1/auth/login', { body: { login: 'alice', password: PW } })).status, 200);
+});
+
 test('reset tokens expire after an hour', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
