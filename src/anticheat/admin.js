@@ -48,8 +48,9 @@ Rating refunds (the points the victims of a confirmed cheater lost to them, give
                                               refunds of a cheater's games, received by a victim, or all
 
 Engine analysis
-  analysis queue <gameId>                     analyse the game before every other one: a waiting job
-                                              moves up, a failed one is tried again; a game being
+  analysis queue <gameId>                     analyse the game before every other one, even one the
+                                              queue left out (casual, short): a waiting job moves
+                                              up, a failed one is tried again; a game being
                                               analysed or already analysed is left as it is
 
 Reports and anomalies
@@ -541,9 +542,10 @@ function refundsList(ctx) {
 const PRIORITY_NAMES = Object.fromEntries(Object.entries(AnalysisPriority).map(([name, p]) => [p, name]));
 
 // A moderator request (DESIGN 6.5): the game is analysed before every other one (priority 'manual',
-// store.analysis.enqueue), whatever the automatic policy decided for it. A job waiting at a lower
-// priority moves up and a failed one is queued again; a game being analysed, already analysed or
-// already requested is left as it is. The job is read and queued in one transaction, so that an
+// store.analysis.enqueue), whatever the automatic policy decided for it: a game without a job
+// (casual, short, or left out by the policy) is queued too. A job waiting at a lower priority
+// moves up and a failed one is queued again; a game being analysed, already analysed or already
+// requested is left as it is. The job is read and queued in one transaction, so that an
 // engine cannot claim it in between.
 function analysisQueue(ctx) {
     const idText = ctx.args.positional[2];
@@ -561,8 +563,9 @@ function analysisQueue(ctx) {
     if (queued) audit(ctx, 'analysis_queue', null, { gameId: id, previousStatus: previous?.status ?? null });
     let text;
     if (queued) {
-        const was = previous?.status === 'failed' ? `; its analysis had failed (${cell(previous.error)})`
-            : previous?.status === 'queued' ? `; it was waiting at priority ${PRIORITY_NAMES[previous.priority] ?? previous.priority}` : '';
+        const was = !previous ? '; it was not in the queue (a casual or short game, or one the queue policy left out)'
+            : previous.status === 'failed' ? `; its analysis had failed (${cell(previous.error)})`
+            : `; it was waiting at priority ${PRIORITY_NAMES[previous.priority] ?? previous.priority}`;
         text = `Game #${id} queued for engine analysis before every other game${was}.\n`;
     } else if (previous.status === 'queued') text = `Game #${id} is already queued before every other game.\n`;
     else if (previous.status === 'running') text = `Game #${id} is being analysed now.\n`;

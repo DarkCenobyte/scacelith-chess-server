@@ -301,9 +301,10 @@ test('analysis queue: the game is analysed before every other one; a game being 
         startedAt: NOW - 600000, endedAt: NOW, status: enums.GameStatus.WhiteWins, reason: enums.EndReason.Resignation,
         moves: new Uint16Array(40), spentMs: new Uint32Array(40), clockMs: new Uint32Array(40), ...extra,
     });
-    // Rated games are queued at the ordinary priority; the casual one is left out by the policy.
-    const [running, done, failed, ordinary, reported, casual] = [game(), game(), game(), game(), game(), game({ rated: false })];
-    store.games.finishBatch([running, done, failed, ordinary, reported, casual]);
+    // Rated games are queued at the ordinary priority; the casual and the short one are left out.
+    const [running, done, failed, ordinary, reported, casual, short] = [game(), game(), game(), game(), game(), game({ rated: false }),
+        game({ moves: new Uint16Array(8), spentMs: new Uint32Array(8), clockMs: new Uint32Array(8) })];
+    store.games.finishBatch([running, done, failed, ordinary, reported, casual, short]);
     assert.deepEqual(store.analysis.next(3, 'w', NOW).map((j) => j.gameId), [running.id, done.id, failed.id]);
     store.analysis.complete(done.id, { gameId: done.id }, NOW);
     for (let i = 0; i < 3; i++) {
@@ -313,7 +314,7 @@ test('analysis queue: the game is analysed before every other one; a game being 
     const job = (g) => { const j = store.analysis.job(g.id); return [j.status, j.priority]; };
     assert.deepEqual([running, done, failed, ordinary, reported].map(job),
         [['running', 0], ['done', 0], ['failed', 0], ['queued', AnalysisPriority.ordinary], ['queued', AnalysisPriority.report]]);
-    assert.equal(store.analysis.job(casual.id), null);
+    assert.deepEqual([store.analysis.job(casual.id), store.analysis.job(short.id)], [null, null]);
 
     for (const bad of [[], ['abc'], ['0'], ['-3'], ['1.5']]) {
         const r = await run(store, ['analysis', 'queue', ...bad]);
@@ -328,6 +329,7 @@ test('analysis queue: the game is analysed before every other one; a game being 
     assert.equal(first.code, 0, first.err);
     assert.deepEqual(first.json, { gameId: casual.id, queued: true, previous: null });
     assert.deepEqual(first.security, [['moderator.action', { userId: null, action: 'analysis_queue', moderator: 'mod-anna', gameId: casual.id, previousStatus: null }]]);
+    assert.match((await run(store, ['analysis', 'queue', String(short.id)])).out, /queued .* it was not in the queue \(a casual or short game/);
     assert.match((await run(store, ['analysis', 'queue', String(ordinary.id)])).out, /queued .* it was waiting at priority ordinary/);
     assert.match((await run(store, ['analysis', 'queue', String(failed.id)])).out, /its analysis had failed \(engine crashed\)/);
     assert.equal(store.analysis.job(failed.id).attempts, 0);
@@ -337,10 +339,10 @@ test('analysis queue: the game is analysed before every other one; a game being 
         assert.match(r.out, said);
         assert.deepEqual(r.security, [], 'nothing changed, nothing audited');
     }
-    assert.deepEqual([running, done, casual, ordinary, failed].map(job),
-        [['running', 0], ['done', 0], ['queued', AnalysisPriority.manual], ['queued', AnalysisPriority.manual], ['queued', AnalysisPriority.manual]]);
-    // The engine takes the three requested games before the reported one.
-    assert.deepEqual(store.analysis.next(3, 'w', NOW).map((j) => j.gameId).sort(), [ordinary.id, failed.id, casual.id].sort());
+    assert.deepEqual([running, done, casual, short, ordinary, failed].map(job), [['running', 0], ['done', 0],
+        ['queued', AnalysisPriority.manual], ['queued', AnalysisPriority.manual], ['queued', AnalysisPriority.manual], ['queued', AnalysisPriority.manual]]);
+    // The engine takes the four requested games before the reported one.
+    assert.deepEqual(store.analysis.next(4, 'w', NOW).map((j) => j.gameId).sort(), [ordinary.id, failed.id, casual.id, short.id].sort());
     assert.deepEqual(job(reported), ['queued', AnalysisPriority.report]);
 });
 
