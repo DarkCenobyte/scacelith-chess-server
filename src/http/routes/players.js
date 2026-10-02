@@ -42,7 +42,8 @@ import { ChessGame } from '../../chess/index.js';
 import { canReport } from '../../anticheat/reports.js';
 
 const USERNAME_RE = /^[A-Za-z0-9_.-]{2,24}$/;   // widest charset/length the server ever allows
-const ID_RE = /^[1-9][0-9]{0,15}$/;
+/** A game id in a path or a cursor (routes/account-games.js and routes/gif.js too). */
+export const ID_RE = /^[1-9][0-9]{0,15}$/;
 const LIST_MAX = 50;
 const LIST_DEFAULT = 20;
 const BOARD_MAX = 100;
@@ -51,7 +52,8 @@ const PROMO = ['', '', 'n', 'b', 'r', 'q', '', ''];
 
 const STATUS_NAME = Object.fromEntries(Object.entries(enums.GameStatus).map(([k, v]) => [v, k]));
 const REASON_NAME = Object.fromEntries(Object.entries(enums.EndReason).map(([k, v]) => [v, k]));
-const RESULT = { [enums.GameStatus.WhiteWins]: '1-0', [enums.GameStatus.BlackWins]: '0-1', [enums.GameStatus.Draw]: '1/2-1/2' };
+/** The PGN result of a game status ('*' for the others; routes/gif.js too). */
+export const RESULT = Object.freeze({ [enums.GameStatus.WhiteWins]: '1-0', [enums.GameStatus.BlackWins]: '0-1', [enums.GameStatus.Draw]: '1/2-1/2' });
 
 function error(status, code, message) { return { status, body: { error: code, message } }; }
 

@@ -52,9 +52,9 @@ import { createGifPool } from '../../gif/pool.js';
 import { DELAY, MAX_PLIES, SIZES } from '../../gif/render.js';
 import { endReasonText, readPgn, PgnError } from '../../chess/index.js';
 import { normalizeResult } from '../../chess/pgn.js';
-import { enums } from '../../protocol/schema.js';
 import { metrics } from '../../metrics.js';
 import { randomRetryAfter } from '../../security/ratelimit.js';
+import { ID_RE, RESULT } from './players.js';
 
 /** The thread module of the pool: src/gif/worker.js at the lowest priority (routes/gif-thread.js). */
 export const GIF_THREAD_URL = new URL('./gif-thread.js', import.meta.url);
@@ -63,11 +63,9 @@ export const GIF_THREAD_URL = new URL('./gif-thread.js', import.meta.url);
 export const GIF_PGN_MAX_BYTES = 65536;
 export const GIF_CONTENT_TYPE = 'image/gif';
 
-const ID_RE = /^[1-9][0-9]{0,15}$/;
 const SIZE_NAMES = Object.keys(SIZES);
 const ORIENTATIONS = ['white', 'black'];
 const BODY_FIELDS = new Set(['pgn', 'size', 'orientation', 'delayMs', 'coords']);
-const RESULT = { [enums.GameStatus.WhiteWins]: '1-0', [enums.GameStatus.BlackWins]: '0-1', [enums.GameStatus.Draw]: '1/2-1/2' };
 /** Retry-After of a 503 server_busy, seconds (drawn at random, so that refused clients spread out). */
 export const GIF_BUSY_RETRY_SEC = Object.freeze({ min: 3, max: 10 });
 
