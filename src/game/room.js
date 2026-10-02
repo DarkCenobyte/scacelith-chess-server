@@ -645,10 +645,13 @@ export class GameRoom {
     recover(now) {
         now = Math.floor(now);
         const out = new Outcome();
-        if (!this._over && this.game.status !== undefined && this.game.status !== GS.Ongoing) {
-            // The journal kept the move that ended the game but not its `ended` record.
+        if (!this._over) {
+            // The journal kept the move that ended the game but not its `ended` record: an ending of
+            // the rules, or the ply limit's (as in onMove).
             const at = this.ply ? this.recvTime[this.ply - 1] : this.createdAt;
-            this._end(this.game.status, this.game.reason | 0, at, out, NONE, NONE);
+            const st = this.game.status;
+            if (st !== undefined && st !== GS.Ongoing) this._end(st, this.game.reason | 0, at, out, NONE, NONE);
+            else if (this.ply >= MAX_PLIES) this._end(GS.Aborted, ER.ServerAborted, at, out, NONE, NONE);
         }
         if (this._over) {
             this.rematchState = RM_CLOSED;
