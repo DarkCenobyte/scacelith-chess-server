@@ -313,11 +313,13 @@ function integrityShow(ctx) {
         t += '\nReviews\n' + table(ev.reviews.map((r) => ({ at: iso(r.at), action: r.action, by: r.by, reason: r.reason || '' })), ['at', 'action', 'by', 'reason']);
     }
     const f = (x, d = 1) => (x === null || x === undefined ? '-' : Number(x).toFixed(d));
+    // A side without scored moves has no rates (null): '-', not 0 %.
+    const pct = (x) => (x === null || x === undefined ? '-' : f(x * 100, 0));
     // Games of another analysis profile than the statistics' are not part of the scores.
     const other = (g) => !!st?.profile && g.profile !== st.profile;
     t += '\nAnalysed games (newest first)\n' + table(games.map((g) => ({
         game: other(g) ? `${g.gameId}*` : g.gameId, cat: g.category, rating: g.rating, moves: g.n, acc: f(g.accuracy), acpl: f(g.acpl),
-        't1%': f(g.t1Deep * 100, 0), 'fast%': f(g.t1Fast * 100, 0), 'cx%': g.t1Complex === null ? '-' : `${f(g.t1Complex * 100, 0)}/${g.nComplex}`,
+        't1%': pct(g.t1Deep), 'fast%': pct(g.t1Fast), 'cx%': g.t1Complex === null ? '-' : `${pct(g.t1Complex)}/${g.nComplex}`,
         'time~cx': f(g.timeCorr, 2), cv: f(g.timeCv, 2),
     })), ['game', 'cat', 'rating', 'moves', 'acc', 'acpl', 't1%', 'fast%', 'cx%', 'time~cx', 'cv']);
     if (games.some(other)) t += '  * analysed with another profile (engine, network, depths or hash): not in the scores above\n';

@@ -161,6 +161,18 @@ test('integrity list / show / confirm / clear', async () => {
     assert.deepEqual(moderatorEvents(store).map((e) => e.detail.action), ['integrity_confirm', 'integrity_clear']);
 });
 
+test('integrity show: a side without scored moves shows no rates, not 0 %', async () => {
+    const { store, bob, eve } = world();
+    store._.addGame({ id: 78, whiteId: bob, blackId: eve, endedAt: NOW });
+    // analyzer.js emptySide(): no scored move, every rate null.
+    const empty = { n: 0, accuracy: null, acpl: null, t1Deep: null, t1Fast: null, nComplex: 0, t1Complex: null, timeCorr: null, timeCv: null };
+    store.analysis.complete(78, { v: 1, gameId: 78, category: '5+0', white: { userId: bob, rating: 1600, ...empty }, black: { userId: eve, ...empty } });
+    const show = await run(store, ['integrity', 'show', 'bob']);
+    assert.equal(show.code, 0);
+    const row = show.out.split('\n').find((l) => /^78 /.test(l));
+    assert.deepEqual(row.trim().split(/\s+/), ['78', '5+0', '1600', '0', '-', '-', '-', '-', '-', '-', '-']);
+});
+
 test('reports list / resolve, anomalies, stats', async () => {
     const { store, bob, eve } = world();
     const r1 = store.reports.create({ reporterId: eve, reportedId: bob, gameId: 1, category: 'cheating', comment: '', weight: 0.8, at: NOW });
