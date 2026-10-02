@@ -12,7 +12,8 @@ import {
     WHITE, BLACK, PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING,
     F_CAPTURE, F_EP, F_CASTLE_K, F_CASTLE_Q, F_DOUBLE, F_PROMO, F_CHECK, F_MATE,
     CR_WK, CR_WQ, CR_BK, CR_BQ,
-    S88, S64, KNIGHT_STEPS, KING_STEPS, DIR, STEP, CASTLE_MASK, SQ_NAMES, PIECE_CHAR, PIECE_ASCII,
+    S88, S64, KNIGHT_STEPS, KING_STEPS, ORTH_STEPS, DIAG_STEPS, DIR, STEP, CASTLE_MASK,
+    SQ_NAMES, PIECE_CHAR, PIECE_ASCII,
     ZP_LO, ZP_HI, ZC_LO, ZC_HI, ZEP_LO, ZEP_HI, ZSIDE_LO, ZSIDE_HI,
 } from './tables.js';
 
@@ -1016,7 +1017,7 @@ export class Position {
     }
 }
 
-const QUEEN_STEPS = [15, 17, -15, -17, 1, -1, 16, -16];   // diagonals then orthogonals
+const QUEEN_STEPS = [...DIAG_STEPS, ...ORTH_STEPS];   // diagonals then orthogonals
 
 const START = Position.fromFEN('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1');
 
