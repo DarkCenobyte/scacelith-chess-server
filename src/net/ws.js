@@ -580,14 +580,22 @@ export class WsServer {
             this._reject(socket, 408, 'timeout', null);
         }, this.handshakeTimeoutMs);
         timer.unref();
+        // A client that leaves before the end of its head is no handshake timeout, and the socket
+        // and its partial head are not kept until the timer fires.
+        const onClose = () => { clearTimeout(timer); buf = null; };
+        socket.once('close', onClose);
         const onData = (chunk) => {
             buf = buf === null ? chunk : Buffer.concat([buf, chunk]);
             const end = buf.indexOf('\r\n\r\n', Math.max(0, buf.length - chunk.length - 3), 'latin1');
             if (end < 0) {
-                if (buf.length > this.maxHeaderBytes) { clearTimeout(timer); socket.removeListener('data', onData); this._reject(socket, 431, 'headers_too_large', null); }
+                if (buf.length > this.maxHeaderBytes) {
+                    clearTimeout(timer); socket.removeListener('close', onClose); socket.removeListener('data', onData);
+                    this._reject(socket, 431, 'headers_too_large', null);
+                }
                 return;
             }
             clearTimeout(timer);
+            socket.removeListener('close', onClose);
             socket.removeListener('data', onData);
             socket.pause();
             if (end + 4 > this.maxHeaderBytes) { this._reject(socket, 431, 'headers_too_large', null); return; }
