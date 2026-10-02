@@ -271,6 +271,28 @@ describe('control plane: matchmaking', () => {
         assert.equal(whites.at(-1), 1);
     });
 
+    it('a rated pairing counts toward MATCH_REPEAT_LIMIT only once its game exists', async () => {
+        const { cp, shards, mm, clock, online } = setup({ realMatchmaker: true });
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1);
+        cp.mmJoin({ ...a, category: '5+0', rated: true, rating: 1500 }, 0);
+        cp.mmJoin({ ...b, category: '5+0', rated: true, rating: 1500 }, 1);
+        shards.create = () => ({ error: E.Internal });
+        for (let i = 0; i <= cfg.matchRepeatLimit; i++) {
+            clock.advance(250);
+            shards.clear();
+            cp.matchTick();
+            await tick();
+            assert.equal(shards.requests.length, 1, `pairing ${i} tried`);
+            assert.equal(mm.repeatCount(1, 2), 0);
+        }
+        shards.create = null;
+        clock.advance(250);
+        cp.matchTick();
+        await tick();
+        assert.equal(cp.activeGames.size, 2);
+        assert.equal(mm.repeatCount(1, 2), 1);
+    });
+
     it('requeues both players when the host refuses the game', async () => {
         const { cp, shards, mm, online } = setup();
         const a = online(1, 'alice', 0), b = online(2, 'bob', 1);

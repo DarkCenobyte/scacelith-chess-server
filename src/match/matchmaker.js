@@ -38,6 +38,9 @@
 //   * join() refuses a user already queued with ErrorCode.QueueNotAllowed (leave first), and a
 //     category that is not official with ErrorCode.InvalidCategory. The conduct cooldown and the
 //     "already in a game" checks belong to the caller (the primary), before join().
+//   * tick() does not count its rated pairings toward the repeat limit: the caller does, with
+//     recordPairing(), once their game exists (a pairing whose game cannot be created counts
+//     nothing, and its players may be paired again at once).
 //   * join({ colorBalance }) overrides the balance tracked here; without it the matchmaker uses its
 //     own record, updated at each pairing (and by recordColors() for games made elsewhere).
 //   * join({ recentOpponents }) is an optional iterable of user ids the player must not be paired
@@ -424,7 +427,7 @@ export class Matchmaker {
         else { white = b; black = a; }
         this._setBalance(white.userId, white.colorBalance + 1);
         this._setBalance(black.userId, black.colorBalance - 1);
-        if (q.rated) { this.recordPairing(a.userId, b.userId, now); mPairsRated.inc(); } else mPairsCasual.inc();
+        if (q.rated) mPairsRated.inc(); else mPairsCasual.inc();
         mWait.observe(now - a.joinedAt);
         mWait.observe(now - b.joinedAt);
         return { category: q.category, rated: q.rated, white: view(white, now), black: view(black, now) };
@@ -458,8 +461,9 @@ export class Matchmaker {
     }
 
     /**
-     * Counts one rated game between two users for the repeat limit (tick() does it for its own
-     * pairings; the primary calls it for rated games made otherwise).
+     * Counts one rated game between two users for the repeat limit. The primary calls it once the
+     * game of a rated pairing of tick() exists; games made outside the matchmaker (challenges,
+     * rematches) are not counted.
      * @param {number|{userId:number}} a
      * @param {number|{userId:number}} b
      * @param {number} [now]

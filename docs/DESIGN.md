@@ -362,7 +362,7 @@ new Matchmaker({ config, now })
 mm.join({ userId, username, category, rated, rating, provisional, shard, connId, colorBalance, joinedAt }) -> { ok } | { error: ErrorCode }
 mm.leave(userId) -> bool ; mm.has(userId) ; mm.statusOf(userId, now) -> QueueStatus fields
 mm.tick(now) -> [{ category, rated, white: entry, black: entry }]
-mm.recordPairing(a, b, now)  // repeat limit bookkeeping (done by tick itself)
+mm.recordPairing(a, b, now)  // repeat limit bookkeeping (the primary, once a rated queue game exists)
 // challenges.js (primary)
 new Challenges({ config, now })
 ch.create({ from: {userId, username, rating, provisional, shard, connId}, target /* username | '' */, baseSec, incSec, rated, color }) -> { ok, challenge } | { error }

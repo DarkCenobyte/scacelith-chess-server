@@ -477,7 +477,13 @@ export class ControlPlane {
             white: this._info(white), black: this._info(black), createdAt: now,
         };
         const r = await this.createGame(spec, preferred, 'queue');
-        if (r.ok) return;
+        if (r.ok) {
+            // MATCH_REPEAT_LIMIT counts the rated games that exist, not the pairings.
+            if (rated) {
+                try { this.mm.recordPairing?.(white.userId, black.userId, this.now()); } catch (e) { this.log?.error?.('mm.recordPairing failed', { err: e }); }
+            }
+            return;
+        }
         this._recordColors(black.userId, white.userId);    // gives back the colours of the pairing
         // Back to the queue with their original waiting time.
         for (const e of [white, black]) {
