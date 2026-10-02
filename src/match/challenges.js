@@ -1,4 +1,4 @@
-// Direct challenges, private games joined with a code, and rematch specs (primary process).
+// Direct challenges and private games joined with a code (primary process).
 // Pure: no timer, no I/O; time comes from the injected clock (or the `now` argument), random
 // draws from the injected `randomInt` (crypto.randomInt by default: private codes must not be
 // guessable).
@@ -36,8 +36,6 @@
 //     { white, black, baseMs, incMs, category, rated, challengeId, rematchOf: 0 }.
 //   * dropUser(userId) cancels the user's outgoing challenges and marks the incoming ones
 //     Unavailable (for disconnections).
-//   * rematchSpec(previousGame) swaps the colours of a finished game; the caller refreshes the
-//     players' ratings (they changed with the previous game) and checks conduct and bans.
 
 import crypto from 'node:crypto';
 import { enums } from '../protocol/schema.js';
@@ -85,24 +83,6 @@ function playerOf(p) {
     return {
         userId: p.userId, username: p.username ?? '', rating: p.rating ?? 0, provisional: !!p.provisional,
         shard: p.shard ?? 0, connId: p.connId ?? 0,
-    };
-}
-
-/**
- * Spec of a rematch: same time control and rated flag, colours swapped. A rated flag on a
- * category that is not official (any more) is dropped.
- * @param {object} previousGame { white, black, baseMs, incMs, category?, rated, gameId|id }
- * @param {object} [cfg] configuration (categories), to recompute the category
- * @returns {{white:object, black:object, baseMs:number, incMs:number, category:string, rated:boolean, rematchOf:number, challengeId:number}}
- */
-export function rematchSpec(previousGame, cfg) {
-    const g = previousGame;
-    const category = cfg ? categoryOf(g.baseMs, g.incMs, cfg) : (g.category || CUSTOM_CATEGORY);
-    return {
-        white: { ...g.black }, black: { ...g.white },
-        baseMs: g.baseMs, incMs: g.incMs, category,
-        rated: !!g.rated && category !== CUSTOM_CATEGORY,
-        rematchOf: g.gameId ?? g.id ?? 0, challengeId: 0,
     };
 }
 
@@ -345,12 +325,6 @@ export class Challenges {
         }
         return out;
     }
-
-    /**
-     * See the module function rematchSpec(); uses this instance's configuration.
-     * @param {object} previousGame
-     */
-    rematchSpec(previousGame) { return rematchSpec(previousGame, this.config); }
 
     _live(id, now) {
         const c = this.byId.get(id);

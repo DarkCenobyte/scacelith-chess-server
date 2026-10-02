@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { testConfig } from '../../src/config.js';
 import { enums } from '../../src/protocol/schema.js';
 import {
-    Challenges, rematchSpec, normalizeCode, CODE_ALPHABET, CODE_LENGTH, MAX_PENDING_OUTGOING,
+    Challenges, normalizeCode, CODE_ALPHABET, CODE_LENGTH, MAX_PENDING_OUTGOING,
 } from '../../src/match/challenges.js';
 
 const { ErrorCode, ChallengeState, ColorPref } = enums;
@@ -261,18 +261,4 @@ test('challenges: dropUser and ids', () => {
     const b = direct(ch, alice, carol).challenge;
     assert.equal(a.id, 0xFFFFFFFF);
     assert.equal(b.id, 1);
-});
-
-test('challenges: rematch spec swaps the colours', () => {
-    const prev = { gameId: 12345, white: alice, black: bob, baseMs: 180000, incMs: 2000, category: '3+2', rated: true };
-    const spec = rematchSpec(prev, cfg);
-    assert.deepEqual(spec, { white: bob, black: alice, baseMs: 180000, incMs: 2000, category: '3+2', rated: true, rematchOf: 12345, challengeId: 0 });
-    assert.notEqual(spec.white, bob);   // copies
-    const custom = rematchSpec({ id: 7, white: alice, black: bob, baseMs: 240000, incMs: 1000, rated: true }, cfg);
-    assert.equal(custom.category, 'custom');
-    assert.equal(custom.rated, false);
-    assert.equal(custom.rematchOf, 7);
-    const ch = make();
-    assert.deepEqual(ch.rematchSpec(prev), spec);
-    assert.equal(rematchSpec({ ...prev, rated: false }).rated, false);
 });
