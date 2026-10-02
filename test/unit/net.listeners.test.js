@@ -173,6 +173,15 @@ describe('listeners (native TLS)', { skip: !hasOpenssl && 'openssl not available
         await lst.listen();
     });
     after(() => { wss.closeAll(); lst.close(); lst2?.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+    // Another worker's listeners (the same SERVER_SECRET), started by the first test that needs
+    // them: its WSS port.
+    async function secondWorker() {
+        if (!lst2) {
+            lst2 = new Listeners({ config: { ...config, wsPort: await freePort(), apiPort: await freePort() }, wsServer: wss, apiHandler: null });
+            await lst2.listen();
+        }
+        return lst2.addresses().find((x) => x.kind === 'ws').port;
+    }
 
     it('negotiates http/1.1 by ALPN and serves WSS on the dedicated port', async () => {
         const s = await tlsConnect(wsPort);
@@ -189,9 +198,7 @@ describe('listeners (native TLS)', { skip: !hasOpenssl && 'openssl not available
     });
 
     it('resumes sessions across listeners that share the derived ticket keys (other workers)', async () => {
-        const port2 = await freePort();
-        lst2 = new Listeners({ config: { ...config, wsPort: port2, apiPort: await freePort() }, wsServer: wss, apiHandler: null });
-        await lst2.listen();
+        const port2 = await secondWorker();
         const s1 = await tlsConnect(wsPort, { maxVersion: 'TLSv1.2' });
         const session = s1.getSession();
         s1.destroy();
@@ -204,6 +211,7 @@ describe('listeners (native TLS)', { skip: !hasOpenssl && 'openssl not available
     });
 
     it('reloads the certificate without a restart and keeps it when the new one is broken', async () => {
+        const port2 = await secondWorker();
         fs.copyFileSync(b.cert, config.tlsCertFile);
         fs.copyFileSync(b.key, config.tlsKeyFile);
         assert.equal(lst.reloadCertificates(), true);
@@ -218,7 +226,7 @@ describe('listeners (native TLS)', { skip: !hasOpenssl && 'openssl not available
         const r1 = await tlsConnect(wsPort, { maxVersion: 'TLSv1.2', session });
         assert.equal(r1.isSessionReused(), true, 'resumed on the WSS port');
         r1.destroy();
-        const r2 = await tlsConnect(lst2.addresses().find((x) => x.kind === 'ws').port, { maxVersion: 'TLSv1.2', session });
+        const r2 = await tlsConnect(port2, { maxVersion: 'TLSv1.2', session });
         assert.equal(r2.isSessionReused(), true, 'resumed by another worker');
         r2.destroy();
         fs.copyFileSync(a.key, config.tlsKeyFile);               // key no longer matches the certificate
