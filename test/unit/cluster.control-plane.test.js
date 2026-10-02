@@ -334,6 +334,17 @@ describe('control plane: challenges', () => {
         assert.deepEqual(await cp.challengeAccept({ id: again.id, by: b }), { error: E.AlreadyInGame });
     });
 
+    it('a busy creator is told to the challenge\'s target only; another player learns nothing', async () => {
+        const { cp, ch, online } = setup();
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1), c = online(3, 'carl', 1);
+        const direct = cp.challengeCreate({ from: a, target: 'bob', baseSec: 300, incSec: 0, rated: false });
+        const priv = cp.challengeCreate({ from: a, target: '', baseSec: 300, incSec: 0, rated: false });
+        cp.gameActive({ gameId: new GameIdAllocator(0).next(), whiteId: 1, blackId: 9 });
+        for (const id of [direct.id, priv.id]) assert.deepEqual(await cp.challengeAccept({ id, by: c }), { error: E.ChallengeNotFound });
+        assert.deepEqual(await cp.challengeAccept({ id: direct.id, by: b }), { error: E.AlreadyInGame });
+        assert.equal(ch.size, 2, 'nothing consumed');
+    });
+
     it('decline, cancel, expiry and a creator going offline notify the other side', () => {
         const { cp, shards, clock, online } = setup({ acceptsChallenges: (u) => u !== 4 });
         const a = online(1, 'alice', 0), b = online(2, 'bob', 1);

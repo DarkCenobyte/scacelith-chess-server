@@ -539,7 +539,10 @@ export class ControlPlane {
 
     async challengeAccept({ id, by }) {
         const pending = this.ch.get?.(id);
-        if (this._busy(by.userId) || (pending && this._busy(pending.from.userId))) return { error: E.AlreadyInGame };
+        if (this._busy(by.userId)) return { error: E.AlreadyInGame };
+        // A busy creator is told to the challenge's target only: anyone else gets ch.accept's
+        // ChallengeNotFound (challenges.js: nothing leaks).
+        if (pending && pending.kind === 'direct' && pending.targetUserId === by.userId && this._busy(pending.from.userId)) return { error: E.AlreadyInGame };
         let r;
         try { r = this.ch.accept(id, by, this.now()); } catch (e) { this.log?.error?.('challenge.accept failed', { err: e }); return { error: E.Internal }; }
         if (!r || r.error || !r.challenge) return { error: r && r.error ? toErrorCode(r.error) : E.ChallengeNotFound };
