@@ -9,6 +9,10 @@
 //     while 127.0.0.1 keeps working and bobby's game goes on over his open WebSocket;
 //   - once the block ends 127.0.0.2 connects again, and a second flood is blocked 4 times longer;
 //   - an exempt address is never refused nor blocked.
+// ABUSE_EXEMPT does not lift the TLS gate's per-group handshake cap (MAX_PENDING_HANDSHAKES_PER_IP,
+// 4 per worker by default): a flood's 8 simultaneous new connections from one address could exceed
+// it in one worker and get a reset before TLS. The harness raises that cap for every test server,
+// as SIZING advises for a load machine, so that the only refusals here are the protection's own.
 // Needs the openssl command line (skipped without it).
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
