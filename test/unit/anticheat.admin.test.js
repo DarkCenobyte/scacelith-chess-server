@@ -8,7 +8,8 @@ import { testConfig } from '../../src/config.js';
 import { runAdmin, parseArgs, COMMANDS } from '../../src/anticheat/admin.js';
 import { createFakeStore } from '../../src/anticheat/testing/fake-store.js';
 import { reviewPriority } from '../../src/anticheat/reports.js';
-import { openStore, migrate } from '../../src/store/index.js';
+import { openStore, migrate, AnalysisPriority } from '../../src/store/index.js';
+import { enums } from '../../src/protocol/index.js';
 import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -286,6 +287,61 @@ test('user show, integrity list / show and reports list count and weigh every re
     assert.equal((await run(store, ['integrity', 'show', 'bob', '--json'])).json.priority, priority);
     const open = await run(store, ['reports', 'list', '--json']);
     assert.deepEqual(open.json.map((r) => [r.username, r.open, r.weight, r.priority]), [['bob', 31, 4, priority]]);
+});
+
+test('analysis queue: the game is analysed before every other one; a game being or already analysed is left alone', async (t) => {
+    const keep = (r) => ({ before: r.rating, after: r.rating });
+    const store = openStore(testConfig({ DB_PATH: ':memory:' }), { applyGame: (w, b) => ({ white: keep(w), black: keep(b) }) });
+    t.after(() => store.close());
+    migrate(store);
+    const [ann, ben] = ['ann', 'ben'].map((n) => store.users.create({ username: n, email: `${n}@example.org` }));
+    let lastId = 5_000_000_000_000;
+    const game = (extra = {}) => ({
+        id: ++lastId, category: '5+0', rated: true, baseMs: 300000, incMs: 0, whiteId: ann, blackId: ben, whiteName: 'ann', blackName: 'ben',
+        startedAt: NOW - 600000, endedAt: NOW, status: enums.GameStatus.WhiteWins, reason: enums.EndReason.Resignation,
+        moves: new Uint16Array(40), spentMs: new Uint32Array(40), clockMs: new Uint32Array(40), ...extra,
+    });
+    // Rated games are queued at the ordinary priority; the casual one is left out by the policy.
+    const [running, done, failed, ordinary, reported, casual] = [game(), game(), game(), game(), game(), game({ rated: false })];
+    store.games.finishBatch([running, done, failed, ordinary, reported, casual]);
+    assert.deepEqual(store.analysis.next(3, 'w', NOW).map((j) => j.gameId), [running.id, done.id, failed.id]);
+    store.analysis.complete(done.id, { gameId: done.id }, NOW);
+    for (let i = 0; i < 3; i++) {
+        if (store.analysis.fail(failed.id, 'engine crashed', NOW) === 'queued') assert.equal(store.analysis.next(1, 'w', NOW)[0].gameId, failed.id);
+    }
+    assert.equal(store.analysis.request(reported.id, 'report', NOW), true);
+    const job = (g) => { const j = store.analysis.job(g.id); return [j.status, j.priority]; };
+    assert.deepEqual([running, done, failed, ordinary, reported].map(job),
+        [['running', 0], ['done', 0], ['failed', 0], ['queued', AnalysisPriority.ordinary], ['queued', AnalysisPriority.report]]);
+    assert.equal(store.analysis.job(casual.id), null);
+
+    for (const bad of [[], ['abc'], ['0'], ['-3'], ['1.5']]) {
+        const r = await run(store, ['analysis', 'queue', ...bad]);
+        assert.equal(r.code, 1, bad.join());
+        assert.match(r.err, /analysis queue <gameId>/);
+    }
+    const missing = await run(store, ['analysis', 'queue', '424242']);
+    assert.equal(missing.code, 1);
+    assert.match(missing.err, /no game #424242/);
+
+    const first = await run(store, ['analysis', 'queue', String(casual.id), '--json']);
+    assert.equal(first.code, 0, first.err);
+    assert.deepEqual(first.json, { gameId: casual.id, queued: true, previous: null });
+    assert.deepEqual(first.security, [['moderator.action', { userId: null, action: 'analysis_queue', moderator: 'mod-anna', gameId: casual.id, previousStatus: null }]]);
+    assert.match((await run(store, ['analysis', 'queue', String(ordinary.id)])).out, /queued .* it was waiting at priority ordinary/);
+    assert.match((await run(store, ['analysis', 'queue', String(failed.id)])).out, /its analysis had failed \(engine crashed\)/);
+    assert.equal(store.analysis.job(failed.id).attempts, 0);
+    for (const [g, said] of [[running, /is being analysed now/], [done, /was already analysed/], [casual, /is already queued before every other game/]]) {
+        const r = await run(store, ['analysis', 'queue', String(g.id)]);
+        assert.equal(r.code, 0, r.err);
+        assert.match(r.out, said);
+        assert.deepEqual(r.security, [], 'nothing changed, nothing audited');
+    }
+    assert.deepEqual([running, done, casual, ordinary, failed].map(job),
+        [['running', 0], ['done', 0], ['queued', AnalysisPriority.manual], ['queued', AnalysisPriority.manual], ['queued', AnalysisPriority.manual]]);
+    // The engine takes the three requested games before the reported one.
+    assert.deepEqual(store.analysis.next(3, 'w', NOW).map((j) => j.gameId).sort(), [ordinary.id, failed.id, casual.id].sort());
+    assert.deepEqual(job(reported), ['queued', AnalysisPriority.report]);
 });
 
 test('bench-accounts: refused without the test-server flag; creates verified accounts with sessions', async (t) => {

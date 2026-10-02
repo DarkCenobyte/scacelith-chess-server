@@ -435,6 +435,7 @@ store.analysis.next(limit, workerId, now) -> [job] ; complete(gameId, features) 
 store.analysis.enqueue(gameId, now) ; request(gameId, 'report' | 'signal', now) -> bool ; backlog() -> { ordinary, priority }
   // enqueue: moderator re-analysis (priority manual); request: a reported game, 'signal' for a low-credibility
   // report (section 6.5); backlog counts each tier up to 100,000
+store.analysis.job(gameId) -> { status, priority, attempts, queuedAt, finishedAt, error } | null
 store.integrity.get(userId) -> { level /* 'none'|'suspected'|'high_confidence'|'confirmed' */, score, evidence, updatedAt, reviewedBy }
 store.integrity.set(userId, fields) ; listFlagged(minLevel, limit) ; populationStats(ratingBucket) / updatePopulation(...)
 store.reports.create({ reporterId, reportedId, gameId, category, comment, weight, at }) -> id
@@ -955,7 +956,8 @@ weighted by the reporter's credibility, never the level itself.
 is bounded and prioritized instead of growing without end. Every job has a priority and the engine
 takes the highest first, then the oldest:
 
-1. `manual`: a moderator asked for the (re-)analysis of a game (`store.analysis.enqueue`);
+1. `manual`: a moderator asked for the (re-)analysis of a game (`store.analysis.enqueue`, through
+   `scacelith-admin analysis queue <gameId>`, which leaves a game being or already analysed alone);
 2. `report`: a credible player reported the game (category `cheating` or `other`, stored weight
    at least 0.5); the report queues it even if the policy had left it out, and re-queues it if
    its analysis had failed. A report of lower weight (a new account, or one beyond the daily cap
