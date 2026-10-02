@@ -135,6 +135,38 @@ describe('IpGuard: requests in progress', () => {
         assert.equal(guard.inflightTotal, 0);
         assert.equal(admitRequest(guard, { socket, clientIp: '203.0.113.9' }, fakeRes()), true);
     });
+
+    it('admitRequest: a pipelined response its socket never reached is released when the socket closes (at once if ended, else at its end)', () => {
+        const { guard } = guardOf({ IP_MAX_INFLIGHT: '4' });
+        const socket = new FakeSocket('203.0.113.9');
+        const fakeRes = () => Object.assign(new EventEmitter(), {
+            headersSent: false, writableEnded: false,
+            writeHead() { this.headersSent = true; },
+            end() { this.writableEnded = true; },
+        });
+        // Node gives the socket to the first answer only; the others wait their turn and, when the
+        // socket closes first, never emit 'close'.
+        const held = fakeRes(), done = fakeRes(), working = fakeRes();
+        for (const res of [held, done, working]) assert.equal(admitRequest(guard, { socket, clientIp: '203.0.113.9' }, res), true);
+        assert.equal(guard.inflightTotal, 3);
+        done.end();                                           // answered, still queued behind `held`
+        socket.on('close', () => held.emit('close'));         // Node closes the answer that held the socket
+        socket.emit('close');
+        assert.equal(guard.inflightTotal, 1, '`held` closed with the socket, `done` released with it');
+        working.end();
+        assert.equal(guard.inflightTotal, 0, '`working` released when its handler ended it');
+        working.end();
+        held.emit('close');
+        assert.equal(guard.inflightTotal, 0, 'released once each');
+        assert.deepEqual([...guard.inflight], []);
+        // A response that closes normally leaves its socket's list.
+        const socket2 = new FakeSocket('203.0.113.9');
+        const r = fakeRes();
+        admitRequest(guard, { socket: socket2, clientIp: '203.0.113.9' }, r);
+        r.emit('close');
+        socket2.emit('close');
+        assert.equal(guard.inflightTotal, 0);
+    });
 });
 
 describe('IpGuard: connections', () => {

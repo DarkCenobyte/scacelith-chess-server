@@ -1245,6 +1245,9 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
     burst half a minute) and, for IPv6, of `HTTP_RATE_PER_PREFIX` (4 times as much per /48; a
     refusal there gives the /64 token back), then one of the worker's `IP_MAX_INFLIGHT` (32)
     places of requests in progress, given back when the response closes, finished or aborted.
+    A pipelined response still waiting for its turn on the connection when the connection
+    closes (Node never gives it the socket, and it never closes) is given back then, or when its
+    handler ends it if the handler is still at work.
     Beyond: 429 `{ "error": "rate_limited", "message": "Too many requests; try again later.",
     "retryAfter": s }` with `Retry-After`, on an upgrade `HTTP/1.1 429` with the same JSON.
   * Connections (TLS gate stage 0, 5.8): `IP_CONN_RATE` new connections per second (burst 4 s)

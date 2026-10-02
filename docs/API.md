@@ -1167,8 +1167,11 @@ A summary has these fields:
 - `white` / `black`:
   - `name`: the name in the game record (`deleted#<id>` for a deleted account);
   - `rating`: the rating at the start (`null` when unknown);
-  - `ratingAfter` and `ratingDiff`: `null` when the game changed no rating (casual, custom,
-    aborted).
+  - `ratingAfter` and `ratingDiff`: the rating after the game and the change. A rated game
+    always has them, also when the rating rules leave a rating where it was (FIDE's zero score,
+    an unrated opponent, the first games of an unrated player; [DESIGN.md](DESIGN.md) section
+    6.6): then `ratingDiff` is `0`. They are `null` only for a game that does not count for the
+    ratings (casual, custom, aborted).
 - `timeControl`: in seconds (`180+2`). `baseMs` and `incMs` give it in milliseconds.
 - `status`, `reason`, `result` and `termination`: see [Game codes](#game-codes).
 - `plies`: the number of half-moves.
@@ -1277,7 +1280,9 @@ Tags, in this order:
 - `Round`, `White`, `Black`, `Result`. The result is `*` for an aborted game.
 - `UTCDate` and `UTCTime`: the start.
 - `WhiteElo` and `BlackElo`: the ratings at the start, or `-`.
-- `WhiteRatingDiff` and `BlackRatingDiff`: only when the game changed the ratings.
+- `WhiteRatingDiff` and `BlackRatingDiff`: the changes (`"+10"`, `"-10"`), in every rated game,
+  `"+0"` when the rating rules leave the rating where it was (as `ratingDiff` 0 in section 10).
+  A casual, custom or aborted game has neither.
 - `TimeControl`: in seconds.
 - `Termination`, with a PGN standard value:
   - `normal`;

@@ -78,8 +78,10 @@
 // rate_limited with the time left (plus Connection: close, then the socket ends, except behind a
 // proxy, whose connection is shared by many clients); then one token of HTTP_RATE_PER_IP and
 // HTTP_RATE_PER_PREFIX, and a slot of IP_MAX_INFLIGHT requests in progress, given back when the
-// response closes (finished or aborted). Beyond them: 429 rate_limited with Retry-After. The
-// WebSocket upgrade takes the same token in WsServer.handleUpgrade, before its IPC to the primary.
+// response closes (finished or aborted); a pipelined response still queued when its socket closes
+// gives it back then, or when its handler ends it (onCountedSocketClose). Beyond them: 429
+// rate_limited with Retry-After. The WebSocket upgrade takes the same token in
+// WsServer.handleUpgrade, before its IPC to the primary.
 // In proxy mode the address is the X-Forwarded-For client and only these per-request checks exist:
 // the connection limits are the proxy's job.
 //
@@ -143,6 +145,8 @@ const kWait = Symbol('scacelith.tlsGateWait');   // state of a socket waiting fo
 const kAdmitted = Symbol('scacelith.ipguardAdmitted');   // request already through admitRequest
 const kInflight = Symbol('scacelith.ipguardInflight');   // keys of a response counted in progress
 const kGuard = Symbol('scacelith.ipguard');
+const kCounted = Symbol('scacelith.ipguardCounted');     // socket: its responses counted in progress (a Set)
+const kCountedIn = Symbol('scacelith.ipguardCountedIn'); // response: that Set of its socket
 const kSendTimer = Symbol('scacelith.sendDeadline');
 
 // Default handshake slots per address group (MAX_PENDING_HANDSHAKES_PER_IP empty): config.js computes
@@ -488,11 +492,57 @@ export function sendJson(res, status, body, native, headers = null) {
     res.end(json);
 }
 
-function onAdmittedClose() {
-    const k = this[kInflight];
+// Gives back the slot of a response counted by admitRequest; once, whatever calls it first.
+function releaseSlot(res) {
+    const k = res[kInflight];
     if (k === undefined || k === null) return;
-    this[kInflight] = null;
-    this[kGuard].leave(k);
+    res[kInflight] = null;
+    const counted = res[kCountedIn];
+    if (counted) { counted.delete(res); res[kCountedIn] = null; }
+    res[kGuard].leave(k);
+}
+
+function onAdmittedClose() { releaseSlot(this); }
+
+// Pipelined requests: Node gives the socket to one response at a time and queues the others
+// (parsed and handed to the handler at once, answered in turn). A queued response whose socket
+// closes before its turn never gets it and never emits 'close', so its slot would stay counted
+// until the worker restarts (a few such connections, or one request without Host followed by
+// pipelined ones, would lock the address out of the HTTP API). When the socket closes, each
+// response still counted is released: at once when its handler has already ended it, else when
+// the handler ends (or destroys) it, so that the slot keeps covering the work in progress (a
+// password hash in the queue). Not on the request's 'close', which comes as soon as its body is
+// read. The response that held the socket closes with it (onAdmittedClose); releaseSlot runs once.
+function onCountedSocketClose() {
+    const counted = this[kCounted];
+    this[kCounted] = null;
+    for (const res of counted) {
+        res[kCountedIn] = null;
+        if (res.writableEnded || res.destroyed) releaseSlot(res);
+        else releaseOnEnd(res);
+    }
+    counted.clear();
+}
+
+function releaseOnEnd(res) {
+    const { end, destroy } = res;
+    res.end = function endAndRelease(...args) { releaseSlot(res); return end.apply(this, args); };
+    if (typeof destroy === 'function') {
+        res.destroy = function destroyAndRelease(...args) { releaseSlot(res); return destroy.apply(this, args); };
+    }
+}
+
+function countOnSocket(socket, res) {
+    if (!socket || typeof socket.once !== 'function') return;
+    let counted = socket[kCounted];
+    if (counted === null) { releaseOnEnd(res); return; }       // its socket already closed
+    if (counted === undefined) {
+        counted = new Set();
+        socket[kCounted] = counted;
+        socket.once('close', onCountedSocketClose);
+    }
+    counted.add(res);
+    res[kCountedIn] = counted;
 }
 
 /**
@@ -519,6 +569,7 @@ export function admitRequest(guard, req, res, { native = false, closeOnBlock = t
             res[kGuard] = guard;
             res[kInflight] = keys;
             res.once('close', onAdmittedClose);
+            countOnSocket(req.socket, res);
             return true;
         }
         refuseRequest(res, 1000, native, false);

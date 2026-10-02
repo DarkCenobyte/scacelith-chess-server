@@ -22,7 +22,8 @@
 // tags in this order: Event (as the JSON's pgn.Event), Site (SERVER_PUBLIC_HOST), Date (UTC start),
 // Round "-", White, Black, Result ("*" for an aborted game), UTCDate, UTCTime (start, HH:MM:SS),
 // WhiteElo / BlackElo (ratings at the start, "-" when unknown), WhiteRatingDiff / BlackRatingDiff
-// ("+8", "-8", "+0"; only when the game changed the ratings), TimeControl (seconds, "180+2"),
+// ("+8", "-8", "+0"; in every rated game, "+0" when the rules left a rating unchanged; never in
+// a casual, custom or aborted game), TimeControl (seconds, "180+2"),
 // Termination (PGN standard values: normal, time forfeit (a flag fall, also drawn), abandoned,
 // rules infraction, unterminated (aborted)), PlyCount, ScacelithGameId (the decimal id). Each move
 // carries {[%clk h:mm:ss.f] [%emt h:mm:ss.f]}: the mover's clock after the move and the time
