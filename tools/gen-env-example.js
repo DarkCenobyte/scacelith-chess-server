@@ -81,7 +81,7 @@ function typeText(k) {
             if (k.max !== undefined) return `number (<= ${k.max})`;
             return 'number';
         }
-        case 'string': return k.max ? `text (at most ${k.max} characters)` : 'text';
+        case 'string': return k.maxBytes ? `text (at most ${k.maxBytes} bytes in UTF-8)` : k.max ? `text (at most ${k.max} characters)` : 'text';
         case 'path': return 'path (relative to the working directory)';
         default: return k.type;
     }

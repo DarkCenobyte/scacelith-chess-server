@@ -31,7 +31,7 @@ Sections:
 
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
-| `SERVER_NAME` | text (at most 64 characters) | `Scacelith Community Server` | Name shown to players (menus, scoresheet "Event"). |
+| `SERVER_NAME` | text (at most 64 bytes in UTF-8) | `Scacelith Community Server` | Name shown to players (menus, scoresheet "Event"). |
 | `SERVER_PUBLIC_HOST` | text | `localhost` | Public DNS name of the server, used in e-mail links and the Google SSO redirect URI. |
 | `SERVER_MOTD` | text (at most 200 characters) | (empty) | Short message of the day shown in the online menu. |
 | `BIND_ADDRESS` | text | `0.0.0.0` | Address the API and WebSocket listeners bind to. |
