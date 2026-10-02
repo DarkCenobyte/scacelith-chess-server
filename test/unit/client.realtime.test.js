@@ -306,6 +306,19 @@ describe('WsClient', () => {
         await srv.close();
     });
 
+    test('close() during the handshake resolves once the socket is closed', async () => {
+        const silent = await startWsServer({ handshake: () => ({ skip: true }) });
+        const ws = new WsClient({ port: silent.port, insecure: true });
+        const connecting = ws.connect();
+        connecting.catch(() => {});
+        await new Promise((r) => setTimeout(r, 50));
+        await ws.close();
+        assert.equal(ws.readyState, CLOSED);
+        assert.equal(ws._ls?.close?.length ?? 0, 0, 'no close listener left');
+        await assert.rejects(connecting, /closed by the client/);
+        await silent.close();
+    });
+
     test('connection lost without a close frame: 1006', async () => {
         const { srv, ws, peer } = await openPair();
         const closed = closeEvent(ws);
@@ -505,6 +518,19 @@ describe('ScacelithClient', () => {
         // A Hello that cannot be encoded fails before connecting.
         await assert.rejects(new ScacelithClient().connect({ port: fake.port, insecure: true, token: '' }), /invalid Hello \(token bad length\)/);
         for (const f of [fake, fake2, fake3, stalled, refused]) await f.close();
+    });
+
+    test('close() while connecting resolves, and connect() rejects', async () => {
+        const silent = await startWsServer({ handshake: () => ({ skip: true }) });
+        const c = new ScacelithClient();
+        const connecting = c.connect({ port: silent.port, insecure: true, token: TOKEN });
+        connecting.catch(() => {});
+        await new Promise((r) => setTimeout(r, 50));
+        assert.equal(c.state, 'connecting');
+        await c.close();
+        assert.equal(c.state, 'closed');
+        await assert.rejects(connecting, /closed by the client/);
+        await silent.close();
     });
 
     test('server Ping is answered with Pong at once; seq numbers every client message', async () => {

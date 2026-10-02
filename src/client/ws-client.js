@@ -419,13 +419,18 @@ export class WsClient {
      */
     close(code = 1000, reason = '') {
         if (!isValidCloseCode(code)) throw new RangeError(`websocket: close code ${code}`);
+        if (this.readyState === CONNECTING) {
+            // A connection that never opened emits no 'close': wait for the socket's own (after
+            // _onSocketClose, its first listener).
+            const s = this.socket;
+            this._abortHandshake(handshakeError('closed by the client'));
+            return s ? new Promise((resolve) => s.once('close', () => resolve())) : Promise.resolve();
+        }
         const done = new Promise((resolve) => {
             if (this.readyState === CLOSED) { resolve(); return; }
             this.once('close', () => resolve());
         });
-        if (this.readyState === CONNECTING) {
-            this._abortHandshake(handshakeError('closed by the client'));
-        } else if (this.readyState === OPEN) {
+        if (this.readyState === OPEN) {
             this._closeSent = true;
             this.readyState = CLOSING;
             this.socket.write(buildFrame(8, closePayload(code, reason)));
