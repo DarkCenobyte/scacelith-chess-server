@@ -413,24 +413,67 @@ describe('listeners: protection per address and slow clients', () => {
     });
 
     it('slowloris: a header line every 300 ms is cut within headersTimeout + 1 s, and counted', async () => {
-        const { port, guard, registry, close } = await setup({}, { listeners: { headersTimeoutMs: 1000 } });
+        let handled = 0;
+        const { port, guard, registry, lst, close } = await setup({}, {
+            apiHandler: (req, res) => { handled++; res.writeHead(404); res.end('{}'); },
+            listeners: { headersTimeoutMs: 1000 },
+        });
+        const server = lst.servers[0].server;
+        const connections = () => new Promise((resolve) => server.getConnections((e, n) => resolve(e ? -1 : n)));
+        let s = null, timer = null;
         try {
-            const s = net.connect(port, '127.0.0.1');
+            // A client that keeps its side open and goes on sending after the 408 and the server's
+            // FIN: the server closes the socket itself, so the server's side is watched.
+            s = net.connect({ port, host: '127.0.0.1', allowHalfOpen: true });
             s.on('error', () => {});
-            s.write('GET /healthz HTTP/1.1\r\nHost: x\r\n');
+            s.write('GET /api/v1/slow HTTP/1.1\r\nHost: x\r\n');
             const t0 = Date.now();
-            const timer = setInterval(() => { if (!s.destroyed) s.write(`X-Slow-${Date.now()}: 1\r\n`); }, 300);
+            timer = setInterval(() => { if (!s.destroyed) s.write(`X-Slow-${Date.now()}: 1\r\n`); }, 300);
             let answer = '';
             s.on('data', (d) => { answer += d; });
-            const closed = await closedWithin(s, 4000);
-            clearInterval(timer);
+            while ((await connections()) !== 1) await new Promise((r) => setTimeout(r, 5));
+            while ((await connections()) !== 0) {
+                await new Promise((r) => setTimeout(r, 20));
+                assert.ok(Date.now() - t0 < 4000, 'closed by the server');
+            }
             const ms = Date.now() - t0;
-            assert.ok(closed && ms >= 900 && ms < 2600, `closed after ${ms} ms`);
+            clearInterval(timer);
+            assert.ok(ms >= 900 && ms < 2600, `closed by the server after ${ms} ms`);
+            if (!s.destroyed) s.write('\r\n');                  // completes the request, too late
+            await new Promise((r) => setTimeout(r, 200));
+            assert.equal(handled, 0, 'the request never reaches the API handler');
             assert.match(answer, /^HTTP\/1\.1 408/);
             const m = registry.metrics.get('scacelith_http_client_errors_total');
             assert.equal([...m.children.values()].find((c) => c.labelValues[0] === 'timeout').value, 1);
             assert.deepEqual(guard.flushReports(), [['127.0.0.1', null, 1]], 'counted toward a block of the address');
-        } finally { close(); }
+        } finally { clearInterval(timer); s?.destroy(); close(); }
+    });
+
+    it('a client that ends its side in the middle of a request is not counted; a malformed request followed by more bytes counts once', async () => {
+        const { port, guard, registry, close } = await setup();
+        const errors = (reason) => {
+            const m = registry.metrics.get('scacelith_http_client_errors_total');
+            return [...m.children.values()].find((c) => c.labelValues[0] === reason)?.value ?? 0;
+        };
+        let s = null, m = null;
+        try {
+            s = net.connect(port, '127.0.0.1');
+            s.on('error', () => {});
+            s.end('GET /api/v1/x HTTP/1.1\r\nHost: x\r\n');     // FIN before the end of the head
+            assert.ok(await closedWithin(s, 2000));
+            assert.equal(errors('malformed'), 0, 'an aborted request is no malformed request');
+            assert.deepEqual(guard.flushReports(), []);
+            m = net.connect({ port, host: '127.0.0.1', allowHalfOpen: true });
+            m.on('error', () => {});
+            m.write('BLAH\r\n\r\n');
+            for (let i = 0; i < 3; i++) {
+                await new Promise((r) => setTimeout(r, 50));
+                if (!m.destroyed) m.write('more\r\n');
+            }
+            await new Promise((r) => setTimeout(r, 100));
+            assert.equal(errors('malformed'), 1);
+            assert.deepEqual(guard.flushReports(), [['127.0.0.1', null, 1]]);
+        } finally { s?.destroy(); m?.destroy(); close(); }
     });
 
     it('a client that stops reading a large answer is cut by the inactivity timeout; a slow reader by the send deadline', async () => {
