@@ -847,6 +847,10 @@ export class Listeners {
             return false;
         }
         for (const s of this._tlsServers) s.setSecureContext(opts);
+        // setSecureContext installs random ticket keys: put the day's derived ones back, or the
+        // other workers could not resume this one's sessions until the next day.
+        this._ticketDay = -1;
+        this._rotateTicketKeys();
         this.log?.info?.('certificate reloaded');
         return true;
     }

@@ -207,9 +207,20 @@ describe('listeners (native TLS)', { skip: !hasOpenssl && 'openssl not available
         fs.copyFileSync(b.cert, config.tlsCertFile);
         fs.copyFileSync(b.key, config.tlsKeyFile);
         assert.equal(lst.reloadCertificates(), true);
-        const s = await tlsConnect(apiPort);
+        const s = await tlsConnect(apiPort, { maxVersion: 'TLSv1.2' });
         assert.match(s.getPeerCertificate().subject.CN, /second\.test/);
+        const session = s.getSession();
         s.destroy();
+        // The new contexts keep the day's derived ticket keys (setSecureContext alone installs
+        // random ones): a session still resumes on the other port and on the other worker.
+        const keys = deriveTicketKeys(config.serverSecret, Math.floor(Date.now() / 86400000));
+        for (const server of lst._tlsServers) assert.deepEqual(server.getTicketKeys(), keys);
+        const r1 = await tlsConnect(wsPort, { maxVersion: 'TLSv1.2', session });
+        assert.equal(r1.isSessionReused(), true, 'resumed on the WSS port');
+        r1.destroy();
+        const r2 = await tlsConnect(lst2.addresses().find((x) => x.kind === 'ws').port, { maxVersion: 'TLSv1.2', session });
+        assert.equal(r2.isSessionReused(), true, 'resumed by another worker');
+        r2.destroy();
         fs.copyFileSync(a.key, config.tlsKeyFile);               // key no longer matches the certificate
         assert.equal(lst.reloadCertificates(), false);
         const s2 = await tlsConnect(apiPort);
