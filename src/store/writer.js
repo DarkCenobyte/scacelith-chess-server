@@ -14,13 +14,14 @@
 //   const r = await writer.sanction({ userId, gameId, kind, at });   // applyCertainSanction
 //   await writer.close();
 //
-// The store's commit metrics (scacelith_store_commit_batch_ms, scacelith_store_games_committed_total,
-// scacelith_store_busy_total, scacelith_anticheat_analysis_skipped_total) are counted in the
-// shard's own registry from the thread's answers.
+// The store's commit metrics (store/commit-metrics.js: scacelith_store_commit_batch_ms,
+// scacelith_store_games_committed_total, scacelith_store_busy_total,
+// scacelith_anticheat_analysis_skipped_total) are counted in the shard's own registry from the
+// thread's answers.
 
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
-import { metrics } from '../metrics.js';
+import { countCommit, mBusy } from './commit-metrics.js';
 
 if (!isMainThread && parentPort && workerData && workerData.scacelithStoreWriter) {
     const { configureLogging, logger } = await import('../log.js');
@@ -64,12 +65,6 @@ if (!isMainThread && parentPort && workerData && workerData.scacelithStoreWriter
  *            sanction(s: object): Promise<object>, close(): Promise<void> }}
  */
 export function startStoreWriter({ config, shard = 0, logging = true, log = null }) {
-    const mBatchMs = metrics.histogram('scacelith_store_commit_batch_ms', 'Duration of one finished-games commit transaction',
-        [1, 2, 5, 10, 25, 50, 100, 250, 1000]);
-    const mGames = metrics.counter('scacelith_store_games_committed_total', 'Finished games written to the database');
-    const mBusy = metrics.counter('scacelith_store_busy_total', 'Store operations that gave up waiting for the database lock');
-    const mSkipped = metrics.counter('scacelith_anticheat_analysis_skipped_total',
-        'Finished rated games not queued for engine analysis (sample: ANALYSIS_SAMPLE_RATE, backlog: ANALYSIS_QUEUE_MAX reached, player: 20 flagged games of a player already waiting, displaced: a waiting flagged game without an anomaly of its own gave its place to a game with one)', ['reason']);
     const waiting = new Map();
     let next = 1, w = null, closing = null;
 
@@ -97,14 +92,7 @@ export function startStoreWriter({ config, shard = 0, logging = true, log = null
                 return;
             }
             if (!p.commit) { p.resolve(result); return; }
-            mBatchMs.observe(ms);
-            mGames.inc(Array.isArray(result) ? result.reduce((n, x) => n + (x && x.duplicate ? 0 : 1), 0) : 0);
-            if (Array.isArray(result)) {
-                for (const x of result) {
-                    if (x && x.analysisSkipped) mSkipped.labels(x.analysisSkipped).inc();
-                    if (x && x.analysisDisplaced) mSkipped.labels('displaced').inc(x.analysisDisplaced.length);
-                }
-            }
+            countCommit(result, ms);
             p.resolve(result);
         });
         t.on('error', fail);

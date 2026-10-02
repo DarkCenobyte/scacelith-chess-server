@@ -155,8 +155,8 @@ import { createRequire } from 'node:module';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { logger } from '../log.js';
-import { metrics } from '../metrics.js';
 import { enums } from '../protocol/schema.js';
+import { SIGNAL_JOBS_PER_PLAYER, countCommit, mBusy } from './commit-metrics.js';
 
 const { DatabaseSync } = loadSqlite();
 // For the other connections of a process that uses the store (bin/admin.js backup): importing
@@ -206,12 +206,8 @@ const REPORT_SIGNAL_MIN_WEIGHT = 0.5;
 // the ordinary games (the random sample that feeds the population statistics) get at least that
 // share of the engine time however many prioritized games arrive.
 const ORDINARY_SHARE = 4;
-// Waiting 'signal' jobs per player: a flagged player's further games are not queued while this
-// many of their games wait (the scoring reads their 30 latest analysed games, so these renew most
-// of that window); one prolific flagged player cannot grow the signal tier without bound. A game
-// with an anomaly of its own replaces a waiting one without (queueAnalysis), so games flagged only
-// through the player cannot keep one with evidence out.
-const SIGNAL_JOBS_PER_PLAYER = 20;
+// SIGNAL_JOBS_PER_PLAYER (commit-metrics.js, whose skipped-analysis help text names it): waiting
+// 'signal' jobs per player.
 // analysis.backlog() counts at most this many jobs per tier (one index range scan each).
 const BACKLOG_COUNT_MAX = 100000;
 const INTEGRITY_LEVELS = ['none', 'suspected', 'high_confidence', 'confirmed'];
@@ -254,22 +250,6 @@ const RESULT_STATUS = Object.freeze({
     loss: [GameStatus.BlackWins, GameStatus.WhiteWins],
     draw: [GameStatus.Draw, GameStatus.Draw],
 });
-
-const mBatchMs = metrics.histogram('scacelith_store_commit_batch_ms', 'Duration of one finished-games commit transaction',
-    [1, 2, 5, 10, 25, 50, 100, 250, 1000]);
-const mGames = metrics.counter('scacelith_store_games_committed_total', 'Finished games written to the database');
-const mBusy = metrics.counter('scacelith_store_busy_total', 'Store operations that gave up waiting for the database lock');
-// The same help text is registered by store/writer.js (the shard counts its writer thread's answers).
-const mAnalysisSkipped = metrics.counter('scacelith_anticheat_analysis_skipped_total',
-    'Finished rated games not queued for engine analysis (sample: ANALYSIS_SAMPLE_RATE, backlog: ANALYSIS_QUEUE_MAX reached, player: 20 flagged games of a player already waiting, displaced: a waiting flagged game without an anomaly of its own gave its place to a game with one)', ['reason']);
-
-// Counts the games of finishBatch results left out of the analysis queue, or taken out of it.
-function countSkipped(counter, results) {
-    for (const x of results) {
-        if (x.analysisSkipped) counter.labels(x.analysisSkipped).inc();
-        if (x.analysisDisplaced) counter.labels('displaced').inc(x.analysisDisplaced.length);
-    }
-}
 
 /** Priority of an analysis job: the highest waiting priority is analysed first (DESIGN.md 6.5). */
 export const AnalysisPriority = Object.freeze({ ordinary: 0, signal: 1, report: 2, manual: 3 });
@@ -1014,9 +994,7 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                 log.security('rating.refund', { cheaterId: f.cheaterId, source: 'auto', sanctionId: f.sanctionId, gameId: f.gameId,
                     refunds: 1, victims: 1, points: f.points });
             }
-            mBatchMs.observe(performance.now() - t0);
-            mGames.inc(out.reduce((n, x) => n + (x.duplicate ? 0 : 1), 0));
-            countSkipped(mAnalysisSkipped, out);
+            countCommit(out, performance.now() - t0);
             return out;
         },
         byId(id) {
