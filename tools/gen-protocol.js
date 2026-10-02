@@ -843,7 +843,7 @@ export function generateCodec(s = defaultSchema) {
 
 // ---- documentation -------------------------------------------------------------------------------
 
-function typeLabel(t, opts = {}) {
+function typeLabel(t) {
     let s;
     switch (t.kind) {
         case 'enum': s = `enum [${t.name}](#${t.name.toLowerCase()}) (u8)`; break;
