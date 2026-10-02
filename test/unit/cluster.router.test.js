@@ -37,6 +37,7 @@ class FakeHost {
     attach(gameId, userId, ep) { this.calls.push(['attach', gameId, userId, ep]); }
     detach(gameId, userId, ep) { this.calls.push(['detach', gameId, userId, ep]); }
     onClientMessage(gameId, userId, msg, ep) { this.calls.push(['msg', gameId, userId, msg, ep]); }
+    declineRematch(gameId, userId) { this.calls.push(['decline', gameId, userId]); }
     onRtt(gameId, userId, ms) { this.calls.push(['rtt', gameId, userId, ms]); }
     relayGesture(gameId, userId, frame) { this.calls.push(['gesture', gameId, userId, Buffer.from(frame)]); return true; }
     stallDuring() { return this.stalled; }
@@ -339,8 +340,7 @@ describe('router: ready connections', () => {
         assert.equal((await c.until('Ack')).ref, 2);
         const j = env.seen.find((x) => x.type === 'mm.join').p;
         assert.deepEqual([j.userId, j.username, j.category, j.rated, j.rating, j.provisional, j.shard, j.connId], [1, 'alice', '5+0', true, 1777, false, 0, env.conn().id]);
-        const decline = env.host.of('msg')[0];
-        assert.deepEqual([decline[1], decline[2], decline[3].type, decline[3].accept, decline[4]], [lastGame, 1, MSG.Rematch, false, null]);
+        assert.deepEqual(env.host.of('decline'), [['decline', lastGame, 1]]);
         c.send('QueueJoin', { category: '3+2', rated: true });
         assert.equal((await c.until('Ack')).ref, 3);
         const j2 = env.seen.filter((x) => x.type === 'mm.join')[1].p;
@@ -439,7 +439,7 @@ describe('router: primary and bus', () => {
         env.router.onBus(BusKind.Control, 2, 55, 7, gameId, Buffer.from([BusOp.Forfeit]));
         assert.deepEqual(env.host.of('forfeit'), [['forfeit', 7]]);
         env.router.onBus(BusKind.Control, 2, 55, 7, gameId, Buffer.from([BusOp.RematchDecline]));
-        assert.equal(env.host.of('msg')[1][3].accept, false);
+        assert.deepEqual(env.host.of('decline'), [['decline', gameId, 7]]);
         assert.deepEqual(env.router.forgetShard(2), { ok: true, detached: 1 });
         assert.equal(env.router.remote.size, 0);
     });

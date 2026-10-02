@@ -406,6 +406,30 @@ test('rematch agreement is sent to the primary with colours swapped', async () =
     assert.deepEqual([last(ew).type, last(ew).code], [MSG.Error, EC.RematchUnavailable]);
 });
 
+test('declineRematch (a queue join) closes the rematch window and counts no refusal, whatever the game\'s state', () => {
+    const { host, clock, registry } = mkHost();
+    const id = newGame(host, 1, 2);
+    const ew = new FakeEndpoint(1), eb = new FakeEndpoint(2);
+    host.attach(id, 1, ew); host.attach(id, 2, eb);
+    play(host, id, clock); play(host, id, clock);
+    host.declineRematch(id, 1);                                  // still running
+    assert.equal(host.room(id).isOver, false);
+    host.onClientMessage(id, 1, { type: MSG.Resign, seq: 3, game: id }, ew);
+    ew.clear(); eb.clear();
+    host.declineRematch(id, 1);
+    assert.deepEqual(frames(eb).map((m) => [m.type, m.kind]), [[MSG.GameEvent, EV.RematchDeclined]]);
+    assert.equal(ew.sent.length, 1, 'only the broadcast');
+    assert.equal(host.room(id).rematchOpen, false);
+    host.declineRematch(id, 2);                                  // window closed
+    host.pollCommits(clock.t + 1000);
+    host.runTimers(clock.t + REMATCH_WINDOW_MS + 30);
+    assert.equal(host.room(id), null);
+    host.declineRematch(id, 1);                                  // game gone
+    assert.equal(metricValue(registry, 'scacelith_game_rejects_total'), undefined);
+    host.onClientMessage(id, 1, { type: MSG.Rematch, seq: 4, game: id, accept: false }, ew);
+    assert.equal(metricValue(registry, 'scacelith_game_rejects_total', 'NotInGame'), 1, 'a client\'s request still counts');
+});
+
 test('asynchronous store (writer thread): one bad record does not block the batch either', async () => {
     const { host, clock, store, journal } = mkHost();
     store.async = true;

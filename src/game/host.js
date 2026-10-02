@@ -56,8 +56,8 @@
 //   * When finishBatch throws for one record (err.gameId set), the batch is committed one game at a
 //     time so that only the bad game stays pending (and in the journal).
 //   * extra methods: onRtt(gameId, userId, rttMs), forfeitUser(userId) (the active game of a
-//     sanctioned user on this shard ends Forfeit), activeGameOf(userId), room(gameId),
-//     runTimers(now), pollCommits(now).
+//     sanctioned user on this shard ends Forfeit), declineRematch(gameId, userId) (the player
+//     joined a queue), activeGameOf(userId), room(gameId), runTimers(now), pollCommits(now).
 //   * onClientMessage for a game whose sender has no endpoint attached binds that endpoint
 //     (a player coming back after a restart may only send Resync); a message for an unknown
 //     game gets Error{NotInGame} without an anomaly (it may be an old, already dropped game);
@@ -404,6 +404,23 @@ export class GameHost {
             if (out.moved) { this.m.moves.inc(); this.counts.moves++; }
             this.m.moveUs.observe((performance.now() - t0) * 1000);
         }
+    }
+
+    /**
+     * The player joined a queue: its finished game's rematch window closes, as with a
+     * Rematch{accept: false} (DESIGN 6.3; the router, on every QueueJoin). This is no client
+     * request: nothing is sent back, and a game already gone or a window already closed counts no
+     * refusal.
+     */
+    declineRematch(gameId, userId) {
+        const entry = this.rooms.get(gameId);
+        const color = entry ? entry.room.colorOf(userId) : -1;
+        if (color < 0) return;
+        const t = this.now(), from = this.stallStart(t);
+        const te = t - this.stallCredit(t, from);
+        const out = entry.room.onRematch(color, false, t, 0, te, from);
+        out.rejected = 0;
+        this._process(entry, out, null, color, 0, te, from);
     }
 
     /**
