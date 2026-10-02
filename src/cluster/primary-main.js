@@ -38,6 +38,21 @@ export function ensureServerId(store) {
     return String(id);
 }
 
+/**
+ * Graceful stop of the primary: the pairing stops and the shards are told to drain at once
+ * (primary.stop does both before it waits for them), while the retention purge and the analysis
+ * process stop; the store is closed once all of them are done.
+ */
+export async function stopPrimary({ config, log, primary, retention, analysis, store }) {
+    const quietly = async (what, stop) => { try { await stop(); } catch (e) { log.error(`${what} stop failed`, { err: e }); } };
+    await Promise.all([
+        primary.stop(config.shutdownGraceMs),
+        quietly('retention', () => retention.stop()),
+        quietly('analysis', () => analysis?.stop()),
+    ]);
+    try { store.close(); } catch (e) { log.error('store close failed', { err: e }); }
+}
+
 /** Starts the server (primary side). */
 export async function main() {
     const config = loadConfig();
@@ -105,10 +120,7 @@ export async function main() {
         }
         stopping = true;
         log.info('shutting down', { signal, graceMs: config.shutdownGraceMs });
-        try { await retention.stop(); } catch (e) { log.error('retention stop failed', { err: e }); }
-        try { await analysis?.stop(); } catch (e) { log.error('analysis stop failed', { err: e }); }
-        await primary.stop(config.shutdownGraceMs);
-        try { store.close(); } catch (e) { log.error('store close failed', { err: e }); }
+        await stopPrimary({ config, log, primary, retention, analysis, store });
         log.info('stopped');
         process.exit(0);
     };

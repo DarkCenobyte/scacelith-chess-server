@@ -6,6 +6,7 @@ import { Ipc, channelPair } from '../../src/cluster/ipc.js';
 import { OnceStore, SlidingWindowLimiter } from '../../src/cluster/limits.js';
 import { Presence } from '../../src/cluster/presence.js';
 import { startPrimary } from '../../src/cluster/primary.js';
+import { stopPrimary } from '../../src/cluster/primary-main.js';
 import { testConfig } from '../../src/config.js';
 import { Challenges } from '../../src/match/challenges.js';
 import { Registry } from '../../src/metrics.js';
@@ -507,5 +508,23 @@ describe('primary assembly', () => {
         assert.equal(limiter.take(k).allowed, true);
         primary.controlPlane.sweep();
         assert.equal(limiter.take(k).allowed, true);
+    });
+
+    it('on SIGTERM, the shards are told to drain before the analysis process and the purge have stopped', async () => {
+        const events = [];
+        const later = (ms, what, fail) => new Promise((resolve, reject) => setTimeout(() => {
+            events.push(what);
+            if (fail) reject(new Error(what)); else resolve();
+        }, ms));
+        const errors = [];
+        await stopPrimary({
+            config: cfg, log: { error: (msg) => errors.push(msg) },
+            primary: { stop: (graceMs) => { events.push(`drain ${graceMs}`); return later(20, 'shards gone'); } },
+            retention: { stop: () => { events.push('retention.stop'); return later(10, 'retention stopped'); } },
+            analysis: { stop: () => { events.push('analysis.stop'); return later(100, 'analysis stopped', true); } },
+            store: { close: () => events.push('store.close') },
+        });
+        assert.deepEqual(events, [`drain ${cfg.shutdownGraceMs}`, 'retention.stop', 'analysis.stop', 'retention stopped', 'shards gone', 'analysis stopped', 'store.close']);
+        assert.deepEqual(errors, ['analysis stop failed']);
     });
 });
