@@ -5,9 +5,14 @@
 // back of the wall clock would otherwise hold every key's window open and refuse its users until
 // the clock caught up (the values exchanged with the shards are durations). The single-use keys
 // stay on the wall clock, which their users' expiries (proof-of-work challenges) are written in.
+//
+// TLS session-ticket keys (native mode): the primary draws them at its start, moves them forward
+// every UTC day like the shards do (checked every hour) and gives their current state to each shard
+// that starts ('tls.ticketKeys'; net/ticket-keys.js).
 
 import { now as clockNow } from '../game/clock.js';
 import { metrics as defaultRegistry } from '../metrics.js';
+import { TicketKeys } from '../net/ticket-keys.js';
 import { ControlPlane } from './control-plane.js';
 import { OnceStore, SlidingWindowLimiter } from './limits.js';
 import { createMetricsServer } from './metrics-server.js';
@@ -37,12 +42,16 @@ export async function startPrimary({ config, log, fork, matchmaker, challenges, 
     const shardNumbers = shards || Array.from({ length: config.workers }, (_, i) => config.shardBase + i);
     const proc = startProcessMetrics({ registry });
     const presence = new Presence({ maxConnections: config.maxConnections, maxPerIp: config.maxConnectionsPerIp });
+    const ticketKeys = config.tlsMode === 'native' ? TicketKeys.random() : null;
+    const ticketTimer = ticketKeys ? setInterval(() => ticketKeys.advance(), 3600000) : null;
+    ticketTimer?.unref();
     let cp = null;
     let stopping = false;
     const supervisor = new ShardSupervisor({
         shards: shardNumbers, fork, log: log.child('supervisor'),
         onUp: (s, ipc) => {
             ipc.on('config.snapshot', () => config.rawValues);     // worker-main.js shardConfig
+            ipc.on('tls.ticketKeys', () => ticketKeys?.state() ?? null);   // shard.js startShard
             cp.bind(s, ipc);
         },
         onDown: (s) => cp.shardDown(s),
@@ -93,6 +102,7 @@ export async function startPrimary({ config, log, fork, matchmaker, challenges, 
         async stop(graceMs = config.shutdownGraceMs) {
             if (stopping) return;
             stopping = true;
+            clearInterval(ticketTimer);
             cp.stop();
             await supervisor.stop(graceMs);
             if (metricsServer) await metricsServer.close();

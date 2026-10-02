@@ -530,7 +530,7 @@ Nothing secret is ever committed: `.env`, keys and certificates are in `.gitigno
 
 | Key | What it protects |
 |---|---|
-| `SERVER_SECRET` | session tickets, proof-of-work challenges, recovery codes, address hashing; at least 32 random bytes (`gen-secret`) |
+| `SERVER_SECRET` | proof-of-work challenges, recovery codes, address hashing; at least 32 random bytes (`gen-secret`) |
 | `MFA_ENCRYPTION_KEY` | TOTP secrets at rest (derived from `SERVER_SECRET` when empty; set it so that the secret can change without breaking two-factor logins) |
 | `TLS_KEY_FILE` | the certificate's private key |
 | `SMTP_PASSWORD`, `GOOGLE_CLIENT_SECRET` | mail account and Google OAuth client, used as written |
@@ -562,7 +562,10 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
 - Players come back by themselves after a restart. The game spreads their reconnections over
   about half a minute (players with a game in progress within 8 s, since the side to move's
   clock runs again once the game is restored), so a restart does not turn into a burst of TLS
-  handshakes.
+  handshakes. After a full restart each of them does one full handshake: the TLS session-ticket
+  keys the workers share are drawn at random at the start, replaced every day (UTC) by a one-way
+  step and kept in memory only, so that neither `SERVER_SECRET` nor a later memory dump decrypts
+  recorded sessions of the past days. A restarted worker gets the current keys from the primary.
 - Retention: every `RETENTION_INTERVAL_MS` (one hour; the first run about a minute after the
   start) the server deletes expired and revoked sessions, expired tokens, security events older
   than `RETENTION_SECURITY_DAYS` (90), non-certain anomalies of the same age, conduct events and

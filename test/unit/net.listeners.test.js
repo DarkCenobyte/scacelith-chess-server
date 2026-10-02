@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
@@ -12,7 +11,8 @@ import { testConfig } from '../../src/config.js';
 import { Registry } from '../../src/metrics.js';
 import { ipGroupKey, ipMatcher, normalizeIp, resolveClientIp } from '../../src/net/ip.js';
 import { IpGuard } from '../../src/net/ipguard.js';
-import { Listeners, deriveTicketKeys, makeClientIp } from '../../src/net/listeners.js';
+import { Listeners, makeClientIp } from '../../src/net/listeners.js';
+import { TicketKeys } from '../../src/net/ticket-keys.js';
 import { WsServer } from '../../src/net/ws.js';
 import { connectWs } from '../../src/net/ws-raw-client.js';
 
@@ -155,7 +155,9 @@ function tlsConnect(port, opts = {}) {
 }
 
 describe('listeners (native TLS)', { skip: !hasOpenssl && 'openssl not available' }, () => {
-    let dir, a, b, lst, lst2, wss, apiPort, wsPort, config;
+    let dir, a, b, lst, lst2, lst3, wss, apiPort, wsPort, config;
+    // The primary's session-ticket keys: each worker starts from their state at its own start.
+    const primaryKeys = TicketKeys.random();
     before(async () => {
         dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-tls-'));
         a = makeCert(dir, 'a', 'first.test');
@@ -169,15 +171,16 @@ describe('listeners (native TLS)', { skip: !hasOpenssl && 'openssl not available
             tlsCertFile: path.join(dir, 'live.crt'), tlsKeyFile: path.join(dir, 'live.key'),
         };
         wss = new WsServer({ registry: new Registry(), onConnection: () => {} });
-        lst = new Listeners({ config, wsServer: wss, apiHandler: null });
+        lst = new Listeners({ config, wsServer: wss, apiHandler: null, ticketKeys: new TicketKeys(primaryKeys.state()) });
         await lst.listen();
     });
-    after(() => { wss.closeAll(); lst.close(); lst2?.close(); fs.rmSync(dir, { recursive: true, force: true }); });
-    // Another worker's listeners (the same SERVER_SECRET), started by the first test that needs
-    // them: its WSS port.
+    after(() => { wss.closeAll(); lst.close(); lst2?.close(); lst3?.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+    // Another worker's listeners (started later, like a restarted shard), started by the first test
+    // that needs them: its WSS port.
     async function secondWorker() {
         if (!lst2) {
-            lst2 = new Listeners({ config: { ...config, wsPort: await freePort(), apiPort: await freePort() }, wsServer: wss, apiHandler: null });
+            lst2 = new Listeners({ config: { ...config, wsPort: await freePort(), apiPort: await freePort() }, wsServer: wss, apiHandler: null,
+                ticketKeys: new TicketKeys(primaryKeys.state()) });
             await lst2.listen();
         }
         return lst2.addresses().find((x) => x.kind === 'ws').port;
@@ -197,7 +200,7 @@ describe('listeners (native TLS)', { skip: !hasOpenssl && 'openssl not available
         await assert.rejects(tlsConnect(wsPort, { maxVersion: 'TLSv1.1', minVersion: 'TLSv1' }));
     });
 
-    it('resumes sessions across listeners that share the derived ticket keys (other workers)', async () => {
+    it('resumes sessions across listeners that share the ticket keys (other workers, a restarted one included)', async () => {
         const port2 = await secondWorker();
         const s1 = await tlsConnect(wsPort, { maxVersion: 'TLSv1.2' });
         const session = s1.getSession();
@@ -205,9 +208,19 @@ describe('listeners (native TLS)', { skip: !hasOpenssl && 'openssl not available
         const s2 = await tlsConnect(port2, { maxVersion: 'TLSv1.2', session });
         assert.equal(s2.isSessionReused(), true);
         s2.destroy();
-        assert.deepEqual(deriveTicketKeys(config.serverSecret, 5), deriveTicketKeys(config.serverSecret, 5));
-        assert.notDeepEqual(deriveTicketKeys(config.serverSecret, 5), deriveTicketKeys(config.serverSecret, 6));
-        assert.equal(deriveTicketKeys(crypto.randomBytes(32), 1).length, 48);
+    });
+
+    it('a server started again with the same SERVER_SECRET cannot resume the sessions of the previous run', async () => {
+        lst3 = new Listeners({ config: { ...config, wsPort: await freePort(), apiPort: await freePort() }, wsServer: wss, apiHandler: null,
+            ticketKeys: TicketKeys.random() });
+        await lst3.listen();
+        const s1 = await tlsConnect(wsPort, { maxVersion: 'TLSv1.2' });
+        const session = s1.getSession();
+        s1.destroy();
+        const s2 = await tlsConnect(lst3.addresses().find((x) => x.kind === 'ws').port, { maxVersion: 'TLSv1.2', session });
+        assert.equal(s2.isSessionReused(), false, 'the ticket keys do not come from SERVER_SECRET');
+        s2.destroy();
+        assert.notDeepEqual(lst3._tlsServers[0].getTicketKeys(), lst._tlsServers[0].getTicketKeys());
     });
 
     it('reloads the certificate without a restart and keeps it when the new one is broken', async () => {
@@ -219,9 +232,9 @@ describe('listeners (native TLS)', { skip: !hasOpenssl && 'openssl not available
         assert.match(s.getPeerCertificate().subject.CN, /second\.test/);
         const session = s.getSession();
         s.destroy();
-        // The new contexts keep the day's derived ticket keys (setSecureContext alone installs
+        // The new contexts keep the day's shared ticket keys (setSecureContext alone installs
         // random ones): a session still resumes on the other port and on the other worker.
-        const keys = deriveTicketKeys(config.serverSecret, Math.floor(Date.now() / 86400000));
+        const keys = primaryKeys.ticketKeys();
         for (const server of lst._tlsServers) assert.deepEqual(server.getTicketKeys(), keys);
         const r1 = await tlsConnect(wsPort, { maxVersion: 'TLSv1.2', session });
         assert.equal(r1.isSessionReused(), true, 'resumed on the WSS port');
