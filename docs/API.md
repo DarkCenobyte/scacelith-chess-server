@@ -52,7 +52,7 @@ configuration; a community server may change them.
 - A trailing slash is ignored (`/api/v1/info/` is `/api/v1/info`), and path parameters are
   URL-decoded.
 - The Node SDK in `src/client/` (`ApiClient`) wraps these calls for tests, bots and tools. It also
-  solves the proof of work.
+  solves the proof of work (up to `maxPowBits`, 28 by default; a harder one is returned unsolved).
 
 The curl examples below use two shell variables:
 

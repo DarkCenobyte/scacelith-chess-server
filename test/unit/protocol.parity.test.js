@@ -88,6 +88,13 @@ test('identical reasons for every malformed vector', () => {
     }
 });
 
+test('both codecs refuse ±Infinity in an f64 on encode and write NaN as 0', () => {
+    for (const c of [gen, ref]) {
+        for (const v of [Infinity, -Infinity]) assert.throws(() => c.encode.S_Pong({ nonce: 1, serverTime: v }), (e) => e.reason === 'serverTime not finite');
+    }
+    assert.ok(gen.encode.S_Pong({ nonce: 1, serverTime: NaN }).equals(ref.encode.S_Pong({ nonce: 1, serverTime: NaN })));
+});
+
 test('random valid messages: identical bytes, decoded back unchanged', () => {
     const rnd = mulberry32(0x5eed);
     for (const m of schema.messages) {
@@ -188,6 +195,7 @@ test('generator on a synthetic schema: generated and interpreted codecs agree', 
     assert.throws(() => g.encode.Lists({ seq: 1, es: [7, 8], tail: 0 }), (e) => e.reason === 'es not a Sparse');
     assert.throws(() => g.encode.Lists({ seq: 1, strs: ['ok', 'a\0b'], tail: 0 }), (e) => e.reason === 'strs contains NUL');
     assert.throws(() => g.encode.Lists({ seq: 1, fs: [1, NaN, Infinity], tail: 0 }), (e) => e.reason === 'fs not finite');
+    assert.throws(() => r.encode.Lists({ seq: 1, fs: [1, NaN, Infinity], tail: 0 }), (e) => e.reason === 'fs not finite');
     assert.throws(() => g.encode.Strings({ a: '', b: '', c: '', d: true }), (e) => e.reason === 'b bad length');
     assert.throws(() => g.encode.Strings({ a: '', b: 'x', c: 'y', d: true }), (e) => e.reason === 'c bad length');
     assert.throws(() => g.decode(Buffer.from([0x06, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 3, 8])), (e) => e.reason === 's not a Solo');

@@ -197,13 +197,17 @@ async function main() {
     let srv = null;
     let target;
     const cleanup = [];
-    let cleaning = false;
-    const doCleanup = async () => {
-        if (cleaning) return;
-        cleaning = true;
+    // One cleanup, run once: a signal or a guard arriving while it runs waits for it to finish.
+    let cleaning = null;
+    const doCleanup = () => (cleaning ||= (async () => {
         for (const f of cleanup.reverse()) { try { await f(); } catch (e) { process.stderr.write(`cleanup: ${e.message}\n`); } }
-    };
-    process.on('SIGINT', () => { say('\ninterrupted: cleaning up'); doCleanup().then(() => process.exit(130)); });
+    })());
+    let interrupted = false;
+    process.on('SIGINT', () => {
+        if (interrupted) { say('\ninterrupted again: exiting now (the server may be left running)'); process.exit(130); }
+        interrupted = true;
+        say('\ninterrupted: cleaning up'); doCleanup().then(() => process.exit(130));
+    });
     process.on('SIGTERM', () => { doCleanup().then(() => process.exit(143)); });
     const safety = setTimeout(() => { process.stderr.write(`--max-run-s ${o.maxRunS} reached: aborting\n`); doCleanup().then(() => process.exit(3)); }, o.maxRunS * 1000);
     safety.unref();
@@ -276,11 +280,9 @@ async function main() {
         const total = newAgg();
         let phase = newAgg();
         let win = newAgg();
-        let received = 0;
         const onStats = (pr, s) => {
             pr.gauges = s.g;
             addAgg(total, s); addAgg(phase, s); addAgg(win, s);
-            received++;
         };
         const sumG = (k) => procList.reduce((a, pr) => a + (pr.gauges[k] || 0), 0);
         const maxG = (k) => procList.reduce((a, pr) => Math.max(a, pr.gauges[k] || 0), 0);
@@ -334,7 +336,6 @@ async function main() {
         };
         const mark = async () => ({ at: Date.now(), metrics: await scrape(), cpu: cpu.sample(pids) });
         let lastSample = cpu.sample(pids);
-        let lastMetrics = null;
         let phaseName = 'setup';
         let scraping = false;
         const serverSamples = [];
@@ -347,7 +348,7 @@ async function main() {
                 const s = cpu.sample(pids);
                 const d = cpu.delta(lastSample, s);
                 lastSample = s;
-                if (m && !m.error) { lastMetrics = m; serverSamples.push({ phase: phaseName, at: m.at, shards: m.shards }); }
+                if (m && !m.error) serverSamples.push({ phase: phaseName, at: m.at, shards: m.shards });
                 const now = Date.now();
                 const dt = (now - lastWinAt) / 1000;
                 lastWinAt = now;
@@ -570,13 +571,12 @@ async function main() {
         printSummary(report);
         say(`report: ${path.relative(process.cwd(), outFile)}`);
         if (o.json) process.stdout.write(`${JSON.stringify(report)}\n`);
-        void received;
-        void lastMetrics;
     } catch (e) {
         process.stderr.write(`loadgen: ${e.stack || e.message}\n`);
         if (srv) process.stderr.write(`server log (tail):\n${srv.tail(40)}\n`);
         process.exitCode = 1;
     } finally {
+        clearTimeout(safety);
         await doCleanup();
     }
 }

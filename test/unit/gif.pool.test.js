@@ -87,6 +87,19 @@ test('render_failed: a render running too long (the thread is replaced), a threa
     }
 });
 
+test('render_failed when no rendering thread can start: nothing stays queued', async () => {
+    const pool = createGifPool({ threads: 1, queueMax: 4, workerUrl: 'not-a-path.js' });
+    try {
+        await assert.rejects(pool.render({}), (e) => e.code === 'render_failed' && /cannot start a rendering thread/.test(e.message));
+        const s = pool.stats();
+        assert.equal(s.queued, 0);
+        assert.equal(s.live, 0);
+        assert.equal(s.failed, 1);
+    } finally {
+        await pool.close();
+    }
+});
+
 test('two threads render at the same time', async () => {
     const pool = createGifPool({ threads: 2, queueMax: 0, workerUrl: SLOW });
     try {

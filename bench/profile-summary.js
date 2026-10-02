@@ -23,7 +23,7 @@ for (let i = 0; i < args.length; i++) {
     else files.push(args[i]);
 }
 if (!files.length) {
-    process.stdout.write('usage: node bench/profile-summary.js [--top N] [--stalls N] [--min-stall-ms N] FILE.cpuprofile...\n');
+    process.stdout.write('usage: node bench/profile-summary.js [--top N] [--stalls N] [--min-stall-ms N] [--callers FUNCTION [--depth N]] FILE.cpuprofile...\n');
     process.exit(2);
 }
 
@@ -117,14 +117,14 @@ for (const file of files) {
     // Longest runs of identical samples.
     const runs = [];
     let start = 0;
+    let at = 0, atIdx = -1;                 // at = sum of deltas[0..atIdx] (start only moves forward)
     for (let i = 1; i <= p.samples.length; i++) {
         if (i < p.samples.length && p.samples[i] === p.samples[start]) continue;
         let ms = 0;
         for (let j = start; j < i; j++) ms += (j + 1 < deltas.length ? deltas[j + 1] : 0) / 1000;
         const n = byId.get(p.samples[start]);
         if (ms >= opt.minStallMs && area(n) !== 'idle') {
-            let at = 0;
-            for (let j = 0; j <= start; j++) at += deltas[j];
+            while (atIdx < start) at += deltas[++atIdx];
             runs.push({ ms, node: p.samples[start], at: at / 1e6 });
         }
         start = i;

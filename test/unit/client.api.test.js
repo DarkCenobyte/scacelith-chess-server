@@ -46,6 +46,7 @@ function handler(state) {
                     if (json.login === 'bob' && json.password === 'pw') return send(200, { token: 'sct_bob', expiresAt: 1, user: { username: 'bob' } });
                     if (json.login === 'mfa' && json.password === 'pw') return send(200, { mfaRequired: true, mfaToken: 'mfa_token_1' });
                     if (json.login === 'stubborn') return send(428, { error: 'pow_required', pow: { challenge: 'never', bits: 1 } });
+                    if (json.login === 'hostile') return send(428, { error: 'pow_required', pow: { challenge: 'x', bits: 200 } });
                     return send(401, { error: 'invalid_credentials', message: 'Invalid credentials' });
                 case 'POST /api/v1/auth/login/mfa':
                     if (json.mfaToken === 'mfa_token_1' && (json.code === totpCode(SECRET) || json.recoveryCode === 'abcd-efgh-jk')) return send(200, { token: 'sct_mfa', user: { username: 'mfa' } });
@@ -111,6 +112,22 @@ describe('ApiClient over plain HTTP', () => {
         const noPow = await api.post('/auth/login', { login: 'stubborn', password: 'x' }, { pow: false });
         assert.equal(noPow.status, 428);
         assert.equal(fake.state.requests.length, n + 3);
+    });
+
+    test('a proof of work above maxPowBits is returned unsolved', async () => {
+        const low = new ApiClient({ port: fake.port, insecure: true, maxPowBits: 11 });
+        const n = fake.state.requests.length;
+        const r = await low.register({ username: 'alice', email: 'alice@example.test', password: 'correct horse battery' });
+        low.close();
+        assert.equal(r.status, 428);
+        assert.equal(r.body.pow.bits, 12);
+        assert.equal(low.powSolved, 0);
+        assert.equal(fake.state.requests.length, n + 1);
+        // The default bound: a server asking for 200 bits does not freeze the client.
+        const h = await api.login('hostile', 'x');
+        assert.equal(h.status, 428);
+        assert.equal(h.body.pow.bits, 200);
+        assert.equal(fake.state.requests.length, n + 2);
     });
 
     test('login, bearer token, logout', async () => {

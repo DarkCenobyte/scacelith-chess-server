@@ -126,7 +126,7 @@ export function machineInfo() {
 }
 
 /**
- * CPU sampler over a set of processes: sample() records ticks; since(prev) gives cores used.
+ * CPU sampler over a set of processes: sample() records ticks; delta(a, b) gives cores used.
  */
 export class CpuSampler {
     constructor() { this.hz = clkTck(); }

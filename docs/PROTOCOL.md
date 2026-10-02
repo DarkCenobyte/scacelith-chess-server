@@ -32,9 +32,9 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
   u8 type | field 1 | field 2 | ...
   ```
 
-  Type bytes `0x01`-`0x7F` are client->server (C2S), `0x80`-`0xFF` server->client (S2C). `Ping` and
-  `Pong` exist in both directions with different ids; code names them `C_Ping`/`S_Ping`,
-  `C_Pong`/`S_Pong`.
+  Type bytes `0x01`-`0x7F` are client->server (C2S), `0x80`-`0xFF` server->client (S2C). The
+  names used by both directions (currently `Ping`, `Pong` and `Gesture`) have a different id
+  in each; code names them `C_Ping`/`S_Ping`, `C_Pong`/`S_Pong`, `C_Gesture`/`S_Gesture`.
 * Every C2S message starts with `seq` (u32): 1 for `Hello`, then +1 for each message sent on the
   connection (Pongs included). Replies that refer to a request quote it as `ref`.
 * A message must be consumed exactly. The decoder rejects, and the server treats as malformed:
@@ -342,7 +342,8 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
 * `Error{ref, code, fatal, game}`: `ref` is the `seq` of the refused request (0 when none), `game`
   the game concerned (0 when none). `fatal` = the server closes the connection right after it, with
   the matching close code below: `4000 + code` for the connection errors (e.g. `Unauthorized` ->
-  4003), `4300`-`4303` for `ProtocolViolation`, `Flood`, `CheatDetected` and `SlowConsumer`.
+  4003; `EmailUnverified` closes with 4003 too), `4300`-`4303` for `ProtocolViolation`, `Flood`,
+  `CheatDetected` and `SlowConsumer`.
 * Requests without another answer are confirmed with `Ack{ref}` (queue leave, challenge decline or
   cancel, draw offer...); requests with an answer get that answer (`QueueStatus`,
   `ChallengeStatus`, `MoveMade`, `GameSnapshot`...).
@@ -1041,8 +1042,9 @@ The start position digests
 | 1009 | `TooBig` | message larger than `WS_MAX_MESSAGE_BYTES` |
 | 1011 | `Internal` | unexpected server error |
 | 4002 | `UnsupportedProtocol` | `Hello.proto` / `Hello.schema` not supported: update the game or the server (no automatic retry) |
-| 4003 | `Unauthorized` | session token refused: log in again (no automatic retry) |
+| 4003 | `Unauthorized` | session token refused (log in again) or e-mail address not verified (`Error{EmailUnverified}`): no automatic retry |
 | 4004 | `Banned` | account banned (a `Notice{Banned}` gives the end) |
+| 4006 | `ServerFull` | a new player beyond `MAX_CONNECTIONS` (a player whose game is in progress is admitted): retried after 60 s to 120 s |
 | 4007 | `Replaced` | another connection of the same account took over (no automatic retry) |
 | 4008 | `ShuttingDown` | server shutting down: reconnect later |
 | 4010 | `HelloTimeout` | no `Hello` within `WS_HELLO_TIMEOUT_MS` |

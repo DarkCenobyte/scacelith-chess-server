@@ -2,6 +2,9 @@
 // Protocol test vectors for the game client's unit tests (tests/net_tests.cpp).
 //
 //   node dedicated-server/tools/gen-cpp-test-vectors.js   writes ../tests/data/net-protocol-vectors.json
+//   node dedicated-server/tools/gen-cpp-test-vectors.js --check   exits 1 when that file is stale
+//
+// (`npm run gen:protocol` runs it after the C++ codec generator.)
 //
 // Every vector comes from the JavaScript codec (src/protocol/index.js), so the C++ codec is
 // checked against it byte for byte:
@@ -202,6 +205,24 @@ bad('ChallengeCreate: baseSec below min', mod('ChallengeCreate', { baseSec: 14 }
 bad('ChallengeCreate: baseSec above max', mod('ChallengeCreate', { baseSec: 10801 }));
 bad('ChallengeCreate: incSec above max', mod('ChallengeCreate', { incSec: 181 }));
 bad('GameSnapshot: MoveRec move bit 15', mod('GameSnapshot', { moves: [{ move: 0x8000, spentMs: 0, clockMs: 0 }] }));
+// Gesture: the only signed bounded integers (yaw, pitch), both directions, and INT32_MIN.
+bad('C_Gesture: yaw below min', mod('C_Gesture', { yaw: -3143 }));
+bad('C_Gesture: yaw above max', mod('C_Gesture', { yaw: 3143 }));
+bad('C_Gesture: yaw = INT32_MIN', mod('C_Gesture', { yaw: -0x80000000 }));
+bad('C_Gesture: pitch below min', mod('C_Gesture', { pitch: -1572 }));
+bad('C_Gesture: pitch above max', mod('C_Gesture', { pitch: 1572 }));
+bad('C_Gesture: touch above max', mod('C_Gesture', { touch: 65 }));
+bad('C_Gesture: flags above max', mod('C_Gesture', { flags: 8 }));
+bad('C_Gesture: lean above max', mod('C_Gesture', { lean: 101 }));
+bad('C_Gesture: ply above max', mod('C_Gesture', { ply: 1200 }));
+bad('C_Gesture: placed above max', mod('C_Gesture', { placed: 0x8000 }));
+bad('S_Gesture: yaw below min', mod('S_Gesture', { yaw: -3143 }));
+bad('S_Gesture: yaw above max', mod('S_Gesture', { yaw: 3143 }));
+bad('S_Gesture: pitch = INT32_MIN', mod('S_Gesture', { pitch: -0x80000000 }));
+bad('S_Gesture: pitch above max', mod('S_Gesture', { pitch: 1572 }));
+bad('S_Gesture: aim above max', mod('S_Gesture', { aim: 65 }));
+bad('Welcome: gestureRate above max', mod('Welcome', { gestureRate: 61 }));
+bad('Welcome: gestureBurst above max', mod('Welcome', { gestureBurst: 121 }));
 // bools
 bad('Move: drawOffer = 2', mod('Move', { drawOffer: 2 }));
 bad('QueueJoin: rated = 255', mod('QueueJoin', { rated: 255 }));
@@ -262,6 +283,14 @@ const out = {
     malformed,
     fnv1a32,
 };
-fs.mkdirSync(path.dirname(outPath), { recursive: true });
-fs.writeFileSync(outPath, JSON.stringify(out, null, 1) + '\n');
-console.log(`wrote ${path.relative(process.cwd(), outPath)}: ${valid.length} valid, ${malformed.length} malformed, ${fnv1a32.length} fnv1a32`);
+const text = JSON.stringify(out, null, 1) + '\n';
+const current = fs.existsSync(outPath) ? fs.readFileSync(outPath, 'utf8') : null;
+const rel = path.relative(process.cwd(), outPath);
+if (process.argv.includes('--check')) {
+    if (current !== text) { console.error(`${rel} is stale: run npm run gen:protocol`); process.exitCode = 1; }
+} else if (current === text) console.log(`${rel} up to date`);
+else {
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, text);
+    console.log(`wrote ${rel}: ${valid.length} valid, ${malformed.length} malformed, ${fnv1a32.length} fnv1a32`);
+}

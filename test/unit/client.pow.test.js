@@ -58,6 +58,8 @@ test('checkPow refuses wrong nonces and malformed input', () => {
     assert.equal(checkPow('chal', '-1', 1), false);
     assert.equal(checkPow('chal', '1e3', 1), false);
     assert.equal(checkPow('chal', '', 0), false);
+    assert.equal(checkPow('chal', '1'.repeat(20), 0), true);
+    assert.equal(checkPow('chal', '1'.repeat(21), 0), false);         // the server's limit
     assert.equal(checkPow('chal', 12, 0), false);
     assert.equal(checkPow('x', '0', 256), false);
     assert.throws(() => checkPow('x', '0', -1), RangeError);

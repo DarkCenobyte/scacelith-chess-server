@@ -133,6 +133,12 @@ function lzw(out, pixels, minCodeSize, runSymbol) {
 
     emit(clearCode);
     const n = pixels.length;
+    // The run scan compares 4 pixels at a time through a word view of the same bytes. runWord
+    // repeats the run symbol in its four bytes, so the test does not depend on byte order; an
+    // unaligned Buffer keeps the byte loop.
+    const words = runSymbol >= 0 && n >= 64 && n < 2 ** 31 && (pixels.byteOffset & 3) === 0
+        ? new Uint32Array(pixels.buffer, pixels.byteOffset, n >> 2) : null;
+    const runWord = (runSymbol & 255) * 0x01010101;
     if (n > 0) {
         let prefix = pixels[0];
         let run = prefix === runSymbol ? 1 : 0;     // the prefix is chain[run] (0: not a pure run)
@@ -142,6 +148,15 @@ function lzw(out, pixels, minCodeSize, runSymbol) {
                 // Inside a run: jump along the chain.
                 let j = i + 1;
                 const lim = Math.min(n, i + (chainLen - run));
+                if (words !== null) {
+                    while (j < lim && (j & 3) !== 0 && pixels[j] === runSymbol) j++;
+                    if ((j & 3) === 0) {
+                        let wj = j >> 2;
+                        const wl = lim >> 2;
+                        while (wj < wl && words[wj] === runWord) wj++;
+                        j = wj << 2;
+                    }
+                }
                 while (j < lim && pixels[j] === runSymbol) j++;
                 run += j - i;
                 prefix = chain[run];
