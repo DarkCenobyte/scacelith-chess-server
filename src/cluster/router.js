@@ -91,6 +91,7 @@ import {
     MSG, encode, decode, ProtocolError, PROTOCOL_VERSION, PROTOCOL_MIN, SCHEMA_HASH, enums, CloseCode, isClientType,
 } from '../protocol/index.js';
 import { now as clockNow } from '../game/clock.js';
+import { categoryOf, isProvisional } from '../match/elo.js';
 import { isGameId, shardOfGameId } from '../util/ids.js';
 import { BusKind, BusOp } from './bus.js';
 
@@ -477,7 +478,7 @@ export class Router {
                 this._call(conn, msg.seq, 'mm.leave', { userId: conn.userId });
                 return;
             case MSG.ChallengeCreate: {
-                const category = this.categoryOf(msg.baseSec * 1000, msg.incSec * 1000);
+                const category = categoryOf(msg.baseSec * 1000, msg.incSec * 1000, this.config);
                 const { rating, provisional } = this._rating(conn.userId, category);
                 this._call(conn, msg.seq, 'challenge.create', {
                     from: { userId: conn.userId, username: conn.username, rating, provisional, shard: this.shard, connId: conn.id },
@@ -506,17 +507,11 @@ export class Router {
         return { userId: conn.userId, username: conn.username, shard: this.shard, connId: conn.id };
     }
 
-    /** Official category id of a time control, or 'custom'. */
-    categoryOf(baseMs, incMs) {
-        for (const c of this.categories.values()) if (c.baseMs === baseMs && c.incMs === incMs) return c.id;
-        return 'custom';
-    }
-
     _rating(userId, category) {
         if (category !== 'custom' && this.store?.ratings?.get) {
             try {
                 const r = this.store.ratings.get(userId, category);
-                if (r) return { rating: r.rating, provisional: r.rated === false || (r.countedGames ?? r.games ?? 0) < this.config.provisionalGames };
+                if (r) return { rating: r.rating, provisional: isProvisional(r, this.config) };
             } catch (e) {
                 this.log?.error?.('rating read failed', { err: e });
             }

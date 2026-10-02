@@ -64,6 +64,7 @@
 //   newer connection's QueueJoin).
 
 import { RefundNotices } from '../anticheat/refund-notices.js';
+import { categoryOf, isProvisional } from '../match/elo.js';
 import { metrics as defaultRegistry } from '../metrics.js';
 import { encode, enums, CloseCode } from '../protocol/index.js';
 import { isGameId, shardOfGameId } from '../util/ids.js';
@@ -265,7 +266,7 @@ export class ControlPlane {
             if (category && category !== 'custom' && this.ratingOf) {
                 try {
                     const r = this.ratingOf(p.userId, category);
-                    if (r) { rating = r.rating; provisional = r.rated === false || (r.countedGames ?? r.games ?? 0) < this.config.provisionalGames; }
+                    if (r) { rating = r.rating; provisional = isProvisional(r, this.config); }
                 } catch (e) { this.log?.error?.('rating read failed', { err: e }); }
             }
             out.rating = rating;
@@ -275,11 +276,6 @@ export class ControlPlane {
     }
 
     _info(p) { return { userId: p.userId, name: p.username || p.name || '', rating: u16(p.rating), provisional: !!p.provisional }; }
-
-    categoryOf(baseMs, incMs) {
-        for (const c of this.categories.values()) if (c.baseMs === baseMs && c.incMs === incMs) return c.id;
-        return 'custom';
-    }
 
     _chooseShard(preferred) {
         const live = this.shards.list();
@@ -550,7 +546,7 @@ export class ControlPlane {
             white = creatorWhite ? c.from : by;
             black = creatorWhite ? by : c.from;
         }
-        const category = game?.category || c.category || this.categoryOf(c.baseSec * 1000, c.incSec * 1000);
+        const category = game?.category || c.category || categoryOf(c.baseSec * 1000, c.incSec * 1000, this.config);
         const spec = {
             category, baseMs: game?.baseMs ?? c.baseSec * 1000, incMs: game?.incMs ?? c.incSec * 1000,
             rated: !!(game ? game.rated : c.rated) && category !== 'custom',
@@ -645,7 +641,7 @@ export class ControlPlane {
             }
         }
         for (const p of [nw, nb]) if (this.activeGames.get(p.userId) === gameId) this.activeGames.delete(p.userId);
-        const cat = category || this.categoryOf(baseMs, incMs);
+        const cat = category || categoryOf(baseMs, incMs, this.config);
         const spec = {
             category: cat, baseMs, incMs, rated: !!rated && cat !== 'custom',
             white: this._info(this._player({ ...nw, rating: undefined }, cat)),
