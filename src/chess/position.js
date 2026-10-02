@@ -423,11 +423,12 @@ export class Position {
             if (flags & F_PROMO) s += '=' + UPPER[(im >> 12) & 7];
         } else {
             s = UPPER[t];
-            const n = this._generate(SCRATCH, false);
+            // Only the other pieces of the same code can make the move ambiguous: validate theirs
+            // instead of generating every legal move.
+            const piece = this._b[S88[from64]];
             let ambiguous = false, sameFile = false, sameRank = false;
-            for (let i = 0; i < n; i++) {
-                const o = SCRATCH[i], of = o & 63;
-                if (((o >> 6) & 63) !== to64 || of === from64 || (this._b[S88[of]] & 7) !== t) continue;
+            for (let of = 0; of < 64; of++) {
+                if (of === from64 || this._b[S88[of]] !== piece || this._validate(of | (to64 << 6)) < 0) continue;
                 ambiguous = true;
                 if ((of & 7) === (from64 & 7)) sameFile = true;
                 if ((of >> 3) === (from64 >> 3)) sameRank = true;
