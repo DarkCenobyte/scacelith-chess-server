@@ -298,6 +298,34 @@ test('bench-accounts: refused without the test-server flag; creates verified acc
     assert.equal((await run(store, ['bench-accounts', '--count', '4', '--out', out, '--i-know-this-is-a-test-server'])).code, 1);
 });
 
+test('bench-accounts: a pipe keeps its mode; another user\'s file is refused before any account is created', { skip: process.platform === 'win32' }, async (t) => {
+    const { store } = world();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bench-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    // A FIFO stands for /dev/stdout or /dev/null: written to, never chmod'ed.
+    const fifo = path.join(dir, 'tokens.fifo');
+    assert.equal(spawnSync('mkfifo', ['-m', '644', fifo]).status, 0);
+    const reader = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    t.after(() => fs.closeSync(reader));
+    const r = await run(store, ['bench-accounts', '--count', '2', '--out', fifo, '--i-know-this-is-a-test-server']);
+    assert.equal(r.code, 0, r.err);
+    const buf = Buffer.alloc(4096);
+    const tokens = buf.subarray(0, fs.readSync(reader, buf)).toString().trim().split('\n');
+    assert.equal(tokens.length, 2);
+    for (const tok of tokens) assert.match(tok, /^sct_[A-Za-z0-9_-]{43}$/);
+    assert.equal(fs.statSync(fifo).mode & 0o777, 0o644);
+
+    // A regular file of another owner cannot be made 600: refused up front.
+    const out = path.join(dir, 'theirs.txt');
+    fs.writeFileSync(out, 'kept\n');
+    t.mock.method(process, 'geteuid', () => fs.statSync(out).uid + 1);
+    const refused = await run(store, ['bench-accounts', '--count', '3', '--prefix', 'other', '--out', out, '--i-know-this-is-a-test-server']);
+    assert.equal(refused.code, 1);
+    assert.match(refused.err, /belongs to another user/);
+    assert.equal(store.users.byUsername('other0001'), null);
+    assert.equal(fs.readFileSync(out, 'utf8'), 'kept\n');
+});
+
 test('backup refuses a source that is not a Scacelith database, and creates nothing', async (t) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-backup-src-'));
     t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

@@ -534,6 +534,12 @@ function benchAccounts(ctx) {
     const width = Math.max(4, String(count).length);
     const maxLen = ctx.config?.usernameMax ?? 20;
     if (prefix.length + width > maxLen) throw new AdminError(`usernames would exceed ${maxLen} characters: shorten --prefix`);
+    // An existing token file is made 600 below, which only its owner (or root) may do: another
+    // user's file is refused before any account or session is created.
+    const existing = fs.statSync(out, { throwIfNoEntry: false });
+    if (existing?.isFile() && process.geteuid && process.geteuid() !== 0 && existing.uid !== process.geteuid()) {
+        throw new AdminError(`--out: ${out} belongs to another user, so its mode cannot be made 600`);
+    }
     const hash = ctx.hashToken || defaultHashToken;
     const now = ctx.now();
     const maxDays = ctx.config?.sessionMaxDays ?? 90, idleDays = ctx.config?.sessionIdleDays ?? 30;
@@ -558,11 +564,11 @@ function benchAccounts(ctx) {
             idleExpiresAt: now + idleDays * DAY_MS, clientLabel: 'bench', ip: null });
         lines.push(format === 'tsv' ? `${username}\t${token}` : token);
     }
-    // The mode of open() only applies to a new file: an existing one is made 600 before the
-    // tokens go in.
+    // The mode of open() only applies to a new file: an existing regular file is made 600 before
+    // the tokens go in. A device or a pipe (--out /dev/stdout) keeps its mode.
     const fd = fs.openSync(out, 'w', 0o600);
     try {
-        fs.fchmodSync(fd, 0o600);
+        if (fs.fstatSync(fd).isFile()) fs.fchmodSync(fd, 0o600);
         fs.writeFileSync(fd, lines.join('\n') + '\n');
     } finally {
         fs.closeSync(fd);
