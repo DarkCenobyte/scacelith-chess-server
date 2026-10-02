@@ -118,7 +118,8 @@ export function solvePow(challenge, bits, { start = 0, maxAttempts = Infinity } 
  */
 export function checkPow(challenge, nonce, bits) {
     checkBits(bits);
-    if (typeof nonce !== 'string' || !/^[0-9]{1,32}$/.test(nonce)) return false;
+    // At most 20 digits, like the server (src/security/pow.js), which refuses longer nonces.
+    if (typeof nonce !== 'string' || !/^[0-9]{1,20}$/.test(nonce)) return false;
     const h = crypto.createHash('sha256').update(String(challenge) + ':' + nonce, 'utf8').digest();
     let i = 0;
     while (bits >= 8) { if (h[i] !== 0) return false; bits -= 8; i++; }
