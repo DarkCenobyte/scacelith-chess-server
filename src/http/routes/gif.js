@@ -38,7 +38,9 @@
 //  * Cache: an LRU of rendered GIFs per worker process (GIF_CACHE_MB), keyed by a hash of the job
 //    (moves, start position, names, ratings, result, ending, options: never the PGN text itself),
 //    so that a new name (an anonymized account) is a new picture. A request for a GIF being
-//    rendered waits for that render instead of starting another. Neither costs a render quota.
+//    rendered waits for that render instead of starting another (a render counts as started
+//    before its quotas are checked, so two identical requests at once make one GIF). Neither
+//    costs a render quota.
 //
 // Metrics: scacelith_gif_renders_total{result: ok|busy|failed}, scacelith_gif_render_duration_ms
 // (queue wait and render), scacelith_gif_cache_total{result: hit|miss}, scacelith_gif_queue
@@ -137,27 +139,59 @@ export function createGifService({ config, createPool = createGifPool }) {
         cache,
         /** @returns {boolean} whether the rendering threads exist (they start with the first render) */
         get started() { return pool !== null; },
-        /** The GIF of `key` when it is cached, or the render in progress of the same GIF. */
+        /**
+         * The GIF of `key` when it is cached, or the render in progress of the same GIF: a promise
+         * of the GIF, or of null when the request that was to make it was refused its quotas
+         * (claim().cancel(); the caller then looks again).
+         */
         lookup(key) { return cache.get(key) || inflight.get(key) || null; },
         /**
-         * Renders `job` on the pool and caches the result under `key`.
-         * @returns {Promise<Buffer>} rejects with the pool's errors (code 'busy' | 'render_failed')
+         * Registers the GIF of `key` as being made BEFORE the request that makes it takes its render
+         * quotas: those are shared through the primary (IPC round trips), and an identical request
+         * arriving meanwhile must find this render (lookup) and wait for it, not pay for a second.
+         * @returns {{ render(job: object): Promise<Buffer>, cancel(): void }} render: renders `job`
+         *   on the pool and caches the result under `key` (rejects with the pool's errors, code
+         *   'busy' | 'render_failed', and so do the requests waiting for it); cancel: nothing will
+         *   be made (the quotas refused), the requests waiting get null and look again
          */
-        render(key, job) {
-            if (closed) return Promise.reject(Object.assign(new Error('GIF renderer closed'), { code: 'busy' }));
-            const t0 = performance.now();
-            const p = getPool().render(job).then((gif) => {
-                rendersOk.inc();
-                renderMs.observe(performance.now() - t0);
-                cache.set(key, gif);
-                return gif;
-            }, (err) => {
-                if (err && err.code === 'busy') rendersBusy.inc(); else rendersFailed.inc();
-                throw err;
-            });
-            inflight.set(key, p);
-            p.then(() => inflight.delete(key), () => inflight.delete(key));
-            return p;
+        claim(key) {
+            let settle;
+            const pending = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+            pending.catch(() => { /* nobody waiting for it */ });
+            inflight.set(key, pending);
+            const done = () => { if (inflight.get(key) === pending) inflight.delete(key); };
+            let used = false;
+            return {
+                render(job) {
+                    if (used) throw new Error('GIF claim already used');
+                    used = true;
+                    const t0 = performance.now();
+                    let started;
+                    try {
+                        started = closed ? Promise.reject(Object.assign(new Error('GIF renderer closed'), { code: 'busy' })) : getPool().render(job);
+                    } catch (err) {
+                        started = Promise.reject(err);      // never leave the claim pending
+                    }
+                    const p = started.then((gif) => {
+                        rendersOk.inc();
+                        renderMs.observe(performance.now() - t0);
+                        cache.set(key, gif);
+                        return gif;
+                    }, (err) => {
+                        if (err && err.code === 'busy') rendersBusy.inc(); else rendersFailed.inc();
+                        throw err;
+                    });
+                    p.then(settle.resolve, settle.reject);
+                    p.then(done, done);
+                    return p;
+                },
+                cancel() {
+                    if (used) return;
+                    used = true;
+                    done();
+                    settle.resolve(null);
+                },
+            };
         },
         stats() {
             const s = pool ? pool.stats() : null;
@@ -271,15 +305,29 @@ export function register(router, deps) {
     /** The cached GIF, or a new render (render quotas taken first), as the answer. */
     async function deliver(ctx, job, filename) {
         const key = gifCacheKey(job);
-        let gif = service.lookup(key);
+        let gif = null;
         try {
+            // A GIF in the cache or being made for another request costs no render quota. The
+            // render is registered before its quotas are taken (claim), so that an identical
+            // request arriving during that check waits for it; when they refuse it (null), the
+            // requests waiting look again and the next one pays for its own render.
+            let found = service.lookup(key);
+            while (found) {
+                gif = await found;
+                found = gif ? null : service.lookup(key);
+            }
             if (gif) {
                 cacheHit.inc();
-                gif = await gif;
             } else {
                 cacheMiss.inc();
-                await ctx.takeRates(renderRates);
-                gif = await service.render(key, job);
+                const claim = service.claim(key);
+                try {
+                    await ctx.takeRates(renderRates);
+                } catch (err) {
+                    claim.cancel();
+                    throw err;
+                }
+                gif = await claim.render(job);
             }
         } catch (err) {
             if (err && err.code === 'busy' && !err.expose) {

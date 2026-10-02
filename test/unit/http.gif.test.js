@@ -284,6 +284,50 @@ test('cache: a cached or in-flight GIF costs no render and no render quota; a ne
     assert.notEqual(gifCacheKey({ moves: [1, 2], options: {} }), gifCacheKey({ moves: [1, 2], options: {}, footer: 'x' }));
 });
 
+test('a render counts as in progress while its shared quotas are checked: one render and one quota for two requests at once', async (t) => {
+    const s = await server({ GIF_USER_RENDERS_PER_MIN: '50', GIF_USER_RENDERS_PER_HOUR: '100' });
+    t.after(s.close);
+    const alice = await signedIn(s, 'alice'), bob = await signedIn(s, 'bob');
+    const g = record(alice, bob);
+    s.store._raw.games.push(g);
+    // The shared quotas are IPC round trips to the primary: a few milliseconds each.
+    const request = s.primary.request;
+    s.primary.request = (type, payload) => new Promise((r) => setTimeout(r, 3)).then(() => request(type, payload));
+    const [r1, r2] = await Promise.all([gif(s, g.id, { token: alice.token }), gif(s, g.id, { token: alice.token })]);
+    assert.deepEqual([r1.status, r2.status], [200, 200]);
+    assert.ok(r1.bytes.equals(r2.bytes));
+    assert.equal(s.fp.jobs.length, 1, 'one render');
+    assert.equal(takes(s, 'gif_user_min').length, 1, 'one render quota');
+
+    // The primary refuses alice's next render (her quota spent on another worker), slowly: bob's
+    // identical request waits for the render she started, then, when it is refused, makes it himself.
+    let release, asked = false;
+    const gate = new Promise((r) => { release = r; });
+    s.primary.request = async (type, payload) => {
+        if (type === 'ratelimit.take' && payload.key === `gif_user_min:u${alice.id}`) {
+            asked = true;
+            await gate;
+            return { allowed: false, retryAfterMs: 30000 };
+        }
+        return request(type, payload);
+    };
+    const p3 = gif(s, g.id, { token: alice.token, query: '?delay=700' });
+    for (let i = 0; i < 400 && !asked; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.ok(asked, 'alice asks the primary for her render quota');
+    const p4 = gif(s, g.id, { token: bob.token, query: '?delay=700' });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(takes(s, `gif_user_min:u${bob.id}`).length, 0, 'bob waits for the render alice started');
+    release();
+    const [r3, r4] = await Promise.all([p3, p4]);
+    assert.deepEqual([r3.status, r3.json.error], [429, 'rate_limited']);
+    assert.equal(r4.status, 200, 'bob gets the GIF');
+    assert.equal(takes(s, `gif_user_min:u${bob.id}`).length, 1, 'on his own quota');
+    assert.equal(s.fp.jobs.length, 2);
+    s.primary.request = request;
+    assert.equal((await gif(s, g.id, { token: alice.token, query: '?delay=700' })).status, 200, 'then cached for alice too');
+    assert.equal(s.fp.jobs.length, 2);
+});
+
 test('GifCache: bounded in bytes, least recently used out, no single GIF above a quarter; 0 disables it', async (t) => {
     const c = new GifCache(1000);
     c.set('a', Buffer.alloc(200)); c.set('b', Buffer.alloc(200)); c.set('c', Buffer.alloc(200));
