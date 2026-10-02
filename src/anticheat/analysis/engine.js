@@ -2,8 +2,8 @@
 //
 // One UciEngine owns one engine process: spawned directly from ANALYSIS_ENGINE_PATH (never
 // through a shell), one search thread, a small hash, low CPU priority. Commands are strictly
-// sequential (one search at a time per engine); an EnginePool hands engines to concurrent
-// analyses. Every wait has a timeout: an engine that does not answer is killed and restarted,
+// sequential (one search at a time per engine); each analysis loop of the worker owns one
+// engine. Every wait has a timeout: an engine that does not answer is killed and restarted,
 // and the caller gets an EngineError it can turn into a failed job.
 //
 // Scores are reported as the engine gives them: from the side to move's point of view. The
@@ -420,52 +420,5 @@ export class UciEngine {
             try { p.stdin.write('quit\n'); p.stdin.end(); } catch { clearTimeout(t); this._kill(); resolve(); }
         });
         this.proc = null;
-    }
-}
-
-/**
- * A fixed set of engines handed out one analysis at a time.
- */
-export class EnginePool {
-    /**
-     * @param {{ size: number, factory: () => UciEngine }} o
-     */
-    constructor({ size, factory }) {
-        this.engines = [];
-        this.idle = [];
-        this.waiters = [];
-        for (let i = 0; i < Math.max(1, size); i++) {
-            const e = factory(i);
-            this.engines.push(e);
-            this.idle.push(e);
-        }
-        this.closed = false;
-    }
-
-    get size() { return this.engines.length; }
-
-    /** @returns {Promise<UciEngine>} */
-    acquire() {
-        if (this.closed) return Promise.reject(new EngineError('closed', 'pool closed'));
-        const e = this.idle.pop();
-        if (e) return Promise.resolve(e);
-        return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
-    }
-
-    release(engine) {
-        const w = this.waiters.shift();
-        if (w) w.resolve(engine); else this.idle.push(engine);
-    }
-
-    /** Runs fn(engine) with an engine of the pool. */
-    async use(fn) {
-        const e = await this.acquire();
-        try { return await fn(e); } finally { this.release(e); }
-    }
-
-    async close() {
-        this.closed = true;
-        for (const w of this.waiters.splice(0)) w.reject(new EngineError('closed', 'pool closed'));
-        await Promise.all(this.engines.map((e) => e.close()));
     }
 }

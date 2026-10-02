@@ -1,8 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { testConfig } from '../../src/config.js';
 import { createAnticheat, startAnalysisProcess } from '../../src/anticheat/index.js';
+import { applyCertainSanction } from '../../src/anticheat/sanction.js';
+import { Population, updatePlayerIntegrity } from '../../src/anticheat/scoring.js';
 import { createFakeStore } from '../../src/anticheat/testing/fake-store.js';
+import { openStore, migrate } from '../../src/store/index.js';
 
 const quiet = { debug() {}, info() {}, warn() {}, error() {}, security() {}, child() { return this; } };
 
@@ -60,6 +66,55 @@ test('idempotency across processes: an existing ban of the same game is reused',
     assert.equal(c.applied, true);
     assert.equal(store._.sanctions.length, 2);
     assert.equal(store.integrity.get(9).evidence.certain.length, 3, 'every sanction call adds evidence');
+});
+
+test('a ban that cannot be stored writes nothing else, and the next certain anomaly of the game tries again', async () => {
+    const store = createFakeStore();
+    const primary = fakePrimary();
+    const t = 1_800_000_000_000;
+    const ac = createAnticheat({ config: testConfig(), store, primary, log: quiet, now: () => t });
+    const create = store.sanctions.create;
+    store.sanctions.create = () => { throw Object.assign(new Error('database is locked'), { code: 'busy' }); };
+    const a = ac.sanctionCertain({ userId: 5, gameId: 77, kind: 'illegal_move' });
+    assert.deepEqual(a, { banUntil: 0, applied: false, refunds: 0 });
+    assert.equal(store.integrity.get(5), null, 'not confirmed without the ban');
+    assert.equal(store._.security.length, 0);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(primary.sent.length, 0);
+    store.sanctions.create = create;
+    const b = ac.sanctionCertain({ userId: 5, gameId: 77, kind: 'illegal_move' });
+    assert.equal(b.applied, true, 'retried');
+    assert.equal(store._.sanctions.length, 1);
+    assert.equal(store.integrity.get(5).level, 'confirmed');
+    await new Promise((r) => setImmediate(r));
+    assert.equal(primary.sent.length, 1);
+    ac.close();
+});
+
+test('an analysis update does not overwrite a certain-cheat ban committed meanwhile by another process', (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-integrity-race-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const config = testConfig({ DB_PATH: path.join(dir, 'db.sqlite') });
+    const analysis = openStore(config);       // the analysis process's connection
+    migrate(analysis);
+    const shard = openStore(config);          // a shard's store writer thread
+    t.after(() => { analysis.close(); shard.close(); });
+    const userId = analysis.users.create({ username: 'cheat', email: 'cheat@example.org' });
+    const t0 = 1_800_000_000_000;
+    const forUser = analysis.analysis.forUser;
+    let banned = false;
+    analysis.analysis.forUser = (...a) => {
+        // The shard bans the player while the analysis reads their games.
+        if (!banned) { banned = true; applyCertainSanction(shard, config, { userId, gameId: 7, kind: 'illegal_move', at: t0 }); }
+        return forUser(...a);
+    };
+    const r = updatePlayerIntegrity({ store: analysis, userId, population: new Population(null), now: t0 + 1, log: quiet });
+    assert.ok(banned);
+    assert.equal(r.level, 'confirmed');
+    const integ = analysis.integrity.get(userId);
+    assert.equal(integ.level, 'confirmed');
+    assert.deepEqual(integ.evidence.certain.map((c) => c.kind), ['illegal_move'], 'the evidence of the ban is kept');
+    assert.equal(integ.evidence.statistics.games, 0);
 });
 
 test('a longer ban stands for the automatic one only when it is a ban for cheating that refunds', () => {

@@ -10,8 +10,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { DatabaseSync } from 'node:sqlite';
-import { readIntegrity, writeIntegrity, writeStructured, parseMaybeJson, levelRank, LEVELS, HOUR_MS, DAY_MS } from './util.js';
+import { DatabaseSync } from '../store/index.js';
+import { readIntegrity, writeIntegrity, writeStructured, inTx, parseMaybeJson, levelRank, LEVELS, HOUR_MS, DAY_MS } from './util.js';
 import { CheatBanReason, isCheatingBan, refundVictims, refundWindowStart, victimTotals } from './refunds.js';
 import { reviewPriority, recentReportWeight } from './reports.js';
 import { sideOf } from './scoring.js';
@@ -87,10 +87,16 @@ export function parseArgs(argv) {
 
 function iso(t) { return t ? new Date(Number(t)).toISOString().replace('.000Z', 'Z') : '-'; }
 
+// Control characters (C0, DEL, C1), line and paragraph separators and bidirectional controls are
+// printed as \uXXXX: a player's report comment cannot break a table or forge lines of the output.
+// eslint-disable-next-line no-control-regex
+const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+const cell = (v) => String(v ?? '-').replace(UNPRINTABLE, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+
 function table(rows, cols) {
     if (!rows.length) return '(none)\n';
-    const w = cols.map((c) => Math.max(c.length, ...rows.map((r) => String(r[c] ?? '-').length)));
-    const line = (vals) => vals.map((v, i) => String(v ?? '-').padEnd(w[i])).join('  ').trimEnd();
+    const w = cols.map((c) => Math.max(c.length, ...rows.map((r) => cell(r[c]).length)));
+    const line = (vals) => vals.map((v, i) => cell(v).padEnd(w[i])).join('  ').trimEnd();
     return [line(cols), line(w.map((n) => '-'.repeat(n))), ...rows.map((r) => line(cols.map((c) => r[c])))].join('\n') + '\n';
 }
 
@@ -130,13 +136,16 @@ function textFlag(ctx, name, { required = false, max = 300 } = {}) {
 }
 
 // A date option: YYYY-MM-DD (00:00 UTC) or an ISO 8601 time with its offset (2026-05-01T18:30Z),
-// not in the future.
+// not in the future. The typed calendar date must exist: Date.parse rolls a day past the end of
+// the month over (2026-02-31 would be 2026-03-03).
 function dateFlag(ctx, name) {
     const v = ctx.args.flags[name];
     if (v === undefined) return null;
     const s = String(v).trim();
     const valid = /^\d{4}-\d{2}-\d{2}$/.test(s) || /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(s);
-    const t = valid ? Date.parse(s) : NaN;
+    const [y, mo, d] = s.slice(0, 10).split('-').map(Number);
+    const exists = mo >= 1 && mo <= 12 && d >= 1 && d <= new Date(Date.UTC(y, mo, 0)).getUTCDate();
+    const t = valid && exists ? Date.parse(s) : NaN;
     if (!Number.isFinite(t)) throw new AdminError(`--${name} expects a date: YYYY-MM-DD (UTC) or an ISO 8601 time with its offset`);
     if (t > ctx.now()) throw new AdminError(`--${name} is in the future`);
     return t;
@@ -155,14 +164,28 @@ function reportsAgainst(ctx, userId) {
 
 function isOpen(r) { return !(r.outcome ?? r.resolution ?? r.resolvedAt ?? r.resolved_at); }
 
-function resolveOpenCheatingReports(ctx, userId, outcome) {
-    let n = 0;
-    for (const r of reportsAgainst(ctx, userId)) {
-        if (!isOpen(r) || r.category !== 'cheating') continue;
-        ctx.store.reports.resolve(r.id, outcome, ctx.moderator, ctx.now());
-        n++;
+// Summed weight of the reports received in the last 30 days: over every report when the store
+// sums them (weightSince), otherwise over the newest ones that forReported returns.
+function reportWeight30d(ctx, userId, received = null) {
+    const now = ctx.now();
+    if (typeof ctx.store.reports?.weightSince === 'function') {
+        try { return Math.round(ctx.store.reports.weightSince(userId, now - 30 * DAY_MS, 0).total * 1000) / 1000; } catch { /* the list below */ }
     }
-    return n;
+    return recentReportWeight(received ?? reportsAgainst(ctx, userId), now, 30);
+}
+
+// Reports received and the open ones: every report when the store counts them (countFor).
+function reportCounts(ctx, userId) {
+    if (typeof ctx.store.reports?.countFor === 'function') {
+        try { return ctx.store.reports.countFor(userId); } catch { /* the list below */ }
+    }
+    const rep = reportsAgainst(ctx, userId);
+    return { total: rep.length, open: rep.filter(isOpen).length };
+}
+
+// Every open cheating report, not only those among the newest reports that forReported returns.
+function resolveOpenCheatingReports(ctx, userId, outcome) {
+    return ctx.store.reports.resolveOpenFor(userId, 'cheating', outcome, ctx.moderator, ctx.now()).length;
 }
 
 function pushReview(ev, entry) {
@@ -178,15 +201,15 @@ function userShow(ctx) {
     const sanctions = safe(() => s.sanctions.list(u.id), []);
     const activeBan = safe(() => s.sanctions.activeBan(u.id, now), null);
     const integ = readIntegrity(s, u.id);
-    const sessions = safe(() => s.sessions.listForUser(u.id), []).filter((x) => !x.revokedAt && (!x.expiresAt || x.expiresAt > now)).length;
+    const sessions = safe(() => s.sessions.listForUser(u.id), []).filter((x) => !x.revokedAt && (!x.expiresAt || x.expiresAt > now)
+        && (!x.idleExpiresAt || x.idleExpiresAt > now)).length;
     const anomalies = { info: 0, suspicious: 0, certain: 0 };
     for (const a of safe(() => s.anomalies.forUser(u.id, 1000), [])) if (a.severity in anomalies) anomalies[a.severity]++;
-    const rep = reportsAgainst(ctx, u.id);
     const data = {
         user: publicUser(u), ratings, activeBan, sanctions,
         integrity: { level: integ.level, score: integ.score, updatedAt: integ.updatedAt, reviewedBy: integ.reviewedBy },
         activeSessions: sessions, anomalies,
-        reports: { total: rep.length, open: rep.filter(isOpen).length, weight30d: recentReportWeight(rep, now, 30) },
+        reports: { ...reportCounts(ctx, u.id), weight30d: reportWeight30d(ctx, u.id) },
     };
     let t = `User ${u.username} (#${u.id})  ${u.status || 'active'}\n`;
     t += `  e-mail ${u.email || '-'} (${u.emailVerified ? 'verified' : 'NOT verified'}), MFA ${u.mfaEnabled ? 'on' : 'off'}\n`;
@@ -260,11 +283,10 @@ function integrityList(ctx) {
     const level = ctx.args.flags.level === undefined ? 'suspected' : String(ctx.args.flags.level);
     if (!LEVELS.includes(level) || level === 'none') throw new AdminError('--level must be suspected, high_confidence or confirmed');
     const limit = intFlag(ctx, 'limit', { min: 1, max: 10000, def: 50 });
-    const now = ctx.now();
     const rows = (ctx.store.integrity.listFlagged(level, limit) || []).map((r) => {
         const userId = r.userId ?? r.user_id;
         const u = safe(() => ctx.store.users.byId(userId), null);
-        const w = recentReportWeight(reportsAgainst(ctx, userId), now, 30);
+        const w = reportWeight30d(ctx, userId);
         const ev = parseMaybeJson(r.evidence, {}) || {};
         return {
             userId, username: u?.username ?? `#${userId}`, level: r.level, score: Number(r.score) || 0,
@@ -279,18 +301,18 @@ function integrityList(ctx) {
 
 function integrityShow(ctx) {
     const u = requireUser(ctx, ctx.args.positional[2]);
-    const s = ctx.store, now = ctx.now();
+    const s = ctx.store;
     const integ = readIntegrity(s, u.id);
     const ev = integ.evidence || {};
     const games = [];
-    for (const row of safe(() => s.analysis.forUser(u.id, 30), [])) {
+    for (const row of safe(() => s.analysis.forUser(u.id, 30, { doneOnly: true }), [])) {
         const g = sideOf(parseMaybeJson(row?.features ?? row, null), u.id);
         if (g) games.push(g);
     }
     const anomalies = safe(() => s.anomalies.forUser(u.id, 50), []).map((a) => ({ ...a, detail: parseMaybeJson(a.detail, a.detail) }));
     const reports = reportsAgainst(ctx, u.id);
     const sanctions = safe(() => s.sanctions.list(u.id), []);
-    const priority = reviewPriority({ level: integ.level, score: integ.score, reportWeight: recentReportWeight(reports, now, 30) });
+    const priority = reviewPriority({ level: integ.level, score: integ.score, reportWeight: reportWeight30d(ctx, u.id, reports) });
     const data = { user: publicUser(u), integrity: integ, priority, games, anomalies, reports, sanctions };
     const st = ev.statistics;
     let t = `Integrity of ${u.username} (#${u.id}): ${integ.level}, score ${integ.score.toFixed(2)}, review priority ${priority}\n`;
@@ -309,16 +331,22 @@ function integrityShow(ctx) {
         t += '\nReviews\n' + table(ev.reviews.map((r) => ({ at: iso(r.at), action: r.action, by: r.by, reason: r.reason || '' })), ['at', 'action', 'by', 'reason']);
     }
     const f = (x, d = 1) => (x === null || x === undefined ? '-' : Number(x).toFixed(d));
+    // A side without scored moves has no rates (null): '-', not 0 %.
+    const pct = (x) => (x === null || x === undefined ? '-' : f(x * 100, 0));
     // Games of another analysis profile than the statistics' are not part of the scores.
     const other = (g) => !!st?.profile && g.profile !== st.profile;
     t += '\nAnalysed games (newest first)\n' + table(games.map((g) => ({
         game: other(g) ? `${g.gameId}*` : g.gameId, cat: g.category, rating: g.rating, moves: g.n, acc: f(g.accuracy), acpl: f(g.acpl),
-        't1%': f(g.t1Deep * 100, 0), 'fast%': f(g.t1Fast * 100, 0), 'cx%': g.t1Complex === null ? '-' : `${f(g.t1Complex * 100, 0)}/${g.nComplex}`,
+        't1%': pct(g.t1Deep), 'fast%': pct(g.t1Fast), 'cx%': g.t1Complex === null ? '-' : `${pct(g.t1Complex)}/${g.nComplex}`,
         'time~cx': f(g.timeCorr, 2), cv: f(g.timeCv, 2),
     })), ['game', 'cat', 'rating', 'moves', 'acc', 'acpl', 't1%', 'fast%', 'cx%', 'time~cx', 'cv']);
     if (games.some(other)) t += '  * analysed with another profile (engine, network, depths or hash): not in the scores above\n';
     t += '\nAnomalies (latest 50)\n' + table(anomalies.map((a) => ({ at: iso(a.at), kind: a.kind, severity: a.severity, game: a.gameId || '' })), ['at', 'kind', 'severity', 'game']);
-    t += '\nReports received\n' + table(reports.map((r) => ({ id: r.id, at: iso(r.at), category: r.category, weight: r.weight, game: r.gameId, outcome: r.outcome ?? r.resolution ?? 'open', comment: String(r.comment || '').slice(0, 60) })), ['id', 'at', 'category', 'weight', 'game', 'outcome', 'comment']);
+    // The store's report rows carry createdAt and status ('open' until resolved).
+    t += '\nReports received\n' + table(reports.map((r) => ({
+        id: r.id, at: iso(r.createdAt ?? r.at), category: r.category, weight: r.weight, game: r.gameId,
+        outcome: r.outcome ?? r.resolution ?? (r.status && r.status !== 'open' ? r.status : 'open'), comment: String(r.comment || '').slice(0, 60),
+    })), ['id', 'at', 'category', 'weight', 'game', 'outcome', 'comment']);
     t += '\nSanctions\n' + table(sanctions.map((x) => ({ id: x.id, kind: x.kind, source: x.source, until: iso(x.endsAt), reason: x.reason })), ['id', 'kind', 'source', 'until', 'reason']);
     return { data, text: t };
 }
@@ -331,16 +359,21 @@ function integrityConfirm(ctx) {
     const since = dateFlag(ctx, 'refund-since');
     if (noRefund && since !== null) throw new AdminError('--refund-since and --no-refund exclude each other');
     const now = ctx.now();
-    const prev = readIntegrity(ctx.store, u.id);
-    const ev = { ...prev.evidence };
-    pushReview(ev, { action: 'confirm', by: ctx.moderator, at: now, reason, previousLevel: prev.level, score: prev.score });
-    ev.review = { ...(ev.review || {}), confirmedAt: now, by: ctx.moderator };
-    writeIntegrity(ctx.store, u.id, { level: 'confirmed', score: prev.score, evidence: ev, updatedAt: now, reviewedBy: ctx.moderator });
     const until = now + hours * HOUR_MS;
     // The reason tells the store whether the games recorded during the ban are refunded
     // (refunds.js banRefunds): not after --no-refund.
     const banReason = `${noRefund ? CheatBanReason.confirmedNoRefund : CheatBanReason.confirmed}${reason}`;
-    const id = ctx.store.sanctions.create({ userId: u.id, kind: 'ban', reason: banReason, source: 'moderator', gameId: null, startsAt: now, endsAt: until, createdBy: ctx.moderator });
+    // The record is read and written back in one transaction (util.js inTx), with the ban.
+    const { prev, id } = inTx(ctx.store, () => {
+        const prev = readIntegrity(ctx.store, u.id, true);
+        const ev = { ...prev.evidence };
+        pushReview(ev, { action: 'confirm', by: ctx.moderator, at: now, reason, previousLevel: prev.level, score: prev.score });
+        ev.review = { ...(ev.review || {}), confirmedAt: now, by: ctx.moderator };
+        // The ban first: when it cannot be stored, the level is left as it was.
+        const id = ctx.store.sanctions.create({ userId: u.id, kind: 'ban', reason: banReason, source: 'moderator', gameId: null, startsAt: now, endsAt: until, createdBy: ctx.moderator });
+        writeIntegrity(ctx.store, u.id, { level: 'confirmed', score: prev.score, evidence: ev, updatedAt: now, reviewedBy: ctx.moderator });
+        return { prev, id };
+    });
     const resolved = ctx.args.flags['keep-reports'] ? 0 : resolveOpenCheatingReports(ctx, u.id, 'actioned');
     const from = noRefund ? null : since ?? refundWindowStart(ctx.config, now);
     // The ban stands whatever happens to the refunds (one transaction of their own): a failure is
@@ -384,12 +417,16 @@ function integrityClear(ctx) {
     const u = requireUser(ctx, ctx.args.positional[2]);
     const reason = textFlag(ctx, 'reason');
     const now = ctx.now();
-    const prev = readIntegrity(ctx.store, u.id);
-    const ev = { ...prev.evidence };
-    pushReview(ev, { action: 'clear', by: ctx.moderator, at: now, reason, previousLevel: prev.level, score: prev.score });
-    // The automatic model only raises the level again on new evidence (scoring.js).
-    ev.review = { clearedAt: now, clearedScore: prev.score, by: ctx.moderator };
-    writeIntegrity(ctx.store, u.id, { level: 'none', score: prev.score, evidence: ev, updatedAt: now, reviewedBy: ctx.moderator });
+    // The record is read and written back in one transaction (util.js inTx).
+    const prev = inTx(ctx.store, () => {
+        const prev = readIntegrity(ctx.store, u.id, true);
+        const ev = { ...prev.evidence };
+        pushReview(ev, { action: 'clear', by: ctx.moderator, at: now, reason, previousLevel: prev.level, score: prev.score });
+        // The automatic model only raises the level again on new evidence (scoring.js).
+        ev.review = { clearedAt: now, clearedScore: prev.score, by: ctx.moderator };
+        writeIntegrity(ctx.store, u.id, { level: 'none', score: prev.score, evidence: ev, updatedAt: now, reviewedBy: ctx.moderator });
+        return prev;
+    });
     const dismissed = ctx.args.flags['dismiss-reports'] ? resolveOpenCheatingReports(ctx, u.id, 'dismissed') : 0;
     audit(ctx, 'integrity_clear', u.id, { reason, previousLevel: prev.level, score: prev.score, reportsDismissed: dismissed });
     return { data: { level: 'none', previous: prev.level, reportsDismissed: dismissed },
@@ -400,7 +437,6 @@ function integrityClear(ctx) {
 
 function reportsList(ctx) {
     const limit = intFlag(ctx, 'limit', { min: 1, max: 10000, def: 100 });
-    const now = ctx.now();
     const groups = new Map();
     for (const r of ctx.store.reports.listOpen(limit) || []) {
         const id = r.reportedId ?? r.reported_id;
@@ -413,13 +449,13 @@ function reportsList(ctx) {
     for (const g of groups.values()) {
         const u = safe(() => ctx.store.users.byId(g.reportedId), null);
         const integ = readIntegrity(ctx.store, g.reportedId);
-        const w30 = recentReportWeight(reportsAgainst(ctx, g.reportedId), now, 30) || g.weight;
+        const w30 = reportWeight30d(ctx, g.reportedId) || g.weight;
         rows.push({
             reportedId: g.reportedId, username: u?.username ?? `#${g.reportedId}`, level: integ.level, score: integ.score,
             priority: reviewPriority({ level: integ.level, score: integ.score, reportWeight: w30 }),
             open: g.reports.length, weight: Math.round(g.weight * 1000) / 1000,
             categories: [...new Set(g.reports.map((r) => r.category))].join(','),
-            ids: g.reports.map((r) => r.id), latest: Math.max(...g.reports.map((r) => Number(r.at) || 0)),
+            ids: g.reports.map((r) => r.id), latest: Math.max(...g.reports.map((r) => Number(r.createdAt ?? r.at) || 0)),
         });
     }
     rows.sort((a, b) => b.priority - a.priority || b.weight - a.weight);
@@ -452,11 +488,9 @@ function stats(ctx) {
     const counts = { suspected: 0, high_confidence: 0, confirmed: 0 };
     for (const r of safe(() => ctx.store.integrity.listFlagged('suspected', 100000), [])) if (r.level in counts) counts[r.level]++;
     const openReports = safe(() => ctx.store.reports.listOpen(100000), []).length;
-    const extra = typeof ctx.store.stats === 'function' ? safe(() => ctx.store.stats(), null) : null;
-    const data = { integrity: counts, openReports, store: extra };
+    const data = { integrity: counts, openReports, store: null };
     let t = `Integrity: ${counts.suspected} suspected, ${counts.high_confidence} high confidence, ${counts.confirmed} confirmed\n`;
     t += `Open reports: ${openReports}\n`;
-    if (extra) t += `Store: ${JSON.stringify(extra)}\n`;
     return { data, text: t };
 }
 
@@ -516,6 +550,12 @@ function benchAccounts(ctx) {
     const width = Math.max(4, String(count).length);
     const maxLen = ctx.config?.usernameMax ?? 20;
     if (prefix.length + width > maxLen) throw new AdminError(`usernames would exceed ${maxLen} characters: shorten --prefix`);
+    // An existing token file is made 600 below, which only its owner (or root) may do: another
+    // user's file is refused before any account or session is created.
+    const existing = fs.statSync(out, { throwIfNoEntry: false });
+    if (existing?.isFile() && process.geteuid && process.geteuid() !== 0 && existing.uid !== process.geteuid()) {
+        throw new AdminError(`--out: ${out} belongs to another user, so its mode cannot be made 600`);
+    }
     const hash = ctx.hashToken || defaultHashToken;
     const now = ctx.now();
     const maxDays = ctx.config?.sessionMaxDays ?? 90, idleDays = ctx.config?.sessionIdleDays ?? 30;
@@ -540,7 +580,15 @@ function benchAccounts(ctx) {
             idleExpiresAt: now + idleDays * DAY_MS, clientLabel: 'bench', ip: null });
         lines.push(format === 'tsv' ? `${username}\t${token}` : token);
     }
-    fs.writeFileSync(out, lines.join('\n') + '\n', { mode: 0o600 });
+    // The mode of open() only applies to a new file: an existing regular file is made 600 before
+    // the tokens go in. A device or a pipe (--out /dev/stdout) keeps its mode.
+    const fd = fs.openSync(out, 'w', 0o600);
+    try {
+        if (fs.fstatSync(fd).isFile()) fs.fchmodSync(fd, 0o600);
+        fs.writeFileSync(fd, lines.join('\n') + '\n');
+    } finally {
+        fs.closeSync(fd);
+    }
     audit(ctx, 'bench_accounts', null, { count, prefix, created, reused });
     return { data: { count, created, reused, out }, text: `${count} bench accounts ready (${created} created, ${reused} reused); tokens written to ${out} (mode 600).\n` };
 }
@@ -636,7 +684,9 @@ export const COMMANDS = Object.freeze({
 export async function runAdmin(argv, { store, config = null, out = process.stdout, err = process.stderr, now = Date.now, moderator = 'admin', log = null, hashToken = null } = {}) {
     const args = parseArgs(argv);
     const [a, b] = args.positional;
-    const handler = COMMANDS[`${a} ${b}`] || COMMANDS[a];
+    // Own keys only: an inherited name (constructor, toString, __proto__) is not a command.
+    const key = Object.hasOwn(COMMANDS, `${a} ${b}`) ? `${a} ${b}` : Object.hasOwn(COMMANDS, a) ? a : null;
+    const handler = key ? COMMANDS[key] : null;
     if (!handler || args.flags.help) {
         (handler ? out : err).write(USAGE);
         return handler ? 0 : 2;

@@ -182,7 +182,7 @@ export class GameHost {
      * @param {object} opts.config
      * @param {object} [opts.store] Store (store.games.finishBatch)
      * @param {object} [opts.journal] Journal (append, committed, recover, flush; hasUnwritten()
-     *   and failedWrites when its writes are asynchronous)
+     *   and failedWrites when its writes are asynchronous; releaseRecovered() if it has one)
      * @param {object} [opts.anticheat] { recordAnomaly, sanctionCertain, flush?, pendingSignalCount? }
      * @param {object} [opts.bus] unused
      * @param {object} [opts.primary] { request(type, payload) -> Promise }
@@ -673,6 +673,7 @@ export class GameHost {
             this._request('game.recovered', { gameId, whiteId: room.white.userId, blackId: room.black.userId, shard: this.shard });
         }
         this.m.active.set(this.activeCount);
+        this.journal.releaseRecovered?.();     // the rooms keep no reference to the records
         this.log.info('games recovered from the journal', { restored: this.counts.recovered, requeued: this.counts.requeued, aborted: this.counts.aborted });
         return count;
     }

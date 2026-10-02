@@ -47,10 +47,14 @@ export function writeStructured(write, value, fields = []) {
     }
 }
 
-/** Integrity record with defaults (the store returns null for a player never scored). */
-export function readIntegrity(store, userId) {
+/**
+ * Integrity record with defaults (the store returns null for a player never scored). A store error
+ * gives the defaults too, unless `strict` (a caller that writes the record back must not write
+ * the defaults over it).
+ */
+export function readIntegrity(store, userId, strict = false) {
     let r = null;
-    try { r = store.integrity.get(userId); } catch { r = null; }
+    try { r = store.integrity.get(userId); } catch (e) { if (strict) throw e; r = null; }
     return {
         level: r?.level || 'none',
         score: Number(r?.score) || 0,
@@ -63,6 +67,16 @@ export function readIntegrity(store, userId) {
 /** Writes an integrity record, tolerating stores that want the evidence as text. */
 export function writeIntegrity(store, userId, fields) {
     return writeStructured((f) => store.integrity.set(userId, f), fields, ['evidence']);
+}
+
+/**
+ * Runs fn() in one store transaction when the store has them (store.transaction: BEGIN
+ * IMMEDIATE), else directly. An integrity record read, changed and written back inside it cannot
+ * overwrite what another process (the analysis, a shard's automatic sanction, the admin CLI)
+ * wrote in between.
+ */
+export function inTx(store, fn) {
+    return typeof store.transaction === 'function' ? store.transaction(fn) : fn();
 }
 
 export const HOUR_MS = 3600000;

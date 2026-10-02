@@ -162,7 +162,9 @@ the human stand-ins' ACPL 26 % higher than Stockfish 16 at 10/18, and scores 16 
 the statistics never mix them (section 4).
 
 **Queue policy** (docs/DESIGN.md 6.5). The engine takes the highest priority first, then the
-oldest job: a moderator request, then a game a credible player reported (`cheating` or `other`,
+oldest job: a moderator request (priority `manual`, made through the store API
+`store.analysis.enqueue(gameId)`: no `scacelith-admin` command exposes it yet), then a game a
+credible player reported (`cheating` or `other`,
 stored weight 0.5 or more), then a game with a suspicion signal at its end (either player's
 integrity level above `none`, an open `cheating` or `other` report of weight 0.5 or more against
 either player in the last 30 days, a `suspicious` or `certain` anomaly in that game) or a report
@@ -565,14 +567,27 @@ header of `src/anticheat/index.js`):
   m2 } }`, and `integrity.updatePopulation([{ key: '<profile>|<category>|<bucket>|<metric>',
   value }], now)` sends one observation per metric and game, which the store merges (Welford);
   the analysis process is the only writer;
-* `analysis.forUser(userId, limit)` returns the player's completed analyses, newest first, each
-  row with the `features` given to `complete()`;
-* `reports.forReported(userId)` rows carry `weight` and `at`; the optional
+* `analysis.forUser(userId, limit, { doneOnly: true })` returns the player's completed analyses,
+  newest first, each row with the `features` given to `complete()`;
+* `reports.forReported(userId)` rows carry `weight`, `createdAt` and `status`; the optional
   `reports.forReporter(userId)` (rows with `outcome`) feeds the reporter's track record;
+* `reports.resolveOpenFor(reportedId, 'cheating', outcome, by, now)` resolves every open cheating
+  report of the player and returns their ids; `integrity confirm` (unless `--keep-reports`) and
+  `integrity clear --dismiss-reports` require it (no fallback);
+* the optional `reports.weightSince(reportedId, since, lowThreshold)` (`{ total, low }`) and
+  `reports.countFor(reportedId)` (`{ total, open }`) make the 24-hour cap of a new report, the
+  30-day report weights and the report counts of `bin/admin.js` cover every report; without them
+  they are taken from `forReported`'s rows (the newest 200);
 * the optional `analysis.request(gameId, 'report' | 'signal', now)` queues a reported game,
   at `report` priority for a credible report and `signal` for a low-credibility one (without it
   a report does not touch the analysis queue);
 * `analysis.next()` returns each job with its `priority` (0 for the ordinary sample, the only
   jobs that feed the population);
+* the optional `analysis.touch(gameId, workerId, now)` renews the claim of a job every minute
+  while it is analysed (without it, a job analysed for more than 10 minutes is taken for the job
+  of a vanished worker and given to another engine);
+* the optional `transaction(fn)` makes each read-modify-write of an integrity record (analysis
+  scoring, automatic sanction, `integrity confirm` / `clear`) one transaction, so that it cannot
+  overwrite what another process wrote in between; without it the writes are made directly;
 * free-form values are passed as objects and retried as JSON text if the store refuses them;
 * the rating refunds use `refunds` when the store has it (a partial store gives none).

@@ -23,11 +23,26 @@
 //     <ratingBucket>') returns { <metric>: { n, mean, m2 } }; the analysis process (the only
 //     writer) sends one { key, value } observation per metric and game, which the store merges
 //     (Welford).
-//   * store.analysis.forUser(userId, limit) must return that player's completed analyses, newest
-//     first, each row carrying the `features` object given to complete() (or being it).
+//   * store.analysis.forUser(userId, limit, { doneOnly: true }) must return that player's completed
+//     analyses, newest first, each row carrying the `features` object given to complete() (or
+//     being it).
 //   * store.reports.forReporter(reporterId) (not in DESIGN) is used when present to weigh a
 //     reporter by the outcomes of their past reports; without it every reporter has a neutral
-//     track record. store.reports.forReported(userId) must return rows with { weight, at }.
+//     track record. store.reports.forReported(userId) must return rows with { weight, createdAt,
+//     status }.
+//   * store.reports.resolveOpenFor(reportedId, 'cheating', outcome, by, now) -> [ids] is required
+//     by bin/admin.js integrity confirm (unless --keep-reports) and integrity clear
+//     --dismiss-reports: it resolves every open cheating report of the player (no fallback).
+//   * store.reports.weightSince(reportedId, since, lowThreshold) -> { total, low } and
+//     store.reports.countFor(reportedId) -> { total, open } are used when present: the 24-hour
+//     cap of a new report, the 30-day report weights and the report counts of bin/admin.js then
+//     cover every report; without them they are taken from forReported's rows (the newest 200).
+//   * store.analysis.touch(gameId, workerId, now) is used when present to renew the claim of a job
+//     every minute while it is analysed; without it, a job analysed for more than 10 minutes is
+//     taken for the job of a vanished worker and given to another engine.
+//   * store.transaction(fn) is used when present (util.js inTx): an integrity record read, changed
+//     and written back (analysis scoring, automatic sanction, integrity confirm / clear) is then
+//     one transaction; without it the writes are made directly.
 //   * store.analysis.request(gameId, 'report' | 'signal', now) is used when present to queue a
 //     reported game for analysis ahead of the ordinary ones ('signal' for a low-credibility report;
 //     reports.js; the queue policy is the store's). store.analysis.next() returns each job with its
@@ -222,6 +237,12 @@ export function createAnticheat({ config, store, primary = null, log = null, now
         const s = { userId, gameId: gameId || 0, kind, at: t };
 
         const done = (r) => {
+            if (r.failed) {
+                // The ban was not stored (logged, nothing else written): a later certain anomaly of
+                // this game tries again.
+                sanctioned.delete(key);
+                return { banUntil: 0, applied: false, refunds: 0 };
+            }
             sanctioned.set(key, r.until);
             if (r.created) {
                 sanctionCounter.labels(kind in ANOMALY_KINDS ? kind : 'unknown').inc();

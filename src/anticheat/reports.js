@@ -15,7 +15,7 @@
 // the session's user object does not carry it (the HTTP server's does not; before, every report
 // sent through the API was weighed as from an account created that instant).
 
-import { DAY_MS, readIntegrity, parseMaybeJson } from './util.js';
+import { DAY_MS, readIntegrity } from './util.js';
 
 export const REPORT_RULES = Object.freeze({
     categories: Object.freeze(['cheating', 'abuse', 'other']),
@@ -69,6 +69,12 @@ export function cappedWeight(raw, received, now) {
         today += w;
         if (w < REPORT_RULES.lowCredibility) todayLow += w;
     }
+    return cappedWeightOfSums(raw, today, todayLow);
+}
+
+// cappedWeight from the sums of the weights received in the last 24 hours: all of them (today),
+// and those below REPORT_RULES.lowCredibility (todayLow).
+function cappedWeightOfSums(raw, today, todayLow) {
     let w = raw;
     if (raw < REPORT_RULES.lowCredibility) w = Math.min(w, Math.max(0, REPORT_RULES.lowCredDailyCap - todayLow));
     w = Math.min(w, Math.max(0, REPORT_RULES.dailyWeightCap - today));
@@ -235,10 +241,27 @@ export function handleReport(ctx, deps = {}) {
     const { actioned, dismissed } = outcomesOf(store, user.id);
     const level = readIntegrity(store, user.id).level;
     const raw = reporterWeight({ createdAt: accountCreatedAt(store, user), gamesPlayed: gamesPlayed(store, user.id), actioned, dismissed, level, now });
-    let received = [];
-    try { received = store.reports.forReported(opponentId) || []; } catch { received = []; }
-    const weight = cappedWeight(raw.weight, received, now);
-    const id = store.reports.create({ reporterId: user.id, reportedId: opponentId, gameId, category, comment, weight, at: now });
+    // The sums over every report of the last 24 hours when the store has them (forReported returns
+    // only the newest reports: past them, the cap would start over).
+    let weight;
+    if (typeof store.reports.weightSince === 'function') {
+        let today = 0, todayLow = 0;
+        try { ({ total: today, low: todayLow } = store.reports.weightSince(opponentId, now - DAY_MS, REPORT_RULES.lowCredibility)); } catch { /* none counted */ }
+        weight = cappedWeightOfSums(raw.weight, today, todayLow);
+    } else {
+        let received = [];
+        try { received = store.reports.forReported(opponentId) || []; } catch { received = []; }
+        weight = cappedWeight(raw.weight, received, now);
+    }
+    let id;
+    try {
+        id = store.reports.create({ reporterId: user.id, reportedId: opponentId, gameId, category, comment, weight, at: now });
+    } catch (e) {
+        // The same report filed at the same moment through another shard (separate connections:
+        // both passed exists()); the UNIQUE index kept one, and a duplicate gets the same answer.
+        if (e?.code === 'duplicate') return ACCEPTED;
+        throw e;
+    }
     log?.security?.('report.filed', { reportId: id, reporterId: user.id, reportedId: opponentId, gameId, category, weight, rawWeight: raw.weight });
     // The reported game is analysed ahead of the ordinary ones, even when the queue policy left
     // it out (ANALYSIS_QUEUE_MAX, ANALYSIS_SAMPLE_RATE): at 'report' priority when the report is
@@ -252,11 +275,4 @@ export function handleReport(ctx, deps = {}) {
         try { store.analysis.request(gameId, reason, now); } catch (e) { log?.warn?.('analysis request of a reported game failed', { err: e, gameId }); }
     }
     return ACCEPTED;
-}
-
-/** Evidence-friendly summary of the reports a player received. */
-export function summariseReports(received, now) {
-    const rows = (received || []).map((r) => ({ ...r, detail: parseMaybeJson(r.detail, r.detail) }));
-    const open = rows.filter((r) => !(r.outcome ?? r.resolution));
-    return { total: rows.length, open: open.length, weight30d: recentReportWeight(rows, now, 30) };
 }

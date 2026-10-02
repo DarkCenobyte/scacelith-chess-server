@@ -43,14 +43,6 @@ export function stdev(xs) {
     return Math.sqrt(s / (xs.length - 1));
 }
 
-/** Median (NaN for an empty list). */
-export function median(xs) {
-    if (!xs.length) return NaN;
-    const s = [...xs].sort((a, b) => a - b);
-    const h = s.length >> 1;
-    return s.length % 2 ? s[h] : (s[h - 1] + s[h]) / 2;
-}
-
 /** Ranks with ties averaged (1-based). */
 export function ranks(xs) {
     const idx = xs.map((x, i) => i).sort((a, b) => xs[a] - xs[b]);

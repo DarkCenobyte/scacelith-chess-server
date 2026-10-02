@@ -4,7 +4,7 @@
 // not load the rest of the anti-cheat module.
 
 import { banRefunds, CheatBanReason, refundVictims, refundWindowStart, victimTotals } from './refunds.js';
-import { readIntegrity, writeIntegrity, writeStructured, HOUR_MS } from './util.js';
+import { readIntegrity, writeIntegrity, writeStructured, inTx, HOUR_MS } from './util.js';
 
 const MAX_EVIDENCE_ITEMS = 50;
 
@@ -14,12 +14,13 @@ const MAX_EVIDENCE_ITEMS = 50;
  * long (another shard, an earlier anomaly, a moderator's integrity confirm); integrity level
  * 'confirmed' with the evidence appended; security event 'sanction_auto'; the rating refunds of
  * the player's victims (refunds.js; they are idempotent, so they also run when the ban existed).
- * Each step's failure is logged, not thrown.
+ * Each step's failure is logged, not thrown; a ban that cannot be stored stops there (failed:
+ * nothing else is written), so that the next certain anomaly of the game tries again.
  * @param {object} store
  * @param {object} config   loadConfig() result (banDurationHours, ratingRefundDays)
  * @param {{ userId: number, gameId?: number, kind: string, at: number }} s
  * @param {object} [log]
- * @returns {{ until: number, created: boolean, sanctionId: number|null, refunds: { victimId: number, points: number }[] }}
+ * @returns {{ until: number, created: boolean, failed?: boolean, sanctionId: number|null, refunds: { victimId: number, points: number }[] }}
  *          refunds: the points given back now, per victim
  */
 export function applyCertainSanction(store, config, { userId, gameId = 0, kind, at }, log = null) {
@@ -48,14 +49,19 @@ export function applyCertainSanction(store, config, { userId, gameId = 0, kind, 
             created = true;
         } catch (e) {
             log?.error?.('automatic ban not stored', { err: e, userId, kind });
+            // Not 'confirmed' and refunded without the ban that justifies it.
+            return { until: 0, created: false, failed: true, sanctionId: null, refunds: [] };
         }
     }
 
     try {
-        const prev = readIntegrity(store, userId);
-        const ev = { ...prev.evidence };
-        ev.certain = [...(Array.isArray(ev.certain) ? ev.certain : []), { kind, gameId: gameId || 0, at, banUntil: until }].slice(-MAX_EVIDENCE_ITEMS);
-        writeIntegrity(store, userId, { level: 'confirmed', score: prev.score, evidence: ev, updatedAt: at });
+        // Read and written back in one transaction (util.js inTx).
+        inTx(store, () => {
+            const prev = readIntegrity(store, userId, true);
+            const ev = { ...prev.evidence };
+            ev.certain = [...(Array.isArray(ev.certain) ? ev.certain : []), { kind, gameId: gameId || 0, at, banUntil: until }].slice(-MAX_EVIDENCE_ITEMS);
+            writeIntegrity(store, userId, { level: 'confirmed', score: prev.score, evidence: ev, updatedAt: at });
+        });
     } catch (e) {
         log?.error?.('integrity not updated after a certain cheat', { err: e, userId });
     }

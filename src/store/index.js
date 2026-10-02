@@ -65,9 +65,12 @@
 //   - tokens.consume, mfa.consumeRecoveryCode and users.advanceMfaStep are single conditional
 //     statements (UPDATE/DELETE ... WHERE still-valid): atomic across processes without an
 //     explicit transaction (an autocommit write retries on the lock through busy_timeout).
-//   - analysis: a job is claimed at most 3 times (ANALYSIS_MAX_ATTEMPTS); a running job older than
-//     10 minutes is re-queued (or failed at the cap) by the next claim; fail() re-queues until the
-//     cap and returns the new status; extra enqueue(gameId, now) (manual re-analysis) and stats().
+//   - analysis.forUser(userId, limit, { doneOnly }) lists the player's jobs of every status, newest
+//     game first; with doneOnly the completed analyses only (anticheat/scoring.js, bin/admin.js).
+//   - analysis: a job is claimed at most 3 times (ANALYSIS_MAX_ATTEMPTS); a running job claimed (or
+//     renewed by touch(gameId, workerId, now), the worker's heartbeat) more than 10 minutes ago is
+//     re-queued (or failed at the cap) by the next claim; fail() re-queues until the cap and
+//     returns the new status; extra enqueue(gameId, now) (manual re-analysis) and stats().
 //   - analysis queue policy (DESIGN.md 6.5): every job has a priority (AnalysisPriority: ordinary,
 //     signal, report, manual) and next() takes the highest first, then the oldest, except that
 //     every ORDINARY_SHARE-th claim of a store takes the oldest ordinary job first (when one
@@ -135,6 +138,14 @@
 //         each with reportedName and `outcome` (null while open, else 'actioned' | 'dismissed').
 //         anticheat/reports.js reads the outcomes for the reporter's track record when this call
 //         exists: before it, every reporter of a real store had the neutral track record.
+//       reports.weightSince(reportedId, since, lowThreshold) -> { total, low }: the summed weights of
+//         the reports against the player since `since`, and of those below lowThreshold (the 24-hour
+//         cap of anticheat/reports.js, over every report rather than forReported's newest 200).
+//       reports.resolveOpenFor(reportedId, category, outcome, by, now) -> [ids]: every open report
+//         of that category against the player resolved in one statement (forReported returns only
+//         the newest 200: bin/admin.js integrity confirm / clear).
+//       reports.countFor(reportedId) -> { total, open }: the number of reports against the player
+//         and of those still open (bin/admin.js user show; forReported returns only the newest 200).
 //       explainQueryPlan(store, sql, params) (module export): the EXPLAIN QUERY PLAN rows of a
 //         statement on the store's own connection (tests and diagnostics).
 
@@ -146,10 +157,13 @@ import { createRequire } from 'node:module';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { logger } from '../log.js';
-import { metrics } from '../metrics.js';
 import { enums } from '../protocol/schema.js';
+import { SIGNAL_JOBS_PER_PLAYER, countCommit, mBusy } from './commit-metrics.js';
 
 const { DatabaseSync } = loadSqlite();
+// For the other connections of a process that uses the store (bin/admin.js backup): importing
+// node:sqlite directly would print the warning loadSqlite() filters.
+export { DatabaseSync };
 
 // node:sqlite prints an ExperimentalWarning on Node 22 when it is first loaded. Only that notice
 // is filtered, only while the module loads; every other warning goes through unchanged.
@@ -194,12 +208,8 @@ const REPORT_SIGNAL_MIN_WEIGHT = 0.5;
 // the ordinary games (the random sample that feeds the population statistics) get at least that
 // share of the engine time however many prioritized games arrive.
 const ORDINARY_SHARE = 4;
-// Waiting 'signal' jobs per player: a flagged player's further games are not queued while this
-// many of their games wait (the scoring reads their 30 latest analysed games, so these renew most
-// of that window); one prolific flagged player cannot grow the signal tier without bound. A game
-// with an anomaly of its own replaces a waiting one without (queueAnalysis), so games flagged only
-// through the player cannot keep one with evidence out.
-const SIGNAL_JOBS_PER_PLAYER = 20;
+// SIGNAL_JOBS_PER_PLAYER (commit-metrics.js, whose skipped-analysis help text names it): waiting
+// 'signal' jobs per player.
 // analysis.backlog() counts at most this many jobs per tier (one index range scan each).
 const BACKLOG_COUNT_MAX = 100000;
 const INTEGRITY_LEVELS = ['none', 'suspected', 'high_confidence', 'confirmed'];
@@ -224,28 +234,24 @@ export const GAMES_FOR_USER_SQL = `SELECT ${GAME_SUMMARY_COLS} FROM games WHERE 
 export const GAMES_COUNT_FOR_USER_SQL = `SELECT (SELECT count(*) FROM games WHERE white_id = ?1 ${userGamesFilter('?5')})
     + (SELECT count(*) FROM games WHERE black_id = ?1 ${userGamesFilter('?6')}) AS n`;
 
+// analysis.forUser: ?1 the player, ?2 the limit. The done-only filter is written `+a.status` (no
+// index term): SQLite keeps walking the player's games newest first (games_white / games_black, a
+// primary-key probe of analysis_jobs each, stopped at the limit) instead of reading every done job
+// of the server through analysis_jobs_queue and sorting them.
+const analysisForUserSql = (doneOnly) => `SELECT a.game_id, a.status, a.attempts, a.finished_at, a.error, a.features, g.category,
+    g.white_id, g.ended_at, g.ply_count FROM games g JOIN analysis_jobs a ON a.game_id = g.id WHERE g.id IN (
+    SELECT id FROM games WHERE white_id = ?1 UNION SELECT id FROM games WHERE black_id = ?1)
+    ${doneOnly ? "AND +a.status = 'done' " : ''}ORDER BY g.id DESC LIMIT ?2`;
+
+/** analysis.forUser(userId, limit, { doneOnly: true }) (the tests check its query plan). */
+export const ANALYSED_FOR_USER_SQL = analysisForUserSql(true);
+
 // The status a result filter needs on each colour (index 0: as White, 1: as Black).
 const RESULT_STATUS = Object.freeze({
     win: [GameStatus.WhiteWins, GameStatus.BlackWins],
     loss: [GameStatus.BlackWins, GameStatus.WhiteWins],
     draw: [GameStatus.Draw, GameStatus.Draw],
 });
-
-const mBatchMs = metrics.histogram('scacelith_store_commit_batch_ms', 'Duration of one finished-games commit transaction',
-    [1, 2, 5, 10, 25, 50, 100, 250, 1000]);
-const mGames = metrics.counter('scacelith_store_games_committed_total', 'Finished games written to the database');
-const mBusy = metrics.counter('scacelith_store_busy_total', 'Store operations that gave up waiting for the database lock');
-// The same help text is registered by store/writer.js (the shard counts its writer thread's answers).
-const mAnalysisSkipped = metrics.counter('scacelith_anticheat_analysis_skipped_total',
-    'Finished rated games not queued for engine analysis (sample: ANALYSIS_SAMPLE_RATE, backlog: ANALYSIS_QUEUE_MAX reached, player: 20 flagged games of a player already waiting, displaced: a waiting flagged game without an anomaly of its own gave its place to a game with one)', ['reason']);
-
-// Counts the games of finishBatch results left out of the analysis queue, or taken out of it.
-function countSkipped(counter, results) {
-    for (const x of results) {
-        if (x.analysisSkipped) counter.labels(x.analysisSkipped).inc();
-        if (x.analysisDisplaced) counter.labels('displaced').inc(x.analysisDisplaced.length);
-    }
-}
 
 /** Priority of an analysis job: the highest waiting priority is analysed first (DESIGN.md 6.5). */
 export const AnalysisPriority = Object.freeze({ ordinary: 0, signal: 1, report: 2, manual: 3 });
@@ -497,7 +503,6 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         mfaEnabled: (v) => [['mfa_enabled', b01(v)]],
         mfaSecretEnc: (v) => [['mfa_secret_enc', orNull(v)]],
         pendingMfaSecretEnc: (v) => [['mfa_pending_secret_enc', orNull(v)]],
-        mfaPendingSecretEnc: (v) => [['mfa_pending_secret_enc', orNull(v)]],
         mfaLastStep: (v) => [['mfa_last_step', Math.floor(v)]],
         status: (v) => [['status', v]],
         acceptChallenges: (v) => [['accept_challenges', b01(v)]],
@@ -996,9 +1001,7 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                 log.security('rating.refund', { cheaterId: f.cheaterId, source: 'auto', sanctionId: f.sanctionId, gameId: f.gameId,
                     refunds: 1, victims: 1, points: f.points });
             }
-            mBatchMs.observe(performance.now() - t0);
-            mGames.inc(out.reduce((n, x) => n + (x.duplicate ? 0 : 1), 0));
-            countSkipped(mAnalysisSkipped, out);
+            countCommit(out, performance.now() - t0);
             return out;
         },
         byId(id) {
@@ -1205,6 +1208,15 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             return Number(st(`UPDATE analysis_jobs SET status = 'done', features = ?, finished_at = ?, error = NULL, worker = NULL
                 WHERE game_id = ?`).run(toJson(features), ms(now), gameId).changes) === 1;
         },
+        /**
+         * Heartbeat of a job being analysed: its claim time moves to `now`, so that next() re-queues
+         * only the jobs of a worker that stopped renewing them (ANALYSIS_STALE_MS), not a long
+         * analysis. Returns true when the job is still running for that worker.
+         */
+        touch(gameId, workerId = null, now = Date.now()) {
+            return Number(st(`UPDATE analysis_jobs SET started_at = ? WHERE game_id = ? AND status = 'running' AND worker IS ?`)
+                .run(ms(now), gameId, workerId === null || workerId === undefined ? null : String(workerId)).changes) === 1;
+        },
         /** Re-queues the job, or marks it failed once it was tried ANALYSIS_MAX_ATTEMPTS times. */
         fail(gameId, error, now = Date.now()) {
             return tx(() => {
@@ -1263,11 +1275,13 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                 AS priority`).get(AnalysisPriority.ordinary, BACKLOG_COUNT_MAX);
             return { ordinary: r.ordinary, priority: r.priority };
         },
-        forUser(userId, limit = 50) {
-            return st(`SELECT a.game_id, a.status, a.attempts, a.finished_at, a.error, a.features, g.category, g.white_id, g.ended_at,
-                g.ply_count FROM games g JOIN analysis_jobs a ON a.game_id = g.id WHERE g.id IN (
-                SELECT id FROM games WHERE white_id = ?1 UNION SELECT id FROM games WHERE black_id = ?1)
-                ORDER BY g.id DESC LIMIT ?2`).all(userId, limit).map((r) => ({
+        /**
+         * The player's jobs, newest game first; with doneOnly, the completed analyses only (the
+         * scoring's window of their latest analysed games, which waiting or failed jobs must not
+         * take places in).
+         */
+        forUser(userId, limit = 50, { doneOnly = false } = {}) {
+            return st(analysisForUserSql(doneOnly)).all(userId, limit).map((r) => ({
                 gameId: r.game_id, status: r.status, attempts: r.attempts, finishedAt: r.finished_at, error: r.error,
                 features: fromJson(r.features), category: r.category, color: r.white_id === userId ? 'white' : 'black',
                 endedAt: r.ended_at, plyCount: r.ply_count,
@@ -1419,6 +1433,24 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             if (outcome !== 'actioned' && outcome !== 'dismissed') throw new StoreError('invalid', "outcome must be 'actioned' or 'dismissed'");
             return Number(st(`UPDATE reports SET status = ?, resolved_at = ?, resolved_by = ? WHERE id = ? AND status = 'open'`)
                 .run(outcome, ms(now), by === null || by === undefined ? null : String(by), id).changes) === 1;
+        },
+        /** Summed weights of the reports against the player created at `since` or later: all, and those below lowThreshold. */
+        weightSince(reportedId, since, lowThreshold) {
+            const r = st(`SELECT coalesce(sum(weight), 0) AS total, coalesce(sum(CASE WHEN weight < ?3 THEN weight END), 0) AS low
+                FROM reports WHERE reported_id = ?1 AND created_at >= ?2`).get(reportedId, ms(since), +lowThreshold);
+            return { total: r.total, low: r.low };
+        },
+        /** Number of reports against the player, and of those still open. */
+        countFor(reportedId) {
+            const r = st(`SELECT count(*) AS total, count(CASE WHEN status = 'open' THEN 1 END) AS open
+                FROM reports WHERE reported_id = ?`).get(reportedId);
+            return { total: r.total, open: r.open };
+        },
+        /** Resolves every open report of `category` against the player in one statement; returns their ids. */
+        resolveOpenFor(reportedId, category, outcome, by = null, now = Date.now()) {
+            if (outcome !== 'actioned' && outcome !== 'dismissed') throw new StoreError('invalid', "outcome must be 'actioned' or 'dismissed'");
+            return guard(() => st(`UPDATE reports SET status = ?, resolved_at = ?, resolved_by = ? WHERE reported_id = ? AND category = ? AND status = 'open'
+                RETURNING id`).all(outcome, ms(now), by === null || by === undefined ? null : String(by), reportedId, category).map((r) => r.id));
         },
     };
 
