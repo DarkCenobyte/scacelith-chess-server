@@ -306,6 +306,17 @@ describe('WsClient', () => {
         await srv.close();
     });
 
+    test('a close reason over 123 bytes is cut on a UTF-8 character boundary', async () => {
+        for (const [reason, bytes] of [['\u00e9'.repeat(80), 122], ['a' + '\u00e9'.repeat(70), 123], ['\u{1f600}'.repeat(40), 120], ['x'.repeat(200), 123]]) {
+            const { srv, ws, peer } = await openPair();
+            await ws.close(1000, reason);
+            await srv.close();
+            const payload = peer.frames.find((f) => f.op === 8).payload;
+            assert.equal(payload.length - 2, bytes);
+            assert.ok(reason.startsWith(new TextDecoder('utf-8', { fatal: true }).decode(payload.subarray(2))));
+        }
+    });
+
     test('close() during the handshake resolves once the socket is closed', async () => {
         const silent = await startWsServer({ handshake: () => ({ skip: true }) });
         const ws = new WsClient({ port: silent.port, insecure: true });

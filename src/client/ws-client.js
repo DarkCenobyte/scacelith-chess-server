@@ -445,7 +445,11 @@ export class WsClient {
 
 function closePayload(code, reason) {
     let r = Buffer.from(String(reason), 'utf8');
-    if (r.length > 123) r = r.subarray(0, 123);
+    if (r.length > 123) {
+        let n = 123;
+        while (n > 0 && (r[n] & 0xc0) === 0x80) n--;      // do not split a UTF-8 sequence
+        r = r.subarray(0, n);
+    }
     const p = Buffer.allocUnsafe(2 + r.length);
     p[0] = code >>> 8;
     p[1] = code & 0xff;
