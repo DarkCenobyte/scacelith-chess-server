@@ -277,9 +277,7 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
 
         /** True while the login proof of work is on (credential-stuffing wave). */
         loginPowActive: () => l.powActive(),
-        mailer: svc.mailer,
         events: svc.events,
-        pow: svc.pow,
         /** Flushes pending security events (shutdown). */
         close() { svc.events.close(); },
         _svc: svc,
