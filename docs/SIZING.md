@@ -1,6 +1,6 @@
 # Sizing and hosting
 
-This page tells an operator how many players a machine can hold, what limits it, and how to set up a small VPS. The unit costs were measured on a 2.8 GHz Intel Xeon (Cascade Lake) KVM guest, with the server pinned to 2 vCPUs, the load generator pinned to 2 others, Node 22 and TLS 1.3 over loopback. Figures for another host are scaled by a speed factor `s` (how much work one of its vCores does compared with the test vCPU). Values marked "(inferred)" are reasoned from the measurements, not measured directly. The measurements predate the server's admission limits (the TLS gate, the password-hash cap, the upgrade reserve) and journal compaction, so what these change is inferred as well. Raw benchmark results are in [BENCHMARK.md](BENCHMARK.md), and every setting is described in [CONFIG.md](CONFIG.md).
+This page tells an operator how many players a machine can hold, what limits it, and how to set up a small VPS. The unit costs were measured on a 2.8 GHz Intel Xeon (Cascade Lake) KVM guest, with the server pinned to 2 vCPUs, the load generator pinned to 2 others, Node 22 and TLS 1.3 over loopback. Figures for another host are scaled by a speed factor `s` (how much work one of its vCores does compared with the test vCPU). Values marked "(inferred)" are reasoned from the measurements, not measured directly. The measurements predate the server's admission limits (the TLS gate, the password-hash cap, the upgrade reserve, the protection per address) and journal compaction, so what these change is inferred as well; the protection per address had its own cost measured separately ([Protection per address](#protection-per-address)). Raw benchmark results are in [BENCHMARK.md](BENCHMARK.md), and every setting is described in [CONFIG.md](CONFIG.md).
 
 Terms used throughout:
 
@@ -15,7 +15,9 @@ Terms used throughout:
 - Gestures come on top: the live head and hand movements that the server relays between the two players of a game (`GESTURE_RATE`, at most 4 per player per second by default) cost about 100 µs of an OVH vCore each (inferred from a measurement), so a player in a game who keeps moving costs more than their moves. The game client sends at least one gesture per second for the whole game, even while its player sits still. With the 10 s ping, capacity is divided by 1 + r, where r is the average number of gestures a player in a game sends per second, and r is at least 1 whenever the relay is on: the default configuration holds at most half the figure above, about 3,500 connected players per vCore comfortably at `s` = 0.65, and 1,400 if every player in a game sent the full default rate all the time. Only `GESTURE_RATE=0` (no relay) gives the full 7,000. See [Gestures](#gestures).
 - Memory comes next, near 70 KB per connection: about 24,000-29,000 connections on 4 GB and 51,000-62,000 on 8 GB with the settings below (inferred), at or just after the p99 limit of the CPU with a 10 s ping.
 - Network bandwidth and disk I/O are not limits on a typical VPS. Disk space is: finished games take about 85 MB per day per 1,000 average connected players, and nothing archives old games.
+- One network address, a flood from it included, costs at most a few percent of a vCore with the default per-address limits, and is blocked within a second or two once it ignores them (inferred, measured in part); floods from many addresses are the provider's job. See [Protection per address](#protection-per-address) and [Floods](#floods).
 - Restarts need one setting near the comfortable load: after a crash or a graceful restart alike, every player is back within about 60 s with the 10 s ping, inside the default `RECOVERY_GRACE_MS` of 90 s, but the last players with a game in progress may need about 30 s, more than the default `RECOVERY_CLOCK_HOLD_MS` of 20 s (inferred). See [Restarts](#restarts).
+- Animated GIFs of games are made on one thread per worker at the lowest CPU priority, so they only use the CPU the games leave, and the quotas bound what one account or one address can ask for: at most about 8 % of an OVH vCore for an account and 24 % for an address over a minute, with the longest games at the largest size (inferred). Memory: about 80 MiB per worker while players make GIFs, up to 160 MiB. See [Animated GIFs](#animated-gifs).
 
 ## CPU
 
@@ -126,6 +128,7 @@ Fixed costs to subtract from the visible RAM before dividing by the cost of a co
 - With the default `DB_CACHE_MB=64` (and `DB_MMAP_MB=256`), the budget gives about 21,000-25,000 connections on VPS-1 and 51,000-61,000 on VPS-2 (inferred: 240 MiB more SQLite cache on VPS-1; on VPS-2, 288 MiB more cache and 256 MiB less mapped memory nearly cancel out).
 - The engine analysis process, when enabled, adds 290-350 MB with one engine: a Node process and its SQLite connection (20-80 MB), and Stockfish 19 with its hash table (273 MB). VPS-2 then holds 47,000-58,000 connections (inferred). Further engines: [Anti-cheat engines](#anti-cheat-engines).
 - `DB_MMAP_MB` only covers the start of the file. A database of several GB is read mostly through the OS page cache, and the per-connection cache only keeps the hot pages, so 16 or 32 MB is enough (inferred).
+- Animated GIFs are not in the table: about 80 MiB per worker while players make them, 160 MiB at worst, which takes up to about 4,700 connections on VPS-1 and 9,500 on VPS-2 (inferred, [Animated GIFs](#animated-gifs)).
 
 ### Anti-cheat engines
 
@@ -155,6 +158,42 @@ Budget of the analysis process (the Node side, 20-80 MB, plus the engines) again
 | 4, not shared | 820-880 MB | about 11,300 | 13,000-18,000 | 40,000-51,000 |
 
 CPU sets the number of engines, not memory: an engine busy with the backlog takes a whole vCore (at low priority, on the CPU the server leaves idle). Run one on VPS-1 and two on VPS-2 (`ANALYSIS_WORKERS=2` when the CPU allows); at those counts the memory limit is about the p99 CPU limit with a 10 s ping (22,000 and 44,500 at `s` = 0.65): on VPS-1 it can come up to 2,000 connections before it, on VPS-2 it stays above. Sharing saves 110 MB per engine after the first: nothing with one engine, 1,500 connections' worth with two.
+
+## Animated GIFs
+
+Signed-in players can download a game as an animated GIF (`GET /api/v1/games/:id/gif` for a game of the server, `POST /api/v1/gif` for any game sent as PGN: [API.md](API.md#11-games-pgn-and-gif)). Each worker process makes them on a rendering thread of its own (`GIF_THREADS`, 1), never on the event loop of its games, and that thread runs at the lowest CPU priority (nice 19, on Linux). The thread starts with the first GIF and stops after a minute without one. Up to `GIF_QUEUE_MAX` (4) GIFs wait for it, each at most `GIF_QUEUE_TIMEOUT_MS` (10 s); beyond that the request is answered 503 `server_busy` and its quotas are given back. A GIF already made is kept in a cache of `GIF_CACHE_MB` (32 MiB) per worker and costs no render.
+
+### Cost of one GIF
+
+CPU time of one render (the median of 5, with warm caches and optimized code), measured with `node tools/gif-sample.js --bench` and the same renderer on a 600-ply game, on the development container: a 4-vCPU Intel Xeon at 2.10 GHz, Node 22.22, single-threaded. That vCPU does the scrypt reference of [Validating on the real machine](#validating-on-the-real-machine) in 0.42 s, against 0.50 s for the test vCPU, so an OVH vCore at `s` = 0.65 takes about 1.8 times as long (inferred, as for the [gestures](#gestures)).
+
+| Game | small (284 × 350) | medium (424 × 515) | large (628 × 762) | OVH vCore, `s` = 0.65 (inferred) | File (small / medium / large) |
+|---|---|---|---|---|---|
+| 40 moves (80 plies) | 30 ms | 47 ms | 97 ms | 55 / 85 / 180 ms | 135 / 206 / 324 KiB |
+| 150 moves (300 plies) | 85 ms | 166 ms | 336 ms | 155 / 305 / 615 ms | 506 / 783 / 1,235 KiB |
+| 300 moves (600 plies, `GIF_MAX_PLIES`) | 159 ms | 312 ms | 645 ms | 290 / 570 / 1,180 ms | 980 / 1,514 / 2,384 KiB |
+
+- The first GIF in a new thread takes about 0.25 s more on the development container (0.5 s on an OVH vCore, inferred): the thread starts, the pieces are drawn at that size and the code is not optimized yet. The next few renders are still slower: three 40-move GIFs at the medium size in a new thread took 309, 106 and 61 ms (47 ms warm), and a long game at the large size settles about 10 % above the table.
+- Memory, measured as the RSS the thread adds to its worker process: 43-45 MiB once it has made 40-move GIFs at the three sizes, 63 MiB after one 600-ply GIF at the large size, and 105-125 MiB after ten of those in a row (the pool caps the thread's V8 heap at 128 MiB). When the thread stops, 7-22 MiB stayed in the process (80 MiB after the ten long renders): memory the allocator keeps and gives to the next thread.
+- The cache holds up to `GIF_CACHE_MB` per worker, and a GIF being sent stays in memory until it is sent (2.4 MiB at most). An answer that does not leave within 60 s has its connection closed.
+
+### What the quotas allow at most
+
+All GIF quotas are counted for the whole server, whatever worker a request reaches. Only a GIF that has to be made counts in the render quotas; a request served from the cache only counts in the `gif` limit (30 per minute per account) and in the account's budget. Taking the most expensive GIF, 600 plies at the large size (1.2 s of an OVH vCore, inferred):
+
+| Who | Render quotas | CPU at most, one minute | CPU at most, one hour |
+|---|---|---|---|
+| One account | `GIF_USER_RENDERS_PER_MIN` (4), `GIF_USER_RENDERS_PER_HOUR` (30) | 4.8 s: 8 % of one vCore | 36 s: 1 % |
+| One IPv4 address or IPv6 /64, all its accounts | `GIF_IP_RENDERS_PER_MIN` (12), `GIF_IP_RENDERS_PER_HOUR` (120) | 14 s: 24 % | 144 s: 4 % |
+| One IPv6 /48, all its /64s | 3 times those: 36 and 360 | 43 s: 72 % | 432 s: 12 % |
+
+A 40-move game at the medium size costs 14 times less: an address that makes its 12 GIFs a minute of usual games uses about 2 % of a vCore. Many accounts on many addresses together are not bounded by a quota but by the pool: at most one render at a time per worker, so at most one vCore per worker, which on VPS-1 (2 workers) and VPS-2 (4) is the whole machine. A rendering thread makes at most about 11 GIFs of 40 moves (medium) per second on an idle OVH vCore, 3 of 150 moves, or 0.85 of the longest games at the large size (inferred).
+
+**Effect on the games.** The rendering threads run at nice 19, so they only take the CPU the games leave. Measured on one core of the development container, with an event loop doing 30, 50 or 80 % of that core's work in 10 ms ticks and a rendering thread always busy beside it on the same core (600-ply GIFs at the large size): the 99th percentile of the loop's timer lateness was 5, 6-9 and 45 ms with the low priority, against 53, 90-118 ms and a loop that fell behind at the normal priority (at 80 %, its timers were 360 ms late at the median); 0.3 ms without renders. The renders used what the loop left: 5, 3 and 1 GIFs in 6 s. At the comfortable point (55 % CPU), a worker whose thread renders all the time may see its move round trip rise by about 5-10 ms at the 99th percentile (inferred); when the CPU is full, the renders wait for the games and the requests behind them get 503 `server_busy`.
+
+**Memory budget.** Count about 80 MiB per worker while players make GIFs (45 for the thread, 32 for the cache) and 160 MiB at worst (125 and 32), only when GIFs are made: VPS-1 160-320 MiB, VPS-2 320-640 MiB. The worst case takes about 3,900-4,700 connections on VPS-1 (20,000-24,000 instead of 24,000-29,000 in the [Memory](#memory) table) and 7,900-9,500 on VPS-2 (43,000-52,000 instead of 51,000-62,000) (inferred). `GIF_CACHE_MB=16` saves 16 MiB per worker; `GIF_ENABLED=false` turns the feature off.
+
+**Network.** A GIF is 135 KiB to 2.4 MiB. The `gif` limit lets one account download 30 a minute, cached ones included: about 1 Mbit/s with usual games, 10 Mbit/s with the longest at the large size (inferred).
 
 ## Network
 
@@ -260,9 +299,41 @@ With `TLS_MODE=native`, each worker screens new TCP connections before any TLS w
 
 At about 3.7 ms of CPU per new connection on these vCores (TLS handshake, upgrade and Hello, the handshake being about half of it; inferred: 2.4 ms ÷ 0.65), 128 handshakes in flight are about half a second of work, so the handshakes a worker starts finish long before the game's 10 s deadline, and a reconnection storm is served in turn. `scacelith_tls_refused_total{reason}` counts the closed connections.
 
-**Players who share one address.** A school, a company network or a mobile operator's carrier-grade NAT puts many players behind one IPv4 address. In normal play the per-group cap does not matter: a handshake holds its slot for one or two network round trips, so 4 slots per worker serve dozens of handshakes per second from one address (inferred). After a restart, when they all reconnect at once, players behind one address are served 4 at a time per worker and come back later than the others. Other limits matter more for such a group: `MAX_CONNECTIONS_PER_IP` (16 connections per IPv4 address), `AUTH_RATE_PER_IP` (20 password logins, registrations or resets per 10 minutes), and, while a worker's hash queue is at least half full, the `PASSWORD_HASH_WAITERS_PER_SOURCE` (2) password hashes one address may have waiting in it (the next concurrent login gets 429, and the game shows the player how long to wait before trying again). For a club or a school that plays over one address, raise `MAX_CONNECTIONS_PER_IP` and `AUTH_RATE_PER_IP` above the size of the group, `MAX_PENDING_HANDSHAKES_PER_IP` to about 16 (it must stay below `MAX_PENDING_HANDSHAKES`), and `PASSWORD_HASH_WAITERS_PER_SOURCE` if its players log in together while the server is busy.
+**Players who share one address.** A school, a company network or a mobile operator's carrier-grade NAT puts many players behind one IPv4 address. In normal play the per-group cap does not matter: a handshake holds its slot for one or two network round trips, so 4 slots per worker serve dozens of handshakes per second from one address (inferred). After a restart, when they all reconnect at once, players behind one address are served 4 at a time per worker and come back later than the others. Other limits matter more for such a group: `MAX_CONNECTIONS_PER_IP` (64 WebSocket connections per IPv4 address), the protection per address below (`HTTP_RATE_PER_IP`, 600 requests per minute, and `IP_MAX_CONNECTIONS`, 128 open connections per worker, sized for a class of 30 or about 50 players behind a carrier's address), `AUTH_RATE_PER_IP` (20 password logins, registrations or resets per 10 minutes), and, while a worker's hash queue is at least half full, the `PASSWORD_HASH_WAITERS_PER_SOURCE` (2) password hashes one address may have waiting in it (the next concurrent login gets 429, and the game shows the player how long to wait before trying again). For a club or a school that plays over one known address, list it in `ABUSE_EXEMPT` (the protection per address then leaves it alone, and it is never blocked), raise `MAX_CONNECTIONS_PER_IP` and `AUTH_RATE_PER_IP` above the size of the group, `MAX_PENDING_HANDSHAKES_PER_IP` to about 16 (it must stay below `MAX_PENDING_HANDSHAKES`), and `PASSWORD_HASH_WAITERS_PER_SOURCE` if its players log in together while the server is busy.
 
-**Load tests from one machine.** Every client of a load machine shares its address, and the load generator does not retry a refused connection. On the test instance, set `MAX_PENDING_HANDSHAKES_PER_IP=127` (one below `MAX_PENDING_HANDSHAKES`) and `MAX_CONNECTIONS_PER_IP` above the clients per load address, as the tool does for a server it starts itself. See [Validating on the real machine](#validating-on-the-real-machine).
+**Load tests from one machine.** Every client of a load machine shares its address, and the load generator does not retry a refused connection. On the test instance, set `ABUSE_EXEMPT` to the load machines' addresses (otherwise their new connections soon exceed `IP_CONN_RATE` and the address is blocked), `MAX_PENDING_HANDSHAKES_PER_IP=127` (one below `MAX_PENDING_HANDSHAKES`) and `MAX_CONNECTIONS_PER_IP` above the clients per load address, as the tool does for a server it starts itself. See [Validating on the real machine](#validating-on-the-real-machine).
+
+### Protection per address
+
+Every request and every connection first meets a per-address layer (README, [Protection against abuse](../README.md#protection-against-abuse); [DESIGN.md](DESIGN.md) section 8): a request budget (`HTTP_RATE_PER_IP`, 600 per minute), a cap on the requests in progress (`IP_MAX_INFLIGHT`, 32 per worker), and with native TLS, before any TLS work, a new-connection rate (`IP_CONN_RATE`, 10 per second) and a cap on open connections (`IP_MAX_CONNECTIONS`, 128). An address is an IPv4 address or an IPv6 /64, and an IPv6 /48 gets 4 times each limit. These are whole-server limits: each worker allows its share, all of it on 2 workers (VPS-1) and half of it on 4 (VPS-2), so a client spread over the workers gets at most twice the figure, and no request waits for the primary. An address that keeps going after being refused (`ABUSE_BLOCK_REFUSALS_PER_MIN`, 600 refusals in a minute) is blocked: 1 min, then 4, 16 and 60 minutes at each new block within 6 hours.
+
+**Cost of the checks.** Measured on the development container, a 4-vCPU Intel Xeon at 2.10 GHz whose vCPU did the scrypt reference of [Validating on the real machine](#validating-on-the-real-machine) in 0.42-0.43 s against 0.50 s for the test vCPU, so its times are multiplied by about 1.8 for an OVH vCore at `s` = 0.65 (inferred). The checks themselves come from the micro-benchmark of `test/unit/net.ipguard.test.js` (it prints them); the last row from `node bench/gate-cost.js`: a TLS server behind the gate in one process and 20,000 connections from a blocked loopback address opened by another, the server process's CPU time (kernel included) divided by the count:
+
+| Check | Development container | OVH vCore, `s` = 0.65 (inferred) |
+|---|---|---|
+| A request from an IPv4 address (budget, a place among the requests in progress, and its release) | 0.14-0.26 µs | about 0.3-0.5 µs |
+| The same from an IPv6 address (its /64 and its /48) | 0.46-0.70 µs | about 0.8-1.3 µs |
+| The keys of an IPv6 address, once per connection (cached on the socket afterwards: 0.005-0.03 µs) | 0.74-0.86 µs | about 1.5 µs |
+| A request from a blocked address | 0.02-0.04 µs | about 0.05 µs |
+| A new connection (rate, open counts) and its close | 0.52-0.61 µs | about 1 µs |
+| A whole connection reset before TLS (accept, the socket, the check, the reset); the same for one closed at a first record that is not TLS (`bad_hello`) | 26-30 µs | about 50-55 µs |
+
+So the checks add well under 1 % to the cheapest request or move (a move costs 190-420 µs of the test vCPU), and refusing costs little. The last row is what a blocked address, or any connection flood, still costs: 1,000 connections per second from blocked addresses take about 5 % of a vCore, 10,000 about half of one (inferred). Only the provider's edge or a filter on the host remove that (see [Provider firewall](#provider-firewall-the-ovh-edge-network-firewall)).
+
+**What one address can still cost on VPS-1** (2 workers, `s` = 0.65, default settings, inferred):
+
+| Resource | Bound for one IPv4 address or IPv6 /64 | Cost |
+|---|---|---|
+| Requests | 600 per minute per worker, 1,200 per minute (20 per second) over both, burst 300 per worker | about 0.2 % of a vCore if every one is refused, about 3 % if every one is a heavy read (1.5 ms) |
+| Requests in progress | 32 per worker (a body sent slowly, a wait in the hash queue, a GIF waiting for its render, a data export), each until its answer is sent: the request received within 30 s (`requestTimeout`), then the route's own timeout: 30 s, 45 s for a GIF (`GIF_QUEUE_TIMEOUT_MS` + `GIF_RENDER_TIMEOUT_MS` + 5 s), 60 s for the export; then up to 60 s more for a client that reads the answer slowly (the send deadline) | memory and a place in the queues, not CPU |
+| New connections | 10 per second per worker, 20 over both, burst 40 per worker | 20 full TLS handshakes per second, about 4 % of a vCore (about 1.9 ms each, half of the 3.7 ms of a new connection above) |
+| Open connections | 128 per worker, 256 in all (WebSockets: 64, `MAX_CONNECTIONS_PER_IP`) | about 15 MB of sockets |
+| Password hashes | `AUTH_RATE_PER_IP`, 20 per 10 minutes for sign-in, registration and reset (`auth`), and as many again for the routes that ask a signed-in player for the password (`reauth`, a bucket of its own), where a password change hashes twice: at most 60 per 10 minutes (a sign-in that upgrades an old hash adds one, once per account) | at most 8 % of a vCore (0.8 s each) |
+| Refusals before a block | 600 in a minute (a burst of 600 in one second on one worker blocks at once) | negligible |
+
+An IPv6 /48 may cost 4 times each figure (the password hashes 5 times, `AUTH_RATE_PER_PREFIX`: 40 %). A client that ignores its 429s is blocked within about a second on the worker that sees 600 refusals in a second, and within one or two seconds on every worker otherwise (one report per second, then the primary's broadcast). `test/integration/abuse.test.js` measures it on a real server with 2 workers and a threshold of 200: 8 keep-alive connections from one address flooding unknown paths (`HTTP_RATE_PER_IP=60`) got their first 429 once the burst of 30 per worker was spent, and about 0.2 s later every new connection from that address was reset before TLS on both workers, while another address, and a game in progress over a WebSocket the flooding address had opened before, went on. Many addresses that each stay under these bounds are not stopped here: the capacity limits (the hash queue, the TLS gate, `MAX_CONNECTIONS`) and the provider are what remain.
+
+Behind a reverse proxy (`TLS_MODE=proxy`) only the request budget, the requests in progress and the blocks apply, per `X-Forwarded-For` client, and a block answers 429 without closing the proxy's connection. The connection limits are the proxy's job then: limit the connections and the request rate per client there (nginx: `limit_conn`, `limit_req`), to about the figures above.
 
 ### When the server is full
 
@@ -309,13 +380,16 @@ Restart at quiet hours, keep `SHUTDOWN_GRACE_MS` so clients receive the notice, 
 | `DB_CACHE_MB` | 16 | 32 | the default 64 is per connection, 5 or 9 connections |
 | `DB_MMAP_MB` | 256 (default) | 512 | shared, reclaimable OS page cache |
 | `MAX_CONNECTIONS` | 10000 at first | 20000 at first | a memory guard (default 200000); raise it toward 20000 / 40000 once `s` is measured, never above the memory figure |
-| `MAX_CONNECTIONS_PER_IP`, `MAX_PENDING_HANDSHAKES_PER_IP`, `PASSWORD_HASH_WAITERS_PER_SOURCE` | 16, empty (4), 2 (defaults) | same | raise them when many players share one address (a school, a company); the first two on a load-test instance too |
+| `MAX_CONNECTIONS_PER_IP`, `MAX_PENDING_HANDSHAKES_PER_IP`, `PASSWORD_HASH_WAITERS_PER_SOURCE` | 64, empty (4), 2 (defaults) | same | raise them when many players share one address (a school, a company); the first two on a load-test instance too |
+| `HTTP_RATE_PER_IP`, `IP_CONN_RATE`, `IP_MAX_CONNECTIONS`, `IP_MAX_INFLIGHT`, `ABUSE_BLOCK_REFUSALS_PER_MIN` | 600, 10, 128, 32, 600 (defaults) | same | the protection per address: what one address can cost stays a few percent of a vCore, and a class or a carrier's shared address still plays ([Protection per address](#protection-per-address)) |
+| `ABUSE_EXEMPT` | empty | same | the addresses of your monitoring and load machines, and of a school or club that plays over one address |
 | `PASSWORD_HASH_CONCURRENCY` | 1 (default) | 1 | the memory budget counts one 128 MiB hash per worker, and each hash takes a vCore for 0.8 s |
 | `POW_LOGIN_TRIGGER_PER_MIN` | 20 | 30 (default) | the default is about a fifth of a 2-vCore VPS in scrypt (inferred) |
 | `RECOVERY_GRACE_MS`, `RECOVERY_CLOCK_HOLD_MS` | 90000 (default), 45000 | same | after a crash or a graceful restart near the comfortable load, the default grace brings every player back, and 45000 keeps the clock of the side to move stopped until the last of them is back (inferred); the default hold of 20000 covers about 10,000 / 20,000 clients; raise the grace to 130000 if `MAX_CONNECTIONS` goes above the comfortable load |
 | `HEARTBEAT_INTERVAL_MS`, `HEARTBEAT_TIMEOUT_MS` | 10000, 30000 (default) | same | the heartbeat round trip feeds lag compensation, and the game drops a connection after two silent intervals |
 | `JOURNAL_FLUSH_MS`, `JOURNAL_FSYNC`, `DB_COMMIT_MS` | 50, true, 50 (default) | same | NVMe has plenty of room |
 | `ANALYSIS_ENGINE_PATH` | empty | optional: the official Stockfish 19 binary, `ANALYSIS_WORKERS=1` (2 when the CPU allows) | one engine takes a whole vCore and about 300 MB (70 MB more per further engine, with the network shared), and analyses about 870 games a day (inferred) |
+| `GIF_THREADS`, `GIF_CACHE_MB` | 1, 32 (defaults) | same | one rendering thread per worker, at the lowest priority, and about 80 MiB per worker while players make GIFs (160 MiB at worst, [Animated GIFs](#animated-gifs)); more threads only help when the CPU is idle |
 | `TLS_MODE`, `TLS_MIN_VERSION` | native, TLSv1.2 | same | the TLS gate needs native TLS, and a proxy on the same machine only moves the cost; Windows 10 WinHTTP lacks TLS 1.3 (inferred) |
 | `TLS_CERT_FILE`, `TLS_KEY_FILE` | full chain, ECDSA P-256 key | same | the key type all measurements used; RSA adds about 1 ms per handshake (inferred) |
 | `DATA_DIR` | /var/lib/scacelith | same | as in the README's systemd unit and the backup command above |
@@ -330,13 +404,14 @@ Restart at quiet hours, keep `SHUTDOWN_GRACE_MS` so clients receive the notice, 
 ### System
 
 - Node 24 LTS, 24.7 or later: Argon2id costs about 40 % less CPU and half the memory of scrypt per password hash. A certificate from certbot 2 or later has an ECDSA P-256 key by default.
-- systemd unit as in the [README](../README.md#running-as-a-service-systemd-example), with `LimitNOFILE` above `MAX_CONNECTIONS` and `RestartSec=2`. With the default 100 ms, repeated start failures hit systemd's limit of 5 starts in 10 s and the service stays down.
+- systemd unit as in the [README](../README.md#running-as-a-service-systemd-example), with `LimitNOFILE` above `MAX_CONNECTIONS`, `AmbientCapabilities=CAP_NET_BIND_SERVICE` for the default port 443, and `RestartSec=2`. With the default 100 ms, repeated start failures hit systemd's limit of 5 starts in 10 s and the service stays down.
 - sysctl, for example in `/etc/sysctl.d/90-scacelith.conf`:
 
 ```ini
-# The API port lies inside the ephemeral range (32768-60999). Without a reservation an outgoing
-# connection (apt, certbot) can hold it during a restart and the server's bind() fails (EADDRINUSE).
-net.ipv4.ip_local_reserved_ports = 44664
+# The default API port 443 needs no reservation. A custom API_PORT inside the ephemeral range
+# (32768-60999, e.g. 44664) does: without it an outgoing connection (apt, certbot) can hold the port
+# during a restart and the server's bind() fails (EADDRINUSE).
+# net.ipv4.ip_local_reserved_ports = 44664
 # The kernel caps LISTEN_BACKLOG (2048 by default) at somaxconn: 4096 is the default since
 # Linux 5.4 and 128 before. Raise it too if you raise LISTEN_BACKLOG.
 net.core.somaxconn = 4096
@@ -358,7 +433,7 @@ The OVH Edge Network Firewall is stateless, filters IPv4 only, applies the first
 | Priority | Action | Protocol | Source | Source port | Destination port | TCP option | Purpose |
 |---|---|---|---|---|---|---|---|
 | 0 | Accept | TCP | any | | 32768-60999 | established | replies to outgoing connections: SMTP 587/465, Google 443, apt, ACME, DNS over TCP |
-| 1 | Accept | TCP | any | | 44664 | | API and WSS |
+| 1 | Accept | TCP | any | | 443 | | API and WSS (`API_PORT`) |
 | 2 | Accept | TCP | admin IPv4/32 | | 22 | | SSH |
 | 3 | Accept | TCP | second admin /32 (optional) | | 22 | | SSH, or the machine that pulls backups |
 | 4 | Accept | ICMP | any | | | | ping, and path-MTU "fragmentation needed" messages that TLS relies on |
@@ -372,9 +447,38 @@ What it does not cover:
 - IPv6 is not filtered, and recent images configure it by default. The game server binds IPv4 only (`BIND_ADDRESS=0.0.0.0`), but sshd listens on `::` unless changed. Publish no AAAA record.
 - Traffic from inside the provider's network is not filtered, other customers included: use key-only SSH.
 - The metrics port (9464) is bound to 127.0.0.1 by default; read it through an SSH tunnel.
-- There is no per-IP rate limiting; the server does its own (`MAX_CONNECTIONS_PER_IP`, `MAX_PENDING_HANDSHAKES_PER_IP`, `HTTP_RATE_PER_IP`, `AUTH_RATE_PER_IP`).
+- The firewall does not limit the rate of each source; the server does that itself ([Protection per address](#protection-per-address): `HTTP_RATE_PER_IP`, `IP_CONN_RATE`, `IP_MAX_CONNECTIONS`, the blocks; and `MAX_CONNECTIONS_PER_IP`, `MAX_PENDING_HANDSHAKES_PER_IP`, `AUTH_RATE_PER_IP`).
 
 To avoid locking yourself out: take your IPv4 address from `echo $SSH_CLIENT` inside an `ssh -4` session, keep that session open, test a new `ssh -4` login, and only then add the Deny rule. The rules can also be edited from the provider's control panel, and the KVM console and rescue mode remain available, so give the local console a password even with key-only SSH.
+
+### Floods
+
+The edge firewall cannot tell a flood on the game's own port from the players, and has no rate limit. What it does against floods:
+
+- **Everything that is not the service is dropped at the edge**, before it reaches the VPS link: the table above, with its final Deny. UDP floods, reflection and amplification on any port, and TCP floods on other ports then never reach the machine. The server needs no inbound UDP: use OVH's resolver and NTP server, which are not filtered from inside the network.
+- **TCP fragments**: if the rule form offers the "fragments" option, add a Deny for fragmented TCP to 443 at a priority before the 443 Accept (renumber the rules). Legitimate TLS over TCP is not IP-fragmented.
+- **Floods on 443 itself** from many addresses (SYN, ACK or data floods) are the job of OVH's always-on anti-DDoS mitigation, which starts by itself when it detects an attack and keeps the firewall rules during the mitigation (inferred from OVH's documentation; the control panel shows the mitigation).
+- **A few persistent sources** that the server blocks again and again (`scacelith_abuse_blocks_total{level="4"}` growing, the same addresses in the `ip blocked` log lines; with `LOG_IP=truncated` they show the /24, the right size for an edge rule): a temporary Deny rule per source /24 or /32, at a priority before the 443 Accept, takes their connections off the machine (each one still costs about 55 µs when the server resets it itself, [Protection per address](#protection-per-address)). Keep such rules few, dated, and removed when the attack ends: there are 20 rules in all, and a /24 may hold a school or a carrier's CGNAT pool.
+- **IPv6** is not filtered at the edge: keep the server on IPv4 with no AAAA record. If IPv6 is enabled later, an `ip6` nftables table on the host does the edge's job, and the server's /64 and /48 handling applies.
+
+Optionally, the host can drop the connection attempts the server would refuse anyway, before they reach it: a per-source meter of new TCP connections in an `ip` table, without connection tracking (see the `inet` warning in [System](#system)). Set it well above what the server itself lets one address open: `IP_CONN_RATE` (10 per second) per worker on VPS-1 with 2 workers is 20 per second with a burst of 80, so 40 per second with a burst of 80 drops only what is beyond it, and the server's own refusals stay the normal path. Raise it with `IP_CONN_RATE`, and keep a whole CGNAT address in mind. A dropped SYN is sent again by the client after about a second, so a legitimate client over it waits rather than fails. This ruleset passes `nft -c` (a check that applies nothing) with nftables 1.0.9; check it again on the machine's version before loading it (`nft -f`, and for good in `/etc/nftables.conf`):
+
+```
+table ip scacelith {
+  set syn4 {
+    type ipv4_addr
+    size 65536
+    flags dynamic,timeout
+    timeout 60s
+  }
+  chain input {
+    type filter hook input priority -10; policy accept;
+    tcp dport 443 tcp flags & (syn | ack) == syn update @syn4 { ip saddr limit rate over 40/second burst 80 packets } counter drop
+  }
+}
+```
+
+It keeps one entry per source address seen in the last minute (at most 65,536), and `nft list set ip scacelith syn4` shows them. The kernel drops a SYN there for far less than the 55 µs of a connection the server accepts and resets.
 
 ## Validating on the real machine
 
@@ -390,13 +494,13 @@ for i in 1 2 3 4 5; do node -e "const c=require('crypto');const t=process.cpuUsa
 4. **ADX**: `grep -cw adx /proc/cpuinfo` prints 0 with the QEMU Haswell model, which confirms the slower TLS path.
 5. **Load test from another machine** (on the same machine the load generator takes 25-50 % of the CPU), against a separate test instance with its own `DATA_DIR`:
    - Accounts: `node bin/admin.js bench-accounts --count 20000 --out tokens.tsv --format tsv --i-know-this-is-a-test-server`. That flag is the only safeguard: the command creates verified accounts with live sessions in whatever database the configuration points to.
-   - Server: `MAX_CONNECTIONS_PER_IP` above the clients per load address (one source address gives about 28,000 ports), `MAX_PENDING_HANDSHAKES_PER_IP=127`, and `/metrics` through `ssh -L 9464:127.0.0.1:9464`.
-   - Add `--url wss://HOST:44664/ws --tokens tokens.tsv --metrics http://127.0.0.1:9464/metrics` to each command (and `--ca` for a self-signed certificate), and set `--ping-interval-ms` to the server's `CLIENT_PING_INTERVAL_MS`. The tool counts a connection the TLS gate refuses as failed, so keep `--inflight` times the load processes (2 up to 30,000 clients) below `MAX_PENDING_HANDSHAKES` × `WORKERS`, for example `--inflight 100` on 2 workers:
+   - Server: `ABUSE_EXEMPT` set to the load machines' addresses, `MAX_CONNECTIONS_PER_IP` above the clients per load address (one source address gives about 28,000 ports), `MAX_PENDING_HANDSHAKES_PER_IP=127`, and `/metrics` through `ssh -L 9464:127.0.0.1:9464`.
+   - Add `--url wss://HOST/ws --tokens tokens.tsv --metrics http://127.0.0.1:9464/metrics` to each command (and `--ca` for a self-signed certificate), and set `--ping-interval-ms` to the server's `CLIENT_PING_INTERVAL_MS`. The tool counts a connection the TLS gate refuses as failed, so keep `--inflight` times the load processes (2 up to 30,000 clients) below `MAX_PENDING_HANDSHAKES` × `WORKERS`, for example `--inflight 100` on 2 workers:
      - idle connections: `node bench/loadgen.js --scenario connect --conns 10000 --inflight 100 --ping-interval-ms 10000 --hold-s 60`;
      - games with realistic churn: `--scenario games --games N --inflight 100 --move-interval-ms 5000 --ping-interval-ms 10000 --start-rate 25 --warmup-s 400 --duration-s 300`, raising N until the p99 passes 100-150 ms;
      - reconnection wave: `--scenario connect --conns N --inflight 5000 --connect-timeout-ms 10000`, ideally from several machines. Here refusals are expected: `scacelith_tls_refused_total{reason="handshakes"}` counts the attempts the game would repeat.
    - The load machine needs about 0.7 core per 20,000 idle clients at a 2 s ping, 0.95 core per 20,000 clients in games and 1.8 cores for a ramp of 500 connections per second.
-   - Afterwards, restore `MAX_CONNECTIONS_PER_IP=16`, an empty `MAX_PENDING_HANDSHAKES_PER_IP` and your `MAX_CONNECTIONS` cap.
+   - Afterwards, restore an empty `ABUSE_EXEMPT` (or your monitoring's address), `MAX_CONNECTIONS_PER_IP=64`, an empty `MAX_PENDING_HANDSHAKES_PER_IP` and your `MAX_CONNECTIONS` cap.
 6. **In production**, watch `/metrics`, the size of `DATA_DIR` and `vmstat`:
 
 | Metric | What to look for |
@@ -404,6 +508,7 @@ for i in 1 2 3 4 5; do node -e "const c=require('crypto');const t=process.cpuUsa
 | `scacelith_process_cpu_ratio`, `scacelith_process_event_loop_delay_p99_ms` (per shard) | CPU above 55 % at the peak, a rising p99 |
 | `scacelith_ws_connections`, `scacelith_process_rss_bytes` | connections and memory against the memory figure |
 | `scacelith_tls_refused_total{reason}`, `scacelith_tls_hello_waiting`, `scacelith_tls_handshakes_pending` | `handshakes` or `per_ip` refusals outside restarts (not enough CPU for handshakes, or a shared address), `hello_timeout` and `bad_hello` from scanners |
+| `scacelith_http_rate_limited_total{limit}`, `scacelith_tls_refused_total{reason}` (`blocked`, `conn_rate`, `conn_open`), `scacelith_abuse_blocks_total{scope,level}`, `scacelith_abuse_blocked{scope}` | the protection per address: `ip`, `inflight` or `conn_open` refusals of ordinary players (a school, a carrier's address: see [Players who share one address](#new-connections-the-tls-gate), `ABUSE_EXEMPT`), blocks at level 4 from the same sources (an edge rule, [Floods](#floods)); the primary logs each block (`ip blocked`) |
 | `scacelith_ws_hello_total{result="server_full"}`, `scacelith_ws_handshakes_rejected_total{reason="server_full"}` | newcomers refused at login by `MAX_CONNECTIONS`, the sign of a full server; upgrades refused (HTTP 503) once its reserve is in use too, after which the TLS gate sheds (`scacelith_tls_refused_total{reason="server_full"}`) |
 | `scacelith_password_hash_rejected_total{reason}`, `scacelith_password_hash_queued` | `queue_full` or `timeout` outside an attack: not enough CPU for the logins; `source_limit`: clients held to `PASSWORD_HASH_WAITERS_PER_SOURCE` (2) waiting hashes while the queue was at least half full |
 | `scacelith_retention_runs_total{result}`, `scacelith_retention_run_seconds` | a `failed` result, or runs growing longer |
@@ -413,6 +518,7 @@ for i in 1 2 3 4 5; do node -e "const c=require('crypto');const t=process.cpuUsa
 | `scacelith_journal_errors_total`, `scacelith_game_commit_unjournaled_total` | any increase: the journal cannot be written, and finished games are committed without it; fix the disk before a restart |
 | `scacelith_gestures_relayed_total`, `scacelith_gestures_dropped_total{reason}` | the relayed rate divided by the players in a game is r of [Gestures](#gestures); `backlog` drops mean slow players or an overloaded worker, `rate` drops a client that exceeds `GESTURE_RATE`, or a player's link that stalled and then delivered more than `GESTURE_BURST` gestures at once (a few now and then are normal) |
 | `scacelith_game_stall_ms`, `scacelith_game_timer_late_ms` | stalls of a worker's event loop (the games do not charge them to the players, up to `GAME_STALL_CREDIT_MAX_MS`); frequent ones of 100 ms or more mean an overloaded machine, CPU steal or a slow disk |
+| `scacelith_gif_renders_total{result}`, `scacelith_gif_render_duration_ms`, `scacelith_gif_queue`, `scacelith_gif_cache_total{result}`, `scacelith_http_rate_limited_total{limit=~"gif.*"}` (per shard) | `busy` renders (503 `server_busy`) or a rising render time: the CPU is full and the GIFs wait for the games, as intended; a low cache hit rate is normal (each game is asked for once or twice) |
 
 ## Risks, largest first
 
@@ -420,6 +526,6 @@ for i in 1 2 3 4 5; do node -e "const c=require('crypto');const t=process.cpuUsa
 2. **The latency knee.** It was measured over loopback (kernel network cost ±30 %) and with little game churn, so the 55 % comfortable point may be a few points optimistic.
 3. **Disk space.** Nothing archives finished games: a 2-vCore VPS that is full every evening fills a 40 GB disk in about 2 months (inferred), in 1 month if backup copies are written locally.
 4. **Restarts.** Near the comfortable load with the 10 s ping, a crash or a graceful restart takes about 60 s to bring every player back (inferred), inside the default recovery grace, but the players to move keep their whole clock only with the `RECOVERY_CLOCK_HOLD_MS` setting above. This has not been tested with a real multi-machine reconnection wave.
-5. **Admission limits and journal compaction are tested, not measured under load.** The TLS gate, the password-hash cap, the upgrade reserve and compaction came after the load measurements, and only the retention purge has a measured cost. Run the load tests above again on the real machine.
+5. **Admission limits and journal compaction are tested, not measured under load.** The TLS gate, the password-hash cap, the upgrade reserve, the protection per address and compaction came after the load measurements; only the retention purge and the per-address checks (in isolation) have a measured cost. Run the load tests above again on the real machine, with `ABUSE_EXEMPT` set to the load machines.
 6. **Player mix.** Between a bullet-heavy mix and a slow one, capacity changes by more than a factor of two, and between players who sit still and players who keep looking around (the gesture rate r, from about 1 to `GESTURE_RATE` while the relay is on) by more than a factor of two again. Production metrics will tell which one your players resemble.
 7. **Small items.** One SQLite writer for about 12 to 23 game ends per second is ample, the primary stays under 0.25 core, and one analysis engine follows only a small share of the games at full load (about 870 a day, against about 71,000 per 1,000 connected players).

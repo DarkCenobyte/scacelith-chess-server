@@ -51,7 +51,8 @@ export class ShardSupervisor {
             entry.exited = true;
             ipc.close('worker exited');
             if (this.workers.get(shard) === entry) this.workers.delete(shard);
-            if (!this.stopping) this.log?.error?.('shard exited', { shard, code, signal });
+            // exitCode, not `code`: the log hides a field of that name (log.js, credentials).
+            if (!this.stopping) this.log?.error?.('shard exited', { shard, exitCode: code, signal });
             try { this.onDown?.(shard, { code, signal }); } catch (e) { this.log?.error?.('onDown failed', { err: e }); }
             if (!this.stopping) {
                 const ranLong = Date.now() - entry.startedAt > 60000;

@@ -5,6 +5,8 @@ import { createApiHandler, HttpError } from '../../src/http/server.js';
 import { Router, validate } from '../../src/http/router.js';
 import { testConfig } from '../../src/config.js';
 import { logger } from '../../src/log.js';
+import { Registry } from '../../src/metrics.js';
+import { IpGuard } from '../../src/net/ipguard.js';
 import { capturedLogs, createClock, createFakePrimary, createFakeStore } from './helpers/auth-fakes.js';
 
 const TOKEN = 'sct_' + 'a'.repeat(43);
@@ -36,6 +38,10 @@ function routesUnderTest(router) {
     router.page('GET', '/page', () => ({ html: '<!DOCTYPE html><p>page</p>' }));
     router.page('POST', '/page', (ctx) => ({ html: `<p>${ctx.body.token}</p>` }), { body: { token: { type: 'string', max: 64 } } });
     router.page('GET', '/page-error', () => { throw new HttpError(400, 'bad', 'Bad <things>.'); });
+    router.get('/file', () => ({ text: '[Event "é"]\n\n*\n', contentType: 'application/x-chess-pgn; charset=utf-8',
+        headers: { 'Content-Disposition': 'attachment; filename="x.pgn"' } }));
+    router.get('/plain', () => ({ status: 202, text: 'plain' }));
+    router.post('/own', (ctx) => ({ body: { got: ctx.body } }), { ownBodyValidation: true });
 }
 
 async function start(env = {}, opts = {}) {
@@ -43,9 +49,11 @@ async function start(env = {}, opts = {}) {
     const now = opts.now || createClock();
     const primary = opts.primary === undefined ? createFakePrimary({ now }) : opts.primary;
     const auth = { validateToken: (t) => (t === TOKEN ? { userId: 7, username: 'alice', sessionId: 3, emailVerified: true, tokenHash: 'h' } : null) };
+    // opts.guard: the protection per address of a handler used alone (no listener in front).
+    const guard = opts.guard ? new IpGuard({ config, workers: 1, registry: new Registry(), now }) : null;
     const handler = createApiHandler({
         config, store: createFakeStore({ now }), auth, primary, log: logger.child('router-test'), now,
-        routes: [routesUnderTest], bodyTimeoutMs: 150, handlerTimeoutMs: 150, ready: opts.ready,
+        routes: [routesUnderTest], bodyTimeoutMs: 150, handlerTimeoutMs: 150, ready: opts.ready, guard,
     });
     const server = http.createServer((req, res) => { if (req.headers['x-test-ip']) req.clientIp = req.headers['x-test-ip']; handler(req, res); });
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -123,6 +131,48 @@ test('security headers on every answer; HSTS with native TLS only', async (t) =>
     const n = await start({ TLS_MODE: 'native', TLS_CERT_FILE: '/nonexistent/cert.pem', TLS_KEY_FILE: '/nonexistent/key.pem' });
     t.after(n.close);
     assert.equal((await n.req('GET', '/api/v1/echo/x')).headers['strict-transport-security'], 'max-age=31536000');
+    assert.equal((await n.req('GET', '/api/v1/file')).headers['strict-transport-security'], 'max-age=31536000');
+});
+
+test('ownBodyValidation: the parsed JSON reaches the handler as it is (still JSON only, still limited)', async (t) => {
+    const s = await start();
+    t.after(s.close);
+    let r = await s.req('POST', '/api/v1/own', { body: { gameId: '123', anything: [1, { x: null }] } });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json.got, { gameId: '123', anything: [1, { x: null }] });
+    assert.deepEqual((await s.req('POST', '/api/v1/own', { body: [1, 2] })).json.got, [1, 2]);
+    assert.deepEqual((await s.req('POST', '/api/v1/own')).json.got, {}, 'an empty body is an empty object');
+    assert.equal((await s.req('POST', '/api/v1/own', { raw: '{bad', headers: { 'Content-Type': 'application/json' } })).json.error, 'invalid_json');
+    assert.equal((await s.req('POST', '/api/v1/own', { raw: 'a=1', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } })).status, 415);
+    assert.equal((await s.req('POST', '/api/v1/own', { raw: JSON.stringify({ x: 'y'.repeat(2000) }), headers: { 'Content-Type': 'application/json' } })).status, 413);
+    // Without it, a route with no schema takes no field.
+    r = await s.req('POST', '/api/v1/empty', { body: { gameId: 1 } });
+    assert.equal(r.status, 400);
+    assert.equal(r.json.field, 'gameId');
+});
+
+test('text answers: content type, byte length, extra headers, the API security headers, HEAD', async (t) => {
+    const s = await start();
+    t.after(s.close);
+    let r = await s.req('GET', '/api/v1/file');
+    assert.equal(r.status, 200);
+    assert.equal(r.text, '[Event "é"]\n\n*\n');
+    assert.equal(r.headers['content-type'], 'application/x-chess-pgn; charset=utf-8');
+    assert.equal(r.headers['content-disposition'], 'attachment; filename="x.pgn"');
+    assert.equal(+r.headers['content-length'], Buffer.byteLength('[Event "é"]\n\n*\n'));
+    assert.equal(r.headers['content-security-policy'], "default-src 'none'; frame-ancestors 'none'");
+    assert.equal(r.headers['cache-control'], 'no-store');
+    assert.equal(r.headers['x-content-type-options'], 'nosniff');
+    assert.equal(r.headers['x-frame-options'], 'DENY');
+    assert.equal(r.headers['referrer-policy'], 'no-referrer');
+    r = await s.req('GET', '/api/v1/plain');
+    assert.equal(r.status, 202);
+    assert.equal(r.text, 'plain');
+    assert.equal(r.headers['content-type'], 'text/plain; charset=utf-8');
+    r = await s.req('HEAD', '/api/v1/file');
+    assert.equal(r.status, 200);
+    assert.equal(r.text, '');
+    assert.equal(+r.headers['content-length'], Buffer.byteLength('[Event "é"]\n\n*\n'));
 });
 
 test('JSON body: 201, 415 wrong type, 400 invalid JSON, charset, empty body allowed only without required fields', async (t) => {
@@ -228,17 +278,19 @@ test('authentication modes', async (t) => {
     assert.equal((await s.req('GET', '/api/v1/maybe', { headers: { Authorization: 'Bearer nope' } })).status, 401);
 });
 
-test('rate limits: global per IP, per route, shared through the primary, fail open', async (t) => {
-    const s = await start({ HTTP_RATE_PER_IP: '5' });
+test('rate limits: per-address budget of a handler used alone, per route, shared through the primary, fail open', async (t) => {
+    // HTTP_RATE_PER_IP 10 per minute, one worker: a burst of 5 (half a minute), then 1 per 6 s.
+    const s = await start({ HTTP_RATE_PER_IP: '10' }, { guard: true });
     t.after(s.close);
-    for (let i = 0; i < 5; i++) assert.equal((await s.req('GET', '/api/v1/echo/x', { headers: { 'X-Test-Ip': '198.51.100.1' } })).status, 200);
-    const r = await s.req('GET', '/api/v1/echo/x', { headers: { 'X-Test-Ip': '198.51.100.1' } });
-    assert.equal(r.status, 429);
+    for (let i = 0; i < 4; i++) assert.equal((await s.req('GET', '/api/v1/echo/x', { headers: { 'X-Test-Ip': '198.51.100.1' } })).status, 200);
+    assert.equal((await s.req('GET', '/healthz', { headers: { 'X-Test-Ip': '198.51.100.1' } })).status, 200, 'health takes a token too');
+    const r = await s.req('GET', '/api/v1/nothing-here', { headers: { 'X-Test-Ip': '198.51.100.1' } });
+    assert.equal(r.status, 429, 'any path, before routing');
     assert.equal(r.json.error, 'rate_limited');
     assert.equal(r.headers['retry-after'], String(r.json.retryAfter));
+    assert.equal(r.json.retryAfter, 6);
     assert.equal((await s.req('GET', '/api/v1/echo/x', { headers: { 'X-Test-Ip': '198.51.100.2' } })).status, 200, 'another client');
-    assert.equal((await s.req('GET', '/healthz', { headers: { 'X-Test-Ip': '198.51.100.1' } })).status, 200, 'health is not limited');
-    s.now.advance(60000);
+    s.now.advance(6000);
     assert.equal((await s.req('GET', '/api/v1/echo/x', { headers: { 'X-Test-Ip': '198.51.100.1' } })).status, 200, 'refilled');
 
     const q = await start();

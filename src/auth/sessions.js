@@ -133,6 +133,15 @@ export function createSessionManager(svc) {
         return list.length;
     }
 
+    /**
+     * Drops the cached sessions of `userId` here and on every shard (the `session.revoked`
+     * broadcast without token hashes), after a change of the account that the cache holds or that
+     * must be read again: nothing is revoked, the next request reloads its session.
+     */
+    function refresh(userId) {
+        broadcast(userId, []);
+    }
+
     /** Active sessions of a user, for the sessions list. */
     function list(userId, currentId) {
         const t = now();
@@ -151,5 +160,5 @@ export function createSessionManager(svc) {
         return (store.sessions.listForUser(userId) || []).find((r) => String(r.id) === String(id) && isActiveRow(r, t)) || null;
     }
 
-    return { create, validate, invalidate, revoke, revokeAll, list, find, cacheSize: () => cache.size };
+    return { create, validate, invalidate, refresh, revoke, revokeAll, list, find, cacheSize: () => cache.size };
 }

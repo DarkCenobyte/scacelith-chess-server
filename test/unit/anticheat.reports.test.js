@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testConfig } from '../../src/config.js';
 import { register } from '../../src/http/routes/reports.js';
-import { reporterWeight, cappedWeight, reviewPriority, validateReport, REPORT_RULES } from '../../src/anticheat/reports.js';
+import { reporterWeight, cappedWeight, reviewPriority, validateReport, canReport, REPORT_RULES } from '../../src/anticheat/reports.js';
 import { createFakeStore } from '../../src/anticheat/testing/fake-store.js';
 
 const DAY = 86400000;
@@ -181,6 +181,43 @@ test('only a credible report asks for the analysis at report priority; a low-cre
     call(fresh, { gameId: game(fresh, users.carol), reported: 'carol', category: 'cheating' });
     assert.deepEqual(store._.reports.map((r) => r.weight >= REPORT_RULES.lowCredibility), [true, true, false, false]);
     assert.deepEqual(requests(), ['report', 'report', 'signal', 'signal']);
+});
+
+test('the account age comes from the account when the session user object lacks it (as the HTTP server passes it)', () => {
+    const { store, call, users, game } = setup();
+    const session = { id: users.alice.id, userId: users.alice.id, username: 'alice', emailVerified: true };
+    assert.equal(call(session, { gameId: game(users.alice, users.bob), reported: 'bob', category: 'cheating' }).status, 202);
+    assert.ok(store._.reports[0].weight > 0.9, `a year-old account with 200 games: ${store._.reports[0].weight}`);
+    const id = store._.addUser('newbie');
+    store.users.byId(id).createdAt = NOW - 3600000;
+    const fresh = { id, userId: id, username: 'newbie' };
+    call(fresh, { gameId: game(store.users.byId(id), users.carol), reported: 'carol', category: 'cheating' });
+    assert.ok(store._.reports[1].weight < 0.2, 'an account one hour old stays low');
+});
+
+test('canReport: the rules of POST /reports, answered for one game without filing anything', () => {
+    const { store, config, call, users, game, setNow } = setup({ reportsPerDay: 2 });
+    const byId = (gid) => store.games.byId(gid);
+    const g = game(users.alice, users.bob);
+    assert.equal(canReport(store, config, users.alice.id, byId(g), NOW), true);
+    assert.equal(canReport(store, config, users.bob.id, byId(g), NOW), true, 'either player');
+    assert.equal(canReport(store, config, users.carol.id, byId(g), NOW), false, 'not a player of that game');
+    assert.equal(canReport(store, config, users.alice.id, null, NOW), false, 'no game');
+    assert.equal(canReport(store, config, users.alice.id, byId(game(users.alice, users.bob, NOW - 8 * DAY)), NOW), false, 'too old');
+    assert.equal(canReport(store, config, users.alice.id, byId(game(users.alice, users.bob, NOW + 3600000)), NOW), false, 'not ended yet');
+    assert.equal(canReport(store, config, users.alice.id, byId(game(users.alice, users.alice)), NOW), false, 'against oneself');
+    assert.equal(store._.reports.length, 0, 'nothing filed');
+    assert.equal(call(users.alice, { gameId: g, reported: 'bob', category: 'cheating' }).status, 202);
+    assert.equal(canReport(store, config, users.alice.id, byId(g), NOW), false, 'already reported');
+    assert.equal(canReport(store, config, users.bob.id, byId(g), NOW), true, 'the opponent still may');
+    const g2 = game(users.alice, users.carol);
+    const g3 = game(users.alice, users.dave);
+    assert.equal(call(users.alice, { gameId: g2, reported: 'carol', category: 'abuse' }).status, 202);
+    assert.equal(canReport(store, config, users.alice.id, byId(g3), NOW), false, 'REPORTS_PER_DAY reached');
+    assert.equal(call(users.alice, { gameId: g3, reported: 'dave', category: 'abuse' }).status, 429, 'as POST answers');
+    setNow(NOW + DAY + 1);
+    assert.equal(canReport(store, config, users.alice.id, byId(g3), NOW + DAY + 1), true, 'the next day');
+    assert.equal(canReport({ reports: { countByReporterSince() { throw new Error('db down'); } } }, config, users.alice.id, byId(g3), NOW), false);
 });
 
 test('review priority grows with level, score and (logarithmically) with reports', () => {

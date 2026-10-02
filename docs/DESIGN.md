@@ -59,9 +59,10 @@ API, and `SHARD_BASE` gives each instance its shard range (section 9).
 | `src/game/*` | game | GameRoom (authoritative game), clocks, lag compensation, disconnection policy, GameHost (rooms of a shard, timer wheel, journal hooks, persistence queue) |
 | `src/match/*` | match | Elo (per category), matchmaker, challenges/private codes/rematch, conduct cooldowns |
 | `src/net/*`, `src/cluster/*`, `bin/scacelith-server.js` | net | RFC 6455 server, TLS listeners, connections, heartbeat, backpressure, per-connection limits, primary/worker bootstrap, IPC, shard bus, presence, routing, metrics endpoint, graceful shutdown |
-| `src/store/*` (+ `migrations/*.sql`), `src/http/routes/players.js` | store | schema, migrations, Store API, game journal and crash recovery, retention jobs, public read API |
-| `src/http/server.js`, `src/http/router.js`, `src/http/routes/{auth,account,sso,info}.js`, `src/http/pages/*`, `src/auth/*`, `src/mail/*`, `src/security/*` | auth | HTTPS API, sessions, passwords, MFA, recovery, e-mail, SSO, rate limiting, proof of work |
+| `src/store/*` (+ `migrations/*.sql`), `src/http/routes/players.js`, `src/http/routes/account-games.js` | store | schema, migrations, Store API, game journal and crash recovery, retention jobs, public read API |
+| `src/http/server.js`, `src/http/router.js`, `src/http/routes/{auth,account,account-export,sso,info}.js`, `src/http/pages/*`, `src/auth/*`, `src/mail/*`, `src/security/*` | auth | HTTPS API, sessions, passwords, MFA, recovery, e-mail, SSO, rate limiting, proof of work |
 | `src/anticheat/*`, `src/http/routes/reports.js`, `bin/admin.js` | anticheat | anomaly classification, sanctions, engine analysis, suspicion levels, reports, admin CLI |
+| `src/gif/*`, `assets/*`, `src/http/routes/gif.js`, `src/http/routes/gif-thread.js` | gif | animated GIF of a game (renderer, encoder, pieces, fonts, thread pool), the two GIF endpoints with their cache and render quotas |
 | `test/unit/<module>.*.test.js` | each owner | unit tests of the module |
 | `test/integration/*` | tests | multiplayer scenarios against a real server |
 | `bench/*` | bench | load generator and benchmark report |
@@ -545,6 +546,7 @@ Shard -> primary:
 | `once.consume` | `{ key, ttlMs }` | `{ fresh }` |
 | `sanction.applied` | `{ userId, until, reason, refunds }` | - (primary kicks the user everywhere; `refunds`: victims refunded, whose notices it looks for at once) |
 | `session.revoked` | `{ userId, tokenHashes }` | - (broadcast to every shard's auth cache) |
+| `abuse.report` | `{ entries: [[key64, key48 or null, weight]] }` | - (notification: the refusals counted toward a block since the last report, at most one report per second per worker and 512 entries, the largest first; section 8) |
 
 Primary -> shard:
 
@@ -557,12 +559,13 @@ Primary -> shard:
 | `auth.invalidate` | `{ userId, tokenHashes }` | drops cached sessions |
 | `metrics.snapshot` | - | replies `registry.snapshot()` |
 | `shutdown` | `{ graceMs }` | drain: Notice{ServerShutdown}, stop accepting, flush |
+| `abuse.block` | `{ blocks: [[key, ttlMs, level]] }` | the shard blocks these addresses (IPv4, IPv6 /64 or /48) for `ttlMs` on its monotonic clock; sent to every shard with the new blocks of each `abuse.report`, and to one shard at its `shard.ready` with every running block (section 8) |
 
 ### 5.8 Shard internals (net owner) and the anti-cheat hooks
 
 ```js
 // src/net/ws.js
-class WsServer { constructor({ maxMessageBytes, subprotocol, allowOrigins, onConnection }) ; handleUpgrade(req, socket, head) }
+class WsServer { constructor({ maxMessageBytes, subprotocol, allowOrigins, onConnection, guard }) ; handleUpgrade(req, socket, head) }
 class WsConnection {
   id; ip; userId; username; state /* 'hello'|'ready'|'closing' */; rttMs; bufferedBytes;
   sendFrame(buf) -> bool   // one binary message; false when closed or over WS_SEND_BUFFER_LIMIT (then closes 4303)
@@ -590,6 +593,15 @@ honours it too). With native TLS, a gate (`TlsGate`) runs in front of the TLS se
 closes the sockets it refuses with an RST, before any TLS work, and counts them in
 `scacelith_tls_refused_total{reason}`:
 
+* Protection per address first (`src/net/ipguard.js` `IpGuard.connection`, section 8; skipped
+  for `ABUSE_EXEMPT`): a blocked IPv4 address, IPv6 /64 or /48 (`blocked`), more than the
+  worker's share of `IP_CONN_RATE` new connections per second (`conn_rate`) or of
+  `IP_MAX_CONNECTIONS` open ones (`conn_open`) from one address are refused before anything is
+  read: two `Map` lookups and a token bucket. A socket let through is counted open until its
+  'close', whatever happens to it next. The refusals that say something about one address
+  (`conn_rate`, `conn_open`, `per_ip`, `waiting_per_ip`, `bad_hello`, `hello_timeout`, a failed
+  handshake) count toward a block of it; the server-wide ones (`handshakes`, `waiting`,
+  `server_full`) and the refusals of an address already blocked do not.
 * Waiting for the ClientHello. A new socket holds no handshake slot until its first TLS record
   has arrived whole: a handshake record of at most 16 KB whose body starts a ClientHello (a client
   may fragment the ClientHello over several records; only the first one is awaited). It has 3 s
@@ -662,20 +674,50 @@ closes the sockets it refuses with an RST, before any TLS work, and counts them 
   shared port. The waiting room needs more (128 groups and about 700 silent connections per
   second per worker). Players already connected are not affected. Raising
   `MAX_PENDING_HANDSHAKES` raises the connection rate such an attack needs in proportion, and a
-  lower `MAX_PENDING_HANDSHAKES_PER_IP` raises the number of address groups it needs; stopping it
+  lower `MAX_PENDING_HANDSHAKES_PER_IP` raises the number of address groups it needs. Stage 0
+  does not change that: every timed-out handshake counts toward a block of its address, but each
+  group needs only about 0.4 of them per second per worker (inferred: 128 slots ÷ 10 s ÷ 32
+  groups), 50 a minute on two workers, far below `ABUSE_BLOCK_REFUSALS_PER_MIN`; it stops the
+  same attack from a few addresses, which their per-address refusals soon block. Stopping it
   belongs in front of the server (a per-source connection rate limit in the firewall, or a
-  filtering provider).
+  filtering provider: SIZING, provider firewall).
 * `TLS_MODE=proxy` and `off` have no gate: the TLS work (and its limits) belongs to the proxy.
+  Behind a proxy the per-address connection limits are the proxy's job too; the request budget,
+  the in-flight cap and the blocks still apply per `X-Forwarded-For` client (section 8).
 
 ### 5.9 HTTP (`src/http/`)
 
-`createApiHandler({ config, store, auth, primary, anticheat, log }) -> (req, res)`, mounted by
-the net owner on the HTTPS server (and handling `upgrade` elsewhere). Router:
+`createApiHandler({ config, store, auth, primary, anticheat, log, guard }) -> (req, res)`, mounted
+by the net owner on the HTTPS server behind `wrapApiHandler` (and handling `upgrade` elsewhere);
+`guard` is the shard's `IpGuard` (section 8), the same one the listeners use, which the wrapper
+applies to every request before the handler sees it; `handler.close()` (awaited
+first by the worker's shutdown) runs what the routes registered through `deps.onClose`, today the
+GIF rendering threads. Router:
 ```js
-router.get(path, handler, { auth: 'none'|'optional'|'required', rate: { key, limit, windowMs } })
-router.post(path, handler, { auth, body: schemaObject, rate })   // JSON only, HTTP_BODY_LIMIT
-// handler(ctx) -> { status, body, headers } ; ctx = { req, ip, params, query, body, user, session, config, store, log, primary }
+router.get(path, handler, { auth: 'none'|'optional'|'required', rate: { key, limit, windowMs, shared?, by?: 'user', prefixLimit?, abuseWeight? } | [rates] })
+router.post(path, handler, { auth, body: schemaObject, rate, timeoutMs?, bodyLimit?, ownBodyValidation? })   // JSON only, HTTP_BODY_LIMIT
+router.page(method, path, handler, opts)                                    // HTML page outside /api
+// handler(ctx) -> { status, body, headers } (JSON) | { status, html, headers } (page)
+//               | { status, text, contentType, headers } (a text file: the PGN download)
+//               | { status, bytes, contentType, headers } (a binary file: the GIF), each with refundRate?: true
+// ctx = { req, ip, params, query, body, user, session, config, store, log, primary, takeRates(rates) }
 ```
+Rates: `by: 'user'` counts per account, and per client for a request without a session;
+`prefixLimit` also counts each IPv6 /48 as a whole; `shared` adds the primary's sliding window
+(`ratelimit.take`, given back by `ratelimit.refund`); `abuseWeight` marks the auth family for the
+network shield: a refusal by a rate counted per client (not per account) is reported to the
+`guard` (`IpGuard.noteRefusal`) with that weight, or 1, toward a block of the address. The rates of a route are checked in order, and when one refuses, the tokens the
+earlier ones took are given back (local bucket and primary). `ctx.takeRates(rates)` takes more
+rates from inside a handler (the GIF render quotas, only on a cache miss): a 429 if one refuses,
+and they are given back with the route's when the answer carries `refundRate: true`. Before the
+route's rates, every request authenticated with a session spends one token of the account's
+budget (`USER_RATE_PER_MIN`, per worker: max(1, min(L, ceil(2L / WORKERS))) per minute, a burst
+of half a minute, local only; never counted toward a block). A route may raise its body limit
+(`bodyLimit`) and its handler timeout (`timeoutMs`: the export 60 s, the GIFs 45 s). The send
+deadline is the listener's (section 8): an answer not flushed 60 s after the handler ended it is
+destroyed with its socket, and the handler's own time does not count toward it.
+The complete reference of every endpoint, with its request, answers, errors, rate limits and curl
+examples, is [API.md](API.md); the table below is the contract summary.
 Path parameters use `:name`. JSON errors are `{ "error": "<snake_case_code>", "message": "...",
 "retryAfter"?: s }` (with a `Retry-After` header when `retryAfter` is set). An endpoint that
 hashes or checks a password may answer 503 `server_busy` when the worker's password hash queue
@@ -691,31 +733,40 @@ Endpoints (prefix `/api/v1`):
 | Method and path | Owner | Notes |
 |---|---|---|
 | `GET /info` | auth | `{ name, serverId, motd, protocol: {min, max, schema, subprotocol}, wsPort, wsPath: '/ws', registration, emailVerification, sso: { google }, mfa: true, pow: { register }, categories: [{id, baseSec, incSec}], limits }` |
-| `POST /auth/register` | auth | `{ username, email, password, pow? }` -> 202 `{ status: 'verification_sent' }` (same answer when the e-mail exists) |
+| `POST /auth/register` | auth | `{ username, email, password, pow? }` -> 202 `{ status: 'verification_sent' }` (same answer when the e-mail exists); without `REQUIRE_EMAIL_VERIFICATION`: 201 `{ status: 'ready' }`, or 409 `email_taken`. Rates `auth`, then `auth_register` (`AUTH_REGISTER_PER_HOUR` 10 per hour per client, 3x per /48, shared) |
 | `POST /auth/login` | auth | `{ login, password, clientLabel?, pow? }` -> `{ token, expiresAt, user }` or `{ mfaRequired: true, mfaToken }` |
-| `POST /auth/login/mfa` | auth | `{ mfaToken, code? , recoveryCode? }` (401 `invalid_mfa_token` once the step expired or was used, or when the password was reset or changed since the first step) |
+| `POST /auth/login/mfa` | auth | `{ mfaToken, code? , recoveryCode? }` (401 `invalid_mfa_token` once the step expired or was used, or when the password was reset or changed since the first step). Every code checked here or in a re-authentication first takes `mfa:u<id>` from the primary (`AUTH_MFA_PER_ACCOUNT` 10 per 15 minutes per account, any address): beyond it 429 `too_many_attempts` before the check, a recovery code not spent |
 | `POST /auth/logout`, `POST /auth/logout-all` | auth | bearer |
 | `GET /auth/sessions`, `DELETE /auth/sessions/:id` | auth | |
-| `POST /auth/verify-email/resend` | auth | `{ email }` -> 202 always |
-| `POST /auth/password/forgot` | auth | `{ email }` -> 202 always |
-| `POST /auth/password/reset` | auth | `{ token, newPassword }` (also the HTML form at `/reset-password`) |
-| `POST /auth/sso/google/start` | auth | `{ codeChallenge }` -> `{ attemptId, authUrl, pollMs, expiresIn }` |
+| `POST /auth/verify-email/resend` | auth | `{ email }` -> 202 always. Rates `auth`, `auth_mail` (`AUTH_MAIL_PER_HOUR` 10 per hour per client, 3x per /48, shared) |
+| `POST /auth/password/forgot` | auth | `{ email }` -> 202 always (a refusal is a 429, which says nothing about the address). Rates `auth`, `auth_forgot` (`AUTH_FORGOT_PER_HOUR` 3 per hour) and `auth_forgot_day` (`AUTH_FORGOT_PER_DAY` 10 per 24 h), per client, 3x per /48, shared; plus one mail per address every 5 minutes |
+| `POST /auth/password/reset` | auth | `{ token, newPassword }` (also the HTML form at `/reset-password`). Rates `auth`, `auth_reset` (`AUTH_RESET_PER_HOUR` 10 per hour per client, 3x per /48, shared, the form included) |
+| `POST /auth/sso/google/start` | auth | `{ codeChallenge }` -> `{ attemptId, authUrl, pollMs, expiresIn }`. Rate `sso_start` 30 per 10 min per client, 90 per /48, shared |
 | `POST /auth/sso/google/poll` | auth | `{ attemptId, codeVerifier }` -> `{ status: 'pending' }` / login answer / `{ needsUsername, ssoTicket }` |
-| `POST /auth/sso/complete` | auth | `{ ssoTicket, username }` |
-| `GET /account/me` | auth | user, ratings, active sanctions, integrity level is NOT exposed |
+| `POST /auth/sso/complete` | auth | `{ ssoTicket, username }`. Rate `auth`, its /48 count included |
+| `GET /account/me` | auth | `{ user, ratings, sanctions (active), ban }`; `user`: `{ id, username, email, emailVerified, mfaEnabled, googleLinked, hasPassword, acceptChallenges: 'all'\|'none', createdAt, lastLoginAt, pendingEmail }` (`pendingEmail`: the address of an e-mail change waiting for its link, or null; the login answers carry the same `user`); the integrity level is NOT exposed |
 | `POST /account/password` | auth | `{ currentPassword, newPassword }`: the current password only, never a second factor (by design, even with MFA on); revokes the other sessions |
 | `POST /account/mfa/totp/setup` | auth | `{ password }` -> `{ secret, uri, algorithm, digits, period }` (409 when MFA is already on) |
 | `POST /account/mfa/totp/enable` | auth | `{ code }`: a code of the secret from setup only, no password -> `{ status, recoveryCodes }` |
 | `POST /account/mfa/totp/disable`, `POST /account/delete` | auth | `{ password, code?, recoveryCode? }`: the password, plus a TOTP code or a recovery code when MFA is on (disable requires MFA on) |
 | `POST /account/mfa/recovery-codes` | auth | `{ password, code }`: the password and a TOTP code (a recovery code is refused) -> `{ recoveryCodes }` |
+| (every re-authenticated route above, `/account/email`, `/account/export`) | auth | rates `reauth` (per client and /48, shared) and `reauth_user` (`AUTH_REAUTH_PER_USER` 10 per 10 min per account, shared): `reauthRatesOf(config)` of `routes/account.js` |
 | `PUT /account/preferences` | auth | `{ acceptChallenges: 'all'\|'none' }`: the session only, no re-authentication |
-| `GET /players/:username`, `GET /players/:username/games`, `GET /games/:id`, `GET /leaderboard?category=` | store | public data only |
-| `POST /reports` | anticheat | `{ gameId, reported, category: 'cheating'|'abuse'|'other', comment }` |
+| `POST /account/email` | auth | `{ newEmail, password, code?, recoveryCode? }`, the re-authentication of delete. With `REQUIRE_EMAIL_VERIFICATION`: 202 `{ status: 'verification_sent' }`, the same answer and the same `pendingEmail` whether or not another account uses the address; a 24 h link to the new address (`/confirm-email-change`), a notice to the current one. Without it: 200 `{ status: 'email_changed', email }` or 409 `email_taken`. 400 `invalid_email` / `same_email` before the password check |
+| `POST /account/export` | auth | `{ password, code?, recoveryCode? }` -> 200 JSON attachment `scacelith-account-<username>.json` (`format: 'scacelith-account-export'`, version 1: account, ratings, refunds, sessions, security events, sanctions, conduct, reports filed, every game summary, notes); never a secret, token hash, anti-cheat data, report received or moderator identity. Rate `account_export` (5 per hour per player, shared) then `reauth`, `reauth_user`; 60 s timeout |
+| `GET /account/games` | store | `?before=<id>&limit<=50&category=<id>\|custom&rated=true\|false&result=win\|loss\|draw` -> `{ games: [summary + baseMs, incMs, outcome], next, total }`, the player's own games newest first (`outcome` from the player's side; aborted games only without a result filter); rate `account_games` 60 per minute per player |
+| `GET /players/:username`, `GET /players/:username/games`, `GET /leaderboard?category=` | store | public data only; the two player routes take an optional session (same answer) so that their `public_read` limit counts per account when there is one; the leaderboard has no limit of its own (the per-address layer only, section 8) |
+| `GET /games/:id`, `GET /games/:id/pgn` | store | public data, optional session: a player of the game also gets `you: 'white'\|'black'` and `reportable` (whether `POST /reports` would take a report of the opponent now). The PGN: `application/x-chess-pgn` attachment `scacelith-<id>.pgn`, standard tags plus `ScacelithGameId`, `[%clk]` / `[%emt]` per move. Both share the `public_read` limit (60 per minute, `by: 'user'`) with the two player routes |
+| `GET /games/:id/gif?size&orientation&delay&coords` | gif | session required (quotas per account). `small\|medium\|large` (default medium), `white\|black`, delay 100-3000 ms (500), coords `0\|1` (1); else 400 `invalid_option {field}`. The game record's names, ratings, result and ending -> 200 `image/gif` attachment `scacelith-<id>.gif` (binary answer). 400 `invalid_game_id`, 404 `not_found`, 422 `game_too_long` (> `GIF_MAX_PLIES` 600), 429, 503 `server_busy {retryAfter 3-10}` (queue full or wait over; render quotas given back), 500 `render_failed`, 404 `gif_disabled` |
+| `POST /gif` | gif | `{ pgn (<= 65536 bytes), size?, orientation?, delayMs? (number), coords? (boolean) }`: the first game of the PGN (`src/chess/pgn.js` `readPgn`), names and ratings from its tags (printable ASCII), result from `Result`, ending from `Termination` unless `normal` -> attachment `scacelith-game.gif`; 400 `invalid_pgn {line, column}`; body limit 2 x 65536 + 4096; other answers as GET |
+| (both GIF routes) | gif | `routes/gif.js`: rate `gif` 30 per min per account on every call; on a cache miss only, `ctx.takeRates` of `gif_user_min` / `gif_user_hour` (`GIF_USER_RENDERS_PER_MIN` 4, `_PER_HOUR` 30, per account) and `gif_ip_min` / `gif_ip_hour` (`GIF_IP_RENDERS_PER_MIN` 12, `_PER_HOUR` 120, per client, 3x per /48), all shared. Render on `src/gif/pool.js` threads (`GIF_THREADS` 1 per worker, started from `routes/gif-thread.js` at nice 19 on Linux, created on the first render, `GIF_QUEUE_MAX` 4 waiting up to `GIF_QUEUE_TIMEOUT_MS` 10 s, `GIF_RENDER_TIMEOUT_MS` 30 s, closed by `handler.close()`), never on the event loop; LRU cache per worker (`GIF_CACHE_MB` 32) keyed by a hash of the job (moves, start, names, ratings, result, ending, options), in-flight renders joined; metrics `scacelith_gif_renders_total{result}`, `scacelith_gif_render_duration_ms`, `scacelith_gif_cache_total{result}`, `scacelith_gif_queue`, `scacelith_gif_renders_running`, `scacelith_gif_cache_bytes` |
+| `POST /reports` | anticheat | `{ gameId, reported, category: 'cheating'|'abuse'|'other', comment }`. Rate `reports` 30 per hour per account (`by: 'user'`) |
 | `GET /healthz`, `GET /readyz` | net | also on the metrics port |
 
 HTML pages outside `/api`: `GET/POST /verify-email?token=`, `GET/POST /reset-password?token=`,
-`GET /auth/sso/google/callback` (auth owner). GET only shows a confirmation button; the state
-change happens on POST (link scanners must not consume tokens).
+`GET/POST /confirm-email-change?token=` (POST: 200, 400 for an invalid link, 409 when another
+account took the address meanwhile), `GET /auth/sso/google/callback` (auth owner). GET only shows
+a confirmation button; the state change happens on POST (link scanners must not consume tokens).
 
 ## 6. Game policies
 
@@ -1132,18 +1183,39 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   against a login (both of its steps), a rehash or a password change that was in flight, and no
   session is opened with a password the reset has replaced.
 * **Tokens**: 32 random bytes, only their SHA-256 is stored; e-mail verification (24 h),
-  password reset (1 h, revokes all sessions), MFA login challenge (5 min), SSO attempt (10 min),
-  all single-use.
+  password reset (1 h, revokes all sessions; it works only while the account still has the
+  address it was mailed to), e-mail change (24 h, sent to the new address, at most one link per
+  new address every 5 minutes whoever asks; a new request replaces it, a password change or reset
+  cancels it, and a request that one of them overtakes gets 403 `invalid_password`: its write is a
+  compare-and-set on the password hash it checked), MFA login challenge (5 min), SSO attempt
+  (10 min), all single-use. The confirmation of an e-mail change (the link used, the new address,
+  the end of the reset and verification links of the former address) and a password reset (the
+  link used, the new password, the pending e-mail change cancelled) are each one transaction; a
+  store that stays locked answers 503 `server_busy` with `retryAfter: 1`, nothing changed and
+  the link still valid.
 * **TOTP**: RFC 6238 (SHA-1, 6 digits, 30 s, +-1 step), secret 20 bytes, AES-256-GCM at rest with
   a key derived from SERVER_SECRET (or MFA_ENCRYPTION_KEY), replay refused (last used step
   stored). 10 recovery codes (`xxxx-xxxx-xx`, 50 bits) stored as HMAC-SHA256 with a derived
   pepper, single use. Password reset never disables MFA; an administrator can
   (`bin/admin.js user reset-mfa`) after verifying the owner by other means.
-* **Enumeration**: register / forgot / resend answer the same whatever the e-mail; login errors
+* **Enumeration**: register / forgot / resend answer the same whatever the e-mail; so does an
+  e-mail change (`POST /account/email` answers 202 and shows the address as pending whether or not
+  another account uses it; the owner of a taken address gets a notice, never a link); login errors
   are the same for an unknown account and a wrong password; usernames are public anyway (the
-  "taken" answer is rate limited).
-* **Brute force and stuffing**: per-IP token buckets (API, auth; IPv6 per /64, and the password
-  endpoints also per /48 as a whole with `AUTH_RATE_PER_PREFIX`), per-account failure counter
+  "taken" answer is rate limited). Without `REQUIRE_EMAIL_VERIFICATION`, register and the e-mail
+  change answer 409 `email_taken` (no link would confirm the address).
+* **Account data export** (`POST /account/export`, password and second factor, 5 per hour): the
+  player's own data only; never a password hash, TOTP secret, recovery code, token or token hash,
+  the anti-cheat's data (integrity level, anomalies, analysis features, report weights), the reports
+  made against the player or a moderator's identity, nor anything that tells which opponent was
+  sanctioned (rating refunds are summed per UTC day and category, a filed report is only open or
+  closed) or another person's IP address (an event keeps its IP only for the kinds the account
+  holder does: `IP_KINDS`) (`src/http/routes/account-export.js`).
+* **Brute force and stuffing**: per-address token buckets (the background budget of every
+  request, below, and the auth family's route limits; IPv6 per /64, and the password endpoints
+  also per /48 as a whole with `AUTH_RATE_PER_PREFIX`), whose refusals count 5 toward a block of
+  the address; per-account limits whatever the address (`AUTH_MFA_PER_ACCOUNT` second-factor
+  codes, `AUTH_REAUTH_PER_USER` re-authentications); per-account failure counter
   with exponential delay, global failure-rate detector that turns on the login proof-of-work
   (`POW_LOGIN_TRIGGER_PER_MIN`, 30 failed logins per minute: each costs a password hash, so a
   small server's hash throughput could never reach a much higher trigger),
@@ -1152,9 +1224,84 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
 * **WebSocket surface**: one message type table, strict decoding, size limit checked from the
   frame header before buffering, no compression, no fragmentation beyond the size limit,
   Hello timeout, per-connection token bucket, per-IP and global connection limits, slow
-  consumers closed, heartbeat timeout, `Origin` refused by default. Before TLS: handshakes in
-  progress capped per worker and per address, and load shed once the upgrades are refused because
-  the server is full (5.8).
+  consumers closed, heartbeat timeout, `Origin` refused by default. Before TLS: blocked addresses
+  and the per-address connection rate and open connections (below), handshakes in progress capped
+  per worker and per address, and load shed once the upgrades are refused because the server is
+  full (5.8).
+* **Protection per address (background layer)**: `src/net/ipguard.js` (`IpGuard`, one per
+  worker) and `src/cluster/abuse.js` (`AbuseTracker`, in the primary). Every request and every
+  connection meets it first, before routing, before authentication and, with native TLS, before
+  any TLS work. It only keeps one network address from saturating the server; quotas otherwise
+  belong to the signed-in account. An address is an IPv4 address or an IPv6 /64; an IPv6 address
+  also counts toward its /48 (one customer's site) with 4 times each limit, so that rotating over
+  the 65,536 /64s of a /48 multiplies nothing. A whole-server limit L is enforced in each worker
+  as its share `max(1, min(L, ceil(2 L / WORKERS)))` (`workerShare`, `src/security/ratelimit.js`):
+  all of it with 1 or 2 workers, half with 4, so a client spread over the workers gets at most
+  twice L and no request waits for an IPC.
+  * Requests (`admitRequest` in `wrapApiHandler`, `src/net/listeners.js`, and the API handler's
+    first statement when it is used alone; `WsServer.handleUpgrade` for upgrades): every HTTP
+    request, whatever its path, method or outcome (API, pages, `/healthz`, unknown paths, HEAD,
+    OPTIONS, a 414, a WebSocket upgrade), takes one token of `HTTP_RATE_PER_IP` (600 per minute,
+    burst half a minute) and, for IPv6, of `HTTP_RATE_PER_PREFIX` (4 times as much per /48; a
+    refusal there gives the /64 token back), then one of the worker's `IP_MAX_INFLIGHT` (32)
+    places of requests in progress, given back when the response closes, finished or aborted.
+    A pipelined response still waiting for its turn on the connection when the connection
+    closes (Node never gives it the socket, and it never closes) is given back then, or when its
+    handler ends it if the handler is still at work.
+    Beyond: 429 `{ "error": "rate_limited", "message": "Too many requests; try again later.",
+    "retryAfter": s }` with `Retry-After`, on an upgrade `HTTP/1.1 429` with the same JSON.
+  * Connections (TLS gate stage 0, 5.8): `IP_CONN_RATE` new connections per second (burst 4 s)
+    and `IP_MAX_CONNECTIONS` open ones (handshakes, API keep-alive and WebSockets together),
+    each worker its share; beyond, an RST before any TLS byte. `MAX_CONNECTIONS_PER_IP` (64),
+    exact through the primary, still bounds the WebSockets of an address (per /64 only: it has
+    no /48 count).
+  * Slow clients (`hardenHttp`): `headersTimeout` 10 s and `requestTimeout` 30 s checked every
+    second (`connectionsCheckingInterval`; Node's own 30 s let a slowloris client hold a socket 40
+    s), `keepAliveTimeout` 5 s, a socket with no byte in or out for 30 s destroyed
+    (`server.timeout`; upgraded sockets clear it; a request still in its handler keeps the socket,
+    the handler's own timeout answers it), and an answer not flushed to the kernel 60 s
+    after the handler ended it destroyed with its socket (a client reading a GIF or a PGN a few
+    bytes at a time). Malformed HTTP is answered 400, 408 (header timeout) or 431 (headers too
+    large) and counted in `scacelith_http_client_errors_total{reason}`.
+  * Blocks. Each worker sums, per address, the refusals that show a client ignoring the limits:
+    weight 1 for a 429 of the address budgets or the in-flight cap, a gate refusal of that
+    address, a failed TLS handshake, malformed HTTP (not from a trusted proxy). The API's route
+    limits report theirs through the same `IpGuard.noteRefusal` (`AUTH_REFUSAL_WEIGHT`, 5, for
+    the login, registration, reset and MFA family, whose attempts each cost a password hash).
+    Not counted: per-account limits, server-wide capacity refusals (the hash queue, the gate's
+    `handshakes`, `waiting` and `server_full`), the refusals of an address already blocked. A
+    worker reports the sums at most once a second (`abuse.report`, 5.7, at most 512 keys, the
+    largest first); the primary adds every worker up over a sliding minute and blocks an address
+    at `ABUSE_BLOCK_REFUSALS_PER_MIN` (600; 4 times that for a /48, which is also blocked once 4
+    of its /64s are), for `ABUSE_BLOCK_BASE_SEC` (60 s) times 4 at each new block within 6 hours,
+    up to `ABUSE_BLOCK_MAX_SEC` (1 h): 1, 4, 16, then 60 minutes. It sends the new blocks to every
+    worker (`abuse.block`), and the running ones to a worker at its `shard.ready`; durations
+    travel as durations and run on each process's monotonic clock. A worker that sees an address
+    reach the threshold in one second on its own blocks it at once (local fast path), so a flood
+    ends within a second on that worker and one or two on the others. A blocked address gets an
+    RST before TLS for its new connections, 429 with the time left and `Connection: close` on the
+    connections it already has (behind a proxy, 429 only: the connection is the proxy's), and 429
+    on upgrades. WebSocket connections already open are never closed by a block, so a player who
+    shares the address with an abuser (a school, a mobile operator's CGNAT) keeps the game in
+    progress; a player whose connection drops can only come back when the block ends, which is
+    why the first one is short. At most 20,000 blocks run at once (the oldest end first); the
+    primary logs each one (`ip blocked`, with `ipForLog`, the scope, level, duration and
+    refusals).
+  * `ABUSE_EXEMPT` (addresses and CIDR subnets: a school or club network, monitoring, a load
+    generator) skips all of the above. Login, registration, the other route limits and the
+    per-account quotas still apply.
+  * Cost (measured on the development container, `test/unit/net.ipguard.test.js`): about 0.15-0.25
+    µs per IPv4 request (budget and in-flight place), 0.5-0.7 µs per IPv6 request, 0.02 µs for the
+    request of a blocked address, 0.5 µs for a new connection and its close; the keys of an
+    address are computed once per connection (0.8 µs for IPv6). Memory is bounded: 50,000 buckets
+    per limiter (an evicted bucket comes back full, which only makes the limit more lenient),
+    counters for open connections and requests in progress only, 20,000 blocks.
+  * Metrics: `scacelith_http_rate_limited_total{limit}` (`ip`, `ip48`, `inflight`, `blocked`),
+    `scacelith_tls_refused_total{reason}` (`blocked`, `conn_rate`, `conn_open`),
+    `scacelith_tls_connections_open`, `scacelith_http_inflight`, `scacelith_abuse_blocked_keys`
+    and `scacelith_abuse_local_blocks_total` per shard, `scacelith_abuse_report_entries_dropped_total`,
+    `scacelith_http_client_errors_total{reason}`; in the primary `scacelith_abuse_blocks_total{scope,
+    level}`, `scacelith_abuse_blocked{scope}` and `scacelith_abuse_blocks_evicted_total`.
 * **Proof of work format**: an endpoint that wants one answers HTTP 428
   `{ "error": "pow_required", "pow": { "challenge": "<opaque ASCII>", "bits": 18, "expiresAt": ms } }`.
   The client finds a nonce, a decimal ASCII string, such that

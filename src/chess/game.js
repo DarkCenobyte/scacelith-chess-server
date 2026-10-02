@@ -40,8 +40,12 @@ export function endReasonText(reason) {
     return REASON_TEXT[reason] ?? '';
 }
 
+// The PGN standard's Termination value. A game without a result ('*': still running, or aborted
+// online, whatever the abort's reason) is "unterminated"; a flag fall is a "time forfeit" also
+// when it ends in a draw (the opponent cannot mate); a second illegal move and a fair-play
+// forfeit are a "rules infraction"; a game lost (or drawn) by a disconnection is "abandoned".
 function terminationTag(status, reason) {
-    if (status === GameStatus.Ongoing) return 'unterminated';
+    if (status === GameStatus.Ongoing || status === GameStatus.Aborted) return 'unterminated';
     switch (reason) {
     case EndReason.Timeout:
     case EndReason.TimeoutVsInsufficient:
@@ -52,12 +56,7 @@ function terminationTag(status, reason) {
         return 'rules infraction';
     case EndReason.Abandonment:
     case EndReason.AbandonmentVsInsufficient:
-    case EndReason.Aborted:
-    case EndReason.NoShow:
-    case EndReason.BothDisconnected:
         return 'abandoned';
-    case EndReason.ServerAborted:
-        return 'emergency';
     default:
         return 'normal';
     }
@@ -70,6 +69,12 @@ function pgnEscape(s) {
         r += (c === '\n' || c === '\r') ? ' ' : c;
     }
     return r;
+}
+
+// A word of a movetext comment: braces (a '}' would end the comment) and control characters dropped.
+function commentText(w) {
+    // eslint-disable-next-line no-control-regex
+    return w.replace(/[{}\u0000-\u001f\u007f]/g, '').trim();
 }
 
 function todayUtc() {
@@ -261,11 +266,18 @@ export class ChessGame {
 
     /**
      * PGN export, like chess::Game::pgn: Seven Tag Roster, SetUp/FEN for a custom start,
-     * TimeControl, Termination, then the movetext wrapped at 80 columns with the end reason as a
-     * comment.
+     * TimeControl, Termination, then the movetext wrapped at 80 columns (lines of at most 79
+     * characters) with the end reason as a comment.
+     * Additions for the server's game records (GET /api/v1/games/:id/pgn): `afterResult` tags
+     * written right after Result, and a comment per ply. A comment is a string (broken between its
+     * words when a line is full) or an array of words each kept whole, e.g. ['[%clk 0:02:58.3]',
+     * '[%emt 0:00:01.7]'] gives {[%clk 0:02:58.3] [%emt 0:00:01.7]}; a Black move right after a
+     * comment repeats its number ("12... Nf6"), as the PGN export format asks.
      * @param {{event?: string, site?: string, date?: string, round?: string, white?: string,
-     *   black?: string, timeControl?: string, extra?: Array<[string, string]>}} [tags]
-     *   date "YYYY.MM.DD" (default: today, UTC); extra: tags written after Termination.
+     *   black?: string, timeControl?: string, extra?: Array<[string, string]>,
+     *   afterResult?: Array<[string, string]>, comments?: Array<string|string[]|null|undefined>}} [tags]
+     *   date "YYYY.MM.DD" (default: today, UTC); extra: tags written after Termination;
+     *   comments[i]: the comment after ply i (none when missing or empty).
      * @returns {string}
      */
     pgn(tags = {}) {
@@ -279,6 +291,7 @@ export class ChessGame {
         tag('White', tags.white ?? '?');
         tag('Black', tags.black ?? '?');
         tag('Result', result);
+        if (Array.isArray(tags.afterResult)) for (const [k, v] of tags.afterResult) tag(k, v);
         const start = this._start;
         if (start._fenPrefix() !== STANDARD_PREFIX || start.halfmove !== 0 || start.fullmove !== 1) {
             tag('SetUp', '1');
@@ -298,13 +311,26 @@ export class ChessGame {
             if (line.length) line += ' ';
             line += tok;
         };
+        // A comment: its words, '{' before the first and '}' after the last (no break inside a word).
+        const comment = (c) => {
+            const words = typeof c === 'string' ? c.split(' ') : Array.isArray(c) ? c.map(String) : [];
+            const kept = words.map(commentText).filter((w) => w.length > 0);
+            if (!kept.length) return false;
+            kept[0] = `{${kept[0]}`;
+            kept[kept.length - 1] += '}';
+            for (const w of kept) emit(w);
+            return true;
+        };
+        const comments = Array.isArray(tags.comments) ? tags.comments : null;
         const san = this.sanMoves();
         let moveNo = start.fullmove;
         let side = start.side;
+        let afterComment = false;
         for (let i = 0; i < san.length; i++) {
             if (side === WHITE) emit(`${moveNo}.`);
-            else if (i === 0) emit(`${moveNo}...`);
+            else if (i === 0 || afterComment) emit(`${moveNo}...`);
             emit(san[i]);
+            afterComment = comments !== null && comments[i] !== undefined && comments[i] !== null && comment(comments[i]);
             if (side === BLACK) ++moveNo;
             side ^= 1;
         }

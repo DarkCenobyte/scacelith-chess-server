@@ -45,10 +45,11 @@ its explicit flag.
 ```sh
 # on the test server: accounts and their tokens (username<TAB>token per line)
 node bin/admin.js bench-accounts --count 20000 --prefix bench --out tokens.tsv --format tsv --i-know-this-is-a-test-server
-# the test server needs MAX_CONNECTIONS_PER_IP (16 by default) above the number of clients per
-# load machine, and WS_MSG_RATE / WS_MSG_BURST raised for the burst scenario
+# the test server needs ABUSE_EXEMPT set to the load machines' addresses, MAX_CONNECTIONS_PER_IP
+# (64 by default) above the number of clients per load machine, and WS_MSG_RATE / WS_MSG_BURST
+# raised for the burst scenario
 # on the load machine
-node bench/loadgen.js --scenario games --games 10000 --url wss://test.example.org:44664/ws \
+node bench/loadgen.js --scenario games --games 10000 --url wss://test.example.org/ws \
     --ca cert.pem --tokens tokens.tsv --metrics http://test.example.org:9464/metrics --metrics-token TOKEN
 ```
 
@@ -76,11 +77,22 @@ connections by the tool, which does not retry). A connection takes its slot once
 has arrived; a TLS client sends it at once, so that wait costs the tool nothing. Since each load
 process is a single source address, the tool sets `MAX_PENDING_HANDSHAKES_PER_IP` to
 `MAX_PENDING_HANDSHAKES - 1` on the server it starts, so that only the per-worker cap applies (a
-remote server keeps its own setting). The runs below predate these limits. To measure the raw
+remote server keeps its own setting). It also lists the loopback addresses in `ABUSE_EXEMPT`, so
+that the protection per address (`IP_CONN_RATE`, `IP_MAX_CONNECTIONS`, `HTTP_RATE_PER_IP` and the
+blocks, SIZING "Protection per address") leaves the load processes alone; a remote test server
+needs the load machines' addresses there. The runs below predate these limits. To measure the raw
 handshake rate again, keep `--inflight` times the load processes below `MAX_PENDING_HANDSHAKES`
 times `WORKERS`, or raise the key with `--server-env MAX_PENDING_HANDSHAKES=100000`; with the
 default, a ramp that opens connections faster than the server completes them measures the gate
 instead.
+
+**Refused connections.** `node bench/gate-cost.js` measures what a connection the TLS gate
+refuses still costs the server: 20,000 connections from a blocked loopback address (reset at
+accept) and 20,000 that send a first record that is not TLS (`bad_hello`), with the CPU time of
+the server process (kernel included) per connection. On the development container (4-vCPU Xeon at
+2.1 GHz) both were 26-30 µs; SIZING "Protection per address" scales it to an OVH vCore. The
+per-address checks alone (a request, a new connection) are timed by the micro-benchmark of
+`test/unit/net.ipguard.test.js`, which prints them with `npm run test:unit`.
 
 **Open files.** The container used here has a hard `nofile` limit of 20,000 per process that
 cannot be raised without `CAP_SYS_RESOURCE`, so the tool uses at least `clients / 15000` server
@@ -411,8 +423,9 @@ restart and settings figures that go with it.
   at the price of a slower detection of dead connections (`HEARTBEAT_TIMEOUT_MS`).
 - **Kernel settings** for 100,000+ sockets: `fs.nr_open` and `LimitNOFILE`, `net.core.somaxconn`
   (4096 here; it caps `LISTEN_BACKLOG`) and `net.ipv4.tcp_max_syn_backlog` (8192) for the
-  reconnection storms, `net.ipv4.ip_local_reserved_ports=44664` (the server port is inside the
-  ephemeral range, and a restart can fail with `EADDRINUSE` otherwise; README, kernel settings),
+  reconnection storms, `net.ipv4.ip_local_reserved_ports` for a server port inside the ephemeral
+  range (32768-60999: a custom port such as 44664, not the default 443; a restart can fail with
+  `EADDRINUSE` otherwise; README, kernel settings),
   `net.ipv4.tcp_mem` and the socket buffer defaults, and on the load machines
   `net.ipv4.ip_local_port_range` or several source addresses.
 - **`MAX_PENDING_HANDSHAKES`** (128 per worker): enough to keep a core busy with handshakes (at

@@ -17,7 +17,7 @@ test('login by username or e-mail (case-insensitive): session token, user view',
         assert.equal(r.status, 200, login);
         assert.match(r.json.token, /^sct_[A-Za-z0-9_-]{43}$/);
         assert.equal(r.json.expiresAt, s.now() + 90 * 86400000);
-        assert.deepEqual(r.json.user, { id: u.id, username: 'Alice', email: 'alice@example.com', emailVerified: true, mfaEnabled: false, googleLinked: false, hasPassword: true, acceptChallenges: 'all', createdAt: s.now() });
+        assert.deepEqual(r.json.user, { id: u.id, username: 'Alice', email: 'alice@example.com', emailVerified: true, mfaEnabled: false, googleLinked: false, hasPassword: true, acceptChallenges: 'all', createdAt: s.now(), lastLoginAt: s.now(), pendingEmail: null });
     }
     const rows = s.store.sessions.listForUser(u.id);
     assert.equal(rows[0].clientLabel, 'Windows 11');

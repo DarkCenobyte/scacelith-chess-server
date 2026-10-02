@@ -19,10 +19,12 @@ Sections:
 - [Accounts](#accounts)
 - [Mail](#mail)
 - [Google single sign-on](#google-single-sign-on)
+- [Protection per address (background layer)](#protection-per-address-background-layer)
 - [Abuse protection and limits](#abuse-protection-and-limits)
 - [Games](#games)
 - [Matchmaking and ratings](#matchmaking-and-ratings)
 - [Anti-cheat and sanctions](#anti-cheat-and-sanctions)
+- [Animated GIFs of games](#animated-gifs-of-games)
 - [Observability](#observability)
 
 ## Server identity and network
@@ -33,7 +35,7 @@ Sections:
 | `SERVER_PUBLIC_HOST` | text | `localhost` | Public DNS name of the server, used in e-mail links and the Google SSO redirect URI. |
 | `SERVER_MOTD` | text (at most 200 characters) | (empty) | Short message of the day shown in the online menu. |
 | `BIND_ADDRESS` | text | `0.0.0.0` | Address the API and WebSocket listeners bind to. |
-| `API_PORT` | port (0-65535) | `44664` | HTTPS API port (TCP). 44664 is the port of the official server; any free port works for a community server. |
+| `API_PORT` | port (0-65535) | `443` | HTTPS API port (TCP). 443, the HTTPS port: firewalls and proxies let it through; any free port works for a community server. A port below 1024 needs the CAP_NET_BIND_SERVICE capability (README, systemd unit) unless the server runs as root. |
 | `WS_PORT` | port (0-65535) | (empty) | WSS (game WebSocket) port. Empty (the default) = the same port as API_PORT: one TLS listener serves the API under /api/v1 and the WebSocket upgrade on /ws. Set another port to split them. |
 | `PUBLIC_API_PORT` | port (0-65535) | `0` | API port as seen by clients when a proxy/NAT maps ports (0 = API_PORT). |
 | `PUBLIC_WS_PORT` | port (0-65535) | `0` | WSS port as seen by clients (0 = WS_PORT). |
@@ -110,14 +112,28 @@ Sections:
 | `SSO_GOOGLE_ENABLED` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Offers "Sign in with Google" (OpenID Connect, authorization code + PKCE through the system browser). |
 | `GOOGLE_CLIENT_ID` | text | (empty) | OAuth client ID of a "Web application" client in Google Cloud Console. |
 | `GOOGLE_CLIENT_SECRET` | secretText | (empty) | OAuth client secret. Never commit it. |
-| `GOOGLE_REDIRECT_URI` | text | (empty) | Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST:PUBLIC_API_PORT/auth/sso/google/callback). |
+| `GOOGLE_REDIRECT_URI` | text | (empty) | Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST/auth/sso/google/callback, with :PUBLIC_API_PORT after the host when that port is not 443). |
+
+## Protection per address (background layer)
+
+| Variable | Type | Default | Description |
+| --- | --- | --- | --- |
+| `HTTP_RATE_PER_IP` | integer (&gt;= 1) | `600` | HTTP requests per minute from one IPv4 address or IPv6 /64, whole server: every request (API, pages, health checks, unknown paths, WebSocket upgrades), counted before routing and before authentication. Each worker allows its share (all of it with 1 or 2 workers, 2 x HTTP_RATE_PER_IP / WORKERS beyond), with a burst of half a minute. A background ceiling, not a quota: it is loose enough for a school or a mobile operator that puts many players behind one address, and signed-in players are limited per account as well. Beyond it: 429 rate_limited with Retry-After. |
+| `HTTP_RATE_PER_PREFIX` | integer (&gt;= 0) | `0` | The same for one IPv6 /48 as a whole, on top of the limit of each of its /64 networks: a /48 holds 65536 of them, and one customer often gets a /56 or a /48. 0 means 4 x HTTP_RATE_PER_IP; a value you set must be at least HTTP_RATE_PER_IP. IPv4 addresses are only counted one by one. |
+| `IP_CONN_RATE` | integer (1-100000) | `10` | New connections per second from one IPv4 address or IPv6 /64 (4 times that per /48), whole server, each worker its share, with a burst of 4 seconds (TLS_MODE=native: checked before any TLS work; a connection beyond it is closed with a reset). The game opens one or two connections per player. |
+| `IP_MAX_CONNECTIONS` | integer (1-1000000) | `128` | Open connections (TLS handshakes, API keep-alive connections and WebSockets together) from one IPv4 address or IPv6 /64 (4 times that per /48), each worker its share (TLS_MODE=native; a new connection beyond it is closed with a reset before TLS). Keep it at least twice MAX_CONNECTIONS_PER_IP (check-config warns otherwise). |
+| `IP_MAX_INFLIGHT` | integer (1-100000) | `32` | HTTP requests being processed at once in one worker for one IPv4 address or IPv6 /64 (4 times that per /48); one more gets 429 rate_limited. It bounds what one address can keep waiting (slow request bodies, the password hash queue). |
+| `ABUSE_BLOCK_REFUSALS_PER_MIN` | integer (&gt;= 0) | `600` | Refusals in one minute, all workers together, that block an IPv4 address or IPv6 /64 before TLS (4 times that for a /48): rate-limit 429s, connections refused before TLS, malformed requests and failed TLS handshakes. A blocked address gets its new connections closed with a reset before any TLS work, and 429 with Connection: close on the connections it already has; WebSocket connections already open are kept, so that the players of a school or a mobile operator keep their games when one of them floods. The block starts at ABUSE_BLOCK_BASE_SEC and is 4 times longer at each repeat within 6 hours, up to ABUSE_BLOCK_MAX_SEC. 0 = never block (the per-address limits still apply). |
+| `ABUSE_BLOCK_BASE_SEC` | integer (1-86400) | `60` | First block of an address, in seconds (see ABUSE_BLOCK_REFUSALS_PER_MIN). |
+| `ABUSE_BLOCK_MAX_SEC` | integer (1-604800) | `3600` | Longest block of an address, in seconds (at least ABUSE_BLOCK_BASE_SEC). |
+| `ABUSE_EXEMPT` | comma-separated list | (empty) | Addresses and CIDR subnets (203.0.113.7, 2001:db8::/48) never blocked and outside HTTP_RATE_PER_IP, IP_CONN_RATE, IP_MAX_CONNECTIONS and IP_MAX_INFLIGHT: a school or club network, monitoring, a load generator. Login, registration, the other route limits and the per-account quotas still apply. An invalid entry stops the start. |
 
 ## Abuse protection and limits
 
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
 | `MAX_CONNECTIONS` | integer (&gt;= 1) | `200000` | Simultaneous players, whole server. A newcomer beyond it still completes the TLS handshake and the WebSocket upgrade, then is refused at Hello (ServerFull, counted in scacelith_ws_hello_total{result="server_full"}, the metric that shows a full server), and the game waits 60 to 120 s before it tries again. A player whose game is in progress is still admitted, so that a full server does not make them lose it by abandonment. For such a player to reach Hello, WebSocket upgrades may go max(16, 2 %) beyond it; beyond that reserve an upgrade gets HTTP 503, and with TLS_MODE=native the TLS gate starts shedding (see MAX_PENDING_HANDSHAKES). |
-| `MAX_CONNECTIONS_PER_IP` | integer (&gt;= 1) | `16` | Simultaneous WebSocket connections from one IP address (IPv6: per /64). |
+| `MAX_CONNECTIONS_PER_IP` | integer (&gt;= 1) | `64` | Simultaneous WebSocket connections from one IP address (IPv6: per /64), whole server. 64 lets a class or a mobile operator's shared address (carrier-grade NAT) play; one live connection per account still applies, and IP_MAX_CONNECTIONS bounds every connection of an address before TLS. |
 | `MAX_PENDING_HANDSHAKES` | integer (2-100000) | `128` | TLS handshakes in progress per worker (TLS_MODE=native). A new connection takes a slot once the first record of its ClientHello has arrived; it has 3 s for that and holds no slot meanwhile. A connection beyond this cap, or beyond MAX_PENDING_HANDSHAKES_PER_IP for its address group, is closed before any TLS work and the client retries later, so a reconnection storm is served in turn instead of every handshake slowing down together. A worker also sheds load, letting at most half this number of new TLS connections per second through, for up to 5 s after the primary refused a WebSocket upgrade because MAX_CONNECTIONS and its reserve are in use, or while the worker holds 1.2 times its share of MAX_CONNECTIONS. It does not shed at MAX_CONNECTIONS itself, so that a player coming back to a game in progress does not compete with newcomers for that rate: each newcomer then completes the handshake and gets ServerFull at Hello. |
 | `MAX_PENDING_HANDSHAKES_PER_IP` | integer (1-99999) | (empty) | TLS handshakes in progress per worker for one address group: an IPv4 address or an IPv6 /48 (TLS_MODE=native). Empty (the default) = MAX_PENDING_HANDSHAKES / 32 with a floor of 2, but always below MAX_PENDING_HANDSHAKES (4 by default; check-config prints the value in use). A value you set must be lower than MAX_PENDING_HANDSHAKES, so that a few hosts cannot hold every handshake slot. A worker also keeps at most 4 times this number of connections of one group waiting for their ClientHello (and 16 times MAX_PENDING_HANDSHAKES in total). Raise it when many players share one public address (a school or company network); a handshake takes a fraction of a second, so a small value still serves many players. |
 | `WS_MAX_MESSAGE_BYTES` | integer (128-65536) | `512` | Largest message a client may send. |
@@ -130,11 +146,18 @@ Sections:
 | `CLIENT_PING_INTERVAL_MS` | integer (1000-60000) | `10000` | Interval of the game client's own Ping, announced in Welcome (the client measures its round trip for the ping indicator and its estimate of the server clock with it). Lower is a more reactive ping indicator but costs more server CPU for every connected player: at 2000 these pings alone take a third or more of the server CPU of a player in a 3+2 game. After each connection the client sends a few quick pings anyway. |
 | `GESTURE_RATE` | integer (0-60) | `4` | Live gestures (the player's head, the piece in hand and where it is aimed) a client may send per second, sustained, announced in Welcome. The server relays each one to the opponent as it is and never stores it; it costs server CPU for every player in a game (docs/SIZING.md). A client beyond it has its gestures dropped silently, and only a gross excess closes the connection as a flood. 0 turns the relay off (the clients then send none). |
 | `GESTURE_BURST` | integer (1-120) | `8` | Gestures a client may send in a burst above GESTURE_RATE (the size of its own token bucket, apart from WS_MSG_RATE: gestures never delay or rate-limit moves). |
-| `HTTP_BODY_LIMIT` | integer (&gt;= 1024) | `16384` | Largest API request body in bytes. |
-| `HTTP_RATE_PER_IP` | integer (&gt;= 1) | `120` | API requests per minute from one IP address (all endpoints). |
+| `HTTP_BODY_LIMIT` | integer (&gt;= 1024) | `16384` | Largest API request body in bytes, except POST /api/v1/gif, which has its own fixed limit of 135,168 bytes (a PGN of up to 64 KiB as a JSON string, escapes included). |
 | `AUTH_RATE_PER_IP` | integer (&gt;= 1) | `20` | Login / register / reset attempts per 10 minutes from one IP address (one IPv6 /64). |
 | `AUTH_RATE_PER_PREFIX` | integer (&gt;= 0) | `0` | The AUTH_RATE_PER_IP limits (login / register / reset attempts, and account changes that ask for the password), per 10 minutes for one IPv6 /48 as a whole, on top of the limit of each of its /64 networks: a /48 holds 65536 of them, and one customer often gets a /56 or a /48. 0 means 5 x AUTH_RATE_PER_IP. Raise it for a site that brings many players at once over one IPv6 prefix (a campus, a club event). IPv4 addresses are only limited one by one. |
 | `AUTH_FAILURES_PER_ACCOUNT` | integer (&gt;= 1) | `5` | Failed logins on one account before each further attempt is delayed exponentially (up to 15 minutes). |
+| `AUTH_REGISTER_PER_HOUR` | integer (&gt;= 1) | `10` | Registrations per hour from one IPv4 address or IPv6 /64 (3 times that per IPv6 /48), whole server, on top of AUTH_RATE_PER_IP. Raise it for a session where a class creates its accounts together. |
+| `AUTH_MAIL_PER_HOUR` | integer (&gt;= 1) | `10` | Confirmation e-mails asked again (POST /auth/verify-email/resend) per hour from one IPv4 address or IPv6 /64 (3 times that per /48), whole server, on top of AUTH_RATE_PER_IP and of the one e-mail per address every 5 minutes. Password reset e-mails have their own, stricter limits (AUTH_FORGOT_PER_HOUR, AUTH_FORGOT_PER_DAY). |
+| `AUTH_FORGOT_PER_HOUR` | integer (&gt;= 1) | `3` | Password reset e-mails asked (POST /auth/password/forgot) per hour from one IPv4 address or IPv6 /64 (3 times that per /48), whole server, on top of AUTH_RATE_PER_IP and of the one e-mail per address every 5 minutes. A refusal is a 429, which says nothing about the address; an accepted request answers 202 whether the address has an account or not. |
+| `AUTH_FORGOT_PER_DAY` | integer (&gt;= 1) | `10` | The same as AUTH_FORGOT_PER_HOUR per 24 hours (3 times that per /48). At least AUTH_FORGOT_PER_HOUR. |
+| `AUTH_RESET_PER_HOUR` | integer (&gt;= 1) | `10` | New passwords sent with a reset link (POST /auth/password/reset and the /reset-password page) per hour from one IPv4 address or IPv6 /64 (3 times that per /48), whole server, on top of AUTH_RATE_PER_IP: each one hashes a password. |
+| `AUTH_MFA_PER_ACCOUNT` | integer (&gt;= 1) | `10` | Second-factor codes (authenticator or recovery codes) tried per 15 minutes for one account, whole server, from any address, at sign-in and in account changes; then 429 too_many_attempts before the code is checked (a recovery code is not spent). It bounds a code guesser who knows the password, whatever the number of addresses. |
+| `AUTH_REAUTH_PER_USER` | integer (&gt;= 1) | `10` | Account changes that ask for the password or a code (password, two-step verification, e-mail, data export, deletion) per 10 minutes for one account, whole server, from any address, on top of the per-address limit AUTH_RATE_PER_IP: a stolen session used from many addresses cannot guess the password faster. |
+| `USER_RATE_PER_MIN` | integer (&gt;= 1) | `120` | API requests per minute of one signed-in account (every request with a valid session token), all endpoints together, whatever its address. Each worker allows its share, max(1, min(this, ceil(2 x this / WORKERS))) (all of it with 1 or 2 workers, half with 4), with a burst of half a minute; beyond it 429 rate_limited with Retry-After. The game's busiest use, paging through the history, is about one request per second. |
 | `POW_REGISTER_BITS` | integer (0-26) | `18` | Proof-of-work difficulty (leading zero bits of SHA-256) required to register; 0 disables it. |
 | `POW_LOGIN_BITS` | integer (0-26) | `18` | Proof-of-work difficulty required to log in while the server sees a credential-stuffing wave; 0 disables it. |
 | `POW_LOGIN_TRIGGER_PER_MIN` | integer (&gt;= 1) | `30` | Failed logins per minute (whole server) that turn on the login proof-of-work. Every failed login costs a password hash (about 0.5 s of CPU), so 30 per minute already keeps a quarter of a core busy, and a few hundred would need several cores: with PASSWORD_HASH_CONCURRENCY at 1 per worker, a small server could never reach such a trigger. Raise it only on a large server where honest typos alone come near it. |
@@ -199,6 +222,22 @@ Sections:
 | `ANALYSIS_POLL_MS` | integer (100-3600000) | `5000` | Interval at which an idle analysis engine looks for new games to analyse. |
 | `ANALYSIS_QUEUE_MAX` | integer (0-100000) | `5000` | Most ordinary games waiting for engine analysis: while this many wait, a newly finished ordinary game is not queued (the engines could not catch up anyway). Games with a report, a suspicion signal (at most 20 waiting per player) or a moderator request are queued anyway and mostly analysed first; one engine claim in four still goes to the oldest ordinary game. 0 analyses only those (and then no game feeds the population statistics). At most 100000: the waiting ordinary games are counted in every commit of finished games, under the database write lock. |
 | `ANALYSIS_SAMPLE_RATE` | number (0-1) | `1` | Share of the ordinary rated games queued for analysis (0 to 1, drawn at random when the game ends). Lower it when the engine cannot keep up with the games played. |
+
+## Animated GIFs of games
+
+| Variable | Type | Default | Description |
+| --- | --- | --- | --- |
+| `GIF_ENABLED` | boolean (true/false, 1/0, yes/no, on/off) | `true` | Animated GIFs of games for signed-in players: GET /api/v1/games/:id/gif (a game of this server) and POST /api/v1/gif (any game, as a PGN). Rendered on a thread of each worker process, never on the event loop of the games. false: both endpoints answer 404 gif_disabled. |
+| `GIF_THREADS` | integer (1-8) | `1` | GIF renders at the same time in one worker process, each on a thread of its own at the lowest CPU priority (on Linux: it only takes the CPU the games leave). A render takes one core (measured on a 2.1 GHz Xeon: about 45 ms for a 40-move game at the medium size, about 0.7 s for a game of GIF_MAX_PLIES at the large size; docs/SIZING.md), and a thread 40-50 MiB of memory while it lives (up to about 125 MiB after many of the longest games at the large size). The threads start on demand and stop after a minute without work. |
+| `GIF_QUEUE_MAX` | integer (0-64) | `4` | Renders that may wait for a free thread in one worker process; one more is refused at once with 503 server_busy and Retry-After, and the render quotas it took are given back. |
+| `GIF_QUEUE_TIMEOUT_MS` | integer (100-60000) | `10000` | Longest wait of a render for a free thread; then 503 server_busy (the render quotas are given back). |
+| `GIF_RENDER_TIMEOUT_MS` | integer (1000-120000) | `30000` | Longest render: the thread is stopped (a new one starts with the next render) and the request answers 500. |
+| `GIF_MAX_PLIES` | integer (1-1200) | `600` | Longest game, in half-moves, a GIF shows; a longer one answers 422 game_too_long. 600 plies last 5 minutes at the default speed (0.5 s per move). |
+| `GIF_CACHE_MB` | integer (0-1024) | `32` | Memory of the cache of rendered GIFs in each worker process (the least recently used goes first; a medium GIF of 80 plies is about 200 KiB). A GIF served from the cache costs no render quota. 0 disables the cache. |
+| `GIF_USER_RENDERS_PER_MIN` | integer (&gt;= 1) | `4` | GIF renders per minute of one account, whole server (a GIF served from the cache does not count); beyond it 429 rate_limited with Retry-After. |
+| `GIF_USER_RENDERS_PER_HOUR` | integer (&gt;= 1) | `30` | GIF renders per hour of one account, whole server. At least GIF_USER_RENDERS_PER_MIN. |
+| `GIF_IP_RENDERS_PER_MIN` | integer (&gt;= 1) | `12` | GIF renders per minute from one IPv4 address or IPv6 /64 (3 times that per IPv6 /48), all accounts together, whole server: a background ceiling for many accounts behind one address. |
+| `GIF_IP_RENDERS_PER_HOUR` | integer (&gt;= 1) | `120` | GIF renders per hour from one IPv4 address or IPv6 /64 (3 times that per /48), all accounts together, whole server. At least GIF_IP_RENDERS_PER_MIN. |
 
 ## Observability
 

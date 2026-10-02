@@ -4,6 +4,7 @@
 //   TokenBucketLimiter     per-key token buckets (per-IP API limits, local first stage)
 //   FailureCounter         per-key failure counter with exponential delay (login brute force)
 //   SlidingWindowCounter   approximate count of events over the last window (failure-rate detector)
+//   workerShare()          the part of a whole-server per-address limit one worker enforces
 //   createLocalControl()   in-process implementation of the primary's `ratelimit.take`,
 //                          `ratelimit.refund` and `once.consume` IPC requests (docs/DESIGN.md
 //                          5.7). Used when no primary is available (single process, tests) and as
@@ -84,7 +85,28 @@ export function normalizeIp(ip) {
     return a.startsWith('::ffff:') && a.includes('.') ? a.slice(7) : a;
 }
 
-/** Per-key token buckets: `limit` tokens refilled evenly over `windowMs`. */
+/**
+ * The part of a whole-server per-address limit `limit` that one of `workers` worker processes
+ * enforces on its own, without asking the primary: max(1, min(limit, ceil(2 * limit / workers))).
+ * The kernel spreads the connections of a client over the workers (round robin, or SO_REUSEPORT by
+ * 4-tuple), so a client spread over every worker gets at most twice the limit, and one that uses a
+ * single keep-alive connection at least 2 / workers of it; with 1 or 2 workers each one allows all
+ * of it. The exact sum over the workers is only needed to decide a block, which the primary does
+ * from the refusals the workers report (net/ipguard.js, cluster/abuse.js), off the request path.
+ * @param {number} limit
+ * @param {number} workers
+ * @returns {number} at least 1
+ */
+export function workerShare(limit, workers) {
+    const l = Math.max(0, Math.floor(+limit || 0));
+    const n = Math.max(1, Math.floor(+workers || 1));
+    return Math.max(1, Math.min(l, Math.ceil(2 * l / n)));
+}
+
+/**
+ * Per-key token buckets: `limit` tokens refilled evenly over `windowMs`. A bucket that holds a
+ * burst `b` and refills at `r` tokens per minute is `take(key, b, b * 60000 / r)`.
+ */
 export class TokenBucketLimiter {
     /** @param {{ maxKeys?: number, now?: () => number }} [opts] */
     constructor({ maxKeys = 100000, now = Date.now } = {}) {

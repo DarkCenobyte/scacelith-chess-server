@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { openStore, migrate } from '../../src/store/index.js';
 import { register, uciOf } from '../../src/http/routes/players.js';
 import { testConfig } from '../../src/config.js';
 import { enums } from '../../src/protocol/schema.js';
+import { applyGame as eloApplyGame } from '../../src/match/elo.js';
 
 const { GameStatus, EndReason } = enums;
 
@@ -50,11 +52,15 @@ function game(white, black, extra = {}) {
     };
 }
 
-test('registers the four public routes, without authentication', () => {
+test('registers the five public routes; all but the leaderboard take an optional session', () => {
     const { router } = setup();
-    assert.deepEqual(router.routes.map((r) => `${r.method} ${r.path}`), [
-        'GET /api/v1/players/:username', 'GET /api/v1/players/:username/games', 'GET /api/v1/games/:id', 'GET /api/v1/leaderboard']);
-    for (const r of router.routes) assert.equal(r.opts.auth, 'none');
+    assert.deepEqual(router.routes.map((r) => `${r.method} ${r.path} ${r.opts.auth}`), [
+        'GET /api/v1/players/:username optional', 'GET /api/v1/players/:username/games optional', 'GET /api/v1/games/:id optional',
+        'GET /api/v1/games/:id/pgn optional', 'GET /api/v1/leaderboard none']);
+    const rates = router.routes.filter((r) => r.opts.rate).map((r) => r.opts.rate);
+    assert.deepEqual(rates.map((r) => r.key), ['public_read', 'public_read', 'public_read', 'public_read'],
+        'the profile, the game lists, the record and its PGN share one limit');
+    assert.ok(rates.every((r) => r.by === 'user'), 'per account when signed in (per client otherwise)');
     const other = fakeRouter();
     register(other, { store: {}, config: testConfig(), prefix: '' });
     assert.equal(other.routes[0].path, '/players/:username');
@@ -173,6 +179,46 @@ test('game record: players, result, UCI moves with times, PGN tags, rating chang
         assert.equal(call('/api/v1/games/:id', { id: bad }).body.error, 'invalid_game_id', bad);
     }
     store.close();
+});
+
+// docs/API.md section 10 (ratingAfter, ratingDiff) and 11 (WhiteRatingDiff, BlackRatingDiff): a
+// rated game always carries them, also when the rating rules leave both ratings where they were
+// (here FIDE's zero score: a newcomer who has not scored yet loses); null and no tags only for a
+// game that does not count for the ratings (casual, custom, aborted).
+test('rating changes: a rated game that changes no rating says 0 and "+0"; casual, custom and aborted say null', () => {
+    const config = testConfig({ DB_PATH: ':memory:', SERVER_NAME: 'Test Server', SERVER_PUBLIC_HOST: 'chess.example.org' });
+    const store = openStore(config, { applyGame: eloApplyGame });
+    migrate(store);
+    const router = fakeRouter();
+    register(router, { store, config });
+    const call = (p, id) => router.routes.find((x) => x.path === p).handler({ params: { id: String(id) }, query: new URLSearchParams(''), store, config });
+    const a = { id: store.users.create({ username: 'Zara', email: 'z@e.org' }), name: 'Zara' };
+    const b = { id: store.users.create({ username: 'Yann', email: 'y@e.org' }), name: 'Yann' };
+    const zero = game(a, b);                                   // both new: Yann loses before scoring
+    const casual = game(a, b, { rated: false });
+    const custom = game(a, b, { category: 'custom', baseMs: 240000, incMs: 1000 });
+    const aborted = game(a, b, { status: GameStatus.Aborted, reason: EndReason.NoShow, moves: new Uint16Array(0),
+        spentMs: new Uint32Array(0), clockMs: new Uint32Array(0) });
+    store.games.finishBatch([zero, casual, custom, aborted]);
+    const z = call('/api/v1/games/:id', zero.id).body;
+    assert.equal(z.rated, true);
+    assert.deepEqual(z.white, { name: 'Zara', rating: 1500, ratingAfter: 1500, ratingDiff: 0 });
+    assert.deepEqual(z.black, { name: 'Yann', rating: 1500, ratingAfter: 1500, ratingDiff: 0 });
+    const pgn = call('/api/v1/games/:id/pgn', zero.id).text;
+    assert.match(pgn, /^\[WhiteRatingDiff "\+0"\]$/m);
+    assert.match(pgn, /^\[BlackRatingDiff "\+0"\]$/m);
+    for (const g of [casual, custom, aborted]) {
+        const body = call('/api/v1/games/:id', g.id).body;
+        for (const side of [body.white, body.black]) assert.deepEqual([side.ratingAfter, side.ratingDiff], [null, null]);
+        assert.doesNotMatch(call('/api/v1/games/:id/pgn', g.id).text, /RatingDiff/);
+    }
+    store.close();
+    // What docs/API.md says of it.
+    const api = fs.readFileSync(new URL('../../docs/API.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
+    assert.ok(api.includes('A rated game always has them, also when the rating rules leave a rating where it was'));
+    assert.ok(api.includes('then `ratingDiff` is `0`. They are `null` only for a game that does not count for the ratings (casual, custom, aborted).'));
+    assert.ok(api.includes('`WhiteRatingDiff` and `BlackRatingDiff`: the changes (`"+10"`, `"-10"`), in every rated game, `"+0"` when'));
+    assert.ok(!api.includes('only when the game changed the ratings') && !api.includes('`null` when the game changed no rating'));
 });
 
 test('leaderboard: official categories only, established players, "+" spellings, cache', () => {

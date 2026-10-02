@@ -46,6 +46,19 @@ export function normalizeEmail(email) {
 }
 
 /**
+ * An address with its local part hidden but its first character: "n***@example.org" (notices
+ * about an address that must not be shown in full).
+ * @param {string} email
+ * @returns {string}
+ */
+export function maskEmail(email) {
+    const s = String(email ?? '').trim();
+    const at = s.lastIndexOf('@');
+    if (at <= 0) return '***';
+    return s[0] + '***' + s.slice(at);
+}
+
+/**
  * Sanity check of an e-mail address (already normalised).
  * @param {string} email
  * @returns {boolean}

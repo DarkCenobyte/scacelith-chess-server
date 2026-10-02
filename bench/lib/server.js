@@ -121,8 +121,19 @@ export async function startServer({ workers, reusePort = false, accounts = 0, en
         POW_LOGIN_BITS: '0',
         AUTH_RATE_PER_IP: '1000000',
         HTTP_RATE_PER_IP: '1000000',
+        AUTH_REGISTER_PER_HOUR: '1000000',
+        AUTH_MAIL_PER_HOUR: '1000000',
+        AUTH_FORGOT_PER_HOUR: '1000000',
+        AUTH_FORGOT_PER_DAY: '1000000',
+        AUTH_RESET_PER_HOUR: '1000000',
+        AUTH_MFA_PER_ACCOUNT: '1000000',
+        AUTH_REAUTH_PER_USER: '1000000',
+        USER_RATE_PER_MIN: '1000000',
         MAX_CONNECTIONS: '1000000',
         MAX_CONNECTIONS_PER_IP: '1000000',
+        // The load processes share the loopback address: outside the protection per address
+        // (IP_CONN_RATE, IP_MAX_CONNECTIONS, HTTP_RATE_PER_IP, blocks), as SIZING advises for a load machine.
+        ABUSE_EXEMPT: '127.0.0.0/8,::1',
         // Each load process is one source address: only the per-worker handshake cap applies.
         MAX_PENDING_HANDSHAKES_PER_IP: String(Math.max(1, (parseInt(env.MAX_PENDING_HANDSHAKES, 10) || 128) - 1)),
         SHUTDOWN_GRACE_MS: '200',

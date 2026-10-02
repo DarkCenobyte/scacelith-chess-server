@@ -4,12 +4,17 @@
 //   router.post(path, handler, { auth, body: schema, rate })      // also put / patch / delete
 //   router.page(method, path, handler, opts)                      // HTML page outside /api
 //   handler(ctx) -> { status, body, headers } | { status, html, headers }
+//                 | { status, text, contentType, headers }    // a text file (e.g. a PGN download)
 //
 // Paths: a path that starts with "/api/" is taken as it is; any other path is relative to the
 // API prefix "/api/v1" (so route modules may write either '/players/:username' or
 // '/api/v1/players/:username'), except page routes ({ page: true } or router.page()), which are
 // absolute paths outside /api (e.g. '/verify-email'). Parameters are ":name" segments; a literal
 // segment wins over a parameter when both match.
+//
+// ownBodyValidation: true: the parsed JSON body (any JSON value) reaches the handler unchecked; the
+//   handler validates it (POST /reports, whose game ids may be numbers or digit strings). Without
+//   it, a route with no `body` schema accepts only an empty object.
 //
 // rate: { key, limit, windowMs, shared?: bool, by?: 'ip'|'user' } or an array of them. `shared`
 //   limits also go through the primary (`ratelimit.take`) after the local token bucket, so they
@@ -138,7 +143,7 @@ export class Router {
      * @param {string} method GET, POST, PUT, PATCH or DELETE
      * @param {string} path
      * @param {(ctx: object) => Promise<object>|object} handler
-     * @param {object} [opts] { auth, body, query, rate, page, timeoutMs, form }
+     * @param {object} [opts] { auth, body, ownBodyValidation, query, rate, page, timeoutMs, form }
      */
     add(method, path, handler, opts = {}) {
         if (typeof handler !== 'function') throw new TypeError(`route ${method} ${path}: handler must be a function`);

@@ -55,7 +55,13 @@ test('preferences', async (t) => {
     const { token } = await s.login('alice', PW);
     let r = await s.request('PUT', '/api/v1/account/preferences', { token, body: { acceptChallenges: 'none' } });
     assert.deepEqual([r.status, r.json], [200, { preferences: { acceptChallenges: 'none' } }]);
-    assert.equal(s.store.users.byId(u.id).acceptChallenges, 'none');
+    // Stored as the Store's boolean (the challenge check reads acceptChallenges !== false), shown as 'none'.
+    assert.equal(s.store.users.byId(u.id).acceptChallenges, false);
+    assert.equal((await s.request('GET', '/api/v1/account/me', { token })).json.user.acceptChallenges, 'none');
+    r = await s.request('PUT', '/api/v1/account/preferences', { token, body: { acceptChallenges: 'all' } });
+    assert.deepEqual([r.status, r.json], [200, { preferences: { acceptChallenges: 'all' } }]);
+    assert.equal(s.store.users.byId(u.id).acceptChallenges, true);
+    assert.equal((await s.request('GET', '/api/v1/account/me', { token })).json.user.acceptChallenges, 'all');
     r = await s.request('PUT', '/api/v1/account/preferences', { token, body: { acceptChallenges: 'friends' } });
     assert.equal(r.status, 400);
     r = await s.request('POST', '/api/v1/account/preferences', { token, body: { acceptChallenges: 'all' } });

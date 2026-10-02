@@ -106,6 +106,37 @@
 //   - JSON columns (tokens.data, anomaly/security detail, evidence, features) round-trip any JSON
 //     value; hashes are stored and compared exactly as given (string or Buffer); BLOBs come back
 //     as Buffers.
+//   - Account API (GET /account/games, the e-mail change and the data export; docs/API.md):
+//       games.listForUser(userId, { before, limit, category, rated, result }) -> summaries, newest
+//         first (the objects of recentForUser), filtered by category id ('custom' included), rated
+//         (boolean) and result from the player's side ('win' | 'loss' | 'draw': played-out games
+//         only, an aborted game never matches a result); games.countForUser(userId, filter) counts
+//         the games matching the same filter (without one: every game, as before). Both use the
+//         UNION shape of recentForUser: one range scan of games_white / games_black per colour,
+//         the filter applied to the player's own rows, never a scan of the table (the tests check
+//         the query plans of GAMES_FOR_USER_SQL / GAMES_COUNT_FOR_USER_SQL). limit is not capped
+//         here (the route caps it; the export pages with `before`). StoreError 'invalid' for a
+//         result outside the three values.
+//       users.update(id, { email }) also sets email_normalized and throws StoreError 'email_taken'
+//         when another account uses the address (the UNIQUE index decides, atomically).
+//       tokens.deleteForUser(userId, kind) -> rows deleted; tokens.liveForUser(userId, kind, now)
+//         -> the newest unconsumed, unexpired token of that kind for the user (with its data), or
+//         null (both through the tokens_user index).
+//       sessions.allForUser(userId) -> every stored session of the account, revoked and expired
+//         ones included (until the retention deletes them), newest first, with revokedAt,
+//         clientLabel and the stored ip (never the token hash).
+//       security.forUser(userId, limit) (above) is newest first; sanctions.list(userId) includes
+//         the lifted sanctions (createdBy / liftedBy name moderators: a caller showing the list to
+//         the player leaves them out); refunds.list({ victimId, limit }) lists the refunds a player
+//         received.
+//       conduct.forUser(userId, limit = 1000) -> [{ kind, at }], newest first (the retention keeps
+//         30 days).
+//       reports.forReporter(userId, limit = 500) -> the reports the player filed, newest first,
+//         each with reportedName and `outcome` (null while open, else 'actioned' | 'dismissed').
+//         anticheat/reports.js reads the outcomes for the reporter's track record when this call
+//         exists: before it, every reporter of a real store had the neutral track record.
+//       explainQueryPlan(store, sql, params) (module export): the EXPLAIN QUERY PLAN rows of a
+//         statement on the store's own connection (tests and diagnostics).
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -173,6 +204,32 @@ const SIGNAL_JOBS_PER_PLAYER = 20;
 const BACKLOG_COUNT_MAX = 100000;
 const INTEGRITY_LEVELS = ['none', 'suspected', 'high_confidence', 'confirmed'];
 const { GameStatus } = enums;
+
+const GAME_SUMMARY_COLS = 'id, category, rated, base_ms, inc_ms, white_id, black_id, white_name, black_name, white_rating, '
+    + 'black_rating, started_at, ended_at, status, reason, ply_count, white_before, white_after, black_before, black_after, '
+    + 'rematch_of, flags';
+
+// The filter of a player's games (games.listForUser / countForUser) on one colour's rows: ?1 the
+// player, ?3 the category (NULL: any), ?4 rated 0/1 (NULL: any), and the status that a result
+// filter asks for on that colour (?5 as White, ?6 as Black; NULL: any status, aborted included).
+const userGamesFilter = (status) => `AND (?3 IS NULL OR category = ?3) AND (?4 IS NULL OR rated = ?4) AND (${status} IS NULL OR status = ${status})`;
+
+/** games.listForUser: ?2 the exclusive id cursor, ?7 the limit (the other parameters: userGamesFilter). */
+export const GAMES_FOR_USER_SQL = `SELECT ${GAME_SUMMARY_COLS} FROM games WHERE id IN (
+    SELECT id FROM games WHERE white_id = ?1 AND id < ?2 ${userGamesFilter('?5')}
+    UNION SELECT id FROM games WHERE black_id = ?1 AND id < ?2 ${userGamesFilter('?6')}
+    ORDER BY id DESC LIMIT ?7) ORDER BY id DESC`;
+
+/** games.countForUser with a filter (?2 unused, the other parameters: userGamesFilter). */
+export const GAMES_COUNT_FOR_USER_SQL = `SELECT (SELECT count(*) FROM games WHERE white_id = ?1 ${userGamesFilter('?5')})
+    + (SELECT count(*) FROM games WHERE black_id = ?1 ${userGamesFilter('?6')}) AS n`;
+
+// The status a result filter needs on each colour (index 0: as White, 1: as Black).
+const RESULT_STATUS = Object.freeze({
+    win: [GameStatus.WhiteWins, GameStatus.BlackWins],
+    loss: [GameStatus.BlackWins, GameStatus.WhiteWins],
+    draw: [GameStatus.Draw, GameStatus.Draw],
+});
 
 const mBatchMs = metrics.histogram('scacelith_store_commit_batch_ms', 'Duration of one finished-games commit transaction',
     [1, 2, 5, 10, 25, 50, 100, 250, 1000]);
@@ -572,6 +629,14 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                 idleExpiresAt: r.idle_expires_at, clientLabel: r.client_label, ip: r.ip,
             }));
         },
+        /** Every stored session of the user, revoked and expired ones included, newest first. */
+        allForUser(userId) {
+            return st(`SELECT id, created_at, last_seen_at, expires_at, idle_expires_at, revoked_at, client_label, ip FROM sessions
+                WHERE user_id = ? ORDER BY created_at DESC, id DESC`).all(userId).map((r) => ({
+                id: r.id, createdAt: r.created_at, lastSeenAt: r.last_seen_at, expiresAt: r.expires_at,
+                idleExpiresAt: r.idle_expires_at, revokedAt: r.revoked_at, clientLabel: r.client_label, ip: r.ip,
+            }));
+        },
         enforceLimit(userId, max, now = Date.now()) {
             return tx(() => {
                 const live = st(`SELECT id, token_hash FROM sessions WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ?
@@ -609,6 +674,16 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         },
         update(kind, tokenHash, data) {
             return Number(st('UPDATE tokens SET data = ? WHERE kind = ? AND token_hash = ?').run(toJson(data), kind, tokenHash).changes) > 0;
+        },
+        /** Deletes every token of `kind` of the user (consumed or not); returns how many. */
+        deleteForUser(userId, kind) {
+            return guard(() => Number(st('DELETE FROM tokens WHERE user_id = ? AND kind = ?').run(userId, kind).changes));
+        },
+        /** The newest token of `kind` of the user that is neither consumed nor expired, or null. */
+        liveForUser(userId, kind, now = Date.now()) {
+            return toToken(guard(() => st(`SELECT id, kind, user_id, data, created_at, expires_at, consumed_at FROM tokens
+                WHERE user_id = ? AND kind = ? AND consumed_at IS NULL AND expires_at > ? ORDER BY created_at DESC, id DESC LIMIT 1`)
+                .get(userId, kind, ms(now))));
         },
     };
 
@@ -683,9 +758,6 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
 
     // ---- games ---------------------------------------------------------------------------------
 
-    const GAME_SUMMARY_COLS = 'id, category, rated, base_ms, inc_ms, white_id, black_id, white_name, black_name, white_rating, '
-        + 'black_rating, started_at, ended_at, status, reason, ply_count, white_before, white_after, black_before, black_after, '
-        + 'rematch_of, flags';
     function toGame(r, full) {
         const g = {
             id: r.id, category: r.category, rated: !!r.rated, baseMs: r.base_ms, incMs: r.inc_ms, whiteId: r.white_id,
@@ -940,11 +1012,36 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                 AND ended_at >= ?3${rated ? ' AND rated = 1' : ''}`;
             return st(sql).get(a, b, ms(since)).n;
         },
-        countForUser(userId) {
+        /**
+         * A player's games matching a filter, newest first (summaries, as recentForUser).
+         * @param {number} userId
+         * @param {{ before?: number|null, limit?: number, category?: string|null, rated?: boolean|null,
+         *   result?: 'win'|'loss'|'draw'|null }} [opts]  before: exclusive game id cursor
+         */
+        listForUser(userId, { before = null, limit = 20, ...filter } = {}) {
+            const f = userFilter(filter);
+            const cursor = before ?? Number.MAX_SAFE_INTEGER;
+            const n = Math.max(0, Math.floor(limit));
+            if (!f) return games.recentForUser(userId, n, cursor);
+            return st(GAMES_FOR_USER_SQL).all(userId, cursor, f.category, f.rated, f.white, f.black, n).map((r) => toGame(r, false));
+        },
+        /** A player's games (both colours); with a filter (listForUser's), those matching it. */
+        countForUser(userId, filter = null) {
+            const f = userFilter(filter);
+            if (f) return st(GAMES_COUNT_FOR_USER_SQL).get(userId, null, f.category, f.rated, f.white, f.black).n;
             return st('SELECT (SELECT count(*) FROM games WHERE white_id = ?1) + (SELECT count(*) FROM games WHERE black_id = ?1) AS n')
                 .get(userId).n;
         },
     };
+
+    // The parameters of userGamesFilter, or null when the filter keeps every game.
+    function userFilter(filter) {
+        const { category = null, rated = null, result = null } = filter || {};
+        if (result !== null && !Object.hasOwn(RESULT_STATUS, result)) throw new StoreError('invalid', `unknown result filter ${result}`);
+        if (category === null && rated === null && result === null) return null;
+        const status = result === null ? [null, null] : RESULT_STATUS[result];
+        return { category: category === null ? null : String(category), rated: rated === null ? null : b01(rated), white: status[0], black: status[1] };
+    }
 
     // ---- conduct -------------------------------------------------------------------------------
 
@@ -958,6 +1055,11 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                 out[r.kind] = r.n;
             }
             return out;
+        },
+        /** The user's conduct events, newest first: [{ kind, at }]. */
+        forUser(userId, limit = 1000) {
+            return st('SELECT kind, at FROM conduct_events WHERE user_id = ? ORDER BY at DESC, id DESC LIMIT ?').all(userId, limit)
+                .map((r) => ({ kind: r.kind, at: r.at }));
         },
         cooldown(userId) {
             const r = st('SELECT cooldown_until, level, updated_at FROM conduct_state WHERE user_id = ?').get(userId);
@@ -1296,6 +1398,13 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                 JOIN users a ON a.id = r.reporter_id JOIN users b ON b.id = r.reported_id
                 WHERE r.reported_id = ? ORDER BY r.created_at DESC, r.id DESC LIMIT ?`).all(userId, limit).map(toReport);
         },
+        /** The reports the user filed, newest first, with reportedName and outcome (null while open). */
+        forReporter(userId, limit = 500) {
+            return st(`SELECT ${REPORT_COLS}, a.username AS reporter_name, b.username AS reported_name FROM reports r
+                JOIN users a ON a.id = r.reporter_id JOIN users b ON b.id = r.reported_id
+                WHERE r.reporter_id = ? ORDER BY r.created_at DESC, r.id DESC LIMIT ?`).all(userId, limit)
+                .map((r) => ({ ...toReport(r), outcome: r.status === 'open' ? null : r.status }));
+        },
         /** outcome: 'actioned' | 'dismissed'; only an open report changes (returns true then). */
         resolve(id, outcome, by = null, now = Date.now()) {
             if (outcome !== 'actioned' && outcome !== 'dismissed') throw new StoreError('invalid', "outcome must be 'actioned' or 'dismissed'");
@@ -1511,6 +1620,20 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
     };
     Object.defineProperty(store, DB, { value: db });
     return store;
+}
+
+/**
+ * The query plan of a statement on a store's own connection (tests and diagnostics): the rows of
+ * EXPLAIN QUERY PLAN, e.g. { id, parent, detail: 'SEARCH games USING INDEX games_white (...)' }.
+ * @param {object} store  an open Store
+ * @param {string} sql
+ * @param {Array<*>} [params]
+ * @returns {Array<{ id: number, parent: number, detail: string }>}
+ */
+export function explainQueryPlan(store, sql, params = []) {
+    const db = store && store[DB];
+    if (!db) throw new TypeError('explainQueryPlan: not a store');
+    return guard(() => db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params)).map((r) => ({ id: r.id, parent: r.parent, detail: r.detail }));
 }
 
 // ---- migrations --------------------------------------------------------------------------------

@@ -7,9 +7,13 @@ stored, one Elo per official time control, anti-cheat and reports. It is a plain
 with no npm dependency. The game (the Windows binary) is only a client of it; anyone can run a
 community server, and players choose the server in the game's Options.
 
-- Official server: `caissa.scacelith.com`, TCP port `44664` (HTTPS API and WSS on the same port).
+- Official server: `caissa.scacelith.com`, TCP port `443` (HTTPS API and WSS on the same port).
 - Design and contracts: [docs/DESIGN.md](docs/DESIGN.md). Every setting: [docs/CONFIG.md](docs/CONFIG.md).
   Anti-cheat: [docs/ANTICHEAT.md](docs/ANTICHEAT.md).
+- HTTPS API, every endpoint with its answers, errors, rate limits and curl examples (sign-up and
+  sign-in, two-step verification, account, game history, PGN, animated GIFs, data export,
+  deletion):
+  [docs/API.md](docs/API.md). The realtime WebSocket protocol: [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - Sizing and hosting on a small VPS (capacity, memory, disk, restarts, settings): [docs/SIZING.md](docs/SIZING.md).
 
 ## Requirements
@@ -35,8 +39,8 @@ node bin/scacelith-server.js start
 ```
 
 `start` applies the database migrations, replays the game journal (games that were running when
-the server stopped come back), starts one worker per shard and listens on `API_PORT` (44664 by
-default). `SIGTERM` or Ctrl-C stops it gracefully: running games are journaled and resume at the
+the server stopped come back), starts one worker per shard and listens on `API_PORT` (443 by
+default; a port below 1024 needs a capability, see [Ports and firewall](#ports-and-firewall)). `SIGTERM` or Ctrl-C stops it gracefully: running games are journaled and resume at the
 next start. `npm test` runs the unit and integration tests.
 
 Configuration comes from the environment, then from `.env` next to `package.json` (or the file
@@ -48,13 +52,31 @@ configuration file in Git. Secrets can also be read from files with the `_FILE` 
 
 | Port | Default | Open to | Purpose |
 |---|---|---|---|
-| `API_PORT` | 44664/tcp | the Internet | HTTPS API (`/api/v1/...`), e-mail and Google sign-in pages, and the game WebSocket (`wss://host:44664/ws`) |
+| `API_PORT` | 443/tcp | the Internet | HTTPS API (`/api/v1/...`), e-mail and Google sign-in pages, and the game WebSocket (`wss://host/ws`) |
 | `WS_PORT` | same as `API_PORT` | the Internet | set it only to put the WebSocket on its own port |
 | `METRICS_PORT` | 9464/tcp on 127.0.0.1 | your monitoring only | Prometheus metrics, `/healthz`, `/readyz` |
 
 When a NAT or a proxy publishes other port numbers than the ones the server listens on, set
 `PUBLIC_API_PORT` / `PUBLIC_WS_PORT` to what the players must use; the server announces them in
 `GET /api/v1/info`.
+
+443 is the HTTPS port: firewalls and proxies of schools, companies and hotels let it through,
+where they often block other ports. Any free port works for a community server (players then type
+it in the game's Options with the host). On Linux, only a process with the `CAP_NET_BIND_SERVICE`
+capability (root has it) may listen on a port below 1024. Do not run the server as root; give the
+capability instead, in one of these ways:
+
+- systemd (recommended): `AmbientCapabilities=CAP_NET_BIND_SERVICE` and
+  `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` in the unit, as in
+  [Running as a service](#running-as-a-service-systemd-example);
+- on the Node.js binary: `sudo setcap cap_net_bind_service=+ep "$(readlink -f "$(command -v node)")"`
+  (every program run with that binary gets it, and a Node.js upgrade drops it: run it again);
+- for the whole machine: `sysctl -w net.ipv4.ip_unprivileged_port_start=443` (and the same line in
+  `/etc/sysctl.d/`), which lets every user bind 443 and above.
+
+Without one of them the start fails, and each worker logs the error with these fixes (`Cannot listen
+on port 443 (EACCES) ...`) and exits with a non-zero status. A port of 1024 or above needs none of
+them.
 
 ## TLS certificates
 
@@ -85,9 +107,10 @@ TLS_MIN_VERSION=TLSv1.2
   certbot's symlink swaps) and on `SIGHUP` (`systemctl reload scacelith` with the unit below).
   A broken new certificate is refused and logged; the previous one stays in use.
 - Check it from another machine:
-  `openssl s_client -connect caissa.scacelith.com:44664 -servername caissa.scacelith.com </dev/null`
+  `openssl s_client -connect caissa.scacelith.com:443 -servername caissa.scacelith.com </dev/null`
   must show the full chain and `Verify return code: 0 (ok)`, and
-  `curl https://caissa.scacelith.com:44664/api/v1/info` must answer without `-k`.
+  `curl https://caissa.scacelith.com/api/v1/info` must answer without `-k` (add the port,
+  `https://host:8443/...`, for a server on another port).
 
 With Let's Encrypt and certbot, the files under `/etc/letsencrypt/live/` are readable by root
 only. Either run a deploy hook that copies them for the service account:
@@ -128,12 +151,13 @@ When nginx, HAProxy, Caddy or a load balancer already terminates TLS, set `TLS_M
 server then listens in plain text and must only be reachable from the proxy (bind it to a private
 address with `BIND_ADDRESS`, or firewall it). `TRUSTED_PROXIES` lists the proxy addresses whose
 `X-Forwarded-For` header is believed; without it, every player would share the proxy's address
-and the per-address limits would treat them as one client. The proxy must pass WebSocket
+and the per-address limits would treat them as one client, and block them together (see
+[Protection against abuse](#protection-against-abuse)). The proxy must pass WebSocket
 upgrades on `/ws` and keep idle connections for more than a minute:
 
 ```nginx
 location / {
-    proxy_pass http://10.0.0.5:44664;
+    proxy_pass http://10.0.0.5:8443;   # API_PORT of the server (a port above 1024 needs no capability)
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $connection_upgrade;   # map $http_upgrade $connection_upgrade { default upgrade; '' close; }
@@ -143,17 +167,22 @@ location / {
 }
 ```
 
-The server then does no TLS work, so the handshake limit `MAX_PENDING_HANDSHAKES` (see
-[Kernel settings](#kernel-settings-linux)) does not apply: limit the handshakes on the proxy.
+The proxy listens on 443 and the server behind it on any port: set `API_PORT` to that port
+(8443 above) and `PUBLIC_API_PORT=443` (and `PUBLIC_WS_PORT=443`), so that the server announces the
+port the players reach. The server then does no TLS work, so the handshake limit
+`MAX_PENDING_HANDSHAKES` (see [Kernel settings](#kernel-settings-linux)) does not apply, nor do
+the per-address connection limits `IP_CONN_RATE` and `IP_MAX_CONNECTIONS`: limit the handshakes
+and the connections per client on the proxy.
 
 `TLS_MODE=off` exists for local development only and is refused unless `ALLOW_INSECURE_DEV=1`.
 
 ### The official server
 
-`caissa.scacelith.com:44664` uses option 1 with a certificate provided by the server operator;
+`caissa.scacelith.com` (port 443) uses option 1 with a certificate provided by the server operator;
 the game has this address built in as its default server. Its `.env` sets at least
-`SERVER_PUBLIC_HOST=caissa.scacelith.com`, `API_PORT=44664`, `TLS_MODE=native`, `TLS_CERT_FILE`
-and `TLS_KEY_FILE`.
+`SERVER_PUBLIC_HOST=caissa.scacelith.com`, `TLS_MODE=native`, `TLS_CERT_FILE` and `TLS_KEY_FILE`
+(`API_PORT` keeps its default, 443). Its former port was 44664: the game moves a sign-in saved for
+`caissa.scacelith.com:44664` to the new address by itself.
 
 ## Running as a service (systemd example)
 
@@ -175,6 +204,9 @@ KillSignal=SIGTERM
 TimeoutStopSec=30
 Restart=on-failure
 LimitNOFILE=1048576
+# Port 443 (below 1024) without running as root: this capability only, nothing else.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/scacelith
@@ -185,7 +217,11 @@ WantedBy=multi-user.target
 ```
 
 With `DATA_DIR=/var/lib/scacelith` in the environment file. `LimitNOFILE` must exceed
-`MAX_CONNECTIONS`. This unit is an example: adapt the paths to your installation.
+`MAX_CONNECTIONS`. `AmbientCapabilities=CAP_NET_BIND_SERVICE` lets the `scacelith` account listen
+on 443; `CapabilityBoundingSet` keeps every other capability away from the process, and
+`NoNewPrivileges` still applies (the capability is given at the start, not gained later). Leave
+both lines out when `API_PORT` is 1024 or above. This unit is an example: adapt the paths to your
+installation.
 
 ### Anti-cheat engine
 
@@ -229,19 +265,22 @@ After a restart every client reconnects within a few seconds. New connections wa
 queue until the server accepts them; `LISTEN_BACKLOG` (2048 by default) sets its length, but the
 kernel caps it at `net.core.somaxconn` (4096 since Linux 5.4, 128 on older kernels), and
 connections still in their TCP handshake wait in a second queue bounded by
-`net.ipv4.tcp_max_syn_backlog`. Raise both, and reserve the server's port:
+`net.ipv4.tcp_max_syn_backlog`. Raise both:
 
 ```sh
 # /etc/sysctl.d/90-scacelith.conf, applied with: sysctl --system
 net.core.somaxconn = 4096
 net.ipv4.tcp_max_syn_backlog = 8192
-net.ipv4.ip_local_reserved_ports = 44664
+# Only for a server port inside 32768-60999 (here a custom API_PORT=44664):
+# net.ipv4.ip_local_reserved_ports = 44664
 ```
 
-The last line matters because 44664 lies inside Linux's default range of ephemeral ports
-(32768-60999). While the server is stopped, any outgoing connection of the machine (a DNS query, a
-download, the SMTP relay) may get 44664 as its local port, and the restart then fails with
-`EADDRINUSE`. Reserve `WS_PORT` as well when it differs from `API_PORT` (a comma-separated list).
+The default port 443 needs nothing more. A custom port inside Linux's default range of ephemeral
+ports (32768-60999, `net.ipv4.ip_local_port_range`) must also be reserved, as the commented line
+shows: while the server is stopped, any outgoing connection of the machine (a DNS query, a
+download, the SMTP relay) may get that port as its local port, and the restart then fails with
+`EADDRINUSE`. Reserve `WS_PORT` as well when it differs from `API_PORT` and lies in that range (a
+comma-separated list).
 
 The server protects itself during such a reconnection storm. With native TLS, a new connection first
 has 3 s to send the start of its TLS handshake (the ClientHello), and holds no handshake slot while
@@ -295,12 +334,43 @@ limit, the better layout for a server that expects to be full.
   to the log instead (tests), `none` disables e-mail (then turn e-mail confirmation off).
 - Google sign-in is optional and off by default. Create an OAuth client of type "Web application"
   in the Google Cloud console, add the redirect URI
-  `https://<SERVER_PUBLIC_HOST>:<port>/auth/sso/google/callback` (the value `check-config`
-  prints as `googleRedirectUri`), then set `SSO_GOOGLE_ENABLED=true`, `GOOGLE_CLIENT_ID` and
+  `https://<SERVER_PUBLIC_HOST>/auth/sso/google/callback` (`https://<SERVER_PUBLIC_HOST>:<port>/...`
+  when the public port is not 443; the value `check-config` prints as `googleRedirectUri`), then set `SSO_GOOGLE_ENABLED=true`, `GOOGLE_CLIENT_ID` and
   `GOOGLE_CLIENT_SECRET` (or `GOOGLE_CLIENT_SECRET_FILE`). The client secret stays on the server:
   the game signs in through the system browser with PKCE and never sees it.
 - Every server is a separate trust boundary: the game keeps one login per server address and
   never sends a server the credentials or tokens of another one.
+- Players manage their account from the game through the HTTPS API (every endpoint:
+  [docs/API.md](docs/API.md)): game history and PGN downloads, signed-in devices, password,
+  two-step verification, e-mail address, a download of their data and the deletion of the
+  account. A change of e-mail address is confirmed through a link sent to the new address (with
+  `REQUIRE_EMAIL_VERIFICATION`; without it the address changes at once), and the former address
+  is told. The data download holds no password hash, two-step secret, token or anti-cheat data.
+
+## Animated GIFs of games
+
+Signed-in players can download any game of the server as an animated GIF
+(`GET /api/v1/games/:id/gif`), and any game they have as PGN text (`POST /api/v1/gif`): a 2D
+board seen from above, one frame per move, with the players' names and ratings and the result
+([docs/API.md](docs/API.md#get-gamesidgif)). The server draws them itself, with no external
+program, on a rendering thread of each worker process (`GIF_THREADS`, 1) at the lowest CPU
+priority, so the games never wait for a GIF and a GIF only takes the CPU the games leave. It keeps
+the recent ones in memory (`GIF_CACHE_MB`, 32 per worker) and limits each account to 4 GIFs a
+minute and 30 an hour (`GIF_USER_RENDERS_*`), each address to 12 and 120 (`GIF_IP_RENDERS_*`); a
+GIF from the cache does not count. A GIF takes from a few tens of milliseconds to about a second
+of one core, and a rendering thread up to about 125 MiB while it lives
+([docs/SIZING.md](docs/SIZING.md#animated-gifs)). `GIF_ENABLED=false` turns the feature off.
+Every `GIF_*` setting: [docs/CONFIG.md](docs/CONFIG.md).
+
+The pictures use two works shipped in `assets/`, under their own licences:
+
+- `assets/pieces/cburnett/`: the "cburnett" chess pieces by Colin M.L. Burnett, GPL version 2
+  or later, as distributed with lichess (details in `assets/pieces/cburnett/LICENSE.md`). The
+  server is GPL-3.0-or-later, so the combination is distributed under the GPL version 3 or later.
+- `assets/fonts/scacelith-gif/`: "Scacelith GIF", bitmap subsets of Terminus Font 4.49.1 by
+  Dimitar Toshkov Zhekov, modified (a zero without a slash) and renamed as the licence asks of
+  modified versions; SIL Open Font License 1.1 (`assets/fonts/scacelith-gif/OFL.txt`).
+  `tools/gen-gif-font.js` makes them again from the Terminus Font 4.49.1 sources.
 
 ## Password hashing on a small server
 
@@ -328,6 +398,17 @@ school or a company network whose players log in together while the server is bu
 10 minutes for an IPv4 address or an IPv6 /64) is also applied to each IPv6 /48 as a whole
 (`AUTH_RATE_PER_PREFIX`, 5 times as much by default), because a single customer often gets a /56
 (256 /64 networks) or a /48 (65536).
+
+Some of these endpoints have stricter limits of their own, counted for the whole server: 10
+registrations per hour per address (`AUTH_REGISTER_PER_HOUR`: raise it before a class creates its
+accounts together), 3 password reset e-mails per hour and 10 per day (`AUTH_FORGOT_PER_HOUR`,
+`AUTH_FORGOT_PER_DAY`), 10 confirmation e-mails sent again and 10 new passwords from reset links
+per hour, each with 3 times as much per IPv6 /48; 10 two-step codes per 15 minutes for one
+account (`AUTH_MFA_PER_ACCOUNT`) and 10 password re-checks per 10 minutes
+(`AUTH_REAUTH_PER_USER`), whatever the address. A signed-in player also has a budget of its own,
+`USER_RATE_PER_MIN` (120) requests a minute across the API from any address, and the endpoints
+that read games, file reports or make GIFs count per account rather than per address. Every
+limit: [docs/API.md](docs/API.md#15-rate-limits-and-other-throttles).
 
 When a stored hash is outdated (for example scrypt after an upgrade to Node 24.7, where new
 hashes use Argon2id), the login upgrades it with the password it just checked, but only when a
@@ -364,6 +445,83 @@ as long as a scrypt check (0.5 s).
   `queue_full` or `timeout` outside an attack mean the machine needs more cores, not a higher
   cap; the reason `source_limit` counts the clients held back to their
   `PASSWORD_HASH_WAITERS_PER_SOURCE` waiting hashes while the queue was at least half full.
+
+## Protection against abuse
+
+The server protects itself in two layers. The first, described here, works per network address:
+it meets every request and every connection before anything else (before the API routes, before
+the login, and with native TLS before any TLS work), and only stops one address from saturating
+the server. The second works per signed-in account and per route (the limits in
+[docs/API.md](docs/API.md)). An address is an IPv4 address or an IPv6 /64; an IPv6 address also
+counts toward its /48 with 4 times each limit (all of them but `MAX_CONNECTIONS_PER_IP`, which
+counts per /64 only), because one customer often gets a /56 or a /48 and could otherwise rotate
+over its /64 networks. The limits are for the whole server: each worker
+allows its share (all of it with 1 or 2 workers, half of it with 4), so a client spread over the
+workers gets at most twice as much, and no request waits for the other processes.
+
+| Setting | Default | Beyond it |
+|---|---|---|
+| `HTTP_RATE_PER_IP` | 600 requests per minute, any path (API, pages, health checks, unknown paths, WebSocket upgrades), with a burst of half a minute | 429 `rate_limited` with `Retry-After` |
+| `HTTP_RATE_PER_PREFIX` | 4 × `HTTP_RATE_PER_IP` for an IPv6 /48 | the same |
+| `IP_MAX_INFLIGHT` | 32 requests in progress per worker | the same, with `Retry-After: 1` |
+| `IP_CONN_RATE` | 10 new connections per second, with a burst of 4 seconds | the connection is reset before TLS |
+| `IP_MAX_CONNECTIONS` | 128 open connections (TLS handshakes, API keep-alive and WebSockets together) | the same |
+| `MAX_CONNECTIONS_PER_IP` | 64 WebSocket connections, counted exactly over the workers (per /64, no count per /48: the /48's upgrades still take its request budget, and with native TLS its connections the /48 count of `IP_MAX_CONNECTIONS`) | 429 `too_many_connections` at the upgrade |
+| `ABUSE_BLOCK_REFUSALS_PER_MIN` | 600 refusals in a minute block the address (4 times that for a /48) | blocked for `ABUSE_BLOCK_BASE_SEC` (60 s), 4 times longer at each new block within 6 hours, up to `ABUSE_BLOCK_MAX_SEC` (1 h) |
+
+The refusals that count toward a block are those that show a client ignoring the limits: the
+429s of the request budget and the in-flight cap, the connections reset before TLS, failed TLS
+handshakes and malformed HTTP, plus the 429s of the API's per-address route limits (a refused
+login, registration, password reset or second-factor attempt counts 5). A worker that sees 600
+of them from one address within a second blocks it at once; otherwise the primary adds up the
+workers' counts, reported once a second, and blocks the address everywhere within a second or
+two. A blocked address has its new connections reset before any TLS work, and its
+requests on connections already open get 429 with the time left and `Connection: close`.
+WebSocket connections that are already open are never closed by a block, so the players of a
+school or of a mobile operator who share the address with an abuser keep their games; a player
+whose connection drops can only come back when the block ends. `ABUSE_BLOCK_REFUSALS_PER_MIN=0`
+turns blocking off and keeps the limits.
+
+Slow clients are cut as well: the request headers must arrive within 10 s and the whole request
+within 30 s (both checked every second), a connection with no byte in or out for 30 s is closed
+unless the server is still preparing its answer (game WebSockets have their own heartbeat
+instead), and an answer that the client has not read 60 s after the server finished it is
+dropped with its connection. A header or request timeout is
+answered 408 and, like malformed HTTP (400) and oversized headers (431), counted in
+`scacelith_http_client_errors_total{reason}` and toward a block of the address.
+
+**Players who share one address.** A school, a club, a company network or a mobile operator's
+carrier-grade NAT puts many players behind one IPv4 address. The defaults are sized for that: a
+class of 30 browsing the menus at one request every 3 s each is 600 requests per minute, their
+launch fits in the burst, and 50 players make about 150 connections. A real player over the budget
+waits for the `Retry-After` the game shows, and does not come near 600 refusals a minute. For a
+known network that plays together (a school's or a club's address, also your monitoring and a
+load generator), list its address or subnet in `ABUSE_EXEMPT` (`203.0.113.7,2001:db8:12::/48`): it
+then skips this whole layer, never blocked, while the login, registration and account limits
+still apply to it. Raise `MAX_PENDING_HANDSHAKES_PER_IP`, `AUTH_RATE_PER_IP` and
+`PASSWORD_HASH_WAITERS_PER_SOURCE` for it too if its players log in together (see [Kernel
+settings](#kernel-settings-linux) and [Password hashing on a small
+server](#password-hashing-on-a-small-server)). Keep `IP_MAX_CONNECTIONS` at least twice
+`MAX_CONNECTIONS_PER_IP`; `check-config` warns otherwise.
+
+**Behind a reverse proxy** (`TLS_MODE=proxy`) the request budget, the in-flight cap and the
+blocks apply to the client named by `X-Forwarded-For`, and a block answers 429 without closing
+the connection, which belongs to the proxy. The connection limits (`IP_CONN_RATE`,
+`IP_MAX_CONNECTIONS`) and the reset before TLS cannot work there: limit the connections and
+handshakes per client on the proxy (nginx: `limit_conn`, `limit_req`). Set `TRUSTED_PROXIES`
+exactly: when the proxy is not trusted, every player shares its address, and the budget and a
+block would hit them all together.
+
+**Watching it.** The primary logs each block at `warn` level: `ip blocked` with the address
+(truncated as `LOG_IP` says), `scope` (`ip` or `prefix`), `level`, `ttlSec` and `refusals`. On the
+metrics endpoint: `scacelith_http_rate_limited_total{limit}` (`ip`, `ip48`, `inflight`,
+`blocked`), `scacelith_tls_refused_total{reason}` (`blocked`, `conn_rate`, `conn_open`),
+`scacelith_abuse_blocks_total{scope,level}` and `scacelith_abuse_blocked{scope}` in the primary,
+`scacelith_abuse_blocked_keys`, `scacelith_tls_connections_open` and `scacelith_http_inflight`
+per worker. Blocks at level 4 again and again from the same sources, or a flood from many
+addresses that no per-address limit catches, belong to the provider's firewall:
+[docs/SIZING.md](docs/SIZING.md#provider-firewall-the-ovh-edge-network-firewall) gives the OVH
+Edge Network Firewall rules and what this layer can still cost.
 
 ## Secrets
 
@@ -456,7 +614,8 @@ priors (docs/ANTICHEAT.md, section 3).
 ## Monitoring
 
 `http://127.0.0.1:9464/metrics` (Prometheus text format; `METRICS_TOKEN` adds a bearer token):
-connections, messages, games, move latency, commits, journal, rate limits, anti-cheat (including
+connections, messages, games, move latency, commits, journal, rate limits and the blocked
+addresses ([Protection against abuse](#protection-against-abuse)), anti-cheat (including
 the analysis backlog, the skipped games, and the analysis engines running and sharing their
 network: `scacelith_anticheat_analysis_engines*`), the retention purge (`scacelith_retention_*`),
 process memory and event-loop lag per shard, the stalls of a shard's event loop and the time given

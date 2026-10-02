@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { ipMatcher } from './net/ip.js';
 
 const KEYS = [];
 function key(name, spec) { KEYS.push({ name, ...spec }); }
@@ -24,8 +25,8 @@ key('SERVER_PUBLIC_HOST', { section: 'server', type: 'string', default: 'localho
 key('SERVER_MOTD', { section: 'server', type: 'string', default: '', max: 200,
     desc: 'Short message of the day shown in the online menu.' });
 key('BIND_ADDRESS', { section: 'server', type: 'string', default: '0.0.0.0', desc: 'Address the API and WebSocket listeners bind to.' });
-key('API_PORT', { section: 'server', type: 'port', default: 44664,
-    desc: 'HTTPS API port (TCP). 44664 is the port of the official server; any free port works for a community server.' });
+key('API_PORT', { section: 'server', type: 'port', default: 443,
+    desc: 'HTTPS API port (TCP). 443, the HTTPS port: firewalls and proxies let it through; any free port works for a community server. A port below 1024 needs the CAP_NET_BIND_SERVICE capability (README, systemd unit) unless the server runs as root.' });
 key('WS_PORT', { section: 'server', type: 'port',
     desc: 'WSS (game WebSocket) port. Empty (the default) = the same port as API_PORT: one TLS listener serves the API under /api/v1 and the WebSocket upgrade on /ws. Set another port to split them.' });
 key('PUBLIC_API_PORT', { section: 'server', type: 'port', default: 0,
@@ -107,12 +108,35 @@ key('SSO_GOOGLE_ENABLED', { section: 'sso', type: 'bool', default: false, desc: 
 key('GOOGLE_CLIENT_ID', { section: 'sso', type: 'string', default: '', desc: 'OAuth client ID of a "Web application" client in Google Cloud Console.' });
 key('GOOGLE_CLIENT_SECRET', { section: 'sso', type: 'secretText', default: '', desc: 'OAuth client secret. Never commit it.' });
 key('GOOGLE_REDIRECT_URI', { section: 'sso', type: 'string', default: '',
-    desc: 'Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST:PUBLIC_API_PORT/auth/sso/google/callback).' });
+    desc: 'Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST/auth/sso/google/callback, with :PUBLIC_API_PORT after the host when that port is not 443).' });
+
+// ---- Protection per address (background layer, net/ipguard.js) -------------------------------------
+// Every request and every connection, before routing and before TLS; quotas per signed-in account
+// are the 'limits' section's business. Share = max(1, min(L, ceil(2 L / WORKERS))) per worker.
+key('HTTP_RATE_PER_IP', { section: 'abuse', type: 'int', default: 600, min: 1,
+    desc: 'HTTP requests per minute from one IPv4 address or IPv6 /64, whole server: every request (API, pages, health checks, unknown paths, WebSocket upgrades), counted before routing and before authentication. Each worker allows its share (all of it with 1 or 2 workers, 2 x HTTP_RATE_PER_IP / WORKERS beyond), with a burst of half a minute. A background ceiling, not a quota: it is loose enough for a school or a mobile operator that puts many players behind one address, and signed-in players are limited per account as well. Beyond it: 429 rate_limited with Retry-After.' });
+key('HTTP_RATE_PER_PREFIX', { section: 'abuse', type: 'int', default: 0, min: 0,
+    desc: 'The same for one IPv6 /48 as a whole, on top of the limit of each of its /64 networks: a /48 holds 65536 of them, and one customer often gets a /56 or a /48. 0 means 4 x HTTP_RATE_PER_IP; a value you set must be at least HTTP_RATE_PER_IP. IPv4 addresses are only counted one by one.' });
+key('IP_CONN_RATE', { section: 'abuse', type: 'int', default: 10, min: 1, max: 100000,
+    desc: 'New connections per second from one IPv4 address or IPv6 /64 (4 times that per /48), whole server, each worker its share, with a burst of 4 seconds (TLS_MODE=native: checked before any TLS work; a connection beyond it is closed with a reset). The game opens one or two connections per player.' });
+key('IP_MAX_CONNECTIONS', { section: 'abuse', type: 'int', default: 128, min: 1, max: 1000000,
+    desc: 'Open connections (TLS handshakes, API keep-alive connections and WebSockets together) from one IPv4 address or IPv6 /64 (4 times that per /48), each worker its share (TLS_MODE=native; a new connection beyond it is closed with a reset before TLS). Keep it at least twice MAX_CONNECTIONS_PER_IP (check-config warns otherwise).' });
+key('IP_MAX_INFLIGHT', { section: 'abuse', type: 'int', default: 32, min: 1, max: 100000,
+    desc: 'HTTP requests being processed at once in one worker for one IPv4 address or IPv6 /64 (4 times that per /48); one more gets 429 rate_limited. It bounds what one address can keep waiting (slow request bodies, the password hash queue).' });
+key('ABUSE_BLOCK_REFUSALS_PER_MIN', { section: 'abuse', type: 'int', default: 600, min: 0,
+    desc: 'Refusals in one minute, all workers together, that block an IPv4 address or IPv6 /64 before TLS (4 times that for a /48): rate-limit 429s, connections refused before TLS, malformed requests and failed TLS handshakes. A blocked address gets its new connections closed with a reset before any TLS work, and 429 with Connection: close on the connections it already has; WebSocket connections already open are kept, so that the players of a school or a mobile operator keep their games when one of them floods. The block starts at ABUSE_BLOCK_BASE_SEC and is 4 times longer at each repeat within 6 hours, up to ABUSE_BLOCK_MAX_SEC. 0 = never block (the per-address limits still apply).' });
+key('ABUSE_BLOCK_BASE_SEC', { section: 'abuse', type: 'int', default: 60, min: 1, max: 86400,
+    desc: 'First block of an address, in seconds (see ABUSE_BLOCK_REFUSALS_PER_MIN).' });
+key('ABUSE_BLOCK_MAX_SEC', { section: 'abuse', type: 'int', default: 3600, min: 1, max: 604800,
+    desc: 'Longest block of an address, in seconds (at least ABUSE_BLOCK_BASE_SEC).' });
+key('ABUSE_EXEMPT', { section: 'abuse', type: 'list', default: '',
+    desc: 'Addresses and CIDR subnets (203.0.113.7, 2001:db8::/48) never blocked and outside HTTP_RATE_PER_IP, IP_CONN_RATE, IP_MAX_CONNECTIONS and IP_MAX_INFLIGHT: a school or club network, monitoring, a load generator. Login, registration, the other route limits and the per-account quotas still apply. An invalid entry stops the start.' });
 
 // ---- Abuse protection --------------------------------------------------------------------------------
 key('MAX_CONNECTIONS', { section: 'limits', type: 'int', default: 200000, min: 1,
     desc: 'Simultaneous players, whole server. A newcomer beyond it still completes the TLS handshake and the WebSocket upgrade, then is refused at Hello (ServerFull, counted in scacelith_ws_hello_total{result="server_full"}, the metric that shows a full server), and the game waits 60 to 120 s before it tries again. A player whose game is in progress is still admitted, so that a full server does not make them lose it by abandonment. For such a player to reach Hello, WebSocket upgrades may go max(16, 2 %) beyond it; beyond that reserve an upgrade gets HTTP 503, and with TLS_MODE=native the TLS gate starts shedding (see MAX_PENDING_HANDSHAKES).' });
-key('MAX_CONNECTIONS_PER_IP', { section: 'limits', type: 'int', default: 16, min: 1, desc: 'Simultaneous WebSocket connections from one IP address (IPv6: per /64).' });
+key('MAX_CONNECTIONS_PER_IP', { section: 'limits', type: 'int', default: 64, min: 1,
+    desc: 'Simultaneous WebSocket connections from one IP address (IPv6: per /64), whole server. 64 lets a class or a mobile operator\'s shared address (carrier-grade NAT) play; one live connection per account still applies, and IP_MAX_CONNECTIONS bounds every connection of an address before TLS.' });
 key('MAX_PENDING_HANDSHAKES', { section: 'limits', type: 'int', default: 128, min: 2, max: 100000,
     desc: 'TLS handshakes in progress per worker (TLS_MODE=native). A new connection takes a slot once the first record of its ClientHello has arrived; it has 3 s for that and holds no slot meanwhile. A connection beyond this cap, or beyond MAX_PENDING_HANDSHAKES_PER_IP for its address group, is closed before any TLS work and the client retries later, so a reconnection storm is served in turn instead of every handshake slowing down together. A worker also sheds load, letting at most half this number of new TLS connections per second through, for up to 5 s after the primary refused a WebSocket upgrade because MAX_CONNECTIONS and its reserve are in use, or while the worker holds 1.2 times its share of MAX_CONNECTIONS. It does not shed at MAX_CONNECTIONS itself, so that a player coming back to a game in progress does not compete with newcomers for that rate: each newcomer then completes the handshake and gets ServerFull at Hello.' });
 key('MAX_PENDING_HANDSHAKES_PER_IP', { section: 'limits', type: 'int', min: 1, max: 99999,
@@ -132,13 +156,29 @@ key('GESTURE_RATE', { section: 'limits', type: 'int', default: 4, min: 0, max: 6
     desc: 'Live gestures (the player\'s head, the piece in hand and where it is aimed) a client may send per second, sustained, announced in Welcome. The server relays each one to the opponent as it is and never stores it; it costs server CPU for every player in a game (docs/SIZING.md). A client beyond it has its gestures dropped silently, and only a gross excess closes the connection as a flood. 0 turns the relay off (the clients then send none).' });
 key('GESTURE_BURST', { section: 'limits', type: 'int', default: 8, min: 1, max: 120,
     desc: 'Gestures a client may send in a burst above GESTURE_RATE (the size of its own token bucket, apart from WS_MSG_RATE: gestures never delay or rate-limit moves).' });
-key('HTTP_BODY_LIMIT', { section: 'limits', type: 'int', default: 16384, min: 1024, desc: 'Largest API request body in bytes.' });
-key('HTTP_RATE_PER_IP', { section: 'limits', type: 'int', default: 120, min: 1, desc: 'API requests per minute from one IP address (all endpoints).' });
+key('HTTP_BODY_LIMIT', { section: 'limits', type: 'int', default: 16384, min: 1024,
+    desc: 'Largest API request body in bytes, except POST /api/v1/gif, which has its own fixed limit of 135,168 bytes (a PGN of up to 64 KiB as a JSON string, escapes included).' });
 key('AUTH_RATE_PER_IP', { section: 'limits', type: 'int', default: 20, min: 1, desc: 'Login / register / reset attempts per 10 minutes from one IP address (one IPv6 /64).' });
 key('AUTH_RATE_PER_PREFIX', { section: 'limits', type: 'int', default: 0, min: 0,
     desc: 'The AUTH_RATE_PER_IP limits (login / register / reset attempts, and account changes that ask for the password), per 10 minutes for one IPv6 /48 as a whole, on top of the limit of each of its /64 networks: a /48 holds 65536 of them, and one customer often gets a /56 or a /48. 0 means 5 x AUTH_RATE_PER_IP. Raise it for a site that brings many players at once over one IPv6 prefix (a campus, a club event). IPv4 addresses are only limited one by one.' });
 key('AUTH_FAILURES_PER_ACCOUNT', { section: 'limits', type: 'int', default: 5, min: 1,
     desc: 'Failed logins on one account before each further attempt is delayed exponentially (up to 15 minutes).' });
+key('AUTH_REGISTER_PER_HOUR', { section: 'limits', type: 'int', default: 10, min: 1,
+    desc: 'Registrations per hour from one IPv4 address or IPv6 /64 (3 times that per IPv6 /48), whole server, on top of AUTH_RATE_PER_IP. Raise it for a session where a class creates its accounts together.' });
+key('AUTH_MAIL_PER_HOUR', { section: 'limits', type: 'int', default: 10, min: 1,
+    desc: 'Confirmation e-mails asked again (POST /auth/verify-email/resend) per hour from one IPv4 address or IPv6 /64 (3 times that per /48), whole server, on top of AUTH_RATE_PER_IP and of the one e-mail per address every 5 minutes. Password reset e-mails have their own, stricter limits (AUTH_FORGOT_PER_HOUR, AUTH_FORGOT_PER_DAY).' });
+key('AUTH_FORGOT_PER_HOUR', { section: 'limits', type: 'int', default: 3, min: 1,
+    desc: 'Password reset e-mails asked (POST /auth/password/forgot) per hour from one IPv4 address or IPv6 /64 (3 times that per /48), whole server, on top of AUTH_RATE_PER_IP and of the one e-mail per address every 5 minutes. A refusal is a 429, which says nothing about the address; an accepted request answers 202 whether the address has an account or not.' });
+key('AUTH_FORGOT_PER_DAY', { section: 'limits', type: 'int', default: 10, min: 1,
+    desc: 'The same as AUTH_FORGOT_PER_HOUR per 24 hours (3 times that per /48). At least AUTH_FORGOT_PER_HOUR.' });
+key('AUTH_RESET_PER_HOUR', { section: 'limits', type: 'int', default: 10, min: 1,
+    desc: 'New passwords sent with a reset link (POST /auth/password/reset and the /reset-password page) per hour from one IPv4 address or IPv6 /64 (3 times that per /48), whole server, on top of AUTH_RATE_PER_IP: each one hashes a password.' });
+key('AUTH_MFA_PER_ACCOUNT', { section: 'limits', type: 'int', default: 10, min: 1,
+    desc: 'Second-factor codes (authenticator or recovery codes) tried per 15 minutes for one account, whole server, from any address, at sign-in and in account changes; then 429 too_many_attempts before the code is checked (a recovery code is not spent). It bounds a code guesser who knows the password, whatever the number of addresses.' });
+key('AUTH_REAUTH_PER_USER', { section: 'limits', type: 'int', default: 10, min: 1,
+    desc: 'Account changes that ask for the password or a code (password, two-step verification, e-mail, data export, deletion) per 10 minutes for one account, whole server, from any address, on top of the per-address limit AUTH_RATE_PER_IP: a stolen session used from many addresses cannot guess the password faster.' });
+key('USER_RATE_PER_MIN', { section: 'limits', type: 'int', default: 120, min: 1,
+    desc: 'API requests per minute of one signed-in account (every request with a valid session token), all endpoints together, whatever its address. Each worker allows its share, max(1, min(this, ceil(2 x this / WORKERS))) (all of it with 1 or 2 workers, half with 4), with a burst of half a minute; beyond it 429 rate_limited with Retry-After. The game\'s busiest use, paging through the history, is about one request per second.' });
 key('POW_REGISTER_BITS', { section: 'limits', type: 'int', default: 18, min: 0, max: 26, desc: 'Proof-of-work difficulty (leading zero bits of SHA-256) required to register; 0 disables it.' });
 key('POW_LOGIN_BITS', { section: 'limits', type: 'int', default: 18, min: 0, max: 26, desc: 'Proof-of-work difficulty required to log in while the server sees a credential-stuffing wave; 0 disables it.' });
 key('POW_LOGIN_TRIGGER_PER_MIN', { section: 'limits', type: 'int', default: 30, min: 1,
@@ -218,6 +258,30 @@ key('ANALYSIS_QUEUE_MAX', { section: 'anticheat', type: 'int', default: 5000, mi
     desc: 'Most ordinary games waiting for engine analysis: while this many wait, a newly finished ordinary game is not queued (the engines could not catch up anyway). Games with a report, a suspicion signal (at most 20 waiting per player) or a moderator request are queued anyway and mostly analysed first; one engine claim in four still goes to the oldest ordinary game. 0 analyses only those (and then no game feeds the population statistics). At most 100000: the waiting ordinary games are counted in every commit of finished games, under the database write lock.' });
 key('ANALYSIS_SAMPLE_RATE', { section: 'anticheat', type: 'number', default: 1, min: 0, max: 1,
     desc: 'Share of the ordinary rated games queued for analysis (0 to 1, drawn at random when the game ends). Lower it when the engine cannot keep up with the games played.' });
+
+// ---- Animated GIFs of games ------------------------------------------------------------------------------
+key('GIF_ENABLED', { section: 'gif', type: 'bool', default: true,
+    desc: 'Animated GIFs of games for signed-in players: GET /api/v1/games/:id/gif (a game of this server) and POST /api/v1/gif (any game, as a PGN). Rendered on a thread of each worker process, never on the event loop of the games. false: both endpoints answer 404 gif_disabled.' });
+key('GIF_THREADS', { section: 'gif', type: 'int', default: 1, min: 1, max: 8,
+    desc: 'GIF renders at the same time in one worker process, each on a thread of its own at the lowest CPU priority (on Linux: it only takes the CPU the games leave). A render takes one core (measured on a 2.1 GHz Xeon: about 45 ms for a 40-move game at the medium size, about 0.7 s for a game of GIF_MAX_PLIES at the large size; docs/SIZING.md), and a thread 40-50 MiB of memory while it lives (up to about 125 MiB after many of the longest games at the large size). The threads start on demand and stop after a minute without work.' });
+key('GIF_QUEUE_MAX', { section: 'gif', type: 'int', default: 4, min: 0, max: 64,
+    desc: 'Renders that may wait for a free thread in one worker process; one more is refused at once with 503 server_busy and Retry-After, and the render quotas it took are given back.' });
+key('GIF_QUEUE_TIMEOUT_MS', { section: 'gif', type: 'int', default: 10000, min: 100, max: 60000,
+    desc: 'Longest wait of a render for a free thread; then 503 server_busy (the render quotas are given back).' });
+key('GIF_RENDER_TIMEOUT_MS', { section: 'gif', type: 'int', default: 30000, min: 1000, max: 120000,
+    desc: 'Longest render: the thread is stopped (a new one starts with the next render) and the request answers 500.' });
+key('GIF_MAX_PLIES', { section: 'gif', type: 'int', default: 600, min: 1, max: 1200,
+    desc: 'Longest game, in half-moves, a GIF shows; a longer one answers 422 game_too_long. 600 plies last 5 minutes at the default speed (0.5 s per move).' });
+key('GIF_CACHE_MB', { section: 'gif', type: 'int', default: 32, min: 0, max: 1024,
+    desc: 'Memory of the cache of rendered GIFs in each worker process (the least recently used goes first; a medium GIF of 80 plies is about 200 KiB). A GIF served from the cache costs no render quota. 0 disables the cache.' });
+key('GIF_USER_RENDERS_PER_MIN', { section: 'gif', type: 'int', default: 4, min: 1,
+    desc: 'GIF renders per minute of one account, whole server (a GIF served from the cache does not count); beyond it 429 rate_limited with Retry-After.' });
+key('GIF_USER_RENDERS_PER_HOUR', { section: 'gif', type: 'int', default: 30, min: 1,
+    desc: 'GIF renders per hour of one account, whole server. At least GIF_USER_RENDERS_PER_MIN.' });
+key('GIF_IP_RENDERS_PER_MIN', { section: 'gif', type: 'int', default: 12, min: 1,
+    desc: 'GIF renders per minute from one IPv4 address or IPv6 /64 (3 times that per IPv6 /48), all accounts together, whole server: a background ceiling for many accounts behind one address.' });
+key('GIF_IP_RENDERS_PER_HOUR', { section: 'gif', type: 'int', default: 120, min: 1,
+    desc: 'GIF renders per hour from one IPv4 address or IPv6 /64 (3 times that per /48), all accounts together, whole server. At least GIF_IP_RENDERS_PER_MIN.' });
 
 // ---- Observability -------------------------------------------------------------------------------------
 key('METRICS_PORT', { section: 'observability', type: 'port', default: 9464, desc: 'Prometheus metrics and health endpoint (plain HTTP; 0 disables it).' });
@@ -371,6 +435,13 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     cfg.publicWsPort = cfg.publicWsPort || cfg.wsPort;
     cfg.instanceId = cfg.instanceId || os.hostname();
     if (!cfg.authRatePerPrefix && Number.isInteger(cfg.authRatePerIp)) cfg.authRatePerPrefix = 5 * cfg.authRatePerIp;
+    // Protection per address (net/ipguard.js): the /48 budget defaults to 4 /64s' worth.
+    if (Number.isInteger(cfg.httpRatePerIp)) {
+        if (!cfg.httpRatePerPrefix) cfg.httpRatePerPrefix = 4 * cfg.httpRatePerIp;
+        else if (cfg.httpRatePerPrefix < cfg.httpRatePerIp) errors.push('HTTP_RATE_PER_PREFIX must be 0 or at least HTTP_RATE_PER_IP (a /48 holds many /64 networks).');
+    }
+    if (cfg.abuseBlockBaseSec > cfg.abuseBlockMaxSec) errors.push('ABUSE_BLOCK_BASE_SEC must not exceed ABUSE_BLOCK_MAX_SEC.');
+    try { ipMatcher(cfg.abuseExempt); } catch (e) { errors.push(`ABUSE_EXEMPT: ${e.message}.`); }
     const w = String(cfg.workers).trim().toLowerCase();
     if (w === 'auto') cfg.workers = Math.max(1, Math.min(16, os.availableParallelism ? os.availableParallelism() : os.cpus().length));
     else if (/^\d+$/.test(w) && +w >= 1 && +w <= 64) cfg.workers = +w;
@@ -382,6 +453,9 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     if (cfg.ssoGoogleEnabled && (!cfg.googleClientId || !cfg.googleClientSecret)) errors.push('SSO_GOOGLE_ENABLED needs GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.');
     if (cfg.mailTransport === 'smtp' && !cfg.smtpHost) errors.push('MAIL_TRANSPORT=smtp needs SMTP_HOST.');
     if (cfg.analysisDepthFast >= cfg.analysisDepthDeep) errors.push('ANALYSIS_DEPTH_FAST must be lower than ANALYSIS_DEPTH_DEEP.');
+    if (cfg.authForgotPerDay < cfg.authForgotPerHour) errors.push('AUTH_FORGOT_PER_DAY must be at least AUTH_FORGOT_PER_HOUR.');
+    if (cfg.gifUserRendersPerHour < cfg.gifUserRendersPerMin) errors.push('GIF_USER_RENDERS_PER_HOUR must be at least GIF_USER_RENDERS_PER_MIN.');
+    if (cfg.gifIpRendersPerHour < cfg.gifIpRendersPerMin) errors.push('GIF_IP_RENDERS_PER_HOUR must be at least GIF_IP_RENDERS_PER_MIN.');
     if (cfg.maxPendingHandshakesPerIp != null && cfg.maxPendingHandshakesPerIp >= cfg.maxPendingHandshakes) {
         errors.push('MAX_PENDING_HANDSHAKES_PER_IP must be lower than MAX_PENDING_HANDSHAKES (one address group could otherwise hold every handshake slot).');
     }
@@ -445,6 +519,11 @@ export function configWarnings(cfg, env = process.env) {
             + `(${pool === 1 ? '1 thread' : `${pool} threads`}, from UV_THREADPOOL_SIZE or the default 4; libuv reads an empty, 0 or `
             + 'unreadable value as 1 thread): password hashes can then take every thread, '
             + 'and the journal\'s writes and the DNS lookups wait behind them. Lower it, or raise UV_THREADPOOL_SIZE in the process environment.');
+    }
+    if (cfg.ipMaxConnections < 2 * cfg.maxConnectionsPerIp) {
+        out.push(`IP_MAX_CONNECTIONS (${cfg.ipMaxConnections}) is below twice MAX_CONNECTIONS_PER_IP (${cfg.maxConnectionsPerIp}): `
+            + 'the players behind one address (a school, a mobile operator) could be refused before TLS while their WebSockets '
+            + 'and API connections are still within MAX_CONNECTIONS_PER_IP. Raise IP_MAX_CONNECTIONS, or list the address in ABUSE_EXEMPT.');
     }
     return out;
 }

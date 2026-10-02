@@ -315,7 +315,19 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
   is `Welcome.clientPingMs`.
 * `Gesture`: a bucket of its own (`Welcome.gestureRate` / `gestureBurst`) that never touches the one
   above; beyond it gestures are dropped silently ([Gesture relay](#gesture-relay)).
-* Per IP address: `MAX_CONNECTIONS_PER_IP` simultaneous connections (IPv6 per /64); whole server:
+* Per IP address (an IPv4 address or an IPv6 /64): `MAX_CONNECTIONS_PER_IP` simultaneous WebSocket
+  connections, counted exactly over the workers (HTTP 429 `too_many_connections` at the upgrade
+  beyond it; this limit has no count per IPv6 /48). The upgrade request also takes a token of the
+  address's request budget like any HTTP request (`HTTP_RATE_PER_IP`, and for IPv6 also
+  `HTTP_RATE_PER_PREFIX` for its /48 as a whole), and an address that keeps going after being
+  refused is blocked for a while: either way the upgrade gets HTTP 429 with `Retry-After` and
+  `{ "error": "rate_limited", "message": "...", "retryAfter": s }`, and the client waits that long.
+  With native TLS, a new connection from a blocked address, or beyond `IP_CONN_RATE` new
+  connections per second or `IP_MAX_CONNECTIONS` open ones from its address (an IPv6 /48 as a
+  whole: 4 times each), is reset before the TLS handshake (a connection failure for the client,
+  retried with its backoff).
+  A block never closes a WebSocket connection already open (players who share an address with an
+  abuser keep their games). See the README, "Protection against abuse". Whole server:
   `MAX_CONNECTIONS` players (`Error{ServerFull}` at `Hello` beyond it, except for a player whose
   game is in progress). The upgrade itself is refused (HTTP 503) only `max(16, 2 %)` connections
   beyond it, so that such a player can reach `Hello`.

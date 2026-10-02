@@ -2,6 +2,7 @@
 //
 //   kind           lifetime   token given to               data
 //   email_verify   24 h       e-mail link                  { email }
+//   email_change   24 h       e-mail link (new address)    { email: new address, from: address at the request }
 //   password_reset 1 h        e-mail link                  { email }
 //   mfa_login      5 min      login answer (mfa_...)       { attempts, clientLabel, method, pwh? }
 //   sso_attempt    10 min     SSO start answer (sso_...)   { challenge, status, result }
@@ -10,6 +11,7 @@
 
 export const TOKEN_TTL_MS = Object.freeze({
     email_verify: 24 * 3600000,
+    email_change: 24 * 3600000,
     password_reset: 3600000,
     mfa_login: 5 * 60000,
     sso_attempt: 10 * 60000,

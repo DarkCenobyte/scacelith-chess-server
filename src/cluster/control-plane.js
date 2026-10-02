@@ -48,6 +48,11 @@
 //                     'game.recovered' { gameId, whiteId, blackId, shard }   (sent by the GameHost
 //                     for each game replayed from the journal: presence.claim returns it as
 //                     activeGame after a full restart; 'game.active' is an alias)
+//   shard -> primary  'abuse.report' { entries: [[key64, key48|null, weight]] }   (at most one per
+//                     second and shard: the refusals counted per address, net/ipguard.js); the
+//                     AbuseTracker (abuse.js) decides the blocks
+//   primary -> shard  'abuse.block' { blocks: [[key, ttlMs, level]] }   (to every shard for each new
+//                     block, and every running block to a shard at its 'shard.ready')
 //   primary -> shard  'shard.down' { shard }   (a shard died: forget its remote endpoints)
 //                     'game.forfeit' { userId, gameId }   (sanction.applied: the host shard of the
 //                     user's running game ends it Forfeit with host.forfeitUser)
@@ -62,6 +67,7 @@ import { RefundNotices } from '../anticheat/refund-notices.js';
 import { metrics as defaultRegistry } from '../metrics.js';
 import { encode, enums, CloseCode } from '../protocol/index.js';
 import { isGameId, shardOfGameId } from '../util/ids.js';
+import { AbuseTracker } from './abuse.js';
 import { toErrorCode } from './router.js';
 
 const E = enums.ErrorCode;
@@ -98,9 +104,10 @@ export class ControlPlane {
      * @param {() => number} [o.now]
      * @param {() => number} [o.random]
      * @param {object} [o.registry]
+     * @param {AbuseTracker} [o.abuse] the blocks of addresses (default: one built from config, broadcast to the shards)
      */
     constructor({ config, presence, matchmaker, challenges, conduct = null, limiter, once, shards, activeBan = null, ratingOf = null,
-        acceptsChallenges = null, refunds = null, log = null, now = Date.now, random = Math.random, registry = defaultRegistry }) {
+        acceptsChallenges = null, refunds = null, log = null, now = Date.now, random = Math.random, registry = defaultRegistry, abuse = null }) {
         this.config = config;
         this.presence = presence;
         this.mm = matchmaker;
@@ -128,6 +135,9 @@ export class ControlPlane {
         this.loads = new Map();
         this.readyShards = new Set();
         this._timers = [];
+        this.abuse = abuse || new AbuseTracker({
+            config, log, registry, broadcast: (blocks) => this.shards.broadcast('abuse.block', { blocks }),
+        });
         this.refundNotices = refunds ? new RefundNotices({
             refunds, log, now,
             canNotify: (userId) => !!this.presence.get(userId) && !this._busy(userId),
@@ -169,6 +179,7 @@ export class ControlPlane {
             'session.revoked': (p) => this.sessionRevoked(p),
             'shard.load': (p, s) => { this.loads.set(s, { ...p, at: this.now() }); return null; },
             'shard.ready': (p, s) => this.shardReady(s),
+            'abuse.report': (p) => { this.abuse.report(p.entries); return null; },
         };
     }
 
@@ -685,9 +696,11 @@ export class ControlPlane {
 
     // ---- shards ---------------------------------------------------------------------------------
 
-    /** A shard finished its start-up: re-attach the live players of the games it hosts. */
+    /** A shard finished its start-up: re-attach the live players of the games it hosts, and give it the running blocks. */
     shardReady(shard) {
         this.readyShards.add(shard);
+        const blocks = this.abuse.snapshot();
+        if (blocks.length) this.shards.notify(shard, 'abuse.block', { blocks });
         let n = 0;
         for (const [userId, gameId] of this.activeGames) {
             if (shardOfGameId(gameId) !== shard) continue;
@@ -714,6 +727,7 @@ export class ControlPlane {
         this.limiter.sweep(now);
         this.once.sweep(now);
         for (const [u, until] of this.bans) if (until <= now) this.bans.delete(u);
+        this.abuse.sweep();
     }
 
     stats() {

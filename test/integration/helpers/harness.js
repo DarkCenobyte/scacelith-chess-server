@@ -83,7 +83,29 @@ export async function startServer({ workers = 1, env = {}, keep = !!process.env.
         POW_LOGIN_BITS: '0',
         AUTH_RATE_PER_IP: '100000',
         HTTP_RATE_PER_IP: '100000',
+        // Every test client comes from 127.0.0.1: the per-address and per-account limits of the
+        // auth family and the account budget are raised like AUTH_RATE_PER_IP.
+        AUTH_REGISTER_PER_HOUR: '100000',
+        AUTH_MAIL_PER_HOUR: '100000',
+        AUTH_FORGOT_PER_HOUR: '100000',
+        AUTH_FORGOT_PER_DAY: '100000',
+        AUTH_RESET_PER_HOUR: '100000',
+        AUTH_MFA_PER_ACCOUNT: '100000',
+        AUTH_REAUTH_PER_USER: '100000',
+        USER_RATE_PER_MIN: '100000',
         MAX_CONNECTIONS_PER_IP: '100000',
+        // Every test client is on the loopback: outside the protection per address (net/ipguard.js);
+        // test/integration/abuse.test.js narrows it to 127.0.0.1 and floods from 127.0.0.2.
+        ABUSE_EXEMPT: '127.0.0.0/8,::1',
+        // The TLS gate's per-group handshake cap (4 per worker by default) is not part of that
+        // protection: it applies to ABUSE_EXEMPT addresses too, so that no address group can hold
+        // every handshake slot (DESIGN 5.8, SIZING "Load tests from one machine"). A test that opens
+        // more than 4 connections at once from one address (abuse.test.js floods over 8 keep-alive
+        // connections) would see the extra ones reset before TLS whenever the primary's round-robin
+        // hands 5 of them to one worker before it has finished the first 4 handshakes, which a busy
+        // machine makes likely. One below MAX_PENDING_HANDSHAKES (config.js refuses more), as
+        // bench/lib/server.js sets it for its load processes.
+        MAX_PENDING_HANDSHAKES_PER_IP: String(Math.max(1, (parseInt(env.MAX_PENDING_HANDSHAKES, 10) || 128) - 1)),
         LOG_LEVEL: 'info',
         LOG_FORMAT: 'json',
         SCACELITH_ENV_FILE: '',
