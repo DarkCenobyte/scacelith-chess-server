@@ -211,7 +211,8 @@ export function gamePgn(g, config) {
  * @param {object} deps.config
  * @param {object} [deps.log]
  * @param {string} [deps.prefix='/api/v1']
- * @param {() => number} [deps.now]  clock of `reportable` when the request context has no `now`
+ * @param {() => number} [deps.now]  clock of the leaderboard cache, and of `reportable` when the
+ *   request context has no `now`
  */
 export function register(router, { store, config, log, prefix = '/api/v1', now = Date.now }) {
     const categories = config.categories.map((c) => c.id);
@@ -363,12 +364,12 @@ export function register(router, { store, config, log, prefix = '/api/v1', now =
             if (!/^\d{1,3}$/.test(String(limitRaw)) || +limitRaw < 1) return error(400, 'invalid_limit', `limit must be 1 to ${BOARD_MAX}.`);
             limit = Math.min(BOARD_MAX, +limitRaw);
         }
-        const now = Date.now();
+        const t = now();
         let cached = boardCache.get(category);
-        if (!cached || now - cached.at > BOARD_CACHE_MS) {
+        if (!cached || t - cached.at > BOARD_CACHE_MS) {
             const rows = store.ratings.leaderboard(category, BOARD_MAX, provisionalGames);
             cached = {
-                at: now,
+                at: t,
                 players: rows.map((r, i) => ({
                     rank: i + 1, username: r.username, rating: r.rating, games: r.games, wins: r.wins, draws: r.draws,
                     losses: r.losses, peak: r.peak,
