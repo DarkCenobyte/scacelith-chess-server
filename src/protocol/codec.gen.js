@@ -54,9 +54,9 @@ export const MoveFlag = Object.freeze({
 export const GestureFlag = Object.freeze({ Glance: 1, Promoting: 2, Side: 4 });
 export const CloseCode = Object.freeze({
     Normal: 1000, GoingAway: 1001, ProtocolError: 1002, Unsupported: 1003, Policy: 1008, TooBig: 1009,
-    Internal: 1011, UnsupportedProtocol: 4002, Unauthorized: 4003, Banned: 4004, Replaced: 4007,
-    ShuttingDown: 4008, HelloTimeout: 4010, ProtocolViolation: 4300, Flood: 4301, CheatDetected: 4302,
-    SlowConsumer: 4303,
+    Internal: 1011, UnsupportedProtocol: 4002, Unauthorized: 4003, Banned: 4004, ServerFull: 4006,
+    Replaced: 4007, ShuttingDown: 4008, HelloTimeout: 4010, ProtocolViolation: 4300, Flood: 4301,
+    CheatDetected: 4302, SlowConsumer: 4303,
 });
 
 export const MSG = Object.freeze({

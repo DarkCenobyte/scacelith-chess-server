@@ -77,7 +77,7 @@
 //     a small reserve, cluster/presence.js) and the MAX_CONNECTIONS check at Hello stay exact.
 //     A ServerFull at Hello does not feed isFull (see there): a server at MAX_CONNECTIONS itself
 //     does not shed.
-//   - ServerFull closes with 4006 (4000 + ErrorCode.ServerFull; CloseCode has no entry for it).
+//   - ServerFull closes with 4006 (CloseCode.ServerFull, 4000 + ErrorCode.ServerFull).
 //
 // Complexity per message: O(1) (one decode, one Map lookup, one token bucket update).
 
@@ -93,7 +93,7 @@ import { BusKind, BusOp } from './bus.js';
 
 const E = enums.ErrorCode;
 const N = enums.NoticeCode;
-export const CLOSE_SERVER_FULL = 4006;
+export const CLOSE_SERVER_FULL = CloseCode.ServerFull;
 const DIR_C2S = Object.freeze({ dir: 'c2s' });
 const MAX_PENDING_HELLO = 8;
 /** How long a server-full refusal ('global') keeps this worker in the server-full state (isFull). */

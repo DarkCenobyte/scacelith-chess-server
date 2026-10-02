@@ -1189,7 +1189,8 @@ the generator. The HTTPS account API is described in \`docs/DESIGN.md\` section 
     errors: `* \`Error{ref, code, fatal, game}\`: \`ref\` is the \`seq\` of the refused request (0 when none), \`game\`
   the game concerned (0 when none). \`fatal\` = the server closes the connection right after it, with
   the matching close code below: \`4000 + code\` for the connection errors (e.g. \`Unauthorized\` ->
-  4003), \`4300\`-\`4303\` for \`ProtocolViolation\`, \`Flood\`, \`CheatDetected\` and \`SlowConsumer\`.
+  4003; \`EmailUnverified\` closes with 4003 too), \`4300\`-\`4303\` for \`ProtocolViolation\`, \`Flood\`,
+  \`CheatDetected\` and \`SlowConsumer\`.
 * Requests without another answer are confirmed with \`Ack{ref}\` (queue leave, challenge decline or
   cancel, draw offer...); requests with an answer get that answer (\`QueueStatus\`,
   \`ChallengeStatus\`, \`MoveMade\`, \`GameSnapshot\`...).
@@ -1407,8 +1408,9 @@ const CLOSE_MEANING = {
     TooBig: 'message larger than `WS_MAX_MESSAGE_BYTES`',
     Internal: 'unexpected server error',
     UnsupportedProtocol: '`Hello.proto` / `Hello.schema` not supported: update the game or the server (no automatic retry)',
-    Unauthorized: 'session token refused: log in again (no automatic retry)',
+    Unauthorized: 'session token refused (log in again) or e-mail address not verified (`Error{EmailUnverified}`): no automatic retry',
     Banned: 'account banned (a `Notice{Banned}` gives the end)',
+    ServerFull: 'a new player beyond `MAX_CONNECTIONS` (a player whose game is in progress is admitted): retried after 60 s to 120 s',
     Replaced: 'another connection of the same account took over (no automatic retry)',
     ShuttingDown: 'server shutting down: reconnect later',
     HelloTimeout: 'no `Hello` within `WS_HELLO_TIMEOUT_MS`',
