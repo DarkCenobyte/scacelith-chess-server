@@ -19,6 +19,9 @@ import { readIntegrity, writeStructured } from '../util.js';
 // AnalysisPriority.ordinary of src/store/index.js (not imported: this module only sees the Store
 // API): jobs of the random sample, the only games that feed the population statistics.
 const ORDINARY_PRIORITY = 0;
+// How often a job being analysed is renewed (store.analysis.touch): well within the 10 minutes after
+// which the store gives the job of a vanished worker to another one.
+const HEARTBEAT_MS = 60000;
 
 const gamesCounter = metrics.counter('scacelith_anticheat_analysis_games_total', 'Games analysed by the engine', ['result']);
 const okGames = gamesCounter.labels('ok');
@@ -45,9 +48,11 @@ metrics.gaugeFn('scacelith_anticheat_analysis_engines_shared', 'Analysis engines
  * @param {string} [o.workerId]
  * @param {number} [o.pollMs]
  * @param {() => number} [o.now]
+ * @param {number} [o.heartbeatMs]
  * @returns {{ run: () => Promise<void>, stop: () => Promise<void>, processJob: Function, stats: object }}
  */
-export function createAnalysisWorker({ config, store, log = null, engineFactory = null, workerId = `${os.hostname()}:${process.pid}`, pollMs = config.analysisPollMs || 5000, now = Date.now }) {
+export function createAnalysisWorker({ config, store, log = null, engineFactory = null, workerId = `${os.hostname()}:${process.pid}`, pollMs = config.analysisPollMs || 5000, now = Date.now,
+    heartbeatMs = HEARTBEAT_MS }) {
     const engines = [];
     const count = Math.max(1, config.analysisWorkers || 1);
     const factory = engineFactory || (() => new UciEngine({
@@ -105,6 +110,11 @@ export function createAnalysisWorker({ config, store, log = null, engineFactory 
     async function processJob(engine, job) {
         const gameId = job?.gameId ?? job?.game_id ?? job?.id;
         const started = now();
+        // The job stays claimed while the engine works on it, however long that takes.
+        const heartbeat = typeof store.analysis.touch === 'function' ? setInterval(() => {
+            try { store.analysis.touch(gameId, workerId, now()); } catch (e) { log?.warn('analysis heartbeat not stored', { err: e, gameId }); }
+        }, heartbeatMs) : null;
+        heartbeat?.unref?.();
         try {
             let record = job && job.moves ? job : null;
             if (!record) record = store.games.byId(gameId);
@@ -149,6 +159,8 @@ export function createAnalysisWorker({ config, store, log = null, engineFactory 
             log?.warn('analysis failed', { gameId, err: msg });
             try { store.analysis.fail(gameId, msg.slice(0, 500)); } catch (e2) { log?.error('cannot mark the job failed', { err: e2, gameId }); }
             return null;
+        } finally {
+            if (heartbeat) clearInterval(heartbeat);
         }
     }
 

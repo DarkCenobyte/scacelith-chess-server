@@ -65,9 +65,10 @@
 //   - tokens.consume, mfa.consumeRecoveryCode and users.advanceMfaStep are single conditional
 //     statements (UPDATE/DELETE ... WHERE still-valid): atomic across processes without an
 //     explicit transaction (an autocommit write retries on the lock through busy_timeout).
-//   - analysis: a job is claimed at most 3 times (ANALYSIS_MAX_ATTEMPTS); a running job older than
-//     10 minutes is re-queued (or failed at the cap) by the next claim; fail() re-queues until the
-//     cap and returns the new status; extra enqueue(gameId, now) (manual re-analysis) and stats().
+//   - analysis: a job is claimed at most 3 times (ANALYSIS_MAX_ATTEMPTS); a running job claimed (or
+//     renewed by touch(gameId, workerId, now), the worker's heartbeat) more than 10 minutes ago is
+//     re-queued (or failed at the cap) by the next claim; fail() re-queues until the cap and
+//     returns the new status; extra enqueue(gameId, now) (manual re-analysis) and stats().
 //   - analysis queue policy (DESIGN.md 6.5): every job has a priority (AnalysisPriority: ordinary,
 //     signal, report, manual) and next() takes the highest first, then the oldest, except that
 //     every ORDINARY_SHARE-th claim of a store takes the oldest ordinary job first (when one
@@ -1203,6 +1204,15 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         complete(gameId, features, now = Date.now()) {
             return Number(st(`UPDATE analysis_jobs SET status = 'done', features = ?, finished_at = ?, error = NULL, worker = NULL
                 WHERE game_id = ?`).run(toJson(features), ms(now), gameId).changes) === 1;
+        },
+        /**
+         * Heartbeat of a job being analysed: its claim time moves to `now`, so that next() re-queues
+         * only the jobs of a worker that stopped renewing them (ANALYSIS_STALE_MS), not a long
+         * analysis. Returns true when the job is still running for that worker.
+         */
+        touch(gameId, workerId = null, now = Date.now()) {
+            return Number(st(`UPDATE analysis_jobs SET started_at = ? WHERE game_id = ? AND status = 'running' AND worker IS ?`)
+                .run(ms(now), gameId, workerId === null || workerId === undefined ? null : String(workerId)).changes) === 1;
         },
         /** Re-queues the job, or marks it failed once it was tried ANALYSIS_MAX_ATTEMPTS times. */
         fail(gameId, error, now = Date.now()) {

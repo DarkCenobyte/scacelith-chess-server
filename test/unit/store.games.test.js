@@ -328,6 +328,23 @@ test('analysis queue: claim, complete, fail with attempt cap, stale re-queue, fo
     store.close();
 });
 
+test('analysis.touch: a job its worker keeps renewing is not taken for stale', () => {
+    const { store, ids: [a, b] } = setup();
+    const gs = [record(a, b), record(b, a)];
+    store.games.finishBatch(gs);
+    const t = Date.now();
+    assert.deepEqual(store.analysis.next(2, 'w1', t).map((j) => j.gameId), [gs[0].id, gs[1].id]);
+    // gs[0] is renewed 9 minutes after the claim, gs[1] is not (and only its worker renews a job).
+    assert.equal(store.analysis.touch(gs[0].id, 'w1', t + 9 * 60000), true);
+    assert.equal(store.analysis.touch(gs[1].id, 'w2', t + 9 * 60000), false);
+    const again = store.analysis.next(5, 'w2', t + 11 * 60000);
+    assert.deepEqual(again.map((j) => [j.gameId, j.attempts, j.worker]), [[gs[1].id, 2, 'w2']]);
+    assert.equal(store.analysis.touch(gs[1].id, 'w1', t + 11 * 60000), false, 'claimed by another worker since');
+    assert.equal(store.analysis.complete(gs[0].id, { n: 1 }, t + 12 * 60000), true);
+    assert.equal(store.analysis.touch(gs[0].id, 'w1', t + 12 * 60000), false, 'done');
+    store.close();
+});
+
 function runWorker(code, workerData) {
     return new Promise((resolve, reject) => {
         const w = new Worker(`

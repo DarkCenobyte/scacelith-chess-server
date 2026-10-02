@@ -574,5 +574,8 @@ header of `src/anticheat/index.js`):
   a report does not touch the analysis queue);
 * `analysis.next()` returns each job with its `priority` (0 for the ordinary sample, the only
   jobs that feed the population);
+* the optional `analysis.touch(gameId, workerId, now)` renews the claim of a job every minute
+  while it is analysed (without it, a job analysed for more than 10 minutes is taken for the job
+  of a vanished worker and given to another engine);
 * free-form values are passed as objects and retried as JSON text if the store refuses them;
 * the rating refunds use `refunds` when the store has it (a partial store gives none).

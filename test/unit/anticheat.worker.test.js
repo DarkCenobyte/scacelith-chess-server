@@ -9,6 +9,7 @@ import { MODEL, Population } from '../../src/anticheat/scoring.js';
 import { StoreError } from '../../src/store/index.js';
 import { metrics } from '../../src/metrics.js';
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const config = testConfig({ ANALYSIS_ENGINE_PATH: '/fake/engine', ANALYSIS_DEPTH_FAST: '4', ANALYSIS_DEPTH_DEEP: '8', ANALYSIS_POLL_MS: '100' });
 
 // Engine answering every position with three lines; the played move is always the best one.
@@ -164,6 +165,25 @@ test('another engine restarts the statistics: its own population, players scored
         assert.equal(store._.population.get(`${f.profile}|5+0|1500|accuracy`).n, 2 * i);
     }
     assert.equal(store._.population.get(`${old.profile}|5+0|1500|accuracy`).n, 2, 'the earlier population is left as it was');
+});
+
+test('a job is renewed (store.analysis.touch) while the engine works on it, and no longer after', async () => {
+    const store = createFakeStore();
+    const { moves } = addGame(store, 48);
+    const { moveToUci } = await import('../../src/anticheat/analysis/moves.js');
+    const quick = fakeEngine((ply) => (ply < moves.length ? moveToUci(moves[ply]) : null));
+    let slow = true;
+    // A long analysis: the first position takes a while.
+    const engine = { ...quick, async analyse(...a) { if (slow) { slow = false; await sleep(80); } return quick.analyse(...a); } };
+    const touches = [];
+    store.analysis.touch = (gameId, worker, t) => { touches.push([gameId, worker, t]); return true; };
+    const worker = createAnalysisWorker({ config, store, engineFactory: () => engine, workerId: 'w7', now: () => 1234, heartbeatMs: 10 });
+    assert.ok(await worker.processJob(engine, store.analysis.next(1, 'w7', 0)[0]));
+    assert.ok(touches.length >= 2, `${touches.length} heartbeats`);
+    assert.deepEqual(touches[0], [48, 'w7', 1234]);
+    const n = touches.length;
+    await sleep(50);
+    assert.equal(touches.length, n, 'stopped with the job');
 });
 
 test('a job whose game is missing, or whose engine crashes, is marked failed', async () => {
