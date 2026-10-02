@@ -43,6 +43,22 @@ test('a solved challenge is accepted once', async () => {
     assert.deepEqual(await pow.verify(args), { ok: false, reason: 'replayed' });
 });
 
+test('a challenge is single use whatever the spelling of its signature: the other base64url spellings are refused', async () => {
+    const { pow } = setup();
+    const c = pow.issue({ ip: '203.0.113.5', endpoint: 'register', bits: 4 });
+    // The 43rd character of the signature carries 4 bits; its 2 low bits are ignored by a decoder,
+    // so 3 other characters decode to the same 32 bytes.
+    const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const i = B64URL.indexOf(c.challenge.at(-1));
+    const variants = [0, 1, 2, 3].map((k) => B64URL[(i & ~3) | k]).filter((ch) => ch !== c.challenge.at(-1))
+        .map((ch) => c.challenge.slice(0, -1) + ch);
+    assert.equal(variants.length, 3);
+    for (const v of variants) assert.ok(Buffer.from(v.split('.')[1], 'base64url').equals(Buffer.from(c.challenge.split('.')[1], 'base64url')));
+    const args = (challenge) => ({ ip: '203.0.113.5', endpoint: 'register', bits: 4, challenge, nonce: solvePow(challenge, 4) });
+    for (const v of variants) assert.deepEqual(await pow.verify(args(v)), { ok: false, reason: 'signature' });
+    assert.deepEqual(await pow.verify(args(c.challenge)), { ok: true });
+});
+
 test('expired, other network, other endpoint, tampered, lazy and malformed answers are refused', async () => {
     const { pow, now } = setup();
     const c = pow.issue({ ip: '203.0.113.5', endpoint: 'register', bits: 8 });
