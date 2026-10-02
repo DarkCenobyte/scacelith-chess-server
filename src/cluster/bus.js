@@ -52,18 +52,35 @@ export function busToken(secret, serverId) {
     return crypto.createHmac('sha256', secret || Buffer.alloc(0)).update(`scacelith-bus-v1:${serverId}`).digest();
 }
 
+const MAX_SOCKET_PATH_BYTES = 100;                       // sun_path is 104-108 bytes
+
 /**
- * Single-machine transport: Unix domain sockets (`<runDir>/bus-<shard>.sock`, mode 0600) or, on
- * Windows, named pipes (`\\.\pipe\scacelith-<serverId>-<shard>`).
- * @param {{ runDir: string, serverId: string, platform?: string }} o
+ * The directory for the bus sockets whose path would be too long in runDir: made once by the
+ * primary (primary-main.js), which gives it to every worker; '' when every socket fits in runDir.
+ * A random name of mode 0700 (mkdtemp), so that no other local user can take a socket's place in
+ * the shared tmp directory.
+ * @param {string} runDir
+ * @param {string} [platform]
  */
-export function unixTransport({ runDir, serverId, platform = process.platform }) {
+export function makeBusFallbackDir(runDir, platform = process.platform) {
+    if (platform === 'win32' || Buffer.byteLength(path.join(runDir, 'bus-63.sock')) <= MAX_SOCKET_PATH_BYTES) return '';
+    return fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-bus-'));
+}
+
+/**
+ * Single-machine transport: Unix domain sockets (`<runDir>/bus-<shard>.sock`, mode 0600, or in
+ * fallbackDir when that path is too long, makeBusFallbackDir) or, on Windows, named pipes
+ * (`\\.\pipe\scacelith-<serverId>-<shard>`).
+ * @param {{ runDir: string, serverId: string, fallbackDir?: string, platform?: string }} o
+ */
+export function unixTransport({ runDir, serverId, fallbackDir = '', platform = process.platform }) {
     let server = null;
     const pathOf = (shard) => {
         if (platform === 'win32') return `\\\\.\\pipe\\scacelith-${serverId}-${shard}`;
         const p = path.join(runDir, `bus-${shard}.sock`);
-        if (Buffer.byteLength(p) <= 100) return p;           // sun_path is 104-108 bytes
-        return path.join(os.tmpdir(), `scacelith-${String(serverId).slice(0, 8)}-bus-${shard}.sock`);
+        if (Buffer.byteLength(p) <= MAX_SOCKET_PATH_BYTES) return p;
+        if (!fallbackDir) throw new Error(`bus socket path too long: ${p} (use a shorter DATA_DIR)`);
+        return path.join(fallbackDir, `bus-${shard}.sock`);
     };
     return {
         kind: 'unix',

@@ -57,7 +57,7 @@ export async function main() {
     const writer = startStoreWriter({ config, shard, log: log.child('writer') });
     const anticheat = createAnticheat({ config, store, primary, log: logger.child('anticheat'), writer });
     const auth = createAuth({ config, store, primary, log: logger.child('auth') });
-    const bus = createBus({ config, shard, serverId, log: log.child('bus') });
+    const bus = createBus({ config, shard, serverId, busDir: process.env.SCACELITH_BUS_DIR || '', log: log.child('bus') });
     const hostStore = { games: { finishBatch: (records) => writer.finishBatch(records) } };
     const host = new GameHost({
         shard, config, store: hostStore, journal, anticheat, bus, primary, log: logger.child('game'),

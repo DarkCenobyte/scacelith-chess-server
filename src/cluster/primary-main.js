@@ -20,6 +20,7 @@ import { applyGame } from '../match/elo.js';
 import { Matchmaker } from '../match/matchmaker.js';
 import { metrics } from '../metrics.js';
 import { migrate, openStore } from '../store/index.js';
+import { makeBusFallbackDir } from './bus.js';
 import { startPrimary } from './primary.js';
 import { startRetention } from './retention.js';
 
@@ -74,7 +75,8 @@ export async function main() {
     const conduct = new Conduct({ config, store, now: Date.now, log: logger.child('conduct') });
 
     cluster.setupPrimary({ exec: WORKER_MAIN, args: [], serialization: 'advanced' });
-    const fork = (shard) => cluster.fork({ SHARD: String(shard), SCACELITH_SERVER_ID: serverId });
+    const busDir = makeBusFallbackDir(config.runDir);         // for the bus sockets too long for runDir
+    const fork = (shard) => cluster.fork({ SHARD: String(shard), SCACELITH_SERVER_ID: serverId, SCACELITH_BUS_DIR: busDir });
 
     let analysis = null;
     const primary = await startPrimary({
@@ -121,6 +123,7 @@ export async function main() {
         stopping = true;
         log.info('shutting down', { signal, graceMs: config.shutdownGraceMs });
         await stopPrimary({ config, log, primary, retention, analysis, store });
+        if (busDir) fs.rmSync(busDir, { recursive: true, force: true });
         log.info('stopped');
         process.exit(0);
     };
