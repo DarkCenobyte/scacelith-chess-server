@@ -42,7 +42,8 @@
 // it (queue, direct challenge, private code, rematch), in the matchmaker's counts (in memory: a
 // restart forgets them). Two players who reached it within MATCH_REPEAT_WINDOW_MS are no longer
 // paired by the rated queue, and their rated challenges and private games are refused with
-// UserUnavailable, their rated rematches with RematchUnavailable; unrated games stay free.
+// UserUnavailable (a private game's joiner before the code is used: the game stays pending), their
+// rated rematches with RematchUnavailable; unrated games stay free.
 //
 // Notifications (QueueStatus, ChallengeReceived, ChallengeStatus, Notice) are encoded here and
 // written by the shard of the user's live connection ('conn.send'); waiting players get a fresh
@@ -544,7 +545,10 @@ export class ControlPlane {
                     try { accepts = this.acceptsChallenges(tid) !== false; } catch (e) { this.log?.error?.('preference read failed', { err: e }); }
                 }
                 targetUser = { userId: tid, username: this.presence.get(tid).username, online: true, acceptChallenges: accepts };
-                if (rated && this._repeatLimited(from.userId, tid, now)) return { error: E.UserUnavailable };
+                // Past MATCH_REPEAT_LIMIT (header), for a time control ch.create takes as rated: a
+                // wrong one keeps its own error.
+                if (rated && categoryOf(baseSec * 1000, incSec * 1000, this.config) !== 'custom'
+                    && this._repeatLimited(from.userId, tid, now)) return { error: E.UserUnavailable };
             }
         }
         let r;
@@ -580,8 +584,13 @@ export class ControlPlane {
         if (this._busy(by.userId)) return { error: E.AlreadyInGame };
         const limitKey = `joincode:u${by.userId}`;
         if (this.limiter.peek(limitKey) + 1 > this.config.privateCodeFailuresPerMin) return { error: E.RateLimited };
+        const now = this.now();
+        // Past MATCH_REPEAT_LIMIT (header): refused before the code is used, so the creator's
+        // private game stays pending.
+        const pending = this.ch.getCode?.(code, now);
+        if (pending?.rated && this._repeatLimited(pending.from.userId, by.userId, now)) return { error: E.UserUnavailable };
         let r;
-        try { r = this.ch.joinCode(code, by, this.now()); } catch (e) { this.log?.error?.('challenge.joinCode failed', { err: e }); return { error: E.Internal }; }
+        try { r = this.ch.joinCode(code, by, now); } catch (e) { this.log?.error?.('challenge.joinCode failed', { err: e }); return { error: E.Internal }; }
         if (!r || r.error || !r.challenge) {
             const error = r && r.error ? toErrorCode(r.error) : E.CodeInvalid;
             if (error === E.CodeInvalid) this.limiter.take({ key: limitKey, limit: this.config.privateCodeFailuresPerMin, windowMs: PLAYER_LIMIT_WINDOW_MS });

@@ -256,9 +256,9 @@ export class Matchmaker {
         this.queues = new Map();         // 'category|r' or 'category|c' -> Queue
         this.byUser = new Map();         // userId -> Entry
         this.balances = new Map();       // userId -> whites minus blacks (non-zero only)
-        this.pairCounts = new Map();     // pairKey -> rated pairings inside the repeat window
+        this.pairCounts = new Map();     // pairKey -> rated games inside the repeat window
         this.holds = new Map();          // pairKey -> time before which the pair is not made (holdPair)
-        this.logKeys = [];               // pairings in time order (for expiry)
+        this.logKeys = [];               // rated games in time order (for expiry)
         this.logTimes = [];
         this.logHead = 0;
         this.seq = 0;
@@ -512,8 +512,8 @@ export class Matchmaker {
 
     /**
      * Whether two users played MATCH_REPEAT_LIMIT rated games together inside the repeat window:
-     * tick() no longer pairs them in a rated queue, and the primary refuses their rated challenges
-     * and rematches.
+     * tick() no longer pairs them in a rated queue, and the primary refuses their rated challenges,
+     * private games and rematches.
      * @param {number} a
      * @param {number} b
      * @param {number} [now]

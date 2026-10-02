@@ -330,9 +330,8 @@ describe('control plane: matchmaking', () => {
     });
 
     it('MATCH_REPEAT_LIMIT counts rated challenges, private games and rematches, and refuses them past it; unrated games stay free', async () => {
-        const { cp, shards, mm, clock, online } = setup({ realMatchmaker: true });
-        const a = online(1, 'alice', 0), b = online(2, 'bob', 1);
-        online(3, 'carl', 1);
+        const { cp, ch, shards, mm, clock, online } = setup({ realMatchmaker: true });
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1), c = online(3, 'carl', 1);
         const tc = { baseSec: 300, incSec: 0 }, rated = { ...tc, rated: true };
         const end = (gameId) => cp.gameEnded({ gameId, whiteId: 1, blackId: 2 });
         const rematch = (gameId, isRated) => cp.gameRematch({ gameId, white: 2, black: 1, category: '5+0', baseMs: 300000, incMs: 0, rated: isRated });
@@ -361,14 +360,28 @@ describe('control plane: matchmaking', () => {
         shards.clear();
         assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', ...rated }), { error: E.UserUnavailable });
         assert.deepEqual(shards.frames(), [], 'nothing reaches the target');
+        // A wrong time control keeps its own error.
+        assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', baseSec: 420, incSec: 1, rated: true }), { error: E.RatedRequiresOfficialTc });
+        assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', baseSec: 5, incSec: 0, rated: true }), { error: E.InvalidTimeControl });
         const p4 = cp.challengeCreate({ from: b, target: '', ...rated });
+        shards.clear();
         assert.deepEqual(await cp.challengeJoinCode({ code: p4.code, by: a }), { error: E.UserUnavailable });
+        assert.equal(ch.getCode(p4.code)?.id, p4.id, 'the private game stays pending');
+        assert.deepEqual(shards.frames(), [], 'and its creator is told nothing');
+        assert.equal(cp.limiter.peek('joincode:u1'), 0, 'not a wrong code');
+        // The code stays valid for anyone else.
+        const g4 = await cp.challengeJoinCode({ code: p4.code, by: c });
+        assert.equal(g4.ok, true);
+        cp.gameEnded({ gameId: g4.gameId, whiteId: 2, blackId: 3 });
+        shards.clear();
         assert.deepEqual(await rematch(g3.gameId, true), { error: E.RematchUnavailable });
         cp.mmJoin({ ...a, category: '5+0', rated: true, rating: 1500 }, 0);
         cp.mmJoin({ ...b, category: '5+0', rated: true, rating: 1500 }, 1);
+        assert.deepEqual([...cp.queued.keys()].sort(), [1, 2]);
         clock.advance(250);
         cp.matchTick();
         await tick();
+        assert.deepEqual([...cp.queued.keys()].sort(), [1, 2], 'both still waiting');
         cp.mmLeave({ userId: 1 }); cp.mmLeave({ userId: 2 });
         assert.equal(created(), 0, 'no game was created');
         // Unrated games stay free, and other opponents are not concerned.
@@ -378,6 +391,9 @@ describe('control plane: matchmaking', () => {
         const g6 = await rematch(g5.gameId, false);
         assert.equal(g6.ok, true);
         end(g6.gameId);
+        const g8 = await cp.challengeJoinCode({ code: cp.challengeCreate({ from: a, target: '', ...tc, rated: false }).code, by: b });
+        assert.equal(g8.ok, true);
+        end(g8.gameId);
         assert.equal(cp.challengeCreate({ from: a, target: 'carl', ...rated }).ok, true);
         assert.equal(mm.repeatCount(1, 2), 3);
         // The games leave the count after MATCH_REPEAT_WINDOW_MS.

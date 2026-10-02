@@ -49,8 +49,9 @@ its explicit flag.
 node bin/admin.js bench-accounts --count 20000 --prefix bench --out tokens.tsv --format tsv --i-know-this-is-a-test-server
 # the test server needs ABUSE_EXEMPT set to the load machines' addresses, MAX_CONNECTIONS_PER_IP
 # (64 by default) above the number of clients per load machine, MATCH_REPEAT_LIMIT (3 by default)
-# above the rated games of one pair in a run (or --rated false), and WS_MSG_RATE / WS_MSG_BURST
-# raised for the burst scenario
+# above the rated games of one pair in a run (or --rated false), CHALLENGE_UNPLAYED_PER_MIN (5 by
+# default) raised when pairs often retry their challenges, and WS_MSG_RATE / WS_MSG_BURST raised
+# for the burst scenario
 # on the load machine
 node bench/loadgen.js --scenario games --games 10000 --url wss://test.example.org/ws \
     --ca cert.pem --tokens tokens.tsv --metrics http://test.example.org:9464/metrics --metrics-token TOKEN
