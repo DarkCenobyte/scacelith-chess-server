@@ -229,36 +229,38 @@ JavaScript (`src/protocol/index.js` re-exports `codec.gen.js`):
 
 ```js
 import { MSG, encode, decode, ProtocolError, PROTOCOL_VERSION, PROTOCOL_MIN, SCHEMA_HASH,
-         WS_SUBPROTOCOL, enums, MoveFlag, CloseCode, isClientType } from '../protocol/index.js';
+         WS_SUBPROTOCOL, enums, MoveFlag, GestureFlag, CloseCode, isClientType,
+         messageName } from '../protocol/index.js';
 MSG.Move === 0x20; MSG.S_Ping === 0x82; MSG.C_Ping === 0x02;   // names shared by both directions get C_/S_ prefixes
 const buf = encode.MoveMade({ game, gseq, ply, move, flags, spentMs, whiteMs, blackMs, serverTime, drawOffer, firstMoveMs }); // Buffer, exact size
-const msg = decode(buf);   // { type: 0x20, seq, game, ply, ... } ; throws ProtocolError{reason} when malformed
+const msg = decode(buf);   // { type: 0xA1, game, gseq, ply, move, ... } ; throws ProtocolError{reason} when malformed
 decode(buf, { dir: 'c2s' });  // refuses server->client types (server side uses this)
 ```
 `encode.<Name>` exists for every message; the direction-shared names are `encode.C_Ping`,
-`encode.S_Ping`, `encode.C_Pong`, `encode.S_Pong`. Decoded objects use the schema field names;
-`enum:` fields are numbers; `struct:` fields are nested objects; lists are arrays. `id53` decodes
-to a number. Encoding validates ranges too (a server bug must not produce a frame the client
-refuses). Helpers in `src/protocol/index.js` (hand-written, protocol owner): `encodeMove(from,
-to, promo)`, `decodeMove(u16) -> {from, to, promo}`, `fnv1a32(string)`.
+`encode.S_Ping`, `encode.C_Pong`, `encode.S_Pong`, `encode.C_Gesture`, `encode.S_Gesture`.
+Decoded objects use the schema field names; `enum:` fields are numbers; `struct:` fields are
+nested objects; lists are arrays. `id53` decodes to a number. Encoding validates ranges too (a
+server bug must not produce a frame the client refuses). Helpers in `src/protocol/index.js`
+(hand-written, protocol owner): `encodeMove(from, to, promo)`, `decodeMove(u16) -> {from, to,
+promo}`, `fnv1a32(string)`.
 
 C++ (`src/net/protocol_gen.h`, namespace `net::proto`): one struct per message with the same
 field names (camelCase), types `uint8_t/uint16_t/uint32_t/int32_t/double/uint64_t(id53)/bool/
 std::string/std::vector<T>`, enums as `enum class` with the schema values, and:
 ```cpp
-constexpr uint16_t kProtocolVersion = 1; constexpr uint16_t kProtocolMin = 1; constexpr uint32_t kSchemaHash = 0x........;
+constexpr uint16_t kProtocolVersion = 2; constexpr uint16_t kProtocolMin = 2; constexpr uint32_t kSchemaHash = 0x........;
 constexpr const char* kWsSubprotocol = "scacelith.v1";
 enum class MsgType : uint8_t { Hello = 0x01, ..., C_Ping = 0x02, S_Ping = 0x82, ... };
 void encode(const Move& m, std::vector<uint8_t>& out);          // appends
 bool decode(const uint8_t* p, size_t n, MoveMade& out);         // false when malformed
 bool peekType(const uint8_t* p, size_t n, MsgType& t);
 ```
-Struct names are the message names, with `C_`/`S_` prefixes for Ping/Pong. `SCHEMA_HASH` is the
-first 4 bytes (big-endian u32) of SHA-256 of the canonical JSON of `{version, enums, structs,
-messages}` (object keys sorted, `doc` fields excluded): `computeSchemaHash()` in
-`src/protocol/schema-hash.js`, used by both generators. Golden vectors
-(`test/fixtures/protocol-vectors.json`: message object + hex encoding) are checked by the JS
-tests and by `tests/net_tests.cpp`.
+Struct names are the message names, with `C_`/`S_` prefixes for the names of both directions
+(Ping, Pong, Gesture). `SCHEMA_HASH` is the first 4 bytes (big-endian u32) of SHA-256 of the
+canonical JSON of `{version, enums, structs, messages}` (object keys sorted, `doc` fields
+excluded): `computeSchemaHash()` in `src/protocol/schema-hash.js`, used by both generators.
+Golden vectors (`test/fixtures/protocol-vectors.json`: message object + hex encoding) are checked
+by the JS tests and by `tests/net_tests.cpp`.
 
 ### 5.2 Chess rules (`src/chess/index.js`)
 

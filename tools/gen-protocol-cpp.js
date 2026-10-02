@@ -24,7 +24,8 @@ const sourcePath = path.join(outDir, 'protocol_gen.cpp');
 
 // ---- schema model ------------------------------------------------------------------------------
 
-// Names used by both directions (Ping, Pong) get C_ / S_ prefixes, as in the JS codec.
+// Names used by both directions (currently Ping, Pong, Gesture) get C_ / S_ prefixes, as in the
+// JS codec.
 const counts = new Map();
 for (const m of schema.messages) counts.set(m.name, (counts.get(m.name) || 0) + 1);
 const cppName = (m) => (counts.get(m.name) > 1 ? (m.dir === 'c2s' ? 'C_' : 'S_') + m.name : m.name);

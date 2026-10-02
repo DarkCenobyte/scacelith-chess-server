@@ -10,10 +10,11 @@
 // File format (self-describing, deterministic):
 //   valid[]:     { name, type, dir, note, fields, hex }
 //                name = the message name of encode.<name> / the C++ struct (C_/S_ prefixes for
-//                Ping and Pong), type = its id, fields = every field by its schema name (enums as
-//                numbers, bools as true/false, id53 and f64 as JSON numbers, structs as objects,
-//                lists as arrays), hex = the exact encoding (lower-case). Decoding hex gives
-//                { type, ...fields } and encoding fields gives hex.
+//                the names of both directions: Ping, Pong, Gesture), type = its id, fields =
+//                every field by its schema name (enums as numbers, bools as true/false, id53 and
+//                f64 as JSON numbers, structs as objects, lists as arrays), hex = the exact
+//                encoding (lower-case). Decoding hex gives { type, ...fields } and encoding
+//                fields gives hex.
 //   malformed[]: { name, type, dir, note, reason, hex }
 //                bytes that a decoder receiving them in direction `dir` must refuse; name/type
 //                describe the type byte (null when unknown or empty); reason is the JS codec's

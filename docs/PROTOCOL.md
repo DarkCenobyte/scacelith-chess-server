@@ -32,9 +32,9 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
   u8 type | field 1 | field 2 | ...
   ```
 
-  Type bytes `0x01`-`0x7F` are client->server (C2S), `0x80`-`0xFF` server->client (S2C). `Ping` and
-  `Pong` exist in both directions with different ids; code names them `C_Ping`/`S_Ping`,
-  `C_Pong`/`S_Pong`.
+  Type bytes `0x01`-`0x7F` are client->server (C2S), `0x80`-`0xFF` server->client (S2C). The
+  names used by both directions (currently `Ping`, `Pong` and `Gesture`) have a different id
+  in each; code names them `C_Ping`/`S_Ping`, `C_Pong`/`S_Pong`, `C_Gesture`/`S_Gesture`.
 * Every C2S message starts with `seq` (u32): 1 for `Hello`, then +1 for each message sent on the
   connection (Pongs included). Replies that refer to a request quote it as `ref`.
 * A message must be consumed exactly. The decoder rejects, and the server treats as malformed:
