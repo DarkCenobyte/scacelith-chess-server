@@ -52,8 +52,8 @@ export class LruMap {
  * @returns {string}
  */
 export function ipKey(ip) {
-    const a = normalizeAddress(ip);
-    return a ? ipGroupKey(a, 64) : String(ip || '');
+    const k = ipGroupKey(ip, 64);           // 'unknown' exactly when ip is not an address
+    return k === 'unknown' ? String(ip || '') : k;
 }
 
 /**
@@ -64,8 +64,8 @@ export function ipKey(ip) {
  * @returns {string}
  */
 export function prefixKey(ip) {
-    const a = normalizeAddress(ip);
-    return a ? ipGroupKey(a, 48) : String(ip || '');
+    const k = ipGroupKey(ip, 48);
+    return k === 'unknown' ? String(ip || '') : k;
 }
 
 /**
