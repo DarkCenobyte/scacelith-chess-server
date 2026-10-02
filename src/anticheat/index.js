@@ -56,10 +56,10 @@
 //     itself (the router's schema format is not specified).
 //   * A 'repeated_desync' anomaly is reported by the caller (the room counts desyncs); a plain
 //     'desync' stays info whatever its number.
-//   * startAnalysisProcess forks bin/analysis-worker.js, which loads its configuration itself
-//     (same environment, same .env) and opens its own store. Its metrics (games analysed, engines
-//     running, network sharing) reach the primary's /metrics through the IPC channel
-//     ('metrics.snapshot', as the shards'), under the shard label 'analysis'.
+//   * startAnalysisProcess forks bin/analysis-worker.js, which runs the configuration the primary
+//     loaded ('config.snapshot', config.js primaryConfig) and opens its own store. Its metrics
+//     (games analysed, engines running, network sharing) reach the primary's /metrics through the
+//     IPC channel ('metrics.snapshot', as the shards'), under the shard label 'analysis'.
 //   * store.refunds (rating refunds, refunds.js) is used when present: a partial store gives none.
 //   * 'sanction.applied' carries `refunds` (the number of victims refunded): the primary then
 //     looks for the refunds to notify at once (refund-notices.js).
