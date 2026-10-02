@@ -87,7 +87,7 @@ export function createAccounts(svc) {
     function sendVerification(user) {
         const token = randomToken('', 32);
         store.tokens.create({ kind: 'email_verify', tokenHash: sha256Hex(token), userId: user.id, data: { email: user.email }, expiresAt: now() + TOKEN_TTL_MS.email_verify });
-        svc.mail('verification', user.email, { username: user.username, link: svc.links.verify(token), hours: 24 });
+        svc.mail('verification', user.email, { username: user.username, link: svc.links.verify(token), hours: TOKEN_TTL_MS.email_verify / 3600000 });
     }
 
     async function notifyExistingAddress(user, ip) {
@@ -211,7 +211,7 @@ export function createAccounts(svc) {
         if (fresh && user && user.status === 'active') {
             const token = randomToken('', 32);
             store.tokens.create({ kind: 'password_reset', tokenHash: sha256Hex(token), userId: user.id, data: { email: user.email }, expiresAt: now() + TOKEN_TTL_MS.password_reset });
-            svc.mail('passwordReset', user.email, { username: user.username, link: svc.links.reset(token), minutes: 60 });
+            svc.mail('passwordReset', user.email, { username: user.username, link: svc.links.reset(token), minutes: TOKEN_TTL_MS.password_reset / 60000 });
             events.record('password_reset_requested', { userId: user.id, ip });
         }
         return { status: 'accepted' };
