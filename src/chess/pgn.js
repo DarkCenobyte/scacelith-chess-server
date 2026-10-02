@@ -65,7 +65,11 @@ const isAlpha = (c) => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
 const isDigit = (c) => c >= '0' && c <= '9';
 const isNameChar = (c) => isAlpha(c) || isDigit(c) || c === '_';
 
-/** Result text in the movetext or the Result tag, normalised ('' when it is not a result). */
+/**
+ * Result text in the movetext or the Result tag, normalised ('' when it is not a result).
+ * '0.5-0.5' only counts as a Result tag value: in movetext the lexer takes its '.' for the period
+ * of a move number.
+ */
 export function normalizeResult(s) {
     if (s === '1-0' || s === '0-1' || s === '1/2-1/2' || s === '*') return s;
     if (s === '½-½' || s === '0.5-0.5' || s === '1/2') return '1/2-1/2';
