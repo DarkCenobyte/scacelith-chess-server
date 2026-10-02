@@ -16,7 +16,11 @@
 // of the address's request budget like any HTTP request, before any other check and before the
 // admission IPC to the primary: a blocked address, or one over HTTP_RATE_PER_IP, gets HTTP 429
 // rate_limited with Retry-After. The game honours Retry-After when /api/v1/info answers 429; on a
-// refused upgrade it retries with its own backoff (reconnectDelayMs).
+// refused upgrade it retries with its own backoff (reconnectDelayMs). On the dedicated port, a
+// head handleSocket cannot read (400, a 408 timeout, 431 too large) is refused before that check
+// and is not counted toward a block of the address, unlike malformed HTTP on the API port: in
+// native mode IP_CONN_RATE already bounds those connections per address (behind a proxy, the
+// peer is the proxy).
 //
 // Hot path (per message): no allocation for complete frames (the payload is unmasked in place and
 // handed out as a view of the socket chunk); a frame split across TCP reads is appended to a

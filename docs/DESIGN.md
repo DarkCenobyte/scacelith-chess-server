@@ -1265,9 +1265,11 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
     large) and counted in `scacelith_http_client_errors_total{reason}`.
   * Blocks. Each worker sums, per address, the refusals that show a client ignoring the limits:
     weight 1 for a 429 of the address budgets or the in-flight cap, a gate refusal of that
-    address, a failed TLS handshake, malformed HTTP (not from a trusted proxy). The API's route
-    limits report theirs through the same `IpGuard.noteRefusal` (`AUTH_REFUSAL_WEIGHT`, 5, for
-    the login, registration, reset and MFA family, whose attempts each cost a password hash).
+    address, a failed TLS handshake, malformed HTTP (not from a trusted proxy; a malformed
+    upgrade head on a dedicated WebSocket port, `WS_PORT` != `API_PORT`, is refused with 400, 408
+    or 431 but not counted: `IP_CONN_RATE` already bounds those connections per address). The
+    API's route limits report theirs through the same `IpGuard.noteRefusal` (`AUTH_REFUSAL_WEIGHT`,
+    5, for the login, registration, reset and MFA family, whose attempts each cost a password hash).
     Not counted: per-account limits, server-wide capacity refusals (the hash queue, the gate's
     `handshakes`, `waiting` and `server_full`), the refusals of an address already blocked. A
     worker reports the sums at most once a second (`abuse.report`, 5.7, at most 512 keys, the
