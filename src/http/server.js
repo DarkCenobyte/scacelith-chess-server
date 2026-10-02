@@ -42,8 +42,10 @@
 // stops.
 //
 // No CORS: the API serves the game, not browsers; no Access-Control-* header is ever sent, so a
-// web page cannot read an answer, and the JSON-only rule makes every cross-site write need a
-// preflight that fails.
+// web page cannot read an answer. The API carries no ambient credentials (bearer tokens, no
+// cookies), and a JSON body needs a preflight that fails. The HTML form pages (router.page POSTs)
+// accept simple form posts, which need no preflight, and rely on the secret single-use token each
+// form carries: any new page POST must carry such a token (or another CSRF defence).
 //
 // Client address: `req.clientIp` when the listener set it (proxy mode, X-Forwarded-For from a
 // trusted proxy), else the socket's remote address.
