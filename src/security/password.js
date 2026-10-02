@@ -201,9 +201,18 @@ export function createPasswordHasher(opts = {}) {
     }
 
     let dummy = null;
+    // The dummy hash, computed once. A failure (memory, thread pool) is not kept: the next call
+    // computes it again, instead of every unknown-account login failing until a restart.
+    function dummyHash() {
+        if (!dummy) {
+            const p = hash(crypto.randomBytes(18).toString('base64'));
+            dummy = p;
+            p.catch(() => { if (dummy === p) dummy = null; });
+        }
+        return dummy;
+    }
     async function dummyWork(pw) {
-        if (!dummy) dummy = hash(crypto.randomBytes(18).toString('base64'));
-        const d = parse(await dummy);
+        const d = parse(await dummyHash());
         if (d.alg === 'scrypt') await scryptKey(pw, d.salt, d.logN, d.r, d.p, d.key.length);
         else await argon2Async({ message: pw, nonce: d.salt, parallelism: d.parallelism, tagLength: d.key.length, memory: d.memory, passes: d.passes });
     }
@@ -234,8 +243,7 @@ export function createPasswordHasher(opts = {}) {
         };
         const pw = Buffer.from(crypto.randomBytes(18).toString('base64'), 'utf8');
         if (!dummy) {
-            dummy = hash(crypto.randomBytes(18).toString('base64'));
-            await timed(() => dummy);
+            await timed(() => dummyHash());
         } else {
             await dummy;
             await timed(() => dummyWork(pw));

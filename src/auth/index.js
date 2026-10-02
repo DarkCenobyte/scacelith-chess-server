@@ -241,7 +241,7 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
 
     // Prepare the dummy hash now, so that the first login of an unknown user is not faster (it
     // takes a slot of the hash limiter like any other hash).
-    Promise.resolve().then(() => svc.hasher.warmUp?.()).catch(() => {});
+    Promise.resolve().then(() => svc.hasher.warmUp?.()).catch((err) => log.warn('password hashing warm-up failed', { err }));
 
     const a = svc.accounts, l = svc.login, s = svc.sso;
     return {
