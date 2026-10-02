@@ -453,8 +453,9 @@ it meets every request and every connection before anything else (before the API
 the login, and with native TLS before any TLS work), and only stops one address from saturating
 the server. The second works per signed-in account and per route (the limits in
 [docs/API.md](docs/API.md)). An address is an IPv4 address or an IPv6 /64; an IPv6 address also
-counts toward its /48 with 4 times each limit, because one customer often gets a /56 or a /48 and
-could otherwise rotate over its /64 networks. The limits are for the whole server: each worker
+counts toward its /48 with 4 times each limit (all of them but `MAX_CONNECTIONS_PER_IP`, which
+counts per /64 only), because one customer often gets a /56 or a /48 and could otherwise rotate
+over its /64 networks. The limits are for the whole server: each worker
 allows its share (all of it with 1 or 2 workers, half of it with 4), so a client spread over the
 workers gets at most twice as much, and no request waits for the other processes.
 
@@ -465,7 +466,7 @@ workers gets at most twice as much, and no request waits for the other processes
 | `IP_MAX_INFLIGHT` | 32 requests in progress per worker | the same, with `Retry-After: 1` |
 | `IP_CONN_RATE` | 10 new connections per second, with a burst of 4 seconds | the connection is reset before TLS |
 | `IP_MAX_CONNECTIONS` | 128 open connections (TLS handshakes, API keep-alive and WebSockets together) | the same |
-| `MAX_CONNECTIONS_PER_IP` | 64 WebSocket connections, counted exactly over the workers | 429 `too_many_connections` at the upgrade |
+| `MAX_CONNECTIONS_PER_IP` | 64 WebSocket connections, counted exactly over the workers (per /64, no count per /48: the /48's upgrades still take its request budget, and with native TLS its connections the /48 count of `IP_MAX_CONNECTIONS`) | 429 `too_many_connections` at the upgrade |
 | `ABUSE_BLOCK_REFUSALS_PER_MIN` | 600 refusals in a minute block the address (4 times that for a /48) | blocked for `ABUSE_BLOCK_BASE_SEC` (60 s), 4 times longer at each new block within 6 hours, up to `ABUSE_BLOCK_MAX_SEC` (1 h) |
 
 The refusals that count toward a block are those that show a client ignoring the limits: the

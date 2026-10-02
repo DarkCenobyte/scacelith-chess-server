@@ -1250,7 +1250,8 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   * Connections (TLS gate stage 0, 5.8): `IP_CONN_RATE` new connections per second (burst 4 s)
     and `IP_MAX_CONNECTIONS` open ones (handshakes, API keep-alive and WebSockets together),
     each worker its share; beyond, an RST before any TLS byte. `MAX_CONNECTIONS_PER_IP` (64),
-    exact through the primary, still bounds the WebSockets of an address.
+    exact through the primary, still bounds the WebSockets of an address (per /64 only: it has
+    no /48 count).
   * Slow clients (`hardenHttp`): `headersTimeout` 10 s and `requestTimeout` 30 s checked every
     second (`connectionsCheckingInterval`; Node's own 30 s let a slowloris client hold a socket 40
     s), `keepAliveTimeout` 5 s, a socket with no byte in or out for 30 s destroyed

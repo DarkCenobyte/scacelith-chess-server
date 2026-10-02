@@ -31,6 +31,13 @@ describe('presence', () => {
         assert.equal(p.ipRelease('2001:db8:0:1::1', 0), true);
         assert.equal(p.ipAcquire('2001:db8:0:1::99', 0).ok, true);
         assert.equal(p.ipRelease('203.0.113.1', 0), false);                 // never acquired
+        // No count per /48 (docs/PROTOCOL.md, README): each /64 of a /48 has the whole limit; the
+        // /48 as a whole is bounded by the request budget and, with native TLS, the TLS gate.
+        const q = new Presence({ maxPerIp: 2, maxConnections: 100 });
+        for (let net = 1; net <= 6; net++) {
+            for (let i = 1; i <= 2; i++) assert.equal(q.ipAcquire(`2001:db8:5:${net}::${i}`, 0).ok, true, `/64 ${net}, ${i}`);
+        }
+        assert.equal(q.connections, 12);
     });
 
     it('enforces the global limit and forgets a dead shard', () => {
