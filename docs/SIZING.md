@@ -325,7 +325,7 @@ So the checks add well under 1 % to the cheapest request or move (a move costs 1
 | Resource | Bound for one IPv4 address or IPv6 /64 | Cost |
 |---|---|---|
 | Requests | 600 per minute per worker, 1,200 per minute (20 per second) over both, burst 300 per worker | about 0.2 % of a vCore if every one is refused, about 3 % if every one is a heavy read (1.5 ms) |
-| Requests in progress | 32 per worker (a body sent slowly, a wait in the hash queue), each for at most 30 s (`requestTimeout`) | memory and a place in the queues, not CPU |
+| Requests in progress | 32 per worker (a body sent slowly, a wait in the hash queue, a GIF waiting for its render, a data export), each until its answer is sent: the request received within 30 s (`requestTimeout`), then the route's own timeout: 30 s, 45 s for a GIF (`GIF_QUEUE_TIMEOUT_MS` + `GIF_RENDER_TIMEOUT_MS` + 5 s), 60 s for the export; then up to 60 s more for a client that reads the answer slowly (the send deadline) | memory and a place in the queues, not CPU |
 | New connections | 10 per second per worker, 20 over both, burst 40 per worker | 20 full TLS handshakes per second, about 4 % of a vCore (about 1.9 ms each, half of the 3.7 ms of a new connection above) |
 | Open connections | 128 per worker, 256 in all (WebSockets: 64, `MAX_CONNECTIONS_PER_IP`) | about 15 MB of sockets |
 | Password hashes | `AUTH_RATE_PER_IP`, 20 per 10 minutes | at most 2.7 % of a vCore (0.8 s each) |

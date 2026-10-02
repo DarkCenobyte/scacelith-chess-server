@@ -341,6 +341,24 @@ describe('listeners: protection per address and slow clients', () => {
         } finally { close(); }
     });
 
+    it('a request still in its handler keeps its place among the requests in progress past requestTimeout (docs/SIZING.md)', async () => {
+        const waiting = [];
+        const { port, guard, close } = await setup({ IP_MAX_INFLIGHT: '1', HTTP_RATE_PER_IP: '600' }, {
+            apiHandler: (req, res) => { waiting.push(res); },
+            listeners: { headersTimeoutMs: 300, requestTimeoutMs: 300, idleTimeoutMs: 300, checkIntervalMs: 100 },
+        });
+        try {
+            const first = get(port, '/api/v1/slow');
+            await waitUntil(() => waiting.length === 1);
+            await new Promise((r) => setTimeout(r, 900));       // 3 times requestTimeout and the inactivity timeout
+            assert.equal(guard.inflightTotal, 1, 'its place is held until the answer is sent');
+            assert.equal((await get(port, '/api/v1/slow')).status, 429);
+            waiting[0].end('{}');
+            assert.equal((await first).status, 200, 'and the answer still arrives');
+            await waitUntil(() => guard.inflightTotal === 0);
+        } finally { close(); }
+    });
+
     it('slowloris: a header line every 300 ms is cut within headersTimeout + 1 s, and counted', async () => {
         const { port, guard, registry, close } = await setup({}, { listeners: { headersTimeoutMs: 1000 } });
         try {
