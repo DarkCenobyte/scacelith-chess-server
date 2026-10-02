@@ -280,11 +280,9 @@ async function main() {
         const total = newAgg();
         let phase = newAgg();
         let win = newAgg();
-        let received = 0;
         const onStats = (pr, s) => {
             pr.gauges = s.g;
             addAgg(total, s); addAgg(phase, s); addAgg(win, s);
-            received++;
         };
         const sumG = (k) => procList.reduce((a, pr) => a + (pr.gauges[k] || 0), 0);
         const maxG = (k) => procList.reduce((a, pr) => Math.max(a, pr.gauges[k] || 0), 0);
@@ -338,7 +336,6 @@ async function main() {
         };
         const mark = async () => ({ at: Date.now(), metrics: await scrape(), cpu: cpu.sample(pids) });
         let lastSample = cpu.sample(pids);
-        let lastMetrics = null;
         let phaseName = 'setup';
         let scraping = false;
         const serverSamples = [];
@@ -351,7 +348,7 @@ async function main() {
                 const s = cpu.sample(pids);
                 const d = cpu.delta(lastSample, s);
                 lastSample = s;
-                if (m && !m.error) { lastMetrics = m; serverSamples.push({ phase: phaseName, at: m.at, shards: m.shards }); }
+                if (m && !m.error) serverSamples.push({ phase: phaseName, at: m.at, shards: m.shards });
                 const now = Date.now();
                 const dt = (now - lastWinAt) / 1000;
                 lastWinAt = now;
@@ -574,8 +571,6 @@ async function main() {
         printSummary(report);
         say(`report: ${path.relative(process.cwd(), outFile)}`);
         if (o.json) process.stdout.write(`${JSON.stringify(report)}\n`);
-        void received;
-        void lastMetrics;
     } catch (e) {
         process.stderr.write(`loadgen: ${e.stack || e.message}\n`);
         if (srv) process.stderr.write(`server log (tail):\n${srv.tail(40)}\n`);
