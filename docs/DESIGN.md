@@ -545,7 +545,7 @@ Shard -> primary:
 | `ratelimit.refund` | `{ key, windowMs, cost, ageMs }` | `{ refunded }` (gives back a take granted `ageMs` ago, in the window that counted it) |
 | `once.consume` | `{ key, ttlMs }` | `{ fresh }` |
 | `sanction.applied` | `{ userId, until, reason, refunds }` | - (primary kicks the user everywhere; `refunds`: victims refunded, whose notices it looks for at once) |
-| `session.revoked` | `{ userId, tokenHashes }` | - (broadcast to every shard's auth cache) |
+| `session.revoked` | `{ userId, tokenHashes }` | - (broadcast to every shard as `auth.invalidate`; `tokenHashes`: the revoked sessions, `null` when every session of the user was revoked, `[]` to refresh the cache only) |
 | `abuse.report` | `{ entries: [[key64, key48 or null, weight]] }` | - (notification: the refusals counted toward a block since the last report, at most one report per second per worker and 512 entries, the largest first; section 8) |
 
 Primary -> shard:
@@ -556,7 +556,7 @@ Primary -> shard:
 | `game.attach` | `{ gameId, userId, connId }` | the shard binds that connection to the game (local or via bus) |
 | `conn.send` | `{ connId, frames: [Buffer] }` | writes encoded S2C frames (QueueStatus, Challenge*, Notice); as a request (refund notices) it replies `{ ok }`, false when the connection is gone or has not had its Welcome yet |
 | `conn.kick` | `{ connId, code, closeCode, frames }` | sends then closes |
-| `auth.invalidate` | `{ userId, tokenHashes }` | drops cached sessions |
+| `auth.invalidate` | `{ userId, tokenHashes }` | drops the listed sessions from the auth cache and closes the connection opened with one of them; `null` (every session of the user revoked) drops every cached session of the user and closes the user's connection; `[]` drops them and closes nothing |
 | `metrics.snapshot` | - | replies `registry.snapshot()` |
 | `shutdown` | `{ graceMs }` | drain: Notice{ServerShutdown}, stop accepting, flush |
 | `abuse.block` | `{ blocks: [[key, ttlMs, level]] }` | the shard blocks these addresses (IPv4, IPv6 /64 or /48) for `ttlMs` on its monotonic clock; sent to every shard with the new blocks of each `abuse.report`, and to one shard at its `shard.ready` with every running block (section 8) |

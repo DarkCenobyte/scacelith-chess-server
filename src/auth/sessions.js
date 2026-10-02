@@ -7,12 +7,12 @@
 // A revocation drops the local cache entries at once and asks the primary to broadcast
 // `session.revoked` so that every shard drops its entries (auth.invalidate on `auth.invalidate`).
 //
-// Broadcast convention (DESIGN 5.7 leaves it open): `tokenHashes` lists the revoked sessions (their
-// cache entries are dropped and the router closes the connection opened with one of them).
-// `null` or absent means "every session of `userId` was revoked" (revokeAll() of every session):
-// every cached session of the user is dropped and the router closes the user's connection. An
-// empty list means "read the account again" (refresh(), and revoke() when the store gave no
-// hash): every cached session of the user is dropped, no connection is closed
+// Broadcast convention (docs/DESIGN.md 5.7, `auth.invalidate`): `tokenHashes` lists the revoked
+// sessions (their cache entries are dropped and the router closes the connection opened with one
+// of them). `null` or absent means "every session of `userId` was revoked" (revokeAll() of every
+// session): every cached session of the user is dropped and the router closes the user's
+// connection. An empty list means "read the account again" (refresh(), and revoke() when the
+// store gave no hash): every cached session of the user is dropped, no connection is closed
 // (router.invalidateSessions).
 
 import { LruMap } from '../security/ratelimit.js';
