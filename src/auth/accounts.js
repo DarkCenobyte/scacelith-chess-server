@@ -10,9 +10,9 @@
 // Pending signups (with REQUIRE_EMAIL_VERIFICATION; store.signups, migration 007): register
 // creates no account. The signup (username, address, password hash, the SHA-256 of its link's
 // token) waits in pending_signups for the life of the link (24 h) and holds its username, in both
-// branches: a new address gets the link (at most one per address every 5 minutes, `signup`
-// throttle), an address that already has an account gets no link (token NULL) and its owner the
-// notice. A username held by a live pending signup of another address is refused as a taken one
+// branches: a new address gets the link (at most one link mail per address every 5 minutes,
+// `signup` throttle: within that time the new signup's link is not mailed), an address that
+// already has an account gets no link (token NULL) and its owner the notice. A username held by a live pending signup of another address is refused as a taken one
 // (409 username_taken, here and in POST /auth/sso/complete); a new signup with the same address
 // replaces the pending one (its username is freed, its link stops working). Nothing else sees a
 // pending signup: no account row, so sign-in answers invalid_credentials, the public profile 404,
@@ -172,12 +172,13 @@ export function createAccounts(svc) {
         if (config.requireEmailVerification) {
             // No account before the link is used: a pending signup holds the username in both
             // branches, so that the answer, a second signup with that username, a sign-in and the
-            // public profile are the same whether or not the address has an account (header).
-            const linkFresh = !existing && await once(mailKey('signup', em), MAIL_THROTTLE_MS);
-            const token = linkFresh ? randomToken('', 32) : null;
+            // public profile are the same whether or not the address has an account (header). The
+            // mail throttle is consumed only once the signup is stored (a busy store or a lost race
+            // leaves it for the retry).
+            const token = existing ? null : randomToken('', 32);
             if (!holdSignup({ username, em, passwordHash, token })) throw taken();
             if (existing) await notifyExistingAddress(existing, ip);
-            else if (token) mailSignupLink(username, em, token);
+            else if (await once(mailKey('signup', em), MAIL_THROTTLE_MS)) mailSignupLink(username, em, token);
             return { status: 202, body: { status: 'verification_sent' } };
         }
         if (existing) {

@@ -245,6 +245,31 @@ test('a second signup with the same address replaces the pending one', async (t)
     await s.login('alice_3', 'another ivory rook');
 });
 
+test('a signup refused by a busy store or a lost race leaves the link mail to its retry', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    // The write lock is lost past the busy timeout: 503, nothing stored, nothing mailed.
+    s.store.transaction = () => { delete s.store.transaction; throw new StoreError('busy', 'database is locked'); };
+    const busy = await s.request('POST', REG, { body: good() });
+    assert.deepEqual([busy.status, busy.json.error, busy.headers['retry-after']], [503, 'server_busy', '1']);
+    assert.equal(s.store.signups.byEmail('alice@example.com'), null);
+    // Another account takes the username while the password is hashed: 409, nothing mailed.
+    const hash = s.hasher.hash.bind(s.hasher);
+    t.mock.method(s.hasher, 'hash', async (...args) => {
+        s.store.users.create({ username: 'Alice_1', email: 'first@example.com', passwordHash: 'x', emailVerified: true });
+        return hash(...args);
+    }, { times: 1 });
+    const lost = await s.request('POST', REG, { body: good() });
+    assert.deepEqual([lost.status, lost.json.error], [409, 'username_taken']);
+    // The retry, within 5 minutes, gets its link.
+    s.now.advance(60000);
+    assert.equal((await s.request('POST', REG, { body: good({ username: 'Alice_2' }) })).status, 202);
+    await s.mailer.idle();
+    assert.deepEqual(s.mailer.sent.map((m) => m.to), ['alice@example.com']);
+    assert.equal((await confirmPost(s, tokenOf(s.mailer.sent[0]))).status, 200);
+    assert.equal(s.store.users.byEmail('alice@example.com').username, 'Alice_2');
+});
+
 test('resend renews the link of a pending signup; it says nothing about the address', async (t) => {
     const s = await startTestServer();
     t.after(s.close);

@@ -2,10 +2,10 @@
 -- created only when the link mailed to its address is used; until then the signup waits here and
 -- holds its username for the life of the link, whether or not the address already has an account,
 -- so that nothing tells which addresses are registered. token_hash (SHA-256 of the link's token) is
--- NULL when no link was mailed: the address already has an account (its owner got a notice instead),
--- or a link was mailed for it less than 5 minutes before. One row per address: a new signup with the
--- same address replaces it. The retention purge deletes the expired rows, which frees their
--- usernames.
+-- NULL when the address already has an account (no link: its owner got a notice instead); the link
+-- of a new address is not mailed when one was mailed to it less than 5 minutes before. One row per
+-- address: a new signup with the same address replaces it. The retention purge deletes the expired
+-- rows, which frees their usernames.
 CREATE TABLE pending_signups (
     id               INTEGER PRIMARY KEY,
     username         TEXT    NOT NULL,
