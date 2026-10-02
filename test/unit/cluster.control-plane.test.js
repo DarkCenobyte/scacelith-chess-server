@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { AbuseTracker } from '../../src/cluster/abuse.js';
-import { ControlPlane } from '../../src/cluster/control-plane.js';
+import { ControlPlane, PAIR_RETRY_DELAY_MS } from '../../src/cluster/control-plane.js';
 import { Ipc, IpcTimeoutError, channelPair } from '../../src/cluster/ipc.js';
 import { OnceStore, SlidingWindowLimiter } from '../../src/cluster/limits.js';
 import { Presence } from '../../src/cluster/presence.js';
@@ -261,6 +261,7 @@ describe('control plane: matchmaking', () => {
         assert.deepEqual([mm.colorBalanceOf(1), mm.colorBalanceOf(2)], [0, 0], 'the failed game counts for nobody');
         cp.mmLeave({ userId: 1 }); cp.mmLeave({ userId: 2 });
         shards.create = null;
+        clock.advance(PAIR_RETRY_DELAY_MS);
         // Alice White in a challenge: Black in the next queue game.
         const c = cp.challengeCreate({ from: a, target: 'bob', baseSec: 300, incSec: 0, rated: false, color: enums.ColorPref.White });
         const acc = await cp.challengeAccept({ id: c.id, by: b });
@@ -285,7 +286,7 @@ describe('control plane: matchmaking', () => {
         cp.mmJoin({ ...b, category: '5+0', rated: true, rating: 1500 }, 1);
         shards.create = () => ({ error: E.Internal });
         for (let i = 0; i <= cfg.matchRepeatLimit; i++) {
-            clock.advance(250);
+            clock.advance(PAIR_RETRY_DELAY_MS);
             shards.clear();
             cp.matchTick();
             await tick();
@@ -293,11 +294,39 @@ describe('control plane: matchmaking', () => {
             assert.equal(mm.repeatCount(1, 2), 0);
         }
         shards.create = null;
-        clock.advance(250);
+        clock.advance(PAIR_RETRY_DELAY_MS);
         cp.matchTick();
         await tick();
         assert.equal(cp.activeGames.size, 2);
         assert.equal(mm.repeatCount(1, 2), 1);
+    });
+
+    it('a pairing whose game could not be created is not made again for PAIR_RETRY_DELAY_MS; other pairings go on', async () => {
+        const { cp, shards, clock, online } = setup({ realMatchmaker: true });
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1), c = online(3, 'carl', 1);
+        const players = (r) => [r.payload.spec.white.userId, r.payload.spec.black.userId].sort();
+        const round = async (ms) => {
+            clock.advance(ms);
+            shards.clear();
+            cp.matchTick();
+            await tick();
+            return shards.requests.filter((r) => r.type === 'game.create').map(players);
+        };
+        cp.mmJoin({ ...a, category: '5+0', rated: true, rating: 1500 }, 0);
+        cp.mmJoin({ ...b, category: '5+0', rated: true, rating: 1500 }, 1);
+        shards.create = () => ({ error: E.Internal });
+        assert.deepEqual(await round(250), [[1, 2]]);
+        assert.deepEqual([...cp.queued.keys()].sort(), [1, 2], 'both back in the queue');
+        assert.deepEqual(await round(250), [], 'not at the next tick');
+        assert.deepEqual(await round(PAIR_RETRY_DELAY_MS - 500), []);
+        assert.deepEqual(await round(250), [[1, 2]], 'again once the delay is over');
+        // Held, either of them takes another opponent at once.
+        cp.mmJoin({ ...c, category: '5+0', rated: true, rating: 1500 }, 1);
+        shards.create = null;
+        const [pair] = await round(250);
+        assert.equal(pair.length, 2);
+        assert.ok(pair.includes(3), `paired with carl: ${pair}`);
+        assert.equal(cp.activeGames.size, 2);
     });
 
     it('requeues both players when the host refuses the game', async () => {

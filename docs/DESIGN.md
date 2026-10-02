@@ -365,6 +365,7 @@ mm.join({ userId, username, category, rated, rating, provisional, shard, connId,
 mm.leave(userId) -> bool ; mm.has(userId) ; mm.statusOf(userId, now) -> QueueStatus fields
 mm.tick(now) -> [{ category, rated, white: entry, black: entry }]
 mm.recordPairing(a, b, now)  // repeat limit bookkeeping (the primary, once a rated queue game exists)
+mm.holdPair(a, b, until)     // a and b are not paired together before `until` (the primary, after their game could not be created)
 // challenges.js (primary)
 new Challenges({ config, now })
 ch.create({ from: {userId, username, rating, provisional, shard, connId}, target /* username | '' */, baseSec, incSec, rated, color }) -> { ok, challenge } | { error }

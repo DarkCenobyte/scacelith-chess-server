@@ -6,8 +6,9 @@
 //   * window(player) = min(MATCH_WINDOW_START + floor(wait / MATCH_WINDOW_STEP_MS) * MATCH_WINDOW_STEP,
 //                          MATCH_WINDOW_MAX) (+ MATCH_PROVISIONAL_BONUS when provisional)
 //   * A and B may be paired only when |rA - rB| <= window(A) AND <= window(B) (mutual rule), they
-//     are not in each other's `recentOpponents`, and (rated queues) they have not been paired for
-//     MATCH_REPEAT_LIMIT rated games within MATCH_REPEAT_WINDOW_MS.
+//     are not in each other's `recentOpponents`, the pair is not held (holdPair), and (rated
+//     queues) they have not been paired for MATCH_REPEAT_LIMIT rated games within
+//     MATCH_REPEAT_WINDOW_MS.
 //   * Each tick walks every queue from the longest-waiting player to the newest; each player still
 //     unpaired takes the valid partner with the closest rating (ties: the one who waited longer).
 //   * Colours: the player with the higher colour balance (whites minus blacks) gets Black; equal
@@ -40,15 +41,17 @@
 //     "already in a game" checks belong to the caller (the primary), before join().
 //   * tick() does not count its rated pairings toward the repeat limit: the caller does, with
 //     recordPairing(), once their game exists (a pairing whose game cannot be created counts
-//     nothing, and its players may be paired again at once).
+//     nothing; the primary holds it a few seconds with holdPair()).
 //   * join({ colorBalance }) overrides the balance tracked here; without it the matchmaker uses its
 //     own record, updated at each pairing (and by recordColors() for games made elsewhere).
 //   * join({ recentOpponents }) is an optional iterable of user ids the player must not be paired
 //     with (for instance from store.games.countBetween after a restart); it applies in both
 //     directions and in the queue it was given for.
-//   * Exclusions (recentOpponents, repeat limit) are skipped at most SCAN_CAP times per bucket list
-//     and search, which bounds a search even against a pathological exclusion list; a partner
-//     hidden behind more than that is found by its own search or at a later tick.
+//   * holdPair(a, b, until) keeps two users from being paired together before `until` (the
+//     primary holds a pairing whose game could not be created); tick() drops the holds that ended.
+//   * Exclusions (recentOpponents, held pairs, repeat limit) are skipped at most SCAN_CAP times per
+//     bucket list and search, which bounds a search even against a pathological exclusion list; a
+//     partner hidden behind more than that is found by its own search or at a later tick.
 //   * statusOf() returns null when the user is not queued.
 //   * A pairing's white/black are plain copies of the queue entries plus `waitMs`.
 
@@ -252,6 +255,7 @@ export class Matchmaker {
         this.byUser = new Map();         // userId -> Entry
         this.balances = new Map();       // userId -> whites minus blacks (non-zero only)
         this.pairCounts = new Map();     // pairKey -> rated pairings inside the repeat window
+        this.holds = new Map();          // pairKey -> time before which the pair is not made (holdPair)
         this.logKeys = [];               // pairings in time order (for expiry)
         this.logTimes = [];
         this.logHead = 0;
@@ -341,6 +345,7 @@ export class Matchmaker {
      */
     tick(now = this.now()) {
         this._expireRepeats(now);
+        if (this.holds.size !== 0) for (const [k, until] of this.holds) if (until <= now) this.holds.delete(k);
         const pairs = [];
         for (const q of this.queues.values()) {
             let a = q.head;
@@ -395,7 +400,7 @@ export class Matchmaker {
             let scanned = 0;
             while (b !== null && scanned < SCAN_CAP) {
                 if (b !== a) {
-                    if (!this._excluded(q, a, b)) {
+                    if (!this._excluded(q, a, b, now)) {
                         // Windows shrink along the list and d is the same for all of it: the first
                         // entry that is not excluded decides for the whole list.
                         if (d <= this._window(b, now) && (best === null || before(b, best))) best = b;
@@ -409,9 +414,13 @@ export class Matchmaker {
         return best;
     }
 
-    _excluded(q, a, b) {
+    _excluded(q, a, b, now) {
         if (a.recent !== null && a.recent.has(b.userId)) return true;
         if (b.recent !== null && b.recent.has(a.userId)) return true;
+        if (this.holds.size !== 0) {
+            const until = this.holds.get(pairKey(a.userId, b.userId));
+            if (until !== undefined && until > now) return true;
+        }
         if (q.rated && this.pairCounts.size !== 0) {
             const c = this.pairCounts.get(pairKey(a.userId, b.userId));
             if (c !== undefined && c >= this.repeatLimit) return true;
@@ -475,6 +484,17 @@ export class Matchmaker {
         this.pairCounts.set(key, (this.pairCounts.get(key) || 0) + 1);
         this.logKeys.push(key);
         this.logTimes.push(now);
+    }
+
+    /**
+     * Keeps two users from being paired together before `until`; their pairings with others are
+     * not affected.
+     * @param {number} a
+     * @param {number} b
+     * @param {number} until
+     */
+    holdPair(a, b, until) {
+        this.holds.set(pairKey(a, b), until);
     }
 
     /**

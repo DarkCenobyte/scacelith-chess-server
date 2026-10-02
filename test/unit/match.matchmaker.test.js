@@ -204,6 +204,23 @@ test('matchmaker: repeat limit for rated pairings, with expiry', () => {
     assert.deepEqual(n.tick(0), []);
 });
 
+test('matchmaker: a held pair is not made before its time, in any queue; other pairs are', () => {
+    const m = mm();
+    m.holdPair(2, 1, 5000);
+    for (const rated of [true, false]) {
+        m.join(player(1500, { userId: 1, rated }));
+        m.join(player(1500, { userId: 2, rated }));
+        assert.deepEqual(m.tick(4999), [], `rated ${rated}`);
+        m.join(player(1500, { userId: 3, rated }));
+        assert.deepEqual(m.tick(4999).map(ids), [[1, 3]]);
+        m.leave(2);
+    }
+    m.join(player(1500, { userId: 1 }));
+    m.join(player(1500, { userId: 2 }));
+    assert.deepEqual(m.tick(5000).map(ids), [[1, 2]]);
+    assert.equal(m.holds.size, 0, 'an ended hold is dropped');
+});
+
 test('matchmaker: recentOpponents exclusions apply both ways', () => {
     const m = mm();
     m.join(player(1500, { userId: 1, recentOpponents: [2] }));

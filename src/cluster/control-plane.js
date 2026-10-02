@@ -35,6 +35,9 @@
 // Colours: the matchmaker keeps each player's colour balance (DESIGN 5.4). A queue game counts at
 // its pairing (given back when the game cannot be created), any other game once it is created.
 //
+// A queue pairing whose game cannot be created puts both players back in the queue with their
+// waiting time, and the matchmaker does not pair the same two again for PAIR_RETRY_DELAY_MS.
+//
 // Notifications (QueueStatus, ChallengeReceived, ChallengeStatus, Notice) are encoded here and
 // written by the shard of the user's live connection ('conn.send'); waiting players get a fresh
 // QueueStatus every 3 s.
@@ -83,6 +86,10 @@ const CS = enums.ChallengeState;
 const CP = enums.ColorPref;
 const QUEUE_REFRESH_MS = 3000;
 const LOAD_STALE_MS = 10000;
+// A pairing whose game could not be created (a slow shard, or none) is not made again before this
+// long, so that the same two players do not hit a struggling cluster at every MATCH_TICK_MS; each
+// of them may be paired with someone else meanwhile.
+export const PAIR_RETRY_DELAY_MS = 5000;
 // Per player and minute: direct challenges withdrawn or declined (CHALLENGE_UNPLAYED_PER_MIN: each
 // one popped up on its target's screen, and no game came of it), and wrong private game codes tried
 // (PRIVATE_CODE_FAILURES_PER_MIN: a code must not be guessable).
@@ -494,6 +501,7 @@ export class ControlPlane {
             return;
         }
         this._recordColors(black.userId, white.userId);    // gives back the colours of the pairing
+        try { this.mm.holdPair?.(white.userId, black.userId, this.now() + PAIR_RETRY_DELAY_MS); } catch (e) { this.log?.error?.('mm.holdPair failed', { err: e }); }
         // Back to the queue with their original waiting time.
         for (const e of [white, black]) {
             const p = this.presence.get(e.userId);
