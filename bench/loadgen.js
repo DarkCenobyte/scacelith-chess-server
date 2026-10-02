@@ -197,13 +197,17 @@ async function main() {
     let srv = null;
     let target;
     const cleanup = [];
-    let cleaning = false;
-    const doCleanup = async () => {
-        if (cleaning) return;
-        cleaning = true;
+    // One cleanup, run once: a signal or a guard arriving while it runs waits for it to finish.
+    let cleaning = null;
+    const doCleanup = () => (cleaning ||= (async () => {
         for (const f of cleanup.reverse()) { try { await f(); } catch (e) { process.stderr.write(`cleanup: ${e.message}\n`); } }
-    };
-    process.on('SIGINT', () => { say('\ninterrupted: cleaning up'); doCleanup().then(() => process.exit(130)); });
+    })());
+    let interrupted = false;
+    process.on('SIGINT', () => {
+        if (interrupted) { say('\ninterrupted again: exiting now (the server may be left running)'); process.exit(130); }
+        interrupted = true;
+        say('\ninterrupted: cleaning up'); doCleanup().then(() => process.exit(130));
+    });
     process.on('SIGTERM', () => { doCleanup().then(() => process.exit(143)); });
     const safety = setTimeout(() => { process.stderr.write(`--max-run-s ${o.maxRunS} reached: aborting\n`); doCleanup().then(() => process.exit(3)); }, o.maxRunS * 1000);
     safety.unref();
@@ -577,6 +581,7 @@ async function main() {
         if (srv) process.stderr.write(`server log (tail):\n${srv.tail(40)}\n`);
         process.exitCode = 1;
     } finally {
+        clearTimeout(safety);
         await doCleanup();
     }
 }
