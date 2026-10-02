@@ -55,7 +55,7 @@ export function createGifPool({
 } = {}) {
     threads = Math.max(1, Math.floor(threads));
     queueMax = Math.max(0, Math.floor(queueMax));
-    const queue = [];             // { job, resolve, reject, timer, queuedAt }
+    const queue = [];             // { job, resolve, reject, timer }
     const slots = [];             // { worker, task, idleTimer }
     let nextId = 1;
     let closed = false;
