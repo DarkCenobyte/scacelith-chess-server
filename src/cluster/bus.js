@@ -393,6 +393,8 @@ export class Bus {
             if (avail < 4) { link.rest = Buffer.from(buf.subarray(off)); link.restNeed = 4; return true; }
             const len = buf.readUInt32LE(off);
             if (len < BUS_HEADER_BYTES - 4 || len > this.maxFrameBytes) { this._badLink(link, 'bad frame length'); return false; }
+            // The first frame is a Hello, of a known length: nothing longer is buffered before it is checked.
+            if (link.peer < 0 && len !== BUS_HEADER_BYTES - 4 + 2 + TOKEN_BYTES) { this._badLink(link, 'bad hello'); return false; }
             const total = 4 + len;
             if (avail < total) { link.rest = Buffer.from(buf.subarray(off)); link.restNeed = total; return true; }
             const kind = buf[off + 4];

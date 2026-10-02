@@ -104,6 +104,17 @@ describe('shard bus (unix sockets)', () => {
         assert.equal(gotB.length, 0);
     });
 
+    it('refuses a first frame longer than a hello as soon as its length arrives', async () => {
+        const s = net.connect(path.join(dir, 'bus-1.sock'));
+        await new Promise((r) => s.once('connect', r));
+        const len = Buffer.alloc(4);
+        len.writeUInt32LE(1 << 20, 0);                          // a 1 MiB frame, whose bytes never come
+        s.write(len);
+        const t0 = Date.now();
+        await new Promise((r) => s.once('close', r));
+        assert.ok(Date.now() - t0 < 2000, 'closed before the hello deadline (5 s)');
+    });
+
     it('queues while a peer is down and reconnects when it is back', async () => {
         await b.close();
         await waitFor(() => !a.stats().out.find((l) => l.peer === 1).connected);   // frames already in a dying socket are lost (at-most-once)
