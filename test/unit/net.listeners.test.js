@@ -258,6 +258,11 @@ function closedWithin(socket, ms) {
 }
 
 const waitUntil = (pred) => new Promise((resolve) => { const t = setInterval(() => { if (pred()) { clearInterval(t); resolve(); } }, 5); });
+// Like waitUntil, but gives up after `ms`: resolves whether the condition came true.
+const within = (pred, ms) => new Promise((resolve) => {
+    const t0 = Date.now();
+    const t = setInterval(() => { const ok = pred(); if (ok || Date.now() - t0 > ms) { clearInterval(t); resolve(ok); } }, 5);
+});
 
 describe('listeners: protection per address and slow clients', () => {
     async function setup(env = {}, o = {}) {
@@ -338,6 +343,52 @@ describe('listeners: protection per address and slow clients', () => {
             await waitUntil(() => waiting.length === 1);
             waiting[0].end('{}');
             assert.equal((await later).status, 200, 'the slots came back');
+        } finally { close(); }
+    });
+
+    // Node queues pipelined responses on their socket and gives it to each in turn; a queued response
+    // whose socket closes first never gets it and never emits 'close'. Its slot must come back anyway,
+    // or a few such connections lock the address out of the HTTP API until the worker restarts.
+    it('pipelined requests whose socket closes before their turn give their slots back (no Host, then 40 /healthz)', async () => {
+        const { port, guard, close } = await setup({ HTTP_RATE_PER_IP: '600' });
+        try {
+            // Node answers the request without Host itself (400, Connection: close) and never gives the
+            // socket to the 40 queued answers, which the wrapper has already admitted and ended.
+            const s = net.connect(port, '127.0.0.1');
+            s.on('error', () => {});
+            s.resume();
+            s.write('GET / HTTP/1.1\r\n\r\n' + 'GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n'.repeat(40));
+            assert.ok(await closedWithin(s, 2000), 'the server ended the connection after its 400');
+            await within(() => guard.inflightTotal === 0, 1000);
+            assert.deepEqual([...guard.inflight], [], 'no slot left counted for the address');
+            assert.equal((await get(port, '/healthz')).status, 200, 'the address is not locked out');
+        } finally { close(); }
+    });
+
+    it('pipelined requests to a slow handler: after the socket closes, each queued slot comes back when its handler ends', async () => {
+        const waiting = [];
+        const { port, guard, close } = await setup({ HTTP_RATE_PER_IP: '600' }, {
+            apiHandler: (req, res) => { waiting.push(res); },
+        });
+        try {
+            const s = net.connect(port, '127.0.0.1');
+            s.on('error', () => {});
+            s.write('GET /api/v1/slow HTTP/1.1\r\nHost: x\r\n\r\n'.repeat(4));
+            await waitUntil(() => waiting.length === 4);
+            assert.equal(guard.inflightTotal, 4);
+            s.destroy();
+            // The answer that held the socket closes with it; the 3 queued ones keep their slot while
+            // their handler works (a password hash in the queue), as a request in progress.
+            assert.ok(await within(() => guard.inflightTotal === 3, 2000), 'the answer that held the socket gave its slot back');
+            await new Promise((r) => setTimeout(r, 100));
+            assert.equal(guard.inflightTotal, 3, 'not released before the handlers end');
+            for (let i = 1; i < 4; i++) {
+                waiting[i].writeHead(200, { 'Content-Length': 2 });
+                waiting[i].end('{}');
+                assert.equal(guard.inflightTotal, 3 - i, `released when handler ${i} ended its answer`);
+            }
+            waiting[0].end('{}');
+            assert.deepEqual([...guard.inflight], []);
         } finally { close(); }
     });
 
