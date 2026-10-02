@@ -3,7 +3,8 @@
 // are committed by a store writer thread, src/store/writer.js), the protection per address
 // (net/ipguard.js, shared by the API handler and the listeners), the HTTPS API handler, then the
 // shard itself (bus, router, WebSocket server, listeners). Stops gracefully on
-// the primary's 'shutdown' message or SIGTERM, and at once if the primary disappears (Node's
+// the primary's 'shutdown' message or SIGTERM (a 'shutdown' that comes during the start-up stops it
+// once the journal is replayed, before it listens), and at once if the primary disappears (Node's
 // cluster module then exits the worker with code 0; the journal replay recovers everything but the
 // events of its last JOURNAL_FLUSH_MS); a graceful stop also closes the API handler (its GIF
 // rendering threads) before the journal and the store.
@@ -37,13 +38,17 @@ export async function shardConfig(primary) {
     return loadConfig({ env: snapshot, envFile: '' });
 }
 
-/** Starts this worker's shard. */
+/** Starts this worker's shard (null when the primary stopped it during the start-up). */
 export async function main() {
     const shard = Number(process.env.SHARD);
     const serverId = String(process.env.SCACELITH_SERVER_ID || '');
     if (!Number.isInteger(shard) || shard < 0 || shard > 63 || !serverId) throw new Error('worker started without SHARD / SCACELITH_SERVER_ID');
     const log = logger.child(`shard${shard}`);
     const primary = new Ipc(process, { log: log.child('ipc') });
+    // Kept until the end of the start-up (a journal replay can take seconds); startShard's handler
+    // replaces this one.
+    let stopRequested = false;
+    primary.on('shutdown', () => { stopRequested = true; return { ok: true }; });
     const config = await shardConfig(primary);
     configureLogging({ level: config.logLevel, format: config.logFormat, ipMode: config.logIp, secret: config.serverSecret, base: { inst: config.instanceId, shard } });
     process.on('uncaughtException', (e) => { log.error('uncaught exception: the shard restarts', { err: e }); process.exit(1); });
@@ -67,6 +72,21 @@ export async function main() {
     // ('game.recovered'), which gives it back to the players as their activeGame.
     const recovered = await host.recover();
     log.info('journal replayed', { games: recovered });
+    const close = async () => {
+        try { await journal.flush?.(); await journal.close?.(); } catch (e) { log.error('journal close failed', { err: e }); }
+        anticheat.close();   // its buffered anomalies reach the writer before its close
+        try { await writer.close(); } catch (e) { log.error('store writer close failed', { err: e }); }
+        try { store.close(); } catch (e) { log.error('store close failed', { err: e }); }
+        primary.flush();
+        setTimeout(() => process.exit(0), 50);
+    };
+    if (stopRequested) {
+        // Stopped before it listened: the games the replay ended are committed, as at a stop.
+        log.info('stopped during the start-up');
+        try { await host.shutdown(); } catch (e) { log.error('host shutdown failed', { err: e }); }
+        await close();
+        return null;
+    }
     const guard = createShardGuard({ config, primary, log: log.child('guard') });
     const apiHandler = createApiHandler({ config, store, auth, primary, anticheat, log: logger.child('http'), guard });
 
@@ -74,12 +94,7 @@ export async function main() {
         config, shard, serverId, primary, host, auth, anticheat, store, apiHandler, bus, log, guard,
         onStopped: async () => {
             await apiHandler.close();   // the GIF rendering threads (src/http/routes/gif.js)
-            try { await journal.flush?.(); await journal.close?.(); } catch (e) { log.error('journal close failed', { err: e }); }
-            anticheat.close();   // its buffered anomalies reach the writer before its close
-            try { await writer.close(); } catch (e) { log.error('store writer close failed', { err: e }); }
-            try { store.close(); } catch (e) { log.error('store close failed', { err: e }); }
-            primary.flush();
-            setTimeout(() => process.exit(0), 50);
+            await close();
         },
     });
     process.on('SIGTERM', () => { s.stop(config.shutdownGraceMs); });
