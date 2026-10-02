@@ -83,11 +83,9 @@ const CS = enums.ChallengeState;
 const CP = enums.ColorPref;
 const QUEUE_REFRESH_MS = 3000;
 const LOAD_STALE_MS = 10000;
-// Per player and minute: direct challenges withdrawn or declined (each one popped up on its
-// target's screen, and no game came of it), and wrong private game codes tried (a code must not be
-// guessable).
-const UNPLAYED_CHALLENGE_LIMIT = 5;
-const JOIN_CODE_FAILURE_LIMIT = 10;
+// Per player and minute: direct challenges withdrawn or declined (CHALLENGE_UNPLAYED_PER_MIN: each
+// one popped up on its target's screen, and no game came of it), and wrong private game codes tried
+// (PRIVATE_CODE_FAILURES_PER_MIN: a code must not be guessable).
 const PLAYER_LIMIT_WINDOW_MS = 60000;
 
 const u16 = (v) => Math.max(0, Math.min(65535, Math.round(+v || 0)));
@@ -522,7 +520,7 @@ export class ControlPlane {
         if (this._banned(from.userId, now)) return { error: E.Banned };
         let targetUser = null;
         if (target) {
-            if (this.limiter.peek(`challenge:u${from.userId}`) + 1 > UNPLAYED_CHALLENGE_LIMIT) return { error: E.ChallengeLimit };
+            if (this.limiter.peek(`challenge:u${from.userId}`) + 1 > this.config.challengeUnplayedPerMin) return { error: E.ChallengeLimit };
             const tid = this.presence.userIdByName(target);
             if (tid) {
                 let accepts = true;
@@ -564,12 +562,12 @@ export class ControlPlane {
     async challengeJoinCode({ code, by }) {
         if (this._busy(by.userId)) return { error: E.AlreadyInGame };
         const limitKey = `joincode:u${by.userId}`;
-        if (this.limiter.peek(limitKey) + 1 > JOIN_CODE_FAILURE_LIMIT) return { error: E.RateLimited };
+        if (this.limiter.peek(limitKey) + 1 > this.config.privateCodeFailuresPerMin) return { error: E.RateLimited };
         let r;
         try { r = this.ch.joinCode(code, by, this.now()); } catch (e) { this.log?.error?.('challenge.joinCode failed', { err: e }); return { error: E.Internal }; }
         if (!r || r.error || !r.challenge) {
             const error = r && r.error ? toErrorCode(r.error) : E.CodeInvalid;
-            if (error === E.CodeInvalid) this.limiter.take({ key: limitKey, limit: JOIN_CODE_FAILURE_LIMIT, windowMs: PLAYER_LIMIT_WINDOW_MS });
+            if (error === E.CodeInvalid) this.limiter.take({ key: limitKey, limit: this.config.privateCodeFailuresPerMin, windowMs: PLAYER_LIMIT_WINDOW_MS });
             return { error };
         }
         return this._startChallengeGame(r.challenge, r.game, by);
@@ -628,10 +626,10 @@ export class ControlPlane {
         return { ok: true };
     }
 
-    // A direct challenge withdrawn or declined counts toward its creator's UNPLAYED_CHALLENGE_LIMIT:
+    // A direct challenge withdrawn or declined counts toward its creator's CHALLENGE_UNPLAYED_PER_MIN:
     // create/cancel cycles cannot flood a target with popups.
     _unplayed(c) {
-        this.limiter.take({ key: `challenge:u${c.from.userId}`, limit: UNPLAYED_CHALLENGE_LIMIT, windowMs: PLAYER_LIMIT_WINDOW_MS });
+        this.limiter.take({ key: `challenge:u${c.from.userId}`, limit: this.config.challengeUnplayedPerMin, windowMs: PLAYER_LIMIT_WINDOW_MS });
     }
 
     /** Expires challenges and private codes, and tells both sides. */

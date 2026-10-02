@@ -29,8 +29,9 @@ load processes and deletes the temporary directory.
 **Its own server** (default). A temporary data directory on the normal disk (the journal fsyncs and
 the SQLite commits are real), a self-signed ECDSA P-256 certificate made with the `openssl` command,
 free ports on 127.0.0.1, `WORKERS` from `--workers` (auto: the number of cores, more when the
-open-file limit requires it, see below), proof of work off, per-IP limits and `MAX_CONNECTIONS`
-raised to 1,000,000, mail to the log, `LOG_LEVEL=warn`. The burst scenario also raises
+open-file limit requires it, see below), proof of work off, per-IP limits, the challenge limits
+(`CHALLENGE_UNPLAYED_PER_MIN`, `PRIVATE_CODE_FAILURES_PER_MIN`) and `MAX_CONNECTIONS` raised to
+1,000,000, mail to the log, `LOG_LEVEL=warn`. The burst scenario also raises
 `WS_MSG_RATE`/`WS_MSG_BURST` to 1000/2000 (the defaults, 20/40 messages per second per connection,
 would throttle a player who moves without thinking). `--server-env K=V` sets anything else,
 `--reuse-port` sets `LISTEN_REUSE_PORT=true`, `--plain` runs without TLS (`TLS_MODE=off`, to measure

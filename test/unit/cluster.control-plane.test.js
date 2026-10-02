@@ -422,6 +422,23 @@ describe('control plane: challenges', () => {
         assert.equal((await cp.challengeJoinCode({ code: r2.code, by: e })).ok, true);
     });
 
+    it('both limits are settings: CHALLENGE_UNPLAYED_PER_MIN (5) and PRIVATE_CODE_FAILURES_PER_MIN (10), at least 1', async () => {
+        assert.deepEqual([cfg.challengeUnplayedPerMin, cfg.privateCodeFailuresPerMin], [5, 10]);
+        for (const k of ['CHALLENGE_UNPLAYED_PER_MIN', 'PRIVATE_CODE_FAILURES_PER_MIN']) {
+            assert.throws(() => testConfig({ [k]: '0' }), new RegExp(`${k}: at least 1`));
+            assert.throws(() => testConfig({ [k]: 'many' }), new RegExp(`${k}: integer expected`));
+        }
+        const { cp, online } = setup({ config: testConfig({ CHALLENGE_UNPLAYED_PER_MIN: '2', PRIVATE_CODE_FAILURES_PER_MIN: '3' }) });
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1);
+        for (let i = 0; i < 2; i++) {
+            const c = cp.challengeCreate({ from: a, target: 'bob', baseSec: 60, incSec: 0, rated: false });
+            assert.deepEqual(cp.challengeCancel({ id: c.id, userId: 1 }), { ok: true });
+        }
+        assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', baseSec: 60, incSec: 0, rated: false }), { error: E.ChallengeLimit });
+        for (let i = 0; i < 3; i++) assert.deepEqual(await cp.challengeJoinCode({ code: 'XXXXXX', by: b }), { error: E.CodeInvalid });
+        assert.deepEqual(await cp.challengeJoinCode({ code: 'XXXXXX', by: b }), { error: E.RateLimited });
+    });
+
     it('private game: a code, joined by anyone with it', async () => {
         const { cp, shards, online } = setup();
         const a = online(1, 'alice', 0), c = online(3, 'carl', 1);
