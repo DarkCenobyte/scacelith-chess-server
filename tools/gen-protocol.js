@@ -6,8 +6,9 @@
 //   docs/PROTOCOL.md            the protocol reference (generated tables + the prose templates below)
 //
 // and then runs tools/gen-protocol-vectors.js (golden vectors) and, when present,
-// tools/gen-protocol-cpp.js (the game client's C++ codec), so `npm run gen:protocol` refreshes
-// every generated protocol file.
+// tools/gen-protocol-cpp.js (the game client's C++ codec) and tools/gen-cpp-test-vectors.js (its
+// test vectors, tests/data/net-protocol-vectors.json), so `npm run gen:protocol` refreshes every
+// generated protocol file.
 //
 //   node tools/gen-protocol.js           write the generated files
 //   node tools/gen-protocol.js --check   exit 1 when a committed generated file differs from what
@@ -1534,6 +1535,7 @@ async function main(argv) {
     // Vectors are built with the codec on disk: in --check mode a stale codec already failed above.
     if (runChild('gen-protocol-vectors.js', childArgs)) status = 1;
     if (runChild('gen-protocol-cpp.js', childArgs)) status = 1;
+    if (runChild('gen-cpp-test-vectors.js', childArgs)) status = 1;
     return status;
 }
 

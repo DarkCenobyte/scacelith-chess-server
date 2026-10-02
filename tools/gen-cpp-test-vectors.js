@@ -2,6 +2,9 @@
 // Protocol test vectors for the game client's unit tests (tests/net_tests.cpp).
 //
 //   node dedicated-server/tools/gen-cpp-test-vectors.js   writes ../tests/data/net-protocol-vectors.json
+//   node dedicated-server/tools/gen-cpp-test-vectors.js --check   exits 1 when that file is stale
+//
+// (`npm run gen:protocol` runs it after the C++ codec generator.)
 //
 // Every vector comes from the JavaScript codec (src/protocol/index.js), so the C++ codec is
 // checked against it byte for byte:
@@ -262,6 +265,14 @@ const out = {
     malformed,
     fnv1a32,
 };
-fs.mkdirSync(path.dirname(outPath), { recursive: true });
-fs.writeFileSync(outPath, JSON.stringify(out, null, 1) + '\n');
-console.log(`wrote ${path.relative(process.cwd(), outPath)}: ${valid.length} valid, ${malformed.length} malformed, ${fnv1a32.length} fnv1a32`);
+const text = JSON.stringify(out, null, 1) + '\n';
+const current = fs.existsSync(outPath) ? fs.readFileSync(outPath, 'utf8') : null;
+const rel = path.relative(process.cwd(), outPath);
+if (process.argv.includes('--check')) {
+    if (current !== text) { console.error(`${rel} is stale: run npm run gen:protocol`); process.exitCode = 1; }
+} else if (current === text) console.log(`${rel} up to date`);
+else {
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, text);
+    console.log(`wrote ${rel}: ${valid.length} valid, ${malformed.length} malformed, ${fnv1a32.length} fnv1a32`);
+}
