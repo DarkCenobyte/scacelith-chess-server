@@ -27,7 +27,7 @@ function scrub(v, depth = 0) {
     if (typeof v === 'string') {
         // Masked before the cut (a token across the cut is masked too); the window bounds the cost.
         const s = (v.length > 4096 ? v.slice(0, 4096) : v).replace(TOKEN_LIKE, '$1_[redacted]');
-        return s.length > 2000 ? s.slice(0, 2000) + '…' : s;
+        return s.length > 2000 || v.length > 4096 ? s.slice(0, 2000) + '…' : s;
     }
     if (typeof v !== 'object') return v;
     if (depth > 4) return '[depth]';

@@ -118,14 +118,16 @@ test('long strings are masked before they are cut; fields never replace the reco
     log.info('long', { detail: 'x ' + tok + ' ' + 'y'.repeat(2100) });
     log.error('err', { err: new Error('failed for ' + tok + ' ' + 'z'.repeat(2100)) });
     log.info('edge', { detail: 'w '.repeat(995) + tok });           // the token straddles the cut
+    log.info('shrunk', { detail: (tok + ' ').repeat(100) });        // masking shrinks the window below 2000
     log.warn('x', { level: 3, msg: 'y', c: 'other', t: 0, n: 1 });
     const lines = capturedLogs.slice(start).map((l) => JSON.parse(l));
-    assert.equal(lines.length, 4);
-    for (const l of lines.slice(0, 3)) assert.ok(!JSON.stringify(l).includes('sct_QQQQ'), `token leaked: ${l.msg}`);
+    assert.equal(lines.length, 5);
+    for (const l of lines.slice(0, 4)) assert.ok(!JSON.stringify(l).includes('sct_QQQQ'), `token leaked: ${l.msg}`);
     assert.ok(lines[0].detail.includes('sct_[redacted]') && lines[0].detail.endsWith('…') && lines[0].detail.length === 2001);
     assert.ok(lines[1].err.message.includes('sct_[redacted]'));
     assert.ok(lines[2].detail.endsWith('sct_[redac…'));
-    const r = lines[3];
+    assert.ok(lines[3].detail.length < 2000 && lines[3].detail.endsWith('…'), 'a cut string is always marked');
+    const r = lines[4];
     assert.deepEqual([r.level, r.msg, r.c, typeof r.t, r.n], ['warn', 'x', 'logtest', 'string', 1]);
     assert.deepEqual(Object.keys(r).slice(0, 4), ['t', 'level', 'c', 'msg'], 'the record keys keep their place');
 });
