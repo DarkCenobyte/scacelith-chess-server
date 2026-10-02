@@ -470,8 +470,8 @@ export function tlsOptions(config) {
 }
 
 /**
- * A small JSON answer with the security headers of the API (the answers given before the API
- * handler: health, refusals of the protection per address).
+ * A small JSON answer with most of the API's security headers (no Cross-Origin-Resource-Policy;
+ * the answers given before the API handler: health, refusals of the protection per address).
  * @param {import('node:http').ServerResponse} res
  * @param {number} status
  * @param {object} body
