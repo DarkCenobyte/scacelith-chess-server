@@ -77,3 +77,30 @@ test('writer thread: a rated game is committed with its ratings; errors keep the
         fs.rmSync(dir, { recursive: true, force: true });
     }
 });
+
+test('close(): the requests the thread has not answered when the close times out are rejected, not left pending', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-writer-'));
+    const config = testConfig({ DB_PATH: path.join(dir, 'scacelith.db'), DATA_DIR: dir });
+    const store = openStore(config, { applyGame, log: silentLog });
+    migrate(store);
+    store.close();
+    // Another connection holds the write lock: each commit waits busy_timeout (5 s) for it, so the
+    // second one is still waiting when the close times out (5 s).
+    const raw = new DatabaseSync(config.dbPath);
+    raw.exec('BEGIN IMMEDIATE');
+    const writer = startStoreWriter({ config, logging: false });
+    try {
+        const outcome = (p) => p.then(() => 'resolved', (e) => e.message);
+        const first = outcome(writer.finishBatch([{ id: 9001, status: 99 }]));
+        let second = 'pending';
+        outcome(writer.finishBatch([{ id: 9002, status: 99 }])).then((o) => { second = o; });
+        await writer.close();
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(second, 'store writer closed before answering (outcome unknown)');
+        assert.match(await first, /closed before answering|locked/);
+    } finally {
+        raw.exec('ROLLBACK');
+        raw.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});

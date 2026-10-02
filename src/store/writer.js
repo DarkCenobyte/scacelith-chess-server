@@ -67,6 +67,10 @@ if (!isMainThread && parentPort && workerData && workerData.scacelithStoreWriter
 export function startStoreWriter({ config, shard = 0, logging = true, log = null }) {
     const waiting = new Map();
     let next = 1, w = null, closing = null;
+    const rejectAll = (e) => {
+        for (const p of waiting.values()) p.reject(e);
+        waiting.clear();
+    };
 
     // The thread is started on first use and again after it died (the failed batches are rejected:
     // GameHost retries them with backoff, and the games stay journaled meanwhile).
@@ -75,8 +79,7 @@ export function startStoreWriter({ config, shard = 0, logging = true, log = null
         const fail = (e) => {
             if (w !== t) return;
             w = null;
-            for (const p of waiting.values()) p.reject(e);
-            waiting.clear();
+            rejectAll(e);
             if (closing) closing();
             else log?.error?.('store writer thread failed; restarted on the next commit', { err: e });
         };
@@ -118,11 +121,17 @@ export function startStoreWriter({ config, shard = 0, logging = true, log = null
         insertAnomalies: (rows) => send('anomalies', rows),
         sanction: (s) => send('sanction', s),
         // Closes the thread's database connection after the batches already sent, then the thread.
+        // The requests it has not answered within the 5 s are rejected: they may have been
+        // carried out or not.
         close() {
             const t = w;
             if (!t) { closing = () => {}; return Promise.resolve(); }
             return new Promise((resolve) => {
-                const done = () => { clearTimeout(timer); closing = () => {}; w = null; t.terminate().finally(resolve); };
+                const done = () => {
+                    clearTimeout(timer); closing = () => {};
+                    rejectAll(new Error('store writer closed before answering (outcome unknown)'));
+                    w = null; t.terminate().finally(resolve);
+                };
                 const timer = setTimeout(done, 5000);
                 closing = done;
                 t.postMessage({ close: true });
