@@ -97,7 +97,6 @@ import { BusKind, BusOp } from './bus.js';
 
 const E = enums.ErrorCode;
 const N = enums.NoticeCode;
-export const CLOSE_SERVER_FULL = CloseCode.ServerFull;
 const DIR_C2S = Object.freeze({ dir: 'c2s' });
 const MAX_PENDING_HELLO = 8;
 /** How long a server-full refusal ('global') keeps this worker in the server-full state (isFull). */
@@ -797,7 +796,7 @@ export class Router {
         if (r.error) {
             const code = toErrorCode(r.error);
             if (code === E.Banned) { this._banned(conn, r.until || 0); return; }
-            if (code === E.ServerFull) { this._hello.labels('server_full').inc(); this._fatal(conn, 1, E.ServerFull, CLOSE_SERVER_FULL); return; }
+            if (code === E.ServerFull) { this._hello.labels('server_full').inc(); this._fatal(conn, 1, E.ServerFull, CloseCode.ServerFull); return; }
             this._hello.labels('refused').inc();
             this._fatal(conn, 1, code, CloseCode.Policy);
             return;
