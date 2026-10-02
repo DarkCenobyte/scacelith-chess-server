@@ -216,6 +216,25 @@ describe('router: hello', () => {
         assert.equal(env.seen.find((x) => x.type === 'presence.release').p.userId, 1);
     });
 
+    it('runs a game.attach and a conn.send that come with the presence.claim reply after the Welcome', async () => {
+        // The primary posts them in the turn it answers the claim: one batch, dispatched before
+        // the hello resumes.
+        const gameId = new GameIdAllocator(0).next();
+        let env, sent = null;
+        env = await setup({ primaryHandlers: { 'presence.claim': (p) => {
+            env.primary.notify('game.attach', { gameId, userId: 1, connId: p.connId });
+            sent = env.primary.request('conn.send', { connId: p.connId, frames: [encode.Notice({ code: N.Motd, arg: 7 })] });
+            return { ok: true, activeGame: 0 };
+        } } });
+        const c = await env.connect();
+        c.hello();
+        assert.equal((await c.recv()).name, 'Welcome');
+        const n = await c.recv();
+        assert.deepEqual([n.name, n.code, n.arg], ['Notice', N.Motd, 7]);
+        assert.deepEqual(await sent, { ok: true });
+        assert.deepEqual(env.host.of('attach').map((x) => [x[1], x[2]]), [[gameId, 1]]);
+    });
+
     it('closes 4006 when the server is full', async () => {
         const env = await setup({ claim: { error: 'ServerFull' } });
         const c = await env.connect();

@@ -844,6 +844,14 @@ export class Router {
         if (pending) for (const b of pending) { if (conn.state !== 'ready') break; this._onMessage(conn, b); }
     }
 
+    // A connection whose presence.claim reply is on its way: the primary sends a game.attach or a
+    // conn.send for it only after the claim, so they can come in the same batch as the reply,
+    // which the hello handles in microtasks after the batch. They run on the next turn, once the
+    // connection is ready (Welcome first) or closed.
+    _awaitingWelcome(conn) { return !!conn && conn.state === 'hello' && !!conn.ctx?.helloStarted && !!conn.userId; }
+
+    _afterHello(fn) { return new Promise((resolve) => setImmediate(() => resolve(fn()))); }
+
     _banned(conn, until) {
         this._hello.labels('banned').inc();
         this._fatal(conn, 1, E.Banned, CloseCode.Banned, [encode.Notice({ code: N.Banned, arg: until || 0 })]);
@@ -854,10 +862,11 @@ export class Router {
     /**
      * Binds a connection of this shard to a game (primary 'game.attach', or the active game at
      * Welcome). The host sends the snapshot.
-     * @returns {{ ok: boolean }}
+     * @returns {{ ok: boolean } | Promise<{ ok: boolean }>} a promise before the Welcome (_afterHello)
      */
-    attach(gameId, userId, connId) {
+    attach(gameId, userId, connId, again = false) {
         const conn = this.conns.get(connId);
+        if (!again && this._awaitingWelcome(conn) && conn.userId === userId) return this._afterHello(() => this.attach(gameId, userId, connId, true));
         if (!conn || conn.userId !== userId || conn.state !== 'ready' || !isGameId(gameId)) return { ok: false };
         const c = conn.ctx;
         if (!c.games) c.games = new Set();
@@ -991,8 +1000,9 @@ export class Router {
      * written: a frame refused on the way (the connection closed as a slow consumer) answers
      * { ok: false }, so that a sender waiting for the reply (the refund notices) tries again later.
      */
-    sendTo(connId, frames) {
+    sendTo(connId, frames, again = false) {
         const conn = this.conns.get(connId);
+        if (!again && this._awaitingWelcome(conn)) return this._afterHello(() => this.sendTo(connId, frames, true));
         if (!conn || conn.state !== 'ready') return { ok: false };
         let ok = true;
         for (const f of frames || []) ok = conn.sendFrame(f) && ok;
