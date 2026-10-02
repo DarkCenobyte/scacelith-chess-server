@@ -144,6 +144,8 @@
 //       reports.resolveOpenFor(reportedId, category, outcome, by, now) -> [ids]: every open report
 //         of that category against the player resolved in one statement (forReported returns only
 //         the newest 200: bin/admin.js integrity confirm / clear).
+//       reports.countFor(reportedId) -> { total, open }: the number of reports against the player
+//         and of those still open (bin/admin.js user show; forReported returns only the newest 200).
 //       explainQueryPlan(store, sql, params) (module export): the EXPLAIN QUERY PLAN rows of a
 //         statement on the store's own connection (tests and diagnostics).
 
@@ -1428,6 +1430,12 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             const r = st(`SELECT coalesce(sum(weight), 0) AS total, coalesce(sum(CASE WHEN weight < ?3 THEN weight END), 0) AS low
                 FROM reports WHERE reported_id = ?1 AND created_at >= ?2`).get(reportedId, ms(since), +lowThreshold);
             return { total: r.total, low: r.low };
+        },
+        /** Number of reports against the player, and of those still open. */
+        countFor(reportedId) {
+            const r = st(`SELECT count(*) AS total, count(CASE WHEN status = 'open' THEN 1 END) AS open
+                FROM reports WHERE reported_id = ?`).get(reportedId);
+            return { total: r.total, open: r.open };
         },
         /** Resolves every open report of `category` against the player in one statement; returns their ids. */
         resolveOpenFor(reportedId, category, outcome, by = null, now = Date.now()) {

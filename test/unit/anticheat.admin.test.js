@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import { testConfig } from '../../src/config.js';
 import { runAdmin, parseArgs, COMMANDS } from '../../src/anticheat/admin.js';
 import { createFakeStore } from '../../src/anticheat/testing/fake-store.js';
+import { reviewPriority } from '../../src/anticheat/reports.js';
 import { openStore, migrate } from '../../src/store/index.js';
 import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
@@ -260,6 +261,31 @@ test('integrity confirm / clear resolve every open cheating report, not only tho
     assert.equal(conf.json.reportsActioned, 20);
     assert.deepEqual(open(bob), []);
     assert.equal(store.reports.forReporter(ann, 1000).filter((r) => r.reportedId === bob && r.outcome === 'actioned').length, 20);
+});
+
+test('user show, integrity list / show and reports list count and weigh every report, not only the newest 200', async (t) => {
+    const store = openStore(testConfig({ DB_PATH: ':memory:' }));
+    t.after(() => store.close());
+    migrate(store);
+    const bob = store.users.create({ username: 'bob', email: 'bob@example.org' });
+    const ann = store.users.create({ username: 'ann', email: 'ann@example.org' });
+    store.integrity.set(bob, { level: 'suspected', score: 2, evidence: {}, updatedAt: NOW });
+    // One open report older than 30 days, then 250 of weight 0.1 (25 in all): the 30 oldest open.
+    store.reports.create({ reporterId: ann, reportedId: bob, gameId: 1, category: 'cheating', comment: '', weight: 1, at: NOW - 40 * 86400000 });
+    for (let i = 0; i < 250; i++) {
+        const id = store.reports.create({ reporterId: ann, reportedId: bob, gameId: 100 + i, category: 'cheating', comment: '', weight: 0.1, at: NOW - 20 * 86400000 + i * 60000 });
+        if (i >= 30) store.reports.resolve(id, 'dismissed', 'mod', NOW);
+    }
+    const priority = reviewPriority({ level: 'suspected', score: 2, reportWeight: 25 });
+    const user = await run(store, ['user', 'show', 'bob', '--json']);
+    assert.equal(user.code, 0, user.err);
+    assert.deepEqual(user.json.reports, { total: 251, open: 31, weight30d: 25 });
+    assert.match((await run(store, ['user', 'show', 'bob'])).out, /reports received: 251 \(31 open\)/);
+    const list = await run(store, ['integrity', 'list', '--json']);
+    assert.deepEqual(list.json.map((r) => [r.username, r.reports30d, r.priority]), [['bob', 25, priority]]);
+    assert.equal((await run(store, ['integrity', 'show', 'bob', '--json'])).json.priority, priority);
+    const open = await run(store, ['reports', 'list', '--json']);
+    assert.deepEqual(open.json.map((r) => [r.username, r.open, r.weight, r.priority]), [['bob', 31, 4, priority]]);
 });
 
 test('bench-accounts: refused without the test-server flag; creates verified accounts with sessions', async (t) => {

@@ -164,6 +164,25 @@ function reportsAgainst(ctx, userId) {
 
 function isOpen(r) { return !(r.outcome ?? r.resolution ?? r.resolvedAt ?? r.resolved_at); }
 
+// Summed weight of the reports received in the last 30 days: over every report when the store
+// sums them (weightSince), otherwise over the newest ones that forReported returns.
+function reportWeight30d(ctx, userId, received = null) {
+    const now = ctx.now();
+    if (typeof ctx.store.reports?.weightSince === 'function') {
+        try { return Math.round(ctx.store.reports.weightSince(userId, now - 30 * DAY_MS, 0).total * 1000) / 1000; } catch { /* the list below */ }
+    }
+    return recentReportWeight(received ?? reportsAgainst(ctx, userId), now, 30);
+}
+
+// Reports received and the open ones: every report when the store counts them (countFor).
+function reportCounts(ctx, userId) {
+    if (typeof ctx.store.reports?.countFor === 'function') {
+        try { return ctx.store.reports.countFor(userId); } catch { /* the list below */ }
+    }
+    const rep = reportsAgainst(ctx, userId);
+    return { total: rep.length, open: rep.filter(isOpen).length };
+}
+
 // Every open cheating report, not only those among the newest reports that forReported returns.
 function resolveOpenCheatingReports(ctx, userId, outcome) {
     return ctx.store.reports.resolveOpenFor(userId, 'cheating', outcome, ctx.moderator, ctx.now()).length;
@@ -186,12 +205,11 @@ function userShow(ctx) {
         && (!x.idleExpiresAt || x.idleExpiresAt > now)).length;
     const anomalies = { info: 0, suspicious: 0, certain: 0 };
     for (const a of safe(() => s.anomalies.forUser(u.id, 1000), [])) if (a.severity in anomalies) anomalies[a.severity]++;
-    const rep = reportsAgainst(ctx, u.id);
     const data = {
         user: publicUser(u), ratings, activeBan, sanctions,
         integrity: { level: integ.level, score: integ.score, updatedAt: integ.updatedAt, reviewedBy: integ.reviewedBy },
         activeSessions: sessions, anomalies,
-        reports: { total: rep.length, open: rep.filter(isOpen).length, weight30d: recentReportWeight(rep, now, 30) },
+        reports: { ...reportCounts(ctx, u.id), weight30d: reportWeight30d(ctx, u.id) },
     };
     let t = `User ${u.username} (#${u.id})  ${u.status || 'active'}\n`;
     t += `  e-mail ${u.email || '-'} (${u.emailVerified ? 'verified' : 'NOT verified'}), MFA ${u.mfaEnabled ? 'on' : 'off'}\n`;
@@ -265,11 +283,10 @@ function integrityList(ctx) {
     const level = ctx.args.flags.level === undefined ? 'suspected' : String(ctx.args.flags.level);
     if (!LEVELS.includes(level) || level === 'none') throw new AdminError('--level must be suspected, high_confidence or confirmed');
     const limit = intFlag(ctx, 'limit', { min: 1, max: 10000, def: 50 });
-    const now = ctx.now();
     const rows = (ctx.store.integrity.listFlagged(level, limit) || []).map((r) => {
         const userId = r.userId ?? r.user_id;
         const u = safe(() => ctx.store.users.byId(userId), null);
-        const w = recentReportWeight(reportsAgainst(ctx, userId), now, 30);
+        const w = reportWeight30d(ctx, userId);
         const ev = parseMaybeJson(r.evidence, {}) || {};
         return {
             userId, username: u?.username ?? `#${userId}`, level: r.level, score: Number(r.score) || 0,
@@ -284,7 +301,7 @@ function integrityList(ctx) {
 
 function integrityShow(ctx) {
     const u = requireUser(ctx, ctx.args.positional[2]);
-    const s = ctx.store, now = ctx.now();
+    const s = ctx.store;
     const integ = readIntegrity(s, u.id);
     const ev = integ.evidence || {};
     const games = [];
@@ -295,7 +312,7 @@ function integrityShow(ctx) {
     const anomalies = safe(() => s.anomalies.forUser(u.id, 50), []).map((a) => ({ ...a, detail: parseMaybeJson(a.detail, a.detail) }));
     const reports = reportsAgainst(ctx, u.id);
     const sanctions = safe(() => s.sanctions.list(u.id), []);
-    const priority = reviewPriority({ level: integ.level, score: integ.score, reportWeight: recentReportWeight(reports, now, 30) });
+    const priority = reviewPriority({ level: integ.level, score: integ.score, reportWeight: reportWeight30d(ctx, u.id, reports) });
     const data = { user: publicUser(u), integrity: integ, priority, games, anomalies, reports, sanctions };
     const st = ev.statistics;
     let t = `Integrity of ${u.username} (#${u.id}): ${integ.level}, score ${integ.score.toFixed(2)}, review priority ${priority}\n`;
@@ -420,7 +437,6 @@ function integrityClear(ctx) {
 
 function reportsList(ctx) {
     const limit = intFlag(ctx, 'limit', { min: 1, max: 10000, def: 100 });
-    const now = ctx.now();
     const groups = new Map();
     for (const r of ctx.store.reports.listOpen(limit) || []) {
         const id = r.reportedId ?? r.reported_id;
@@ -433,7 +449,7 @@ function reportsList(ctx) {
     for (const g of groups.values()) {
         const u = safe(() => ctx.store.users.byId(g.reportedId), null);
         const integ = readIntegrity(ctx.store, g.reportedId);
-        const w30 = recentReportWeight(reportsAgainst(ctx, g.reportedId), now, 30) || g.weight;
+        const w30 = reportWeight30d(ctx, g.reportedId) || g.weight;
         rows.push({
             reportedId: g.reportedId, username: u?.username ?? `#${g.reportedId}`, level: integ.level, score: integ.score,
             priority: reviewPriority({ level: integ.level, score: integ.score, reportWeight: w30 }),

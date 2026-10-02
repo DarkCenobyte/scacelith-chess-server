@@ -210,6 +210,10 @@ export function createFakeStore({ textColumns = false } = {}) {
                 r.outcome = outcome; r.resolvedBy = by; r.resolvedAt = now;
                 return true;
             },
+            countFor(reportedId) {
+                const mine = reports.filter((r) => r.reportedId === reportedId);
+                return { total: mine.length, open: mine.filter((r) => !r.outcome).length };
+            },
             resolveOpenFor(reportedId, category, outcome, by, now) {
                 const open = reports.filter((r) => r.reportedId === reportedId && r.category === category && !r.outcome);
                 for (const r of open) { r.outcome = outcome; r.resolvedBy = by; r.resolvedAt = now; }
