@@ -7,7 +7,7 @@
 //                          MATCH_WINDOW_MAX) (+ MATCH_PROVISIONAL_BONUS when provisional)
 //   * A and B may be paired only when |rA - rB| <= window(A) AND <= window(B) (mutual rule), they
 //     are not in each other's `recentOpponents`, the pair is not held (holdPair), and (rated
-//     queues) they have not been paired for MATCH_REPEAT_LIMIT rated games within
+//     queues) they have not played MATCH_REPEAT_LIMIT rated games together within
 //     MATCH_REPEAT_WINDOW_MS.
 //   * Each tick walks every queue from the longest-waiting player to the newest; each player still
 //     unpaired takes the valid partner with the closest rating (ties: the one who waited longer).
@@ -41,7 +41,9 @@
 //     "already in a game" checks belong to the caller (the primary), before join().
 //   * tick() does not count its rated pairings toward the repeat limit: the caller does, with
 //     recordPairing(), once their game exists (a pairing whose game cannot be created counts
-//     nothing; the primary holds it a few seconds with holdPair()).
+//     nothing; the primary holds it a few seconds with holdPair()). The primary counts the rated
+//     games made outside the queue too (challenges, private codes, rematches), and refuses them
+//     past the limit (repeatLimited()).
 //   * join({ colorBalance }) overrides the balance tracked here; without it the matchmaker uses its
 //     own record, updated at each pairing (and by recordColors() for games made elsewhere).
 //   * join({ recentOpponents }) is an optional iterable of user ids the player must not be paired
@@ -470,9 +472,9 @@ export class Matchmaker {
     }
 
     /**
-     * Counts one rated game between two users for the repeat limit. The primary calls it once the
-     * game of a rated pairing of tick() exists; games made outside the matchmaker (challenges,
-     * rematches) are not counted.
+     * Counts one rated game between two users for the repeat limit. The primary calls it once a
+     * rated game exists, whatever made it (a pairing of tick(), a challenge, a private code, a
+     * rematch).
      * @param {number|{userId:number}} a
      * @param {number|{userId:number}} b
      * @param {number} [now]
@@ -498,7 +500,7 @@ export class Matchmaker {
     }
 
     /**
-     * Rated pairings of two users inside the repeat window.
+     * Rated games of two users inside the repeat window.
      * @param {number} a
      * @param {number} b
      * @param {number} [now]
@@ -506,6 +508,19 @@ export class Matchmaker {
     repeatCount(a, b, now = this.now()) {
         this._expireRepeats(now);
         return this.pairCounts.get(pairKey(a, b)) || 0;
+    }
+
+    /**
+     * Whether two users played MATCH_REPEAT_LIMIT rated games together inside the repeat window:
+     * tick() no longer pairs them in a rated queue, and the primary refuses their rated challenges
+     * and rematches.
+     * @param {number} a
+     * @param {number} b
+     * @param {number} [now]
+     * @returns {boolean}
+     */
+    repeatLimited(a, b, now = this.now()) {
+        return this.repeatCount(a, b, now) >= this.repeatLimit;
     }
 
     _expireRepeats(now) {

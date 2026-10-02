@@ -233,7 +233,7 @@ key('MATCH_WINDOW_STEP_MS', { section: 'matchmaking', type: 'int', default: 5000
 key('MATCH_WINDOW_MAX', { section: 'matchmaking', type: 'int', default: 500, min: 0, desc: 'Widest window (reached after about a minute with the defaults).' });
 key('MATCH_PROVISIONAL_BONUS', { section: 'matchmaking', type: 'int', default: 150, min: 0, desc: 'Extra window for a provisional rating (its value is still uncertain).' });
 key('MATCH_REPEAT_LIMIT', { section: 'matchmaking', type: 'int', default: 3, min: 1,
-    desc: 'Rated games two players may be paired for within MATCH_REPEAT_WINDOW_MS by the matchmaker (limits rating manipulation between friends).' });
+    desc: 'Rated games two players may play together within MATCH_REPEAT_WINDOW_MS, whatever made them (queue, direct challenge, private game, rematch); beyond it the matchmaker no longer pairs them, and their rated challenges, private games and rematches are refused (limits rating manipulation between friends). Unrated games stay free. The counts are kept in memory: a restart forgets them.' });
 key('MATCH_REPEAT_WINDOW_MS', { section: 'matchmaking', type: 'int', default: 3600000, min: 60000, desc: 'See MATCH_REPEAT_LIMIT.' });
 key('CONDUCT_ABANDON_LIMIT', { section: 'matchmaking', type: 'int', default: 3, min: 1,
     desc: 'Abandoned / aborted / no-show games in 24 hours before rated matchmaking is paused for the player (15 min, then 1 h, then 6 h).' });

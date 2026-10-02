@@ -30,8 +30,9 @@ load processes and deletes the temporary directory.
 the SQLite commits are real), a self-signed ECDSA P-256 certificate made with the `openssl` command,
 free ports on 127.0.0.1, `WORKERS` from `--workers` (auto: the number of cores, more when the
 open-file limit requires it, see below), proof of work off, per-IP limits, the challenge limits
-(`CHALLENGE_UNPLAYED_PER_MIN`, `PRIVATE_CODE_FAILURES_PER_MIN`) and `MAX_CONNECTIONS` raised to
-1,000,000, mail to the log, `LOG_LEVEL=warn`. The burst scenario also raises
+(`CHALLENGE_UNPLAYED_PER_MIN`, `PRIVATE_CODE_FAILURES_PER_MIN`), `MATCH_REPEAT_LIMIT` (a pair of
+accounts plays one rated game after the other) and `MAX_CONNECTIONS` raised to 1,000,000, mail to
+the log, `LOG_LEVEL=warn`. The burst scenario also raises
 `WS_MSG_RATE`/`WS_MSG_BURST` to 1000/2000 (the defaults, 20/40 messages per second per connection,
 would throttle a player who moves without thinking). `--server-env K=V` sets anything else,
 `--reuse-port` sets `LISTEN_REUSE_PORT=true`, `--plain` runs without TLS (`TLS_MODE=off`, to measure
@@ -47,7 +48,8 @@ its explicit flag.
 # on the test server: accounts and their tokens (username<TAB>token per line)
 node bin/admin.js bench-accounts --count 20000 --prefix bench --out tokens.tsv --format tsv --i-know-this-is-a-test-server
 # the test server needs ABUSE_EXEMPT set to the load machines' addresses, MAX_CONNECTIONS_PER_IP
-# (64 by default) above the number of clients per load machine, and WS_MSG_RATE / WS_MSG_BURST
+# (64 by default) above the number of clients per load machine, MATCH_REPEAT_LIMIT (3 by default)
+# above the rated games of one pair in a run (or --rated false), and WS_MSG_RATE / WS_MSG_BURST
 # raised for the burst scenario
 # on the load machine
 node bench/loadgen.js --scenario games --games 10000 --url wss://test.example.org/ws \

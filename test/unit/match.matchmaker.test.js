@@ -176,9 +176,11 @@ test('matchmaker: repeat limit for rated pairings, with expiry', () => {
         assert.equal(pairs.length, 1);
         // A pairing counts once its game exists: the primary records it then.
         assert.equal(m.repeatCount(1, 2, i * 1000), i);
+        assert.equal(m.repeatLimited(1, 2, i * 1000), false);
         m.recordPairing(pairs[0].white, pairs[0].black, i * 1000);
     }
     assert.equal(m.repeatCount(1, 2, 3000), 3);
+    assert.equal(m.repeatLimited(2, 1, 3000), true, 'the primary refuses their rated challenges and rematches');
     m.join(player(1500, { userId: 1, joinedAt: 3000 }));
     m.join(player(1500, { userId: 2, joinedAt: 3000 }));
     assert.deepEqual(m.tick(3000), []);
@@ -195,6 +197,7 @@ test('matchmaker: repeat limit for rated pairings, with expiry', () => {
     m.join(player(1500, { userId: 2, joinedAt: H }));
     assert.deepEqual(m.tick(H - 1), []);
     assert.equal(m.tick(H).length, 1);
+    assert.equal(m.repeatLimited(1, 2, H), false);
 
     // recordPairing() takes user ids too.
     const n = mm();

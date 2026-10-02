@@ -202,7 +202,7 @@ Sections:
 | `MATCH_WINDOW_STEP_MS` | integer (&gt;= 100) | `5000` | Time between two widenings. |
 | `MATCH_WINDOW_MAX` | integer (&gt;= 0) | `500` | Widest window (reached after about a minute with the defaults). |
 | `MATCH_PROVISIONAL_BONUS` | integer (&gt;= 0) | `150` | Extra window for a provisional rating (its value is still uncertain). |
-| `MATCH_REPEAT_LIMIT` | integer (&gt;= 1) | `3` | Rated games two players may be paired for within MATCH_REPEAT_WINDOW_MS by the matchmaker (limits rating manipulation between friends). |
+| `MATCH_REPEAT_LIMIT` | integer (&gt;= 1) | `3` | Rated games two players may play together within MATCH_REPEAT_WINDOW_MS, whatever made them (queue, direct challenge, private game, rematch); beyond it the matchmaker no longer pairs them, and their rated challenges, private games and rematches are refused (limits rating manipulation between friends). Unrated games stay free. The counts are kept in memory: a restart forgets them. |
 | `MATCH_REPEAT_WINDOW_MS` | integer (&gt;= 60000) | `3600000` | See MATCH_REPEAT_LIMIT. |
 | `CONDUCT_ABANDON_LIMIT` | integer (&gt;= 1) | `3` | Abandoned / aborted / no-show games in 24 hours before rated matchmaking is paused for the player (15 min, then 1 h, then 6 h). |
 

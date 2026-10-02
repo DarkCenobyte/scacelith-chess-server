@@ -147,6 +147,8 @@ async function launch({ workers, reusePort = false, accounts = 0, env = {}, data
         AUTH_REAUTH_PER_USER: '1000000',
         USER_RATE_PER_MIN: '1000000',
         CHALLENGE_UNPLAYED_PER_MIN: '1000000',
+        // A pair of accounts plays one rated game after the other.
+        MATCH_REPEAT_LIMIT: '1000000',
         PRIVATE_CODE_FAILURES_PER_MIN: '1000000',
         MAX_CONNECTIONS: '1000000',
         MAX_CONNECTIONS_PER_IP: '1000000',

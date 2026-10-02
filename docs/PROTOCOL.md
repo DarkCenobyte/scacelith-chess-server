@@ -336,7 +336,10 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
 * Challenges, private games and queue joins have their own limits (`ChallengeLimit`, also after
   `CHALLENGE_UNPLAYED_PER_MIN` (5) direct challenges withdrawn or declined in a minute;
   `RateLimited` for `ChallengeJoinCode` after `PRIVATE_CODE_FAILURES_PER_MIN` (10) wrong codes in
-  a minute; `MatchmakingCooldown` with `Notice{MatchmakingCooldown, arg = until}`).
+  a minute; `MatchmakingCooldown` with `Notice{MatchmakingCooldown, arg = until}`). Two players who
+  played `MATCH_REPEAT_LIMIT` (3) rated games together within `MATCH_REPEAT_WINDOW_MS` (an hour),
+  whatever made them, are no longer paired by the rated queue, and their rated challenges and private
+  games are refused with `UserUnavailable`, their rated rematches with `RematchUnavailable`.
 
 ## Error handling
 

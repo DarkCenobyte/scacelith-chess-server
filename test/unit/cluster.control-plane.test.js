@@ -329,6 +329,64 @@ describe('control plane: matchmaking', () => {
         assert.equal(cp.activeGames.size, 2);
     });
 
+    it('MATCH_REPEAT_LIMIT counts rated challenges, private games and rematches, and refuses them past it; unrated games stay free', async () => {
+        const { cp, shards, mm, clock, online } = setup({ realMatchmaker: true });
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1);
+        online(3, 'carl', 1);
+        const tc = { baseSec: 300, incSec: 0 }, rated = { ...tc, rated: true };
+        const end = (gameId) => cp.gameEnded({ gameId, whiteId: 1, blackId: 2 });
+        const rematch = (gameId, isRated) => cp.gameRematch({ gameId, white: 2, black: 1, category: '5+0', baseMs: 300000, incMs: 0, rated: isRated });
+        const created = () => shards.requests.filter((r) => r.type === 'game.create').length;
+        // Three rated games: a direct challenge, a private game, a rematch.
+        const c1 = cp.challengeCreate({ from: a, target: 'bob', ...rated });
+        const g1 = await cp.challengeAccept({ id: c1.id, by: b });
+        assert.equal(g1.ok, true);
+        assert.equal(mm.repeatCount(1, 2), 1);
+        end(g1.gameId);
+        const p2 = cp.challengeCreate({ from: a, target: '', ...rated });
+        const g2 = await cp.challengeJoinCode({ code: p2.code, by: b });
+        assert.equal(g2.ok, true);
+        assert.equal(mm.repeatCount(1, 2), 2);
+        end(g2.gameId);
+        const pending = cp.challengeCreate({ from: b, target: 'alice', ...rated });
+        assert.equal(pending.ok, true, 'two rated games: a third may be offered');
+        const g3 = await rematch(g2.gameId, true);
+        assert.equal(g3.ok, true);
+        assert.equal(mm.repeatCount(1, 2), 3);
+        end(g3.gameId);
+        // The limit is reached: no more rated games between them, however made.
+        shards.clear();
+        assert.deepEqual(await cp.challengeAccept({ id: pending.id, by: a }), { error: E.UserUnavailable }, 'offered before, accepted after');
+        assert.deepEqual(shards.frames().map((f) => [f.connId, f.name, f.msg.state]), [[20, 'ChallengeStatus', CS.Unavailable]]);
+        shards.clear();
+        assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', ...rated }), { error: E.UserUnavailable });
+        assert.deepEqual(shards.frames(), [], 'nothing reaches the target');
+        const p4 = cp.challengeCreate({ from: b, target: '', ...rated });
+        assert.deepEqual(await cp.challengeJoinCode({ code: p4.code, by: a }), { error: E.UserUnavailable });
+        assert.deepEqual(await rematch(g3.gameId, true), { error: E.RematchUnavailable });
+        cp.mmJoin({ ...a, category: '5+0', rated: true, rating: 1500 }, 0);
+        cp.mmJoin({ ...b, category: '5+0', rated: true, rating: 1500 }, 1);
+        clock.advance(250);
+        cp.matchTick();
+        await tick();
+        cp.mmLeave({ userId: 1 }); cp.mmLeave({ userId: 2 });
+        assert.equal(created(), 0, 'no game was created');
+        // Unrated games stay free, and other opponents are not concerned.
+        const g5 = await cp.challengeAccept({ id: cp.challengeCreate({ from: a, target: 'bob', ...tc, rated: false }).id, by: b });
+        assert.equal(g5.ok, true);
+        end(g5.gameId);
+        const g6 = await rematch(g5.gameId, false);
+        assert.equal(g6.ok, true);
+        end(g6.gameId);
+        assert.equal(cp.challengeCreate({ from: a, target: 'carl', ...rated }).ok, true);
+        assert.equal(mm.repeatCount(1, 2), 3);
+        // The games leave the count after MATCH_REPEAT_WINDOW_MS.
+        clock.advance(cfg.matchRepeatWindowMs);
+        const g7 = await cp.challengeAccept({ id: cp.challengeCreate({ from: b, target: 'alice', ...rated }).id, by: a });
+        assert.equal(g7.ok, true);
+        assert.equal(mm.repeatCount(1, 2), 1);
+    });
+
     it('requeues both players when the host refuses the game', async () => {
         const { cp, shards, mm, online } = setup();
         const a = online(1, 'alice', 0), b = online(2, 'bob', 1);

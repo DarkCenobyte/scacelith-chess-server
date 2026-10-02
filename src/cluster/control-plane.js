@@ -38,6 +38,12 @@
 // A queue pairing whose game cannot be created puts both players back in the queue with their
 // waiting time, and the matchmaker does not pair the same two again for PAIR_RETRY_DELAY_MS.
 //
+// Repeat limit: every rated game counts toward MATCH_REPEAT_LIMIT once it is created, whatever made
+// it (queue, direct challenge, private code, rematch), in the matchmaker's counts (in memory: a
+// restart forgets them). Two players who reached it within MATCH_REPEAT_WINDOW_MS are no longer
+// paired by the rated queue, and their rated challenges and private games are refused with
+// UserUnavailable, their rated rematches with RematchUnavailable; unrated games stay free.
+//
 // Notifications (QueueStatus, ChallengeReceived, ChallengeStatus, Notice) are encoded here and
 // written by the shard of the user's live connection ('conn.send'); waiting players get a fresh
 // QueueStatus every 3 s.
@@ -282,6 +288,11 @@ export class ControlPlane {
         try { this.mm.recordColors?.(whiteId, blackId); } catch (e) { this.log?.error?.('mm.recordColors failed', { err: e }); }
     }
 
+    // Whether two players reached MATCH_REPEAT_LIMIT (header, repeat limit).
+    _repeatLimited(a, b, now) {
+        try { return !!this.mm.repeatLimited?.(a, b, now); } catch (e) { this.log?.error?.('mm.repeatLimited failed', { err: e }); return false; }
+    }
+
     _player(p, category) {
         const out = { userId: p.userId, username: p.username || this.presence.get(p.userId)?.username || '', rating: p.rating, provisional: p.provisional, shard: p.shard, connId: p.connId };
         if (out.rating === undefined) {
@@ -356,6 +367,9 @@ export class ControlPlane {
         const gameId = r.gameId;
         this._created.labels(source).inc();
         if (source !== 'queue') this._recordColors(spec.white.userId, spec.black.userId);   // the pairing counted a queue game
+        if (spec.rated) {
+            try { this.mm.recordPairing?.(spec.white.userId, spec.black.userId, this.now()); } catch (e) { this.log?.error?.('mm.recordPairing failed', { err: e }); }
+        }
         for (const u of ids) {
             this.activeGames.set(u, gameId);
             this._leaveQueue(u, source !== 'queue');
@@ -493,13 +507,7 @@ export class ControlPlane {
             white: this._info(white), black: this._info(black), createdAt: now,
         };
         const r = await this.createGame(spec, preferred, 'queue');
-        if (r.ok) {
-            // MATCH_REPEAT_LIMIT counts the rated games that exist, not the pairings.
-            if (rated) {
-                try { this.mm.recordPairing?.(white.userId, black.userId, this.now()); } catch (e) { this.log?.error?.('mm.recordPairing failed', { err: e }); }
-            }
-            return;
-        }
+        if (r.ok) return;
         this._recordColors(black.userId, white.userId);    // gives back the colours of the pairing
         try { this.mm.holdPair?.(white.userId, black.userId, this.now() + PAIR_RETRY_DELAY_MS); } catch (e) { this.log?.error?.('mm.holdPair failed', { err: e }); }
         // Back to the queue with their original waiting time.
@@ -536,6 +544,7 @@ export class ControlPlane {
                     try { accepts = this.acceptsChallenges(tid) !== false; } catch (e) { this.log?.error?.('preference read failed', { err: e }); }
                 }
                 targetUser = { userId: tid, username: this.presence.get(tid).username, online: true, acceptChallenges: accepts };
+                if (rated && this._repeatLimited(from.userId, tid, now)) return { error: E.UserUnavailable };
             }
         }
         let r;
@@ -601,6 +610,10 @@ export class ControlPlane {
             black: this._info(this._player({ ...black, rating: undefined }, category)),
             createdAt: now,
         };
+        if (spec.rated && this._repeatLimited(spec.white.userId, spec.black.userId, now)) {
+            this._sendUser(c.from.userId, [this._statusFrame(c, CS.Unavailable)]);
+            return { error: E.UserUnavailable };
+        }
         const preferred = this.presence.get(c.from.userId)?.shard;
         const r = await this.createGame(spec, preferred, 'challenge');
         if (!r.ok) {
@@ -700,6 +713,7 @@ export class ControlPlane {
                 if (until > now) return { error: E.RematchUnavailable };
             }
         }
+        if (rated && this._repeatLimited(nw.userId, nb.userId, now)) return { error: E.RematchUnavailable };
         for (const p of [nw, nb]) if (this.activeGames.get(p.userId) === gameId) this.activeGames.delete(p.userId);
         const cat = category || categoryOf(baseMs, incMs, this.config);
         const spec = {

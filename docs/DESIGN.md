@@ -364,7 +364,8 @@ new Matchmaker({ config, now })
 mm.join({ userId, username, category, rated, rating, provisional, shard, connId, colorBalance, joinedAt }) -> { ok } | { error: ErrorCode }
 mm.leave(userId) -> bool ; mm.has(userId) ; mm.statusOf(userId, now) -> QueueStatus fields
 mm.tick(now) -> [{ category, rated, white: entry, black: entry }]
-mm.recordPairing(a, b, now)  // repeat limit bookkeeping (the primary, once a rated queue game exists)
+mm.recordPairing(a, b, now)  // repeat limit bookkeeping (the primary, once a rated game exists: queue, challenge, private code, rematch)
+mm.repeatLimited(a, b, now) -> bool  // MATCH_REPEAT_LIMIT reached: the primary refuses their rated challenges and rematches
 mm.holdPair(a, b, until)     // a and b are not paired together before `until` (the primary, after their game could not be created)
 // challenges.js (primary)
 new Challenges({ config, now })
