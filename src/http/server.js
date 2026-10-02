@@ -54,7 +54,7 @@
 
 import { API_PREFIX, HttpError, Router, validate } from './router.js';
 import { PAGE_CSP, renderMessage } from './pages/layout.js';
-import { TokenBucketLimiter, ipKey, normalizeIp, prefixKey } from '../security/ratelimit.js';
+import { TokenBucketLimiter, ipKey, normalizeIp, prefixKey, workerShare } from '../security/ratelimit.js';
 import { ipForLog } from '../log.js';
 import { metrics } from '../metrics.js';
 import { admitRequest } from '../net/listeners.js';
@@ -111,8 +111,8 @@ function rateLimited(ms, label) {
 /**
  * The budget of one signed-in account across every call that carries a valid session
  * (USER_RATE_PER_MIN, abuse design 3.6): each worker allows its share of the whole-server rate,
- * max(1, min(L, ceil(2 L / WORKERS))) (all of it with 1 or 2 workers, half with 4), as a token
- * bucket holding half a minute of that share. Local to the worker: no IPC per request; a client
+ * workerShare(L, WORKERS) (security/ratelimit.js: all of it with 1 or 2 workers, half with 4), as
+ * a token bucket holding half a minute of that share. Local to the worker: no IPC per request; a client
  * spread over every worker gets at most twice the rate. A refusal is the account's problem, not
  * its network's: it never counts toward blocking an address.
  * @param {object} config
@@ -120,8 +120,7 @@ function rateLimited(ms, label) {
  */
 function createUserBudget(config, now) {
     const perMin = Number.isInteger(config.userRatePerMin) && config.userRatePerMin > 0 ? config.userRatePerMin : 120;
-    const workers = Math.max(1, Number(config.workers) || 1);
-    const share = Math.max(1, Math.min(perMin, Math.ceil(2 * perMin / workers)));
+    const share = workerShare(perMin, config.workers);
     const burst = Math.max(1, Math.ceil(share / 2));
     const windowMs = Math.max(1, Math.round(burst * 60000 / share));
     const buckets = new TokenBucketLimiter({ now });
