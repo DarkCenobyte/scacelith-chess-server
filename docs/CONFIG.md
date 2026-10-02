@@ -46,7 +46,7 @@ Sections:
 | `SHUTDOWN_GRACE_MS` | integer (0-120000) | `3000` | On SIGTERM/SIGINT players are warned (ServerShutdown notice) this long before their connections close. Games in progress survive the restart (journal). |
 | `LISTEN_REUSE_PORT` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Linux: every worker binds its own listening socket (SO_REUSEPORT) and the kernel spreads new connections, instead of the primary accepting them and handing them out round-robin. Ignored on other systems. |
 | `LISTEN_BACKLOG` | integer (128-65535) | `2048` | Length of the kernel queue of new connections not yet accepted (listen backlog), which absorbs reconnection bursts. The kernel caps it at net.core.somaxconn (Linux), so raise that sysctl as well (README, kernel settings). |
-| `SHARD_OVERLOAD_LAG_MS` | integer (5-5000) | `250` | Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker. |
+| `SHARD_OVERLOAD_LAG_MS` | integer (5-5000) | `250` | Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker. The delay is sampled every 10 ms and includes that period (an idle worker reads about 10 ms), so a value below about 20 marks every worker overloaded. |
 
 ## TLS
 

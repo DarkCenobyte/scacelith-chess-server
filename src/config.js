@@ -47,7 +47,7 @@ key('LISTEN_REUSE_PORT', { section: 'server', type: 'bool', default: false,
 key('LISTEN_BACKLOG', { section: 'server', type: 'int', default: 2048, min: 128, max: 65535,
     desc: 'Length of the kernel queue of new connections not yet accepted (listen backlog), which absorbs reconnection bursts. The kernel caps it at net.core.somaxconn (Linux), so raise that sysctl as well (README, kernel settings).' });
 key('SHARD_OVERLOAD_LAG_MS', { section: 'server', type: 'int', default: 250, min: 5, max: 5000,
-    desc: 'Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker.' });
+    desc: 'Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker. The delay is sampled every 10 ms and includes that period (an idle worker reads about 10 ms), so a value below about 20 marks every worker overloaded.' });
 
 // ---- TLS -----------------------------------------------------------------------------------------
 key('TLS_MODE', { section: 'tls', type: 'enum', values: ['native', 'proxy', 'off'], default: 'native',
