@@ -234,11 +234,30 @@ test('banned accounts and closed registration', async (t) => {
     assert.deepEqual([r.status, r.json.error], [403, 'registration_closed']);
 });
 
+test('start accepts the body of the first game releases (codeChallengeMethod S256)', async (t) => {
+    const x = await setup();
+    t.after(x.close);
+    const verifier = crypto.randomBytes(32).toString('base64url');
+    const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+    const r = await x.s.request('POST', '/api/v1/auth/sso/google/start', { body: { codeChallenge: challenge, codeChallengeMethod: 'S256' } });
+    assert.equal(r.status, 200, r.text);
+    const cb = await x.callback(x.idp.authorize(r.json.authUrl, claims()));
+    assert.equal(cb.status, 200);
+    const p = await x.poll(r.json, verifier);
+    assert.equal(p.status, 200, p.text);
+    assert.equal(p.json.needsUsername, true);
+});
+
 test('start and poll validate their input', async (t) => {
     const x = await setup();
     t.after(x.close);
     assert.equal((await x.s.request('POST', '/api/v1/auth/sso/google/start', { body: { codeChallenge: 'short' } })).status, 400);
     assert.equal((await x.s.request('POST', '/api/v1/auth/sso/google/start', { body: {} })).status, 400);
+    const challenge = 'A'.repeat(43);
+    const plain = await x.s.request('POST', '/api/v1/auth/sso/google/start', { body: { codeChallenge: challenge, codeChallengeMethod: 'plain' } });
+    assert.equal(plain.status, 400);
+    const other = await x.s.request('POST', '/api/v1/auth/sso/google/start', { body: { codeChallenge: challenge, method: 'S256' } });
+    assert.equal(other.status, 400);
     const a = await x.start();
     assert.equal((await x.s.request('POST', '/api/v1/auth/sso/google/poll', { body: { attemptId: a.attemptId, codeVerifier: 'short' } })).status, 400);
 });

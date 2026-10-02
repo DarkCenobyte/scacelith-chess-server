@@ -30,7 +30,11 @@ export function register(router, { config, auth }) {
 
     router.post('/auth/sso/google/start', (ctx) => ({ body: auth.sso.start({ codeChallenge: ctx.body.codeChallenge, ip: ctx.ip }) }), {
         auth: 'none', rate: startRate,
-        body: { codeChallenge: { type: 'string', min: 43, max: 43, pattern: /^[A-Za-z0-9_-]{43}$/ } },
+        // codeChallengeMethod: sent by the game's first releases (always S256, the only method).
+        body: {
+            codeChallenge: { type: 'string', min: 43, max: 43, pattern: /^[A-Za-z0-9_-]{43}$/ },
+            codeChallengeMethod: { type: 'enum', values: ['S256'], optional: true },
+        },
     });
     router.post('/auth/sso/google/poll', (ctx) => ({ body: auth.sso.poll({ ...ctx.body, ip: ctx.ip }) }), {
         auth: 'none', rate: pollRate,
