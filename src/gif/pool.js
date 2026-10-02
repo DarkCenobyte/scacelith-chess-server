@@ -153,7 +153,19 @@ export function createGifPool({
             let slot = slots.find((s) => s.task === null);
             if (!slot) {
                 if (slots.length >= threads) return;
-                slot = spawn();
+                try {
+                    slot = spawn();
+                } catch (e) {
+                    // No thread can start (a thread or memory limit...). The busy threads take
+                    // the queue when they finish; with none left, the waiting jobs fail now.
+                    if (slots.length > 0) return;
+                    for (const entry of queue.splice(0)) {
+                        clearTimeout(entry.timer);
+                        counters.failed++;
+                        entry.reject(failure('render_failed', `GIF render failed: cannot start a rendering thread (${e.message})`));
+                    }
+                    return;
+                }
             }
             start(slot, queue.shift());
         }
