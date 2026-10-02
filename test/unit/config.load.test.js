@@ -74,13 +74,13 @@ test('an empty KEY= does not hide KEY_FILE of a required secret; an optional one
 
 test('SERVER_NAME fits Welcome.serverName: at most 64 bytes in UTF-8', () => {
     assert.equal(testConfig({ SERVER_NAME: 'x'.repeat(64) }).serverName, 'x'.repeat(64));
-    const accented = 'Échecs du dimanche à la médiathèque de Saint-Étienne-de-Rouvray';    // 63 characters
+    const accented = 'Sunday club ' + 'é'.repeat(30);    // 42 characters, 72 bytes
     assert.ok(accented.length <= 64 && Buffer.byteLength(accented) > 64);
     assert.throws(() => testConfig({ SERVER_NAME: accented }), /SERVER_NAME: at most 64 bytes in UTF-8/);
-    assert.throws(() => testConfig({ SERVER_NAME: '国际象棋'.repeat(6) }), /SERVER_NAME: at most 64 bytes in UTF-8/);
+    assert.throws(() => testConfig({ SERVER_NAME: '€'.repeat(24) }), /SERVER_NAME: at most 64 bytes in UTF-8/);
     assert.throws(() => testConfig({ SERVER_NAME: 'x'.repeat(65) }), /SERVER_NAME: at most 64 characters/);
     assert.throws(() => testConfig({ SERVER_NAME: 'a\0b' }), /SERVER_NAME: no NUL character/);
-    assert.equal(testConfig({ SERVER_NAME: 'Échecs à Rouen' }).serverName, 'Échecs à Rouen');
+    assert.equal(testConfig({ SERVER_NAME: 'Club é' }).serverName, 'Club é');
 });
 
 test('TRUSTED_PROXIES is checked at load with TLS_MODE=proxy only', () => {
