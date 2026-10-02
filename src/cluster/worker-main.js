@@ -3,8 +3,10 @@
 // are committed by a store writer thread, src/store/writer.js), the protection per address
 // (net/ipguard.js, shared by the API handler and the listeners), the HTTPS API handler, then the
 // shard itself (bus, router, WebSocket server, listeners). Stops gracefully on
-// the primary's 'shutdown' message or SIGTERM, and at once if the primary disappears; a graceful
-// stop also closes the API handler (its GIF rendering threads) before the journal and the store.
+// the primary's 'shutdown' message or SIGTERM, and at once if the primary disappears (Node's
+// cluster module then exits the worker with code 0; the journal replay recovers everything but the
+// events of its last JOURNAL_FLUSH_MS); a graceful stop also closes the API handler (its GIF
+// rendering threads) before the journal and the store.
 // The configuration is the primary's (shardConfig), not read again from the environment and files.
 
 import cluster from 'node:cluster';
@@ -83,7 +85,6 @@ export async function main() {
     process.on('SIGTERM', () => { s.stop(config.shutdownGraceMs); });
     process.on('SIGINT', () => { /* the primary coordinates the shutdown (Ctrl-C reaches the whole group) */ });
     process.on('SIGHUP', () => { s.listeners.reloadCertificates(); });
-    process.on('disconnect', () => { log.warn('primary gone: stopping'); s.stop(0); });
     return s;
 }
 
