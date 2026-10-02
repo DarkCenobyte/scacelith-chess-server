@@ -23,10 +23,10 @@ import { Router, TYPE_NAMES } from './router.js';
  * becomes its message handler in startShard).
  * @param {{ config: object, shard: number, serverId: string, transport?: object, log?: object, registry?: object }} o
  */
-export function createBus({ config, shard, serverId, transport = null, log = null, registry = defaultRegistry }) {
+export function createBus({ config, shard, serverId, busDir = '', transport = null, log = null, registry = defaultRegistry }) {
     return new Bus({
         shard,
-        transport: transport || unixTransport({ runDir: config.runDir, serverId }),
+        transport: transport || unixTransport({ runDir: config.runDir, serverId, fallbackDir: busDir }),
         token: busToken(config.serverSecret, serverId),
         onMessage: () => {},
         log,

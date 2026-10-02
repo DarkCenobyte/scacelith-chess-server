@@ -535,7 +535,8 @@ Shard -> primary:
 
 | type | payload | reply |
 |---|---|---|
-| `presence.claim` | `{ userId, username, shard, connId, ip }` | `{ ok, activeGame: id or 0, kicked: bool }` or `{ error }` (ServerFull, Banned) |
+| `config.snapshot` | - | the text of every configuration key the primary loaded at its start (`*_FILE` contents included): the worker's configuration, so that a restarted shard keeps the primary's settings |
+| `presence.claim` | `{ userId, username, shard, connId }` | `{ ok, activeGame: id or 0, kicked: bool }` or `{ error }` (ServerFull, Banned) |
 | `presence.release` | `{ userId, connId }` | - |
 | `conn.ipAcquire` / `conn.ipRelease` | `{ ip }` | `{ ok }` or `{ ok: false, reason }` (`per_ip`: `MAX_CONNECTIONS_PER_IP`; `global`: `MAX_CONNECTIONS` plus `max(16, 2 %)`) |
 | `mm.join` | `{ userId, username, category, rated, rating, provisional, shard, connId }` | `{ ok }` / `{ error }` (`Banned`: a ban found in the database, enforced as `sanction.applied`, 6.6) |
@@ -556,9 +557,10 @@ Primary -> shard:
 | type | payload | effect |
 |---|---|---|
 | `game.create` | `{ spec }` | host creates the room, replies `{ ok, gameId }` |
+| `game.cancel` | `{ gameId }` | ends a game whose `game.create` reply came after the primary's timeout (ServerAborted, no conduct incident) |
 | `game.attach` | `{ gameId, userId, connId }` | the shard binds that connection to the game (local or via bus) |
-| `conn.send` | `{ connId, frames: [Buffer] }` | writes encoded S2C frames (QueueStatus, Challenge*, Notice); as a request (refund notices) it replies `{ ok }`, false when the connection is gone or has not had its Welcome yet |
-| `conn.kick` | `{ connId, code, closeCode, frames }` | sends then closes |
+| `conn.send` | `{ connId, frames: [Buffer] }` | writes encoded S2C frames (QueueStatus, Challenge*, Notice); as a request (refund notices) it replies `{ ok }`, false when the connection is gone or closes before its Welcome (the frames for a connection whose `presence.claim` is under way are written right after its Welcome) |
+| `conn.kick` | `{ connId, closeCode, frames }` | sends then closes |
 | `auth.invalidate` | `{ userId, tokenHashes }` | drops the listed sessions from the auth cache and closes the connection opened with one of them; `null` (every session of the user revoked) drops every cached session of the user and closes the user's connection; `[]` drops them and closes nothing |
 | `metrics.snapshot` | - | replies `registry.snapshot()` |
 | `shutdown` | `{ graceMs }` | drain: Notice{ServerShutdown}, stop accepting, flush |
@@ -1289,8 +1291,8 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
     shares the address with an abuser (a school, a mobile operator's CGNAT) keeps the game in
     progress; a player whose connection drops can only come back when the block ends, which is
     why the first one is short. At most 20,000 blocks run at once (the oldest end first); the
-    primary logs each one (`ip blocked`, with `ipForLog`, the scope, level, duration and
-    refusals).
+    primary logs each one (`ip blocked`, with `ipForLog`, the scope, level (`blockLevel`),
+    duration and refusals).
   * `ABUSE_EXEMPT` (addresses and CIDR subnets: a school or club network, monitoring, a load
     generator) skips all of the above. Login, registration, the other route limits and the
     per-account quotas still apply.

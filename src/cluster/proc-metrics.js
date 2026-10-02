@@ -1,7 +1,8 @@
 // Process health metrics (every process: primary and shards): event-loop delay, CPU and memory,
 // declared {perShard: true} so the primary's merged /metrics shows one series per process.
 // The values are refreshed when a snapshot is taken (gaugeFn), plus a 1 s sampler for the CPU
-// ratio and the event-loop window, so reading them costs nothing on the hot path.
+// ratio and the event-loop window, so reading them costs nothing on the hot path. The event-loop
+// delay is that of a 10 ms timer and includes its period: an idle process reads about 10 ms.
 
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { metrics as defaultRegistry } from '../metrics.js';
@@ -9,7 +10,7 @@ import { metrics as defaultRegistry } from '../metrics.js';
 /**
  * Starts the process metrics.
  * @param {{ registry?: object, windowMs?: number }} [o]
- * @returns {{ lagP99(): number, lagMax(): number, cpuRatio(): number, stop(): void }}
+ * @returns {{ lagP99(): number, stop(): void }}
  */
 export function startProcessMetrics({ registry = defaultRegistry, windowMs = 10000 } = {}) {
     const h = monitorEventLoopDelay({ resolution: 10 });
@@ -37,9 +38,9 @@ export function startProcessMetrics({ registry = defaultRegistry, windowMs = 100
     timer.unref();
 
     const o = { perShard: true, merge: 'last' };
-    registry.gaugeFn('scacelith_process_event_loop_delay_p50_ms', 'Event-loop delay, median over the last window', () => p50, o);
-    registry.gaugeFn('scacelith_process_event_loop_delay_p99_ms', 'Event-loop delay, 99th percentile over the last window', () => p99, o);
-    registry.gaugeFn('scacelith_process_event_loop_delay_max_ms', 'Event-loop delay, maximum over the last window', () => max, o);
+    registry.gaugeFn('scacelith_process_event_loop_delay_p50_ms', 'Event-loop delay (10 ms sampling period included), median over the last window', () => p50, o);
+    registry.gaugeFn('scacelith_process_event_loop_delay_p99_ms', 'Event-loop delay (10 ms sampling period included), 99th percentile over the last window', () => p99, o);
+    registry.gaugeFn('scacelith_process_event_loop_delay_max_ms', 'Event-loop delay (10 ms sampling period included), maximum over the last window', () => max, o);
     registry.gaugeFn('scacelith_process_cpu_ratio', 'CPU time / wall time over the last second (1 = one core)', () => cpu, o);
     registry.gaugeFn('scacelith_process_rss_bytes', 'Resident set size', () => process.memoryUsage.rss(), o);
     registry.gaugeFn('scacelith_process_heap_used_bytes', 'V8 heap in use', () => process.memoryUsage().heapUsed, o);
@@ -48,8 +49,6 @@ export function startProcessMetrics({ registry = defaultRegistry, windowMs = 100
 
     return {
         lagP99: () => p99,
-        lagMax: () => max,
-        cpuRatio: () => cpu,
         stop() { clearInterval(timer); h.disable(); },
     };
 }

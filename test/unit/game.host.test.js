@@ -799,6 +799,18 @@ test('stall credit: a first-move timeout that fell during a stall aborts without
     assert.deepEqual(h.primary.of('conduct.record'), [{ userId: 1, kind: 'noshow' }]);
 });
 
+test('cancelGame: a game the primary gave up creating ends ServerAborted, with no no-show', async () => {
+    const { host, primary } = mkHost();
+    const id = newGame(host);
+    assert.equal(host.cancelGame(id), true);
+    assert.deepEqual([host.room(id).result.status, host.room(id).result.reason], [GS.Aborted, ER.ServerAborted]);
+    assert.equal(host.activeGameOf(1), 0);
+    assert.equal(host.cancelGame(id), false);
+    host.runTimers(T0 + 30000 + 150);
+    await drain();
+    assert.deepEqual(primary.of('conduct.record'), []);
+});
+
 test('stall credit: a move that reached its socket while the backlog of a stall was read beats the flag', async () => {
     for (const moves of [true, false]) {
         const { host, clock, id, ew, eb, deadline } = running();

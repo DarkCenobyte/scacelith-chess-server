@@ -43,11 +43,13 @@
 //   shard -> primary  'sanction.applied' also carries `refunds` (victims refunded): the refund
 //                     notices are looked for at once
 //   primary -> shard  'conn.send' is also sent as a request for the refund notices: its reply
-//                     { ok } tells whether the frames were written (a connection not ready yet,
-//                     or gone, answers ok: false)
+//                     { ok } tells whether the frames were written (a connection gone, or
+//                     closed before its Welcome, answers ok: false; the frames for a connection
+//                     whose claim is under way are written right after its Welcome)
 //   shard -> primary  'shard.load' { conns, games, lagP99, overloaded }   (every 2 s)
 //                     'shard.ready' { shard }   (after host.recover() and listen: re-attaches the
-//                     live connections of players whose game that shard hosts)
+//                     live connections of players whose game that shard hosts; after a crash, the
+//                     games it hosted that its replay did not announce are forgotten first)
 //                     'game.recovered' { gameId, whiteId, blackId, shard }   (sent by the GameHost
 //                     for each game replayed from the journal: presence.claim returns it as
 //                     activeGame after a full restart; 'game.active' is an alias)
@@ -67,6 +69,7 @@
 //   newer connection's QueueJoin).
 
 import { RefundNotices } from '../anticheat/refund-notices.js';
+import { categoryOf, isProvisional } from '../match/elo.js';
 import { metrics as defaultRegistry } from '../metrics.js';
 import { encode, enums, CloseCode } from '../protocol/index.js';
 import { isGameId, shardOfGameId } from '../util/ids.js';
@@ -136,6 +139,8 @@ export class ControlPlane {
         this.activeGames = new Map();
         /** @type {Set<number>} users whose game is being created */
         this.starting = new Set();
+        /** @type {Map<number, Set<number>>} shard -> its games when it went down, not replayed yet */
+        this._unrecovered = new Map();
         /** @type {Map<number, {category:string, rated:boolean}>} users searching */
         this.queued = new Map();
         /** @type {Map<number, number>} userId -> ban end (sanction.applied) */
@@ -178,8 +183,8 @@ export class ControlPlane {
             'challenge.joinCode': (p) => this.challengeJoinCode(p),
             'game.ended': (p) => this.gameEnded(p),
             'game.rematch': (p) => this.gameRematch(p),
-            'game.active': (p) => this.gameActive(p),
-            'game.recovered': (p) => this.gameActive(p),
+            'game.active': (p, s) => this.gameActive(p, s),
+            'game.recovered': (p, s) => this.gameActive(p, s),
             'conduct.record': (p) => this.conductRecord(p),
             'ratelimit.take': (p) => this.limiter.take(p),
             'ratelimit.refund': (p) => this.limiter.refund(p),
@@ -234,11 +239,11 @@ export class ControlPlane {
         return !!(r && r.ok);
     }
 
-    _kick(userId, reason, code, closeCode, frames) {
+    _kick(userId, reason, closeCode, frames) {
         const p = this.presence.get(userId);
         if (!p) return false;
         this._kicks.labels(reason).inc();
-        this.shards.notify(p.shard, 'conn.kick', { connId: p.connId, code, closeCode, frames });
+        this.shards.notify(p.shard, 'conn.kick', { connId: p.connId, closeCode, frames });
         return true;
     }
 
@@ -279,7 +284,7 @@ export class ControlPlane {
             if (category && category !== 'custom' && this.ratingOf) {
                 try {
                     const r = this.ratingOf(p.userId, category);
-                    if (r) { rating = r.rating; provisional = r.rated === false || (r.countedGames ?? r.games ?? 0) < this.config.provisionalGames; }
+                    if (r) { rating = r.rating; provisional = isProvisional(r, this.config); }
                 } catch (e) { this.log?.error?.('rating read failed', { err: e }); }
             }
             out.rating = rating;
@@ -289,11 +294,6 @@ export class ControlPlane {
     }
 
     _info(p) { return { userId: p.userId, name: p.username || p.name || '', rating: u16(p.rating), provisional: !!p.provisional }; }
-
-    categoryOf(baseMs, incMs) {
-        for (const c of this.categories.values()) if (c.baseMs === baseMs && c.incMs === incMs) return c.id;
-        return 'custom';
-    }
 
     _chooseShard(preferred) {
         const live = this.shards.list();
@@ -333,7 +333,12 @@ export class ControlPlane {
         const load = this.loads.get(shard);
         if (load) load.games = (load.games || 0) + 1;
         try {
-            if (shard >= 0) r = await this.shards.request(shard, 'game.create', { spec }, { timeoutMs: 5000 });
+            // A game created after the timeout (a stall of the host shard) would wait for players
+            // nobody attaches, then end as a no-show of White: the host cancels it.
+            const onLate = (late) => {
+                if (late && late.ok && isGameId(late.gameId)) this.shards.notify(shard, 'game.cancel', { gameId: late.gameId });
+            };
+            if (shard >= 0) r = await this.shards.request(shard, 'game.create', { spec }, { timeoutMs: 5000, onLate });
         } catch (e) {
             this.log?.error?.('game.create failed', { shard, err: e });
         } finally {
@@ -357,7 +362,7 @@ export class ControlPlane {
 
     // ---- presence -------------------------------------------------------------------------------
 
-    presenceClaim({ userId, username = '', shard, connId, ip = '' }, from) {
+    presenceClaim({ userId, username = '', shard, connId }, from) {
         const now = this.now();
         const until = this._banUntil(userId, now);
         if (until > now) return { error: E.Banned, until };
@@ -367,11 +372,11 @@ export class ControlPlane {
         // abandonment. Their number is bounded by the live games.
         const full = this.presence.size >= this.config.maxConnections;
         if (full && !existing && !this.activeGames.has(userId)) return { error: E.ServerFull };
-        const { previous } = this.presence.claim({ userId, username, shard: shard ?? from, connId, ip });
+        const { previous } = this.presence.claim({ userId, username, shard: shard ?? from, connId });
         if (previous) {
             this._kicks.labels('replaced').inc();
             this.shards.notify(previous.shard, 'conn.kick', {
-                connId: previous.connId, code: E.Replaced, closeCode: CloseCode.Replaced,
+                connId: previous.connId, closeCode: CloseCode.Replaced,
                 frames: [errorFrame(E.Replaced, true), encode.Notice({ code: N.ReplacedByNewConnection, arg: 0 })],
             });
             this._leaveQueue(userId, false);
@@ -582,7 +587,7 @@ export class ControlPlane {
             white = creatorWhite ? c.from : by;
             black = creatorWhite ? by : c.from;
         }
-        const category = game?.category || c.category || this.categoryOf(c.baseSec * 1000, c.incSec * 1000);
+        const category = game?.category || c.category || categoryOf(c.baseSec * 1000, c.incSec * 1000, this.config);
         const spec = {
             category, baseMs: game?.baseMs ?? c.baseSec * 1000, incMs: game?.incMs ?? c.incSec * 1000,
             rated: !!(game ? game.rated : c.rated) && category !== 'custom',
@@ -662,8 +667,9 @@ export class ControlPlane {
         return { ok: true };
     }
 
-    gameActive({ gameId, whiteId, blackId }) {
+    gameActive({ gameId, whiteId, blackId }, from) {
         if (!isGameId(gameId)) return { ok: false };
+        if (shardOfGameId(gameId) === from) this._unrecovered.get(from)?.delete(gameId);   // replayed by its host
         for (const u of [whiteId, blackId]) if (u && !this.activeGames.has(u)) this.activeGames.set(u, gameId);
         return { ok: true };
     }
@@ -689,7 +695,7 @@ export class ControlPlane {
             }
         }
         for (const p of [nw, nb]) if (this.activeGames.get(p.userId) === gameId) this.activeGames.delete(p.userId);
-        const cat = category || this.categoryOf(baseMs, incMs);
+        const cat = category || categoryOf(baseMs, incMs, this.config);
         const spec = {
             category: cat, baseMs, incMs, rated: !!rated && cat !== 'custom',
             white: this._info(this._player({ ...nw, rating: undefined }, cat)),
@@ -727,7 +733,7 @@ export class ControlPlane {
     // their challenges.
     _enforceBan(userId, end, reason) {
         this.log?.security?.('sanction applied', { userId, until: end, reason });
-        this._kick(userId, 'banned', E.Banned, CloseCode.Banned, [errorFrame(E.Banned, true), encode.Notice({ code: N.Banned, arg: end })]);
+        this._kick(userId, 'banned', CloseCode.Banned, [errorFrame(E.Banned, true), encode.Notice({ code: N.Banned, arg: end })]);
         const gameId = this.activeGames.get(userId);
         if (gameId) this.shards.notify(shardOfGameId(gameId), 'game.forfeit', { userId, gameId });
         this._userGone(userId);
@@ -743,6 +749,11 @@ export class ControlPlane {
     /** A shard finished its start-up: re-attach the live players of the games it hosts, and give it the running blocks. */
     shardReady(shard) {
         this.readyShards.add(shard);
+        // Its games that the replay did not announce (lost before a journal flush, or dropped by
+        // the replay) would keep their players 'in game' for good.
+        const lost = this._unrecovered.get(shard);
+        this._unrecovered.delete(shard);
+        if (lost?.size) for (const [userId, gameId] of this.activeGames) if (lost.has(gameId)) this.activeGames.delete(userId);
         const blocks = this.abuse.snapshot();
         if (blocks.length) this.shards.notify(shard, 'abuse.block', { blocks });
         let n = 0;
@@ -762,22 +773,19 @@ export class ControlPlane {
         this.loads.delete(shard);
         const gone = this.presence.dropShard(shard);
         for (const u of gone) this._userGone(u);
+        // Its new process announces the games it replays (game.recovered) before its shard.ready.
+        const hosted = new Set();
+        for (const gameId of this.activeGames.values()) if (shardOfGameId(gameId) === shard) hosted.add(gameId);
+        this._unrecovered.set(shard, hosted);
         for (const s of this.shards.list()) if (s !== shard) this.shards.notify(s, 'shard.down', { shard });
         return gone.length;
     }
 
     sweep() {
         const now = this.now();
-        this.limiter.sweep(now);
+        this.limiter.sweep();               // on its own clock (primary.js: monotonic)
         this.once.sweep(now);
         for (const [u, until] of this.bans) if (until <= now) this.bans.delete(u);
         this.abuse.sweep();
-    }
-
-    stats() {
-        return {
-            online: this.presence.size, connections: this.presence.connections, searching: this.queued.size,
-            challenges: this.ch.size ?? 0, playing: this.activeGames.size, shardsReady: this.readyShards.size,
-        };
     }
 }

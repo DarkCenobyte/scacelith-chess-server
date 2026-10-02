@@ -31,7 +31,7 @@ Sections:
 
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
-| `SERVER_NAME` | text (at most 64 characters) | `Scacelith Community Server` | Name shown to players (menus, scoresheet "Event"). |
+| `SERVER_NAME` | text (at most 64 bytes in UTF-8) | `Scacelith Community Server` | Name shown to players (menus, scoresheet "Event"). |
 | `SERVER_PUBLIC_HOST` | text | `localhost` | Public DNS name of the server, used in e-mail links and the Google SSO redirect URI. |
 | `SERVER_MOTD` | text (at most 200 characters) | (empty) | Short message of the day shown in the online menu. |
 | `BIND_ADDRESS` | text | `0.0.0.0` | Address the API and WebSocket listeners bind to. |
@@ -46,7 +46,7 @@ Sections:
 | `SHUTDOWN_GRACE_MS` | integer (0-120000) | `3000` | On SIGTERM/SIGINT players are warned (ServerShutdown notice) this long before their connections close. Games in progress survive the restart (journal). |
 | `LISTEN_REUSE_PORT` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Linux: every worker binds its own listening socket (SO_REUSEPORT) and the kernel spreads new connections, instead of the primary accepting them and handing them out round-robin. Ignored on other systems. |
 | `LISTEN_BACKLOG` | integer (128-65535) | `2048` | Length of the kernel queue of new connections not yet accepted (listen backlog), which absorbs reconnection bursts. The kernel caps it at net.core.somaxconn (Linux), so raise that sysctl as well (README, kernel settings). |
-| `SHARD_OVERLOAD_LAG_MS` | integer (5-5000) | `250` | Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker. |
+| `SHARD_OVERLOAD_LAG_MS` | integer (5-5000) | `250` | Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker. The delay is sampled every 10 ms and includes that period (an idle worker reads about 10 ms), so a value below about 20 marks every worker overloaded. |
 
 ## TLS
 
@@ -103,7 +103,7 @@ Sections:
 | `SMTP_PORT` | port (0-65535) | `587` | SMTP port (587 STARTTLS, 465 implicit TLS). |
 | `SMTP_SECURITY` | one of starttls, tls, none | `starttls` | starttls (required, not opportunistic), tls (implicit, port 465) or none (local relay only). |
 | `SMTP_USER` | text | (empty) | SMTP user name (empty = no authentication). |
-| `SMTP_PASSWORD` | secretText | (empty) | SMTP password. |
+| `SMTP_PASSWORD`<br>`SMTP_PASSWORD_FILE` | secretText | (empty) | SMTP password. |
 
 ## Google single sign-on
 
@@ -111,7 +111,7 @@ Sections:
 | --- | --- | --- | --- |
 | `SSO_GOOGLE_ENABLED` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Offers "Sign in with Google" (OpenID Connect, authorization code + PKCE through the system browser). |
 | `GOOGLE_CLIENT_ID` | text | (empty) | OAuth client ID of a "Web application" client in Google Cloud Console. |
-| `GOOGLE_CLIENT_SECRET` | secretText | (empty) | OAuth client secret. Never commit it. |
+| `GOOGLE_CLIENT_SECRET`<br>`GOOGLE_CLIENT_SECRET_FILE` | secretText | (empty) | OAuth client secret. Never commit it. |
 | `GOOGLE_REDIRECT_URI` | text | (empty) | Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST/auth/sso/google/callback, with :PUBLIC_API_PORT after the host when that port is not 443). |
 
 ## Protection per address (background layer)
@@ -245,7 +245,7 @@ Sections:
 | --- | --- | --- | --- |
 | `METRICS_PORT` | port (0-65535) | `9464` | Prometheus metrics and health endpoint (plain HTTP; 0 disables it). |
 | `METRICS_BIND` | text | `127.0.0.1` | Keep it private: 127.0.0.1 or an internal address. |
-| `METRICS_TOKEN`<br>`METRICS_TOKEN_FILE` | secret | (unset) | Optional bearer token required to read the metrics. |
+| `METRICS_TOKEN`<br>`METRICS_TOKEN_FILE` | secretText | (empty) | Optional bearer token required to read the metrics: /metrics then needs the header "Authorization: Bearer &lt;token&gt;" with this exact text (no spaces). |
 | `LOG_LEVEL` | one of debug, info, warn, error | `info` | Log verbosity. |
 | `LOG_FORMAT` | one of json, pretty | `json` | JSON lines (for log collectors) or readable text. |
 | `LOG_IP` | one of truncated, full, hashed | `truncated` | How client addresses appear in the logs: truncated (IPv4 /24, IPv6 /48), full, or hashed (keyed HMAC, rotated daily). |

@@ -1,12 +1,15 @@
 // Router (one per shard): the state machine of every WebSocket connection, and the glue between
 // sockets, the local GameHost, the shard bus and the primary (DESIGN 3, 5.7, 5.8).
 //
-//   hello  The first message must be Hello with seq 1 (else Error{HelloRequired} + close 4010),
-//          within WS_HELLO_TIMEOUT_MS (same). proto in [PROTOCOL_MIN, PROTOCOL_VERSION] and
+//   hello  The first message must be a Hello (else, an empty frame included, Error{HelloRequired}
+//          + close 4010), decodable (else Error{Malformed} + 4300), with seq 1 (else
+//          Error{ProtocolViolation} + 4300), within WS_HELLO_TIMEOUT_MS (HelloRequired + 4010).
+//          proto in [PROTOCOL_MIN, PROTOCOL_VERSION] and
 //          schema == SCHEMA_HASH, else Error{UnsupportedProtocol} + 4002. The token is validated by
 //          the auth service (Unauthorized + 4003), e-mail verification enforced (EmailUnverified +
 //          4003), then the primary's presence.claim (Banned: Error + Notice{Banned, until} + 4004;
-//          ServerFull: + 4006) -> Welcome, then the active game (if any) is attached. Up to 8
+//          ServerFull: + 4006), the token again (revoked meanwhile: Notice{SessionRevoked} +
+//          Unauthorized + 4003) -> Welcome, then the active game (if any) is attached. Up to 8
 //          messages pipelined behind Hello wait for the Welcome.
 //   ready  Per message: token bucket (WS_MSG_RATE / WS_MSG_BURST; over it the message is dropped
 //          with Error{RateLimited} at most once a second, and more than max(10, burst) drops in
@@ -88,6 +91,7 @@ import {
     MSG, encode, decode, ProtocolError, PROTOCOL_VERSION, PROTOCOL_MIN, SCHEMA_HASH, enums, CloseCode, isClientType,
 } from '../protocol/index.js';
 import { now as clockNow } from '../game/clock.js';
+import { categoryOf, isProvisional } from '../match/elo.js';
 import { isGameId, shardOfGameId } from '../util/ids.js';
 import { BusKind, BusOp } from './bus.js';
 
@@ -277,7 +281,10 @@ export class Router {
         this._fullAt = -Infinity;
         this._admitAt = -Infinity;
         this.admission = {
-            acquire: (ip) => this.primary.request('conn.ipAcquire', { ip, shard: this.shard }).then(
+            // A count the primary took after this side gave up (a stall of either) is given back.
+            acquire: (ip) => this.primary.request('conn.ipAcquire', { ip, shard: this.shard }, {
+                onLate: (res) => { if (res && res.ok) this.admission.release(ip); },
+            }).then(
                 (res) => {
                     if (res && res.ok) { this._admitAt = performance.now(); return true; }
                     const global = res && res.reason === 'global';
@@ -349,6 +356,7 @@ export class Router {
                 return { error: E.Internal };
             }
         });
+        ipc.on('game.cancel', ({ gameId }) => ({ ok: this.host.cancelGame(gameId) }));
         ipc.on('game.attach', ({ gameId, userId, connId }) => this.attach(gameId, userId, connId));
         ipc.on('conn.send', ({ connId, frames }) => this.sendTo(connId, frames));
         ipc.on('conn.kick', ({ connId, closeCode, frames }) => this.kick(connId, closeCode, frames));
@@ -471,7 +479,7 @@ export class Router {
                 this._call(conn, msg.seq, 'mm.leave', { userId: conn.userId });
                 return;
             case MSG.ChallengeCreate: {
-                const category = this.categoryOf(msg.baseSec * 1000, msg.incSec * 1000);
+                const category = categoryOf(msg.baseSec * 1000, msg.incSec * 1000, this.config);
                 const { rating, provisional } = this._rating(conn.userId, category);
                 this._call(conn, msg.seq, 'challenge.create', {
                     from: { userId: conn.userId, username: conn.username, rating, provisional, shard: this.shard, connId: conn.id },
@@ -500,17 +508,11 @@ export class Router {
         return { userId: conn.userId, username: conn.username, shard: this.shard, connId: conn.id };
     }
 
-    /** Official category id of a time control, or 'custom'. */
-    categoryOf(baseMs, incMs) {
-        for (const c of this.categories.values()) if (c.baseMs === baseMs && c.incMs === incMs) return c.id;
-        return 'custom';
-    }
-
     _rating(userId, category) {
         if (category !== 'custom' && this.store?.ratings?.get) {
             try {
                 const r = this.store.ratings.get(userId, category);
-                if (r) return { rating: r.rating, provisional: r.rated === false || (r.countedGames ?? r.games ?? 0) < this.config.provisionalGames };
+                if (r) return { rating: r.rating, provisional: isProvisional(r, this.config) };
             } catch (e) {
                 this.log?.error?.('rating read failed', { err: e });
             }
@@ -779,10 +781,13 @@ export class Router {
         c.tokenHash = crypto.createHash('sha256').update(msg.token).digest();
         let r;
         try {
-            r = await this.primary.request('presence.claim', { userId: conn.userId, username: conn.username, shard: this.shard, connId: conn.id, ip: conn.ip });
+            r = await this.primary.request('presence.claim', { userId: conn.userId, username: conn.username, shard: this.shard, connId: conn.id });
         } catch (e) {
             this.log?.warn?.('presence.claim failed', { err: e });
             r = null;
+            // The primary may have applied it all the same (a reply after the timeout): the release
+            // follows the claim on the channel and removes only this connection's claim.
+            this.primary.notify('presence.release', { userId: conn.userId, connId: conn.id });
         }
         if (conn.state !== 'hello') {
             if (r && r.ok) this.primary.notify('presence.release', { userId: conn.userId, connId: conn.id });
@@ -797,7 +802,26 @@ export class Router {
             this._fatal(conn, 1, code, CloseCode.Policy);
             return;
         }
-        c.claimed = true;
+        c.claimed = true;               // from here, the close releases the claim
+        // A revocation that reached this shard during the claim did not find the connection (not
+        // in byUser yet, invalidateSessions): the token is checked again, the revoked sessions
+        // being out of the auth cache by now.
+        const still = await this.auth.validateToken(msg.token);
+        if (conn.state !== 'hello') return;
+        if (!still) {
+            this._hello.labels('unauthorized').inc();
+            conn.sendFrame(encode.Notice({ code: N.SessionRevoked, arg: 0 }));
+            this._fatal(conn, 1, E.Unauthorized, CloseCode.Unauthorized);
+            return;
+        }
+        // Encoded while the connection is still in 'hello': a failure closes it (Internal, 1011).
+        const activeGame = isGameId(r.activeGame) ? r.activeGame : 0;
+        const welcome = encode.Welcome({
+            proto: msg.proto, serverTime: clockNow(), userId: conn.userId, username: conn.username,
+            serverName: this.config.serverName, heartbeatMs: this.config.heartbeatIntervalMs,
+            clientPingMs: this.config.clientPingIntervalMs, maxMsgPerSec: Math.min(65535, this.rate), activeGame,
+            gestureRate: this.gRate, gestureBurst: this.gRate > 0 ? this.gBurst : 0,
+        });
         conn.state = 'ready';
         const prev = this.byUser.get(conn.userId);
         this.byUser.set(conn.userId, conn);
@@ -807,13 +831,7 @@ export class Router {
             prev.sendFrame(encode.Notice({ code: N.ReplacedByNewConnection, arg: 0 }));
             prev.close(CloseCode.Replaced, '');
         }
-        const activeGame = isGameId(r.activeGame) ? r.activeGame : 0;
-        conn.sendFrame(encode.Welcome({
-            proto: msg.proto, serverTime: clockNow(), userId: conn.userId, username: conn.username,
-            serverName: this.config.serverName, heartbeatMs: this.config.heartbeatIntervalMs,
-            clientPingMs: this.config.clientPingIntervalMs, maxMsgPerSec: Math.min(65535, this.rate), activeGame,
-            gestureRate: this.gRate, gestureBurst: this.gRate > 0 ? this.gBurst : 0,
-        }));
+        conn.sendFrame(welcome);
         this._hello.labels('ok').inc();
         this._helloMs.observe(clockNow() - conn.openedAt);
         if (activeGame) this.attach(activeGame, conn.userId, conn.id);
@@ -821,6 +839,14 @@ export class Router {
         c.pending = null;
         if (pending) for (const b of pending) { if (conn.state !== 'ready') break; this._onMessage(conn, b); }
     }
+
+    // A connection whose presence.claim reply is on its way: the primary sends a game.attach or a
+    // conn.send for it only after the claim, so they can come in the same batch as the reply,
+    // which the hello handles in microtasks after the batch. They run on the next turn, once the
+    // connection is ready (Welcome first) or closed.
+    _awaitingWelcome(conn) { return !!conn && conn.state === 'hello' && !!conn.ctx?.helloStarted && !!conn.userId; }
+
+    _afterHello(fn) { return new Promise((resolve) => setImmediate(() => resolve(fn()))); }
 
     _banned(conn, until) {
         this._hello.labels('banned').inc();
@@ -832,10 +858,11 @@ export class Router {
     /**
      * Binds a connection of this shard to a game (primary 'game.attach', or the active game at
      * Welcome). The host sends the snapshot.
-     * @returns {{ ok: boolean }}
+     * @returns {{ ok: boolean } | Promise<{ ok: boolean }>} a promise before the Welcome (_afterHello)
      */
-    attach(gameId, userId, connId) {
+    attach(gameId, userId, connId, again = false) {
         const conn = this.conns.get(connId);
+        if (!again && this._awaitingWelcome(conn) && conn.userId === userId) return this._afterHello(() => this.attach(gameId, userId, connId, true));
         if (!conn || conn.userId !== userId || conn.state !== 'ready' || !isGameId(gameId)) return { ok: false };
         const c = conn.ctx;
         if (!c.games) c.games = new Set();
@@ -969,8 +996,9 @@ export class Router {
      * written: a frame refused on the way (the connection closed as a slow consumer) answers
      * { ok: false }, so that a sender waiting for the reply (the refund notices) tries again later.
      */
-    sendTo(connId, frames) {
+    sendTo(connId, frames, again = false) {
         const conn = this.conns.get(connId);
+        if (!again && this._awaitingWelcome(conn)) return this._afterHello(() => this.sendTo(connId, frames, true));
         if (!conn || conn.state !== 'ready') return { ok: false };
         let ok = true;
         for (const f of frames || []) ok = conn.sendFrame(f) && ok;
@@ -1071,10 +1099,5 @@ export class Router {
             shard: this.shard, conns: this.conns.size, players: this.byUser.size, games, lagP99: lag,
             overloaded: lag > (this.config.shardOverloadLagMs || 250),
         });
-    }
-
-    /** Diagnostics. */
-    stats() {
-        return { conns: this.conns.size, players: this.byUser.size, remoteEndpoints: this.remote.size };
     }
 }

@@ -5,7 +5,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { Bus, BusKind, BusOp, busToken, tcpTransport, unixTransport } from '../../src/cluster/bus.js';
+import { Bus, BusKind, BusOp, busToken, makeBusFallbackDir, tcpTransport, unixTransport } from '../../src/cluster/bus.js';
 import { Registry } from '../../src/metrics.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -104,6 +104,17 @@ describe('shard bus (unix sockets)', () => {
         assert.equal(gotB.length, 0);
     });
 
+    it('refuses a first frame longer than a hello as soon as its length arrives', async () => {
+        const s = net.connect(path.join(dir, 'bus-1.sock'));
+        await new Promise((r) => s.once('connect', r));
+        const len = Buffer.alloc(4);
+        len.writeUInt32LE(1 << 20, 0);                          // a 1 MiB frame, whose bytes never come
+        s.write(len);
+        const t0 = Date.now();
+        await new Promise((r) => s.once('close', r));
+        assert.ok(Date.now() - t0 < 2000, 'closed before the hello deadline (5 s)');
+    });
+
     it('queues while a peer is down and reconnects when it is back', async () => {
         await b.close();
         await waitFor(() => !a.stats().out.find((l) => l.peer === 1).connected);   // frames already in a dying socket are lost (at-most-once)
@@ -145,5 +156,35 @@ describe('shard bus (tcp transport)', () => {
         assert.equal(got[0].payload.toString(), 'hi');
         await a.close();
         await b.close();
+    });
+});
+
+describe('bus sockets of a long DATA_DIR', () => {
+    it('go to a private directory of random name, never to a fixed name in the shared tmp directory', async (t) => {
+        const base = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-bus-'));
+        t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+        const runDir = path.join(base, 'd'.repeat(100), 'run');
+        assert.equal(makeBusFallbackDir(path.join(base, 'run')), '');            // fits: runDir itself
+        assert.equal(makeBusFallbackDir(runDir, 'win32'), '');                   // named pipes
+        const dir = makeBusFallbackDir(runDir);
+        const other = makeBusFallbackDir(runDir);
+        t.after(() => { fs.rmSync(dir, { recursive: true, force: true }); fs.rmSync(other, { recursive: true, force: true }); });
+        assert.notEqual(dir, other);
+        const st = fs.lstatSync(dir);
+        assert.ok(st.isDirectory());
+        assert.equal(st.mode & 0o777, 0o700);
+        assert.equal(st.uid, process.getuid());
+        assert.throws(() => unixTransport({ runDir, serverId: 'abcdefgh-1' }).describe(3), /too long/);
+        const token = busToken(crypto.randomBytes(32), 'abcdefgh-1');
+        const got = [];
+        const transport = () => unixTransport({ runDir, serverId: 'abcdefgh-1', fallbackDir: dir });
+        assert.equal(transport().describe(3), path.join(dir, 'bus-3.sock'));
+        const a = mkBus(0, null, token, [], new Registry(), transport()), b = mkBus(3, null, token, got, new Registry(), transport());
+        await a.start();
+        await b.start();
+        t.after(async () => { await a.close(); await b.close(); });
+        a.send(3, BusKind.ToHost, 1, 2, 3, Buffer.from([4]));
+        await waitFor(() => got.length === 1);
+        assert.equal(fs.lstatSync(path.join(dir, 'bus-3.sock')).mode & 0o777, 0o600);
     });
 });

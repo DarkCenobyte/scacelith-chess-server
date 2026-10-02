@@ -102,7 +102,7 @@ TLS_MIN_VERSION=TLSv1.2
   works in browsers that fetch missing intermediates but fails in the game.
 - `TLS_KEY_FILE` is the PEM private key (RSA 2048+ or ECDSA P-256/P-384). Keep it readable only by
   the account running the server (`chmod 600`, or `640` with the service group) and outside the
-  Git checkout. `TLS_KEY_FILE_FILE` is not needed: the key is already read from a file.
+  Git checkout. `TLS_KEY_FILE_FILE` is refused: the key is already read from a file.
 - Renewal needs no restart. The server re-reads both files when they change (it also follows
   certbot's symlink swaps) and on `SIGHUP` (`systemctl reload scacelith` with the unit below).
   A broken new certificate is refused and logged; the previous one stays in use.
@@ -513,8 +513,8 @@ exactly: when the proxy is not trusted, every player shares its address, and the
 block would hit them all together.
 
 **Watching it.** The primary logs each block at `warn` level: `ip blocked` with the address
-(truncated as `LOG_IP` says), `scope` (`ip` or `prefix`), `level`, `ttlSec` and `refusals`. On the
-metrics endpoint: `scacelith_http_rate_limited_total{limit}` (`ip`, `ip48`, `inflight`,
+(truncated as `LOG_IP` says), `scope` (`ip` or `prefix`), `blockLevel`, `ttlSec` and `refusals`.
+On the metrics endpoint: `scacelith_http_rate_limited_total{limit}` (`ip`, `ip48`, `inflight`,
 `blocked`), `scacelith_tls_refused_total{reason}` (`blocked`, `conn_rate`, `conn_open`),
 `scacelith_abuse_blocks_total{scope,level}` and `scacelith_abuse_blocked{scope}` in the primary,
 `scacelith_abuse_blocked_keys`, `scacelith_tls_connections_open` and `scacelith_http_inflight`

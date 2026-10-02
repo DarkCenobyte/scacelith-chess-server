@@ -532,7 +532,7 @@ function refundsList(ctx) {
 
 // ---- bench accounts ------------------------------------------------------------------------------------
 
-/** Default session-token hash (hex SHA-256); bin/admin.js passes the auth module's when it has one. */
+/** Default session-token hash (hex SHA-256); bin/admin.js passes the auth module's (security/keys.js sha256Hex). */
 export function defaultHashToken(token) {
     return crypto.createHash('sha256').update(token).digest('hex');
 }

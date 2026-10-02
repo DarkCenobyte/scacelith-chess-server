@@ -3,9 +3,13 @@
 //
 // SlidingWindowLimiter: sliding-window counter (the previous fixed window weighted by how much
 // of it still overlaps the sliding window + the current window). Accurate to a few percent,
-// O(1) time and ~100 bytes per key. Keys expire two windows after their last use; the map is
-// bounded (maxKeys): beyond it the least recently inserted keys are evicted first, which can only
-// make the limiter more lenient for the evicted keys, never block an innocent client.
+// O(1) time below capacity and ~100 bytes per key. Keys expire two windows after their last use;
+// the map is bounded (maxKeys): beyond it the expired keys go first, then the least recently
+// inserted ones, which can only make the limiter more lenient for the evicted keys, never block
+// an innocent client. Each complete walk of the map for expired keys records the earliest expiry
+// of the keys it keeps, and no walk is made while no key can have expired since then: a flood of
+// fresh keys at capacity costs O(1) per key, not a walk of the whole map every 16 keys. While
+// keys keep expiring at capacity (about one per new key), each eviction still walks the map: O(n).
 //
 // OnceStore: remembers keys until their TTL (single-use tokens: proof-of-work challenges, TOTP
 // steps...). Bounded too; when full, the oldest insertions are evicted first. With the default
@@ -25,6 +29,8 @@ export class SlidingWindowLimiter {
         /** @type {Map<string, {start:number, cur:number, prev:number, windowMs:number, last:number}>} */
         this.entries = new Map();
         this.evicted = 0;
+        // No key expires before this time (a lower bound; -Infinity: unknown). See _evict.
+        this._noExpiryBefore = -Infinity;
     }
 
     /**
@@ -44,6 +50,9 @@ export class SlidingWindowLimiter {
         }
         this._advance(e, now);
         e.last = now;
+        // On every take: a clock that stepped back lowers this key's expiry.
+        const exp = now + 2 * windowMs - 1;
+        if (exp < this._noExpiryBefore) this._noExpiryBefore = exp;
         const elapsed = now - e.start;
         const weight = 1 - elapsed / windowMs;
         const estimate = e.prev * weight + e.cur;
@@ -113,14 +122,19 @@ export class SlidingWindowLimiter {
     }
 
     _evict() {
-        // Drop expired keys first; if none, the oldest insertions.
+        // Drop expired keys first; if none, the oldest insertions. A walk of the whole map records
+        // the earliest expiry of the keys it keeps (minus 1 ms for rounding): until then no key can
+        // have expired (take() lowers the bound for every key it touches), and the walk is skipped.
         const now = this.now();
-        let removed = 0;
-        for (const [k, e] of this.entries) {
-            if (now - e.last > 2 * e.windowMs) { this.entries.delete(k); removed++; }
-            if (removed >= 64) break;
+        if (now >= this._noExpiryBefore) {
+            let removed = 0, minExp = Infinity;
+            for (const [k, e] of this.entries) {
+                if (now - e.last > 2 * e.windowMs) { this.entries.delete(k); removed++; } else if (e.last + 2 * e.windowMs < minExp) minExp = e.last + 2 * e.windowMs;
+                if (removed >= 64) break;
+            }
+            this._noExpiryBefore = removed >= 64 ? -Infinity : minExp - 1;     // a walk cut short knows no bound
+            if (removed) return;
         }
-        if (removed) return;
         const it = this.entries.keys();
         for (let i = 0; i < 16; i++) {
             const r = it.next();
@@ -136,6 +150,9 @@ export class SlidingWindowLimiter {
         for (const [k, e] of this.entries) if (now - e.last > 2 * e.windowMs) { this.entries.delete(k); n++; }
         return n;
     }
+
+    /** Forgets a key's counts: its next take() starts from zero. */
+    forget(key) { this.entries.delete(key); }
 
     get size() { return this.entries.size; }
 }

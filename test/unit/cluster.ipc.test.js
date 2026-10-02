@@ -31,6 +31,27 @@ describe('ipc', () => {
         assert.equal(left.pending.size, 0);
     });
 
+    it('hands a reply that comes after the timeout to onLate, once, and only a reply', async () => {
+        const [a, b] = channelPair();
+        const left = new Ipc(a, { timeoutMs: 20 }), right = new Ipc(b);
+        const after = (ms, fn) => () => new Promise((resolve, reject) => setTimeout(() => fn(resolve, reject), ms));
+        right.on('slow', after(60, (resolve) => resolve({ ok: true })));
+        right.on('slowBoom', after(60, (_, reject) => reject(new Error('kaput'))));
+        const late = [];
+        await Promise.all([
+            assert.rejects(left.request('slow', null, { onLate: (r) => late.push(r) }), IpcTimeoutError),
+            assert.rejects(left.request('slowBoom', null, { onLate: (r) => late.push(r) }), IpcTimeoutError),
+            assert.rejects(left.request('slow'), IpcTimeoutError),                  // no onLate: dropped
+        ]);
+        assert.equal(left.late.size, 2);
+        await new Promise((r) => setTimeout(r, 100));
+        assert.deepEqual(late, [{ ok: true }]);
+        assert.equal(left.late.size, 0);
+        await assert.rejects(left.request('slow', null, { onLate: (r) => late.push(r) }), IpcTimeoutError);
+        left.close();
+        assert.equal(left.late.size, 0);
+    });
+
     it('delivers notifications and batches messages of one turn', async () => {
         const [a, b] = channelPair();
         let sends = 0;
@@ -142,6 +163,58 @@ describe('global rate limiter', () => {
         t = 10_000;
         l.sweep();
         assert.equal(l.size, 0);
+    });
+
+    it('at capacity, evicts exactly what a walk of the map at every new key evicts', () => {
+        // The reference walks the map for expired keys at every eviction (no expiry bound).
+        class Walking extends SlidingWindowLimiter {
+            _evict() {
+                const now = this.now();
+                let removed = 0;
+                for (const [k, e] of this.entries) {
+                    if (now - e.last > 2 * e.windowMs) { this.entries.delete(k); removed++; }
+                    if (removed >= 64) break;
+                }
+                if (removed) return;
+                const it = this.entries.keys();
+                for (let i = 0; i < 16; i++) {
+                    const r = it.next();
+                    if (r.done) break;
+                    this.entries.delete(r.value);
+                    this.evicted++;
+                }
+            }
+        }
+        let seed = 20261002;
+        const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+        const windows = [100, 1000, 7000, 60000];
+        let skipped = 0, evictions = 0;
+        for (let run = 0; run < 12; run++) {
+            let t = 1e6 + rnd() * 1000;
+            const clock = () => t;
+            const maxKeys = 50 + Math.floor(rnd() * 200);
+            const a = new SlidingWindowLimiter({ now: clock, maxKeys }), b = new Walking({ now: clock, maxKeys });
+            const evict = a._evict.bind(a);
+            a._evict = () => { evictions++; if (clock() < a._noExpiryBefore) skipped++; evict(); };
+            for (let i = 0; i < 4000; i++) {
+                const step = rnd();
+                if (step < 0.01) t -= rnd() * 3000;                               // the clock steps back
+                else if (step < 0.015) t += rnd() * 20000;                        // many keys expire at once
+                else t += rnd() < 0.9 ? rnd() * 2 : rnd() * 100;                  // fractional times
+                const key = `k${Math.floor(rnd() * (rnd() < 0.7 ? 1e6 : 300))}`;
+                const p = { key, limit: 1 + Math.floor(rnd() * 5), windowMs: windows[Math.floor(rnd() * windows.length)], cost: rnd() < 0.9 ? 1 : 2 };
+                const op = rnd();
+                if (op < 0.85) assert.deepEqual(a.take(p), b.take(p));
+                else if (op < 0.9) { const q = { ...p, ageMs: rnd() * 2000 }; assert.deepEqual(a.refund(q), b.refund(q)); }
+                else if (op < 0.95) assert.equal(a.peek(key), b.peek(key));
+                else if (op < 0.952) assert.equal(a.sweep(), b.sweep());
+                else { a.forget(key); b.forget(key); }
+                assert.equal(a.evicted, b.evicted);
+                if (i % 50 === 0) assert.deepEqual([...a.entries], [...b.entries]);
+            }
+            assert.deepEqual([...a.entries], [...b.entries]);
+        }
+        assert.ok(skipped > 100 && skipped < evictions, `walks skipped: ${skipped} of ${evictions}`);
     });
 });
 

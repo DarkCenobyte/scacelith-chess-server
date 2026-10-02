@@ -18,7 +18,7 @@ const KEYS = [];
 function key(name, spec) { KEYS.push({ name, ...spec }); }
 
 // ---- Server identity and network ----------------------------------------------------------------
-key('SERVER_NAME', { section: 'server', type: 'string', default: 'Scacelith Community Server', max: 64,
+key('SERVER_NAME', { section: 'server', type: 'string', default: 'Scacelith Community Server', max: 64, maxBytes: 64,
     desc: 'Name shown to players (menus, scoresheet "Event").' });
 key('SERVER_PUBLIC_HOST', { section: 'server', type: 'string', default: 'localhost',
     desc: 'Public DNS name of the server, used in e-mail links and the Google SSO redirect URI.' });
@@ -47,13 +47,13 @@ key('LISTEN_REUSE_PORT', { section: 'server', type: 'bool', default: false,
 key('LISTEN_BACKLOG', { section: 'server', type: 'int', default: 2048, min: 128, max: 65535,
     desc: 'Length of the kernel queue of new connections not yet accepted (listen backlog), which absorbs reconnection bursts. The kernel caps it at net.core.somaxconn (Linux), so raise that sysctl as well (README, kernel settings).' });
 key('SHARD_OVERLOAD_LAG_MS', { section: 'server', type: 'int', default: 250, min: 5, max: 5000,
-    desc: 'Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker.' });
+    desc: 'Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker. The delay is sampled every 10 ms and includes that period (an idle worker reads about 10 ms), so a value below about 20 marks every worker overloaded.' });
 
 // ---- TLS -----------------------------------------------------------------------------------------
 key('TLS_MODE', { section: 'tls', type: 'enum', values: ['native', 'proxy', 'off'], default: 'native',
     desc: 'native: this server terminates TLS with TLS_CERT_FILE/TLS_KEY_FILE. proxy: a reverse proxy (nginx, haproxy, caddy) terminates TLS and forwards plain HTTP/WebSocket to this server on a private address. off: plain text, refused unless ALLOW_INSECURE_DEV=1 (local development only).' });
 key('TLS_CERT_FILE', { section: 'tls', type: 'path', default: '', desc: 'PEM certificate chain (fullchain). Reloaded on SIGHUP and when the file changes.' });
-key('TLS_KEY_FILE', { section: 'tls', type: 'path', default: '', secretFile: true, desc: 'PEM private key. Never commit it.' });
+key('TLS_KEY_FILE', { section: 'tls', type: 'path', default: '', desc: 'PEM private key. Never commit it.' });
 key('TLS_MIN_VERSION', { section: 'tls', type: 'enum', values: ['TLSv1.2', 'TLSv1.3'], default: 'TLSv1.2', desc: 'Oldest TLS version accepted.' });
 key('TRUSTED_PROXIES', { section: 'tls', type: 'list', default: '127.0.0.1,::1',
     desc: 'With TLS_MODE=proxy: addresses whose X-Forwarded-For header is trusted.' });
@@ -286,7 +286,8 @@ key('GIF_IP_RENDERS_PER_HOUR', { section: 'gif', type: 'int', default: 120, min:
 // ---- Observability -------------------------------------------------------------------------------------
 key('METRICS_PORT', { section: 'observability', type: 'port', default: 9464, desc: 'Prometheus metrics and health endpoint (plain HTTP; 0 disables it).' });
 key('METRICS_BIND', { section: 'observability', type: 'string', default: '127.0.0.1', desc: 'Keep it private: 127.0.0.1 or an internal address.' });
-key('METRICS_TOKEN', { section: 'observability', type: 'secret', default: '', desc: 'Optional bearer token required to read the metrics.' });
+key('METRICS_TOKEN', { section: 'observability', type: 'secretText', default: '',
+    desc: 'Optional bearer token required to read the metrics: /metrics then needs the header "Authorization: Bearer <token>" with this exact text (no spaces).' });
 key('LOG_LEVEL', { section: 'observability', type: 'enum', values: ['debug', 'info', 'warn', 'error'], default: 'info', desc: 'Log verbosity.' });
 key('LOG_FORMAT', { section: 'observability', type: 'enum', values: ['json', 'pretty'], default: 'json', desc: 'JSON lines (for log collectors) or readable text.' });
 key('LOG_IP', { section: 'observability', type: 'enum', values: ['truncated', 'full', 'hashed'], default: 'truncated',
@@ -313,8 +314,9 @@ export function defaultPendingPerGroup(maxPending) {
 export class ConfigError extends Error {}
 
 // Parses KEY=value lines. Supports comments (#), blank lines, optional "export ", and values in
-// single or double quotes (double quotes understand \n, \" and \\).
-export function parseEnvFile(text) {
+// single or double quotes (double quotes understand \n, \" and \\). A quoted value followed by a
+// comment keeps its quotes; `notes`, when given, receives a sentence for each such line.
+export function parseEnvFile(text, notes = null) {
     const out = {};
     for (const raw of text.split(/\r?\n/)) {
         const line = raw.trim();
@@ -328,7 +330,14 @@ export function parseEnvFile(text) {
             v = v.slice(1, -1);
         } else {
             const hash = v.indexOf(' #');
-            if (hash >= 0) v = v.slice(0, hash).trim();
+            if (hash >= 0) {
+                v = v.slice(0, hash).trim();
+                if (notes && (v[0] === '"' || v[0] === "'")) {
+                    notes.push(`${m[1]}: the value is quoted and followed by a comment on the same line of the .env file, `
+                        + 'so its quotes are part of the value. Put the comment on a line of its own (check the value first: '
+                        + 'a secret changes when its quotes go).');
+                }
+            }
         }
         out[m[1]] = v;
     }
@@ -348,25 +357,46 @@ function toCamel(name) {
 // Returns the frozen configuration. 'env' defaults to process.env; 'envFile' (default: the
 // SCACELITH_ENV_FILE variable, else ./.env when it exists) supplies values the environment does
 // not set. Values are exposed in camelCase (API_PORT -> apiPort); secrets as Buffers (keys of
-// type secret) and never appear in describe()/toJSON().
+// type secret) and never appear in describe()/toJSON(). `rawValues` (not enumerable) holds the
+// text of every key that was set, *_FILE contents included: loadConfig({ env: rawValues,
+// envFile: '' }) gives the same configuration without reading any file again (the shards'
+// configuration, cluster/worker-main.js).
 export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } = {}) {
-    const fileName = envFile ?? env.SCACELITH_ENV_FILE ?? path.join(cwd, '.env');
-    let fileVars = {};
-    if (fileName && fs.existsSync(fileName)) fileVars = parseEnvFile(fs.readFileSync(fileName, 'utf8'));
-    const get = (n) => (env[n] !== undefined ? env[n] : fileVars[n]);
-
+    const named = envFile ?? env.SCACELITH_ENV_FILE;            // '' = no file
+    const fileName = named ?? path.join(cwd, '.env');
     const cfg = {};
     const errors = [];
+    const notes = [];           // configWarnings sentences found while loading
+    const rawValues = {};
+    let fileVars = {};
+    if (named) {
+        // A file named explicitly must be there: a typo would start the server on the defaults.
+        try { fileVars = parseEnvFile(fs.readFileSync(named, 'utf8'), notes); } catch (e) {
+            errors.push(`SCACELITH_ENV_FILE: cannot read ${named} (${e.code || e.message}).`);
+        }
+    } else if (fileName && fs.existsSync(fileName)) fileVars = parseEnvFile(fs.readFileSync(fileName, 'utf8'), notes);
+    const get = (n) => (env[n] !== undefined ? env[n] : fileVars[n]);
+
+    // The key is read from TLS_KEY_FILE already; its text must never become a path (and a log line).
+    const keyFileRef = get('TLS_KEY_FILE_FILE');
+    if (keyFileRef !== undefined && keyFileRef !== '') errors.push('TLS_KEY_FILE already names the key file; TLS_KEY_FILE_FILE is not supported.');
     for (const k of KEYS) {
         let raw = get(k.name);
         const fileRef = get(k.name + '_FILE');
         const secret = k.type === 'secret' || k.type === 'secretText';
-        if ((secret || k.secretFile) && fileRef && raw === undefined) {
+        // An empty KEY= (the .env.example line of a required secret, an unset docker-compose
+        // variable) does not hide KEY_FILE for a required secret; an optional one stays unset.
+        if (secret && fileRef && raw === '' && !k.required) {
+            notes.push(`${k.name} is set but empty, so ${k.name}_FILE is not read and ${k.name} is unset. `
+                + `Remove the empty ${k.name}= (or ${k.name}_FILE) to say which one you mean.`);
+        }
+        if (secret && fileRef && (raw === undefined || (raw === '' && k.required))) {
             try { raw = fs.readFileSync(path.resolve(cwd, fileRef), 'utf8').trim(); } catch (e) {
                 errors.push(`${k.name}_FILE: cannot read ${fileRef} (${e.code || e.message})`);
                 continue;
             }
         }
+        if (raw !== undefined) rawValues[k.name] = raw;
         const has = raw !== undefined && raw !== '';
         let v;
         if (!has) {
@@ -381,6 +411,8 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
             case 'string': case 'path':
                 v = String(raw);
                 if (k.max && v.length > k.max) errors.push(`${k.name}: at most ${k.max} characters.`);
+                else if (k.maxBytes && Buffer.byteLength(v, 'utf8') > k.maxBytes) errors.push(`${k.name}: at most ${k.maxBytes} bytes in UTF-8 (fewer characters with accents or other scripts).`);
+                if (k.maxBytes && v.includes('\0')) errors.push(`${k.name}: no NUL character.`);
                 if (k.type === 'path' && v) v = path.resolve(cwd, v);
                 break;
             case 'int': case 'port': {
@@ -442,6 +474,7 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     }
     if (cfg.abuseBlockBaseSec > cfg.abuseBlockMaxSec) errors.push('ABUSE_BLOCK_BASE_SEC must not exceed ABUSE_BLOCK_MAX_SEC.');
     try { ipMatcher(cfg.abuseExempt); } catch (e) { errors.push(`ABUSE_EXEMPT: ${e.message}.`); }
+    if (cfg.tlsMode === 'proxy') { try { ipMatcher(cfg.trustedProxies); } catch (e) { errors.push(`TRUSTED_PROXIES: ${e.message}.`); } }
     const w = String(cfg.workers).trim().toLowerCase();
     if (w === 'auto') cfg.workers = Math.max(1, Math.min(16, os.availableParallelism ? os.availableParallelism() : os.cpus().length));
     else if (/^\d+$/.test(w) && +w >= 1 && +w <= 64) cfg.workers = +w;
@@ -485,6 +518,8 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
 
     if (errors.length) throw new ConfigError('Invalid configuration:\n  - ' + errors.join('\n  - '));
     Object.defineProperty(cfg, 'toJSON', { value: () => describe(cfg), enumerable: false });
+    Object.defineProperty(cfg, 'loadNotes', { value: Object.freeze(notes), enumerable: false });
+    Object.defineProperty(cfg, 'rawValues', { value: Object.freeze(rawValues), enumerable: false });
     return Object.freeze(cfg);
 }
 
@@ -512,7 +547,7 @@ export function threadPoolSize(raw) {
  * @returns {string[]}
  */
 export function configWarnings(cfg, env = process.env) {
-    const out = [];
+    const out = [...(cfg.loadNotes || [])];
     const pool = threadPoolSize(env.UV_THREADPOOL_SIZE);
     if (cfg.passwordHashConcurrency >= pool) {
         out.push(`PASSWORD_HASH_CONCURRENCY (${cfg.passwordHashConcurrency}) is not below the size of the libuv thread pool `
@@ -524,6 +559,14 @@ export function configWarnings(cfg, env = process.env) {
         out.push(`IP_MAX_CONNECTIONS (${cfg.ipMaxConnections}) is below twice MAX_CONNECTIONS_PER_IP (${cfg.maxConnectionsPerIp}): `
             + 'the players behind one address (a school, a mobile operator) could be refused before TLS while their WebSockets '
             + 'and API connections are still within MAX_CONNECTIONS_PER_IP. Raise IP_MAX_CONNECTIONS, or list the address in ABUSE_EXEMPT.');
+    }
+    // A connection that only answers the pings is silent for up to an interval plus the sweeper
+    // tick (250 ms) when the router checks it (cluster/router.js heartbeat), plus round trip and
+    // event-loop lag.
+    if (cfg.heartbeatTimeoutMs < cfg.heartbeatIntervalMs + 2250) {
+        out.push(`HEARTBEAT_TIMEOUT_MS (${cfg.heartbeatTimeoutMs}) is less than HEARTBEAT_INTERVAL_MS (${cfg.heartbeatIntervalMs}) + 2250: `
+            + 'healthy idle connections, which only answer the server\'s pings, would be closed as silent (\'timeout\') and reconnect. '
+            + 'Raise HEARTBEAT_TIMEOUT_MS (the default is 3 times the interval).');
     }
     return out;
 }

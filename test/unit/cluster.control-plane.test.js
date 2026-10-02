@@ -1,11 +1,18 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
 import { AbuseTracker } from '../../src/cluster/abuse.js';
 import { ControlPlane } from '../../src/cluster/control-plane.js';
-import { Ipc, channelPair } from '../../src/cluster/ipc.js';
+import { Ipc, IpcTimeoutError, channelPair } from '../../src/cluster/ipc.js';
 import { OnceStore, SlidingWindowLimiter } from '../../src/cluster/limits.js';
 import { Presence } from '../../src/cluster/presence.js';
-import { testConfig } from '../../src/config.js';
+import { startPrimary } from '../../src/cluster/primary.js';
+import { stopPrimary } from '../../src/cluster/primary-main.js';
+import { shardConfig } from '../../src/cluster/worker-main.js';
+import { describe as describeConfig, loadConfig, testConfig } from '../../src/config.js';
 import { Challenges } from '../../src/match/challenges.js';
 import { Matchmaker } from '../../src/match/matchmaker.js';
 import { Registry } from '../../src/metrics.js';
@@ -36,10 +43,10 @@ class FakeShards {
     notify(shard, type, payload) { this.sent.push({ shard, type, payload }); }
     broadcast(type, payload) { this.sent.push({ shard: '*', type, payload }); }
     list() { return this.live; }
-    async request(shard, type, payload) {
+    async request(shard, type, payload, opts) {
         this.requests.push({ shard, type, payload });
         if (type !== 'game.create') return null;
-        if (this.create) return this.create(shard, payload);
+        if (this.create) return this.create(shard, payload, opts);
         if (!this.alloc.has(shard)) this.alloc.set(shard, new GameIdAllocator(shard));
         return { ok: true, gameId: this.alloc.get(shard).next() };
     }
@@ -481,7 +488,8 @@ describe('control plane: games, sanctions, shards', () => {
         const until = clock.now() + 3600000;
         cp.sanctionApplied({ userId: 1, until, reason: 'engine' });
         const [kick] = shards.of('conn.kick');
-        assert.deepEqual([kick.shard, kick.payload.connId, kick.payload.closeCode, kick.payload.code], [0, 10, 4004, E.Banned]);
+        assert.deepEqual([kick.shard, kick.payload.connId, kick.payload.closeCode], [0, 10, 4004]);
+        assert.equal(shards.frames().find((f) => f.name === 'Error').msg.code, E.Banned);
         assert.ok(shards.frames().some((f) => f.name === 'Notice' && f.msg.code === N.Banned && f.msg.arg === until));
         assert.deepEqual(shards.of('game.forfeit').map((x) => [x.shard, x.payload.userId, x.payload.gameId]), [[1, 1, gameId]]);
         assert.deepEqual(cp.presenceClaim({ userId: 1, username: 'alice', shard: 0, connId: 11 }, 0), { error: E.Banned, until });
@@ -581,6 +589,27 @@ describe('control plane: games, sanctions, shards', () => {
         assert.deepEqual(shards.of('shard.down').map((x) => x.shard), [0, 2]);
     });
 
+    it('a restarted shard that does not replay a game frees its players at its shard.ready', async () => {
+        const { cp, shards, online } = setup({ live: [0, 1] });
+        online(1, 'alice', 0); online(2, 'bob', 0); online(3, 'carl', 0); online(4, 'dan', 0);
+        const spec = (w, b) => ({ white: { userId: w, username: 'w' }, black: { userId: b, username: 'b' }, baseMs: 300000, incMs: 0, rated: true });
+        const lost = (await cp.createGame(spec(1, 2), 1, 'challenge')).gameId;
+        const kept = (await cp.createGame(spec(3, 4), 1, 'challenge')).gameId;
+        cp.shardDown(1);                                        // crashed before the journal had the first game
+        cp.handlers['game.recovered']({ gameId: kept, whiteId: 3, blackId: 4, shard: 1 }, 1);
+        cp.handlers['game.recovered']({ gameId: lost, whiteId: 1, blackId: 2, shard: 0 }, 0);   // not its host: ignored
+        shards.clear();
+        assert.deepEqual(cp.shardReady(1), { ok: true, reattached: 2 });
+        assert.deepEqual(shards.of('game.attach').map((x) => [x.payload.userId, x.payload.gameId]), [[3, kept], [4, kept]]);
+        assert.deepEqual([...cp.activeGames], [[3, kept], [4, kept]]);
+        assert.deepEqual(cp.mmJoin({ userId: 1, username: 'alice', category: '5+0', rated: true, rating: 1500, shard: 0, connId: 10 }, 0), { ok: true });
+        assert.equal(cp.presenceClaim({ userId: 2, username: 'bob', shard: 0, connId: 21 }, 0).activeGame, 0);
+        assert.equal(cp.presenceClaim({ userId: 3, username: 'carl', shard: 0, connId: 31 }, 0).activeGame, kept);
+        shards.clear();
+        cp.shardReady(1);                                       // a later shard.ready without a crash forgets nothing
+        assert.equal(cp.activeGames.size, 2);
+    });
+
     it('abuse.report leads to an abuse.block broadcast; a shard that becomes ready gets the running blocks; sweep ends them', () => {
         const { cp, shards, clock } = setup({ abuse: true, config: testConfig({ ABUSE_BLOCK_REFUSALS_PER_MIN: '50' }) });
         cp.handlers['abuse.report']({ entries: [['198.51.100.7', null, 30]] }, 0);
@@ -604,5 +633,107 @@ describe('control plane: games, sanctions, shards', () => {
         const { cp, shards } = setup({ config: testConfig({ ABUSE_BLOCK_REFUSALS_PER_MIN: '5' }) });
         cp.handlers['abuse.report']({ entries: [['2001:db8::/64', '2001:db8::/48', 5]] }, 0);
         assert.deepEqual(shards.of('abuse.block').map((x) => [x.shard, x.payload.blocks.map(([k, , l]) => [k, l])]), [['*', [['2001:db8::/64', 1]]]]);
+    });
+});
+
+describe('control plane: game.create after its timeout', () => {
+    it('cancels the game a host created after the primary gave up waiting', async () => {
+        const { cp, shards } = setup();
+        const gameId = new GameIdAllocator(1).next();
+        shards.create = (shard, payload, opts) => {
+            setImmediate(() => opts.onLate({ ok: true, gameId }));          // the late reply
+            throw new IpcTimeoutError('game.create', 5000);
+        };
+        const spec = { white: { userId: 1, username: 'a' }, black: { userId: 2, username: 'b' }, baseMs: 300000, incMs: 0, rated: true };
+        assert.deepEqual(await cp.createGame(spec, 1, 'challenge'), { error: E.Internal });
+        await tick();
+        assert.deepEqual(shards.of('game.cancel').map((x) => [x.shard, x.payload.gameId]), [[1, gameId]]);
+        assert.equal(cp.activeGames.size, 0);
+        shards.create = (shard, payload, opts) => {                       // a late refusal created nothing
+            setImmediate(() => opts.onLate({ error: E.Internal }));
+            throw new IpcTimeoutError('game.create', 5000);
+        };
+        await cp.createGame(spec, 1, 'challenge');
+        await tick();
+        assert.equal(shards.of('game.cancel').length, 1);
+    });
+});
+
+describe('primary assembly', () => {
+    it('the global rate limiter runs on a monotonic clock: a step back of the wall clock locks no key out', async (t) => {
+        const silent = { child: () => silent, debug() {}, info() {}, warn() {}, error() {}, security() {} };
+        const wall = Date.now;
+        let step = 0;
+        Date.now = () => wall() + step;                     // the system clock, as the primary reads it
+        t.after(() => { Date.now = wall; });
+        const primary = await startPrimary({
+            config: testConfig(), log: silent, fork: () => { throw new Error('no worker in this test'); }, shards: [],
+            matchmaker: new FakeMatchmaker(), challenges: new Challenges({ config: cfg }), registry: new Registry(),
+        });
+        t.after(() => primary.stop(0));
+        const limiter = primary.controlPlane.limiter;
+        const k = { key: 'auth:ip:192.0.2.1', limit: 2, windowMs: 100 };
+        assert.ok(limiter.take(k).allowed && limiter.take(k).allowed);
+        assert.equal(limiter.take(k).allowed, false);
+        step = -3600000;                                    // the wall clock steps back an hour
+        await new Promise((r) => setTimeout(r, 250));       // two windows of real time
+        assert.equal(limiter.take(k).allowed, true);
+        primary.controlPlane.sweep();
+        assert.equal(limiter.take(k).allowed, true);
+    });
+
+    it('on SIGTERM, the shards are told to drain before the analysis process and the purge have stopped', async () => {
+        const events = [];
+        const later = (ms, what, fail) => new Promise((resolve, reject) => setTimeout(() => {
+            events.push(what);
+            if (fail) reject(new Error(what)); else resolve();
+        }, ms));
+        const errors = [];
+        await stopPrimary({
+            config: cfg, log: { error: (msg) => errors.push(msg) },
+            primary: { stop: (graceMs) => { events.push(`drain ${graceMs}`); return later(20, 'shards gone'); } },
+            retention: { stop: () => { events.push('retention.stop'); return later(10, 'retention stopped'); } },
+            analysis: { stop: () => { events.push('analysis.stop'); return later(100, 'analysis stopped', true); } },
+            store: { close: () => events.push('store.close') },
+        });
+        assert.deepEqual(events, [`drain ${cfg.shutdownGraceMs}`, 'retention.stop', 'analysis.stop', 'retention stopped', 'shards gone', 'analysis stopped', 'store.close']);
+        assert.deepEqual(errors, ['analysis stop failed']);
+    });
+
+    it('a shard started after an edit of .env or of a secret file runs the configuration the primary loaded', async (t) => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-cfg-'));
+        t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+        const envFile = path.join(dir, '.env'), secretFile = path.join(dir, 'secret');
+        fs.writeFileSync(envFile, `SERVER_MOTD=before\nSERVER_SECRET_FILE=${secretFile}\n`);
+        fs.writeFileSync(secretFile, Buffer.alloc(32, 1).toString('base64'));
+        // The server's environment, which its workers inherit.
+        const env = { SCACELITH_ENV_FILE: envFile, TLS_MODE: 'off', ALLOW_INSECURE_DEV: '1', WORKERS: '1', MAIL_TRANSPORT: 'none', LOG_LEVEL: 'error', METRICS_PORT: '0' };
+        const saved = { ...process.env };
+        Object.assign(process.env, env);
+        t.after(() => { for (const k of Object.keys(env)) if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; });
+        const config = loadConfig();
+        // A worker: its IPC channel, and an exit when the primary tells it to stop.
+        const workers = [];
+        const fork = () => {
+            const [a, b] = channelPair();
+            const w = Object.assign(new EventEmitter(), { send: (...args) => a.send(...args), kill() {} });
+            a.on('message', (m) => w.emit('message', m));
+            new Ipc(b).on('shutdown', () => setImmediate(() => w.emit('exit', 0, null)));
+            workers.push(b);
+            return w;
+        };
+        const silent = { child: () => silent, debug() {}, info() {}, warn() {}, error() {}, security() {} };
+        const primary = await startPrimary({
+            config, log: silent, fork, shards: [0], matchmaker: new FakeMatchmaker(), challenges: new Challenges({ config: cfg }), registry: new Registry(),
+        });
+        t.after(() => primary.stop(0));
+        // The operator edits .env and rotates the secret, to apply them at the next restart.
+        fs.writeFileSync(envFile, `SERVER_MOTD=after\nSERVER_SECRET_FILE=${secretFile}\n`);
+        fs.writeFileSync(secretFile, Buffer.alloc(32, 2).toString('base64'));
+        assert.equal(loadConfig().serverMotd, 'after');
+        const shard = await shardConfig(new Ipc(workers[0]));
+        assert.equal(shard.serverMotd, 'before');
+        assert.deepEqual(shard.serverSecret, Buffer.alloc(32, 1));
+        assert.deepEqual(describeConfig(shard), describeConfig(config));
     });
 });
