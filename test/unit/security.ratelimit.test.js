@@ -112,9 +112,21 @@ test('local control implements ratelimit.take and once.consume', async () => {
     assert.deepEqual(await take(), { allowed: true, retryAfterMs: 0, count: 2 });
     const r = await take();
     assert.equal(r.allowed, false);
-    assert.ok(r.retryAfterMs > 0 && r.retryAfterMs <= 1000);
-    now.advance(2000);
-    assert.equal((await take()).allowed, true);
+    // The two takes still count in full when the window rolls over (at 1000 ms), then decay over
+    // the next window: one more fits at 1500 ms, as the primary answers (cluster/limits.js).
+    assert.equal(r.retryAfterMs, 1500);
+    now.advance(r.retryAfterMs - 1);
+    assert.equal((await take()).allowed, false);
+    now.advance(1);
+    assert.equal((await take()).allowed, true, 'allowed when its Retry-After ends');
+    // Limit 5 per minute, 6th take 2 s into the window: 70 s, not 58 s then 12 s more.
+    const take5 = () => ctl.request('ratelimit.take', { key: 'k5', limit: 5, windowMs: 60000, cost: 1 });
+    now.set(120000 + 2000);
+    for (let i = 0; i < 5; i++) assert.equal((await take5()).allowed, true);
+    const r5 = await take5();
+    assert.deepEqual([r5.allowed, r5.retryAfterMs], [false, 70000]);
+    now.advance(70000);
+    assert.equal((await take5()).allowed, true);
     assert.deepEqual(await ctl.request('once.consume', { key: 'x', ttlMs: 100 }), { fresh: true });
     assert.deepEqual(await ctl.request('once.consume', { key: 'x', ttlMs: 100 }), { fresh: false });
     now.advance(101);
