@@ -252,7 +252,7 @@ export function gifOptions({ size, orientation, delay, coords }, from = 'query')
 /** A player's name from a PGN tag: printable ASCII (accents dropped, anything else '?'), at most 48 characters. */
 export function tagText(v, max = 48) {
     if (typeof v !== 'string') return '';
-    const s = v.normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^\x20-\x7e]/g, '?').replace(/\s+/g, ' ').trim();
+    const s = v.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\x20-\x7e]/g, '?').replace(/\s+/g, ' ').trim();
     return s.length > max ? s.slice(0, max) : s;
 }
 
