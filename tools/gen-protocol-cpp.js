@@ -16,6 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as schema from '../src/protocol/schema.js';
 import { computeSchemaHash } from '../src/protocol/schema-hash.js';
+import { buildModel } from './gen-protocol.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const outDir = path.resolve(here, '../../src/net');
@@ -23,6 +24,10 @@ const headerPath = path.join(outDir, 'protocol_gen.h');
 const sourcePath = path.join(outDir, 'protocol_gen.cpp');
 
 // ---- schema model ------------------------------------------------------------------------------
+
+// Validated by the JS generator's rules (enum values within 0..255, str8 bounds within 255 bytes,
+// list16 bounds within 65535...): a schema without a JS codec gets no C++ codec either.
+buildModel(schema);
 
 // Names used by both directions (currently Ping, Pong, Gesture) get C_ / S_ prefixes, as in the
 // JS codec.
@@ -66,14 +71,6 @@ function cppDefault(t) {
     }
 }
 
-// Enums travel as u8. A schema enum with a value above 255 cannot be sent; its C++ type is made
-// wide enough to compile (encode writes value & 0xFF like the JS codec, decode refuses it).
-function wideValues(name) { return Object.entries(schema.enums[name]).filter(([, v]) => v > 255).map(([k, v]) => `${k}=${v}`); }
-function enumUnderlying(name) { return wideValues(name).length ? 'uint16_t' : 'uint8_t'; }
-for (const name of Object.keys(schema.enums)) {
-    if (wideValues(name).length) console.warn(`warning: enum ${name} has values above 255 (${wideValues(name).join(', ')}): not encodable as u8`);
-}
-
 function intLit(v, kind) {
     if (kind === 'i32') return v === -0x80000000 ? '-2147483647 - 1' : String(v);
     return v > 0xffff ? `0x${v.toString(16)}u` : `${v}u`;
@@ -85,9 +82,9 @@ function bounds(f) {
     return [f.opts.min ?? lo, f.opts.max ?? hi];
 }
 
-function strMax(f) { return Math.min(f.opts.max ?? 255, 255); }
+function strMax(f) { return f.opts.max ?? 255; }
 function strMin(f) { return f.opts.min ?? 0; }
-function listMax(f) { return Math.min(f.opts.max ?? 0xffff, 0xffff); }
+function listMax(f) { return f.opts.max ?? 0xffff; }
 
 // ---- code emitters -----------------------------------------------------------------------------
 
@@ -226,16 +223,10 @@ function genHeader(hash) {
     L.push('// ---- enums (u8 on the wire) ----');
     for (const [name, values] of Object.entries(schema.enums)) {
         const items = Object.entries(values).map(([k, v]) => `${k} = ${v}`);
-        const under = enumUnderlying(name);
-        if (under !== 'uint8_t') {
-            L.push(`// SCHEMA BUG: ${name} has values above 255 (${wideValues(name).join(', ')})`);
-            L.push('// but enums are u8 on the wire: those values cannot be sent (the frame carries value & 0xFF,');
-            L.push('// which decode refuses). The C++ type is wider only so that this header compiles.');
-        }
-        const one = `enum class ${name} : ${under} { ${items.join(', ')} };`;
+        const one = `enum class ${name} : uint8_t { ${items.join(', ')} };`;
         if (one.length <= 110) L.push(one);
         else {
-            L.push(`enum class ${name} : ${under} {`);
+            L.push(`enum class ${name} : uint8_t {`);
             let line = '   ';
             for (const it of items) {
                 if ((line + ' ' + it + ',').length > 104) { L.push(line); line = '   '; }
