@@ -497,7 +497,6 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         mfaEnabled: (v) => [['mfa_enabled', b01(v)]],
         mfaSecretEnc: (v) => [['mfa_secret_enc', orNull(v)]],
         pendingMfaSecretEnc: (v) => [['mfa_pending_secret_enc', orNull(v)]],
-        mfaPendingSecretEnc: (v) => [['mfa_pending_secret_enc', orNull(v)]],
         mfaLastStep: (v) => [['mfa_last_step', Math.floor(v)]],
         status: (v) => [['status', v]],
         acceptChallenges: (v) => [['accept_challenges', b01(v)]],
