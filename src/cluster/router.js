@@ -1,8 +1,10 @@
 // Router (one per shard): the state machine of every WebSocket connection, and the glue between
 // sockets, the local GameHost, the shard bus and the primary (DESIGN 3, 5.7, 5.8).
 //
-//   hello  The first message must be Hello with seq 1 (else Error{HelloRequired} + close 4010),
-//          within WS_HELLO_TIMEOUT_MS (same). proto in [PROTOCOL_MIN, PROTOCOL_VERSION] and
+//   hello  The first message must be a Hello (else, an empty frame included, Error{HelloRequired}
+//          + close 4010), decodable (else Error{Malformed} + 4300), with seq 1 (else
+//          Error{ProtocolViolation} + 4300), within WS_HELLO_TIMEOUT_MS (HelloRequired + 4010).
+//          proto in [PROTOCOL_MIN, PROTOCOL_VERSION] and
 //          schema == SCHEMA_HASH, else Error{UnsupportedProtocol} + 4002. The token is validated by
 //          the auth service (Unauthorized + 4003), e-mail verification enforced (EmailUnverified +
 //          4003), then the primary's presence.claim (Banned: Error + Notice{Banned, until} + 4004;
