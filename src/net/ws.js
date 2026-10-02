@@ -152,11 +152,10 @@ function destroySocket(socket) { socket.destroy(); }
  * in `ctx`.
  */
 export class WsConnection {
-    constructor(server, socket, ip, protocol) {
+    constructor(server, socket, ip) {
         /** @type {number} u32, unique among the open connections of this server */
         this.id = server._allocId();
         this.ip = ip;
-        this.protocol = protocol;
         this.userId = 0;
         this.username = '';
         /** @type {'hello'|'ready'|'closing'|'closed'} */
@@ -196,9 +195,6 @@ export class WsConnection {
 
     /** Bytes queued in user space for this client (not yet handed to the kernel). */
     get bufferedBytes() { return this._socket.writableLength; }
-
-    /** Remote port (diagnostics). */
-    get remotePort() { return this._socket.remotePort; }
 
     /**
      * Sends one binary message. Returns false when the connection is closing/closed, or when the
@@ -657,7 +653,7 @@ export class WsServer {
         socket.write(
             'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
             `Sec-WebSocket-Accept: ${acceptKey(key)}\r\nSec-WebSocket-Protocol: ${this.subprotocol}\r\n${this._upgradeExtra}\r\n`);
-        const conn = new WsConnection(this, socket, ip, this.subprotocol);
+        const conn = new WsConnection(this, socket, ip);
         conn._admitted = admitted;
         this.connections.set(conn.id, conn);
         this._accepted.inc();
