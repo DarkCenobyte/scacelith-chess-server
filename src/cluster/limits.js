@@ -3,12 +3,13 @@
 //
 // SlidingWindowLimiter: sliding-window counter (the previous fixed window weighted by how much
 // of it still overlaps the sliding window + the current window). Accurate to a few percent,
-// amortised O(1) time and ~100 bytes per key. Keys expire two windows after their last use; the
-// map is bounded (maxKeys): beyond it the expired keys go first, then the least recently inserted
-// ones, which can only make the limiter more lenient for the evicted keys, never block an
-// innocent client. The search for expired keys walks the map only when one may have expired
-// since the last walk that found none (a lower bound of the expiries is kept), so a flood of
-// fresh keys at capacity costs O(1) per key, not a walk of the whole map every 16 keys.
+// O(1) time below capacity and ~100 bytes per key. Keys expire two windows after their last use;
+// the map is bounded (maxKeys): beyond it the expired keys go first, then the least recently
+// inserted ones, which can only make the limiter more lenient for the evicted keys, never block
+// an innocent client. Each complete walk of the map for expired keys records the earliest expiry
+// of the keys it keeps, and no walk is made while no key can have expired since then: a flood of
+// fresh keys at capacity costs O(1) per key, not a walk of the whole map every 16 keys. While
+// keys keep expiring at capacity (about one per new key), each eviction still walks the map: O(n).
 //
 // OnceStore: remembers keys until their TTL (single-use tokens: proof-of-work challenges, TOTP
 // steps...). Bounded too; when full, the oldest insertions are evicted first. With the default
