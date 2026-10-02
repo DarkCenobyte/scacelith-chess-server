@@ -422,6 +422,9 @@ export function renderGame(job, hooks = {}) {
 
     const enc = new GifEncoder({ width, height, palette: pal.flat, loop: 0, background: P.page });
     const prev = new Uint8Array(width * height);
+    // Pixels of the changed box, reused by every frame: addFrame encodes them at once and keeps
+    // no reference to them.
+    const scratch = new Uint8Array(width * height);
     const last = states.length - 1;
     const finished = result !== '*';
     const resultText = RESULT_TEXT[result];
@@ -465,7 +468,8 @@ export function renderGame(job, hooks = {}) {
             } else {
                 // The changed pixels; everything else is the transparent index 0.
                 const w = bx1 - bx0 + 1, h = by1 - by0 + 1;
-                const sub = new Uint8Array(w * h);
+                const sub = scratch.subarray(0, w * h);
+                sub.fill(0);
                 for (let r = 0; r < dirtyRects.length; r += 4) {
                     const rx = dirtyRects[r], ry = dirtyRects[r + 1], rw = dirtyRects[r + 2], rh = dirtyRects[r + 3];
                     for (let y = ry; y < ry + rh; y++) {
