@@ -50,11 +50,12 @@ export function ipForLog(ip) {
     return truncateIp(ip);
 }
 
-// IPv4 /24, IPv6 /48 (IPv4-mapped IPv6 addresses are treated as IPv4).
+// IPv4 /24, IPv6 /48 (IPv4-mapped IPv6 addresses are treated as IPv4; any other IPv6 address
+// written with a dotted IPv4 tail is IPv6: its /48).
 export function truncateIp(ip) {
     let a = String(ip);
-    if (a.startsWith('::ffff:') && a.includes('.')) a = a.slice(7);
-    if (a.includes('.')) { const p = a.split('.'); return p.length === 4 ? `${p[0]}.${p[1]}.${p[2]}.0/24` : a; }
+    if (a.slice(0, 7).toLowerCase() === '::ffff:' && a.includes('.')) a = a.slice(7);
+    if (!a.includes(':') && a.includes('.')) { const p = a.split('.'); return p.length === 4 ? `${p[0]}.${p[1]}.${p[2]}.0/24` : a; }
     const parts = expandIPv6(a);
     return parts ? parts.slice(0, 3).join(':') + '::/48' : a;
 }

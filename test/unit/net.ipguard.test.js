@@ -8,6 +8,7 @@ import { EventEmitter } from 'node:events';
 import { performance } from 'node:perf_hooks';
 import { describe, it } from 'node:test';
 import { testConfig } from '../../src/config.js';
+import { truncateIp } from '../../src/log.js';
 import { Registry } from '../../src/metrics.js';
 import { ipGroupKey } from '../../src/net/ip.js';
 import { IpGuard, REPORT_MAX_ENTRIES, addressKeys } from '../../src/net/ipguard.js';
@@ -59,6 +60,10 @@ describe('IpGuard: keys', () => {
         // With '::' the tail is two groups, not one: the /64 is 2001:db8:0:1, not 2001:db8:0:0.
         assert.equal(addressKeys('2001:db8::1:2:3:4.5.6.7').k64, '2001:db8:0:1::/64');
         assert.equal(addressKeys('2001:db8::1:2:3:4.5.6.7').k64, addressKeys('2001:db8:0:1:2:3:405:607').k64);
+        // And it is logged (LOG_IP=truncated) as its /48, not almost whole; IPv4-mapped stays IPv4.
+        assert.equal(truncateIp('2001:db8:1:2:3:4:5.6.7.8'), '2001:db8:1::/48');
+        assert.equal(truncateIp('2001:db8::1:2:3:4.5.6.7'), '2001:db8:0::/48');
+        assert.deepEqual(['::ffff:192.0.2.7', '::FFFF:192.0.2.7', '192.0.2.7'].map(truncateIp), Array(3).fill('192.0.2.0/24'));
     });
 });
 
