@@ -761,7 +761,7 @@ export function generateCodec(s = defaultSchema) {
     L.push('//');
     L.push('// API (docs/DESIGN.md section 5.1): MSG, encode.<Name>(fields) -> Buffer, decode(buf, { dir }),');
     L.push('// ProtocolError{reason}, PROTOCOL_VERSION, PROTOCOL_MIN, WS_SUBPROTOCOL, SCHEMA_HASH, enums,');
-    L.push('// MoveFlag, CloseCode, isClientType, messageName. Wire format and validation rules:');
+    L.push('// MoveFlag, GestureFlag, CloseCode, isClientType, messageName. Wire format and validation rules:');
     L.push('// docs/PROTOCOL.md. Every function below is straight-line code specialised for one message:');
     L.push('// fixed parts at constant offsets, one bounds check per run of fixed-size fields, exact-size');
     L.push('// allocation on encode. Encoding validates like decoding, so the server cannot emit a frame');
@@ -1415,7 +1415,8 @@ const CLOSE_MEANING = {
     SlowConsumer: 'client does not read its messages',
 };
 
-// Inline comments of the enum values in schema.js (documentation only).
+// Inline comments of the enum values in schema.js (documentation only; always the file on disk,
+// whatever schema generateDocs is given).
 function enumComments() {
     const out = {};
     let src = '';
@@ -1433,7 +1434,8 @@ function enumComments() {
     return out;
 }
 
-// Trailing comments of the struct fields in schema.js (documentation only).
+// Trailing comments of the struct fields in schema.js (documentation only; always the file on
+// disk, like enumComments).
 function structComments() {
     const out = {};
     let src = '';

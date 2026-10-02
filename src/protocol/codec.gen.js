@@ -3,7 +3,7 @@
 //
 // API (docs/DESIGN.md section 5.1): MSG, encode.<Name>(fields) -> Buffer, decode(buf, { dir }),
 // ProtocolError{reason}, PROTOCOL_VERSION, PROTOCOL_MIN, WS_SUBPROTOCOL, SCHEMA_HASH, enums,
-// MoveFlag, CloseCode, isClientType, messageName. Wire format and validation rules:
+// MoveFlag, GestureFlag, CloseCode, isClientType, messageName. Wire format and validation rules:
 // docs/PROTOCOL.md. Every function below is straight-line code specialised for one message:
 // fixed parts at constant offsets, one bounds check per run of fixed-size fields, exact-size
 // allocation on encode. Encoding validates like decoding, so the server cannot emit a frame
