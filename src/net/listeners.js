@@ -99,7 +99,8 @@
 // reads a large answer, a GIF or a PGN, a few bytes at a time). Malformed HTTP ('clientError':
 // 400, 408 for a header timeout, 431 for oversized headers) is counted in
 // scacelith_http_client_errors_total{reason} and toward a block of the address, unless the peer
-// is a trusted proxy.
+// is a trusted proxy, and its socket is closed once the answer is flushed (1 s at most); a client
+// that ends or resets its connection in the middle of a request is closed without being counted.
 //
 // Privileged ports: API_PORT defaults to 443, and Linux lets only a process with the
 // CAP_NET_BIND_SERVICE capability (root has it) bind a port below 1024
@@ -470,8 +471,8 @@ export function tlsOptions(config) {
 }
 
 /**
- * A small JSON answer with the security headers of the API (the answers given before the API
- * handler: health, refusals of the protection per address).
+ * A small JSON answer with most of the API's security headers (no Cross-Origin-Resource-Policy;
+ * the answers given before the API handler: health, refusals of the protection per address).
  * @param {import('node:http').ServerResponse} res
  * @param {number} status
  * @param {object} body
@@ -588,6 +589,7 @@ function refuseRequest(res, retryAfterMs, native, close) {
 }
 
 function destroyResponse(res) { res.destroy(); }
+function destroySocket(socket) { socket.destroy(); }
 
 // The inactivity timeout (server.timeout, IDLE_TIMEOUT_MS) is for a client that stops reading. A
 // request whose handler is still at work (a GIF waiting for a render thread, a data export) keeps
@@ -643,10 +645,12 @@ export function wrapApiHandler(apiHandler, { clientIp, ready, native, guard = nu
 
 const CLIENT_ERROR_STATUS = { timeout: '408 Request Timeout', too_large: '431 Request Header Fields Too Large', malformed: '400 Bad Request' };
 
-// What a 'clientError' says about the client: null for a connection that simply went away.
+// What a 'clientError' says about the client: null for a connection that simply went away (reset,
+// or ended by the client in the middle of a request: HPE_INVALID_EOF_STATE).
 function clientErrorReason(err) {
     const code = err && err.code;
     if (code === 'ECONNRESET' || code === 'EPIPE' || code === 'ECONNABORTED' || code === 'ETIMEDOUT') return null;
+    if (code === 'HPE_INVALID_EOF_STATE') return null;
     if (code === 'ERR_HTTP_REQUEST_TIMEOUT') return 'timeout';
     if (code === 'HPE_HEADER_OVERFLOW' || code === 'HPE_CHUNK_EXTENSIONS_OVERFLOW') return 'too_large';
     return 'malformed';
@@ -670,6 +674,11 @@ function hardenHttp(server, { guard, isTrusted, clientErrors, headersTimeoutMs, 
         }
         if (reason !== null && socket.writable && !socket.destroyed) {
             socket.end(`HTTP/1.1 ${CLIENT_ERROR_STATUS[reason]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+            // Ending is not enough: the parser stays attached to the socket (after a header timeout
+            // Node no longer watches it, and a client that keeps sending would hold the socket and
+            // could still complete its request). Closed once the answer is flushed, 1 s at most.
+            socket.destroySoon();
+            setTimeout(destroySocket, 1000, socket).unref();
         } else {
             socket.destroy();
         }
@@ -838,6 +847,10 @@ export class Listeners {
             return false;
         }
         for (const s of this._tlsServers) s.setSecureContext(opts);
+        // setSecureContext installs random ticket keys: put the day's derived ones back, or the
+        // other workers could not resume this one's sessions until the next day.
+        this._ticketDay = -1;
+        this._rotateTicketKeys();
         this.log?.info?.('certificate reloaded');
         return true;
     }

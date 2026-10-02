@@ -315,6 +315,21 @@ test('perSourceMax applies only once the queue is half full: one source may use 
     await Promise.all([r4, w4]);
 });
 
+test('perSourceMax above half of queueMax: one source holds up to perSourceMax places, more than half', async () => {
+    const lim = createHashLimiter({ concurrency: 1, queueMax: 8, queueTimeoutMs: 5000, perSourceMax: 6 });
+    const h = held();
+    const running = lim.run(() => h.done);
+    await tick();
+    const mine = [1, 2, 3, 4, 5, 6].map((i) => lim.run(async () => i, { source: 'A' }));
+    assert.equal(lim.waitingFrom('A'), 6, 'max(half of the queue, perSourceMax) = 6 of 8');
+    await assert.rejects(lim.run(async () => 7, { source: 'A' }), { reason: 'source_limit' });
+    const others = [lim.run(async () => 'b', { source: 'B' }), lim.run(async () => 'c', { source: 'C' })];
+    await assert.rejects(lim.run(async () => 'd', { source: 'D' }), { reason: 'queue_full' });
+    h.release();
+    assert.deepEqual(await Promise.all([...mine, ...others]), [1, 2, 3, 4, 5, 6, 'b', 'c']);
+    await running;
+});
+
 test('createCheckFloor: the slowest check of the current or previous period, capped', () => {
     let t = 1000;
     const f = createCheckFloor({ capMs: 500, periodMs: 100, clock: () => t });

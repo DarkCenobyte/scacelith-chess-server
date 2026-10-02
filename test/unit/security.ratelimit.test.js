@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
     FailureCounter, LruMap, SlidingWindowCounter, TokenBucketLimiter, createLocalControl, ipKey, normalizeIp, prefixKey, workerShare,
 } from '../../src/security/ratelimit.js';
+import { ipGroupKey, normalizeIp as normalizeAddress } from '../../src/net/ip.js';
 import { createClock } from './helpers/auth-fakes.js';
 
 test('LruMap evicts the least recently used entry', () => {
@@ -111,9 +112,21 @@ test('local control implements ratelimit.take and once.consume', async () => {
     assert.deepEqual(await take(), { allowed: true, retryAfterMs: 0, count: 2 });
     const r = await take();
     assert.equal(r.allowed, false);
-    assert.ok(r.retryAfterMs > 0 && r.retryAfterMs <= 1000);
-    now.advance(2000);
-    assert.equal((await take()).allowed, true);
+    // The two takes still count in full when the window rolls over (at 1000 ms), then decay over
+    // the next window: one more fits at 1500 ms, as the primary answers (cluster/limits.js).
+    assert.equal(r.retryAfterMs, 1500);
+    now.advance(r.retryAfterMs - 1);
+    assert.equal((await take()).allowed, false);
+    now.advance(1);
+    assert.equal((await take()).allowed, true, 'allowed when its Retry-After ends');
+    // Limit 5 per minute, 6th take 2 s into the window: 70 s, not 58 s then 12 s more.
+    const take5 = () => ctl.request('ratelimit.take', { key: 'k5', limit: 5, windowMs: 60000, cost: 1 });
+    now.set(120000 + 2000);
+    for (let i = 0; i < 5; i++) assert.equal((await take5()).allowed, true);
+    const r5 = await take5();
+    assert.deepEqual([r5.allowed, r5.retryAfterMs], [false, 70000]);
+    now.advance(70000);
+    assert.equal((await take5()).allowed, true);
     assert.deepEqual(await ctl.request('once.consume', { key: 'x', ttlMs: 100 }), { fresh: true });
     assert.deepEqual(await ctl.request('once.consume', { key: 'x', ttlMs: 100 }), { fresh: false });
     now.advance(101);
@@ -136,6 +149,22 @@ test('client source keys: IPv4 address, IPv6 /48', () => {
     assert.equal(prefixKey('2001:db8:aa:ffff::9'), '2001:db8:aa::/48', 'every /64 of the /48 has the same key');
     assert.equal(prefixKey('2001:DB8:0AA::1'), '2001:db8:aa::/48');
     assert.notEqual(prefixKey('2001:db8:ab::1'), prefixKey('2001:db8:aa::1'));
+});
+
+test('the rate-limit keys are those of net/ip.js; what is not an address is kept as is', () => {
+    let s = 11;
+    const rnd = (n) => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s % n; };
+    for (let i = 0; i < 2000; i++) {
+        const g = Array.from({ length: 8 }, () => (rnd(3) ? rnd(65536) : 0).toString(16));
+        const a = rnd(2) ? g.join(':') : g.slice(0, 2).join(':') + '::' + g.slice(5).join(':');
+        for (const ip of [normalizeAddress(a), `${rnd(256)}.${rnd(256)}.${rnd(256)}.${rnd(256)}`]) {
+            assert.equal(ipKey(ip), ipGroupKey(ip, 64), ip);
+            assert.equal(prefixKey(ip), ipGroupKey(ip, 48), ip);
+            assert.equal(normalizeIp(ip), ip);
+        }
+    }
+    assert.deepEqual([ipKey(''), prefixKey(undefined), normalizeIp(null)], ['', '', '']);
+    assert.deepEqual([ipKey('garbage'), prefixKey('garbage'), normalizeIp('garbage')], ['garbage', 'garbage', 'garbage']);
 });
 
 test('workerShare: all of a limit on 1 or 2 workers, 2 L / N beyond, never 0', () => {

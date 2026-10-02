@@ -10,6 +10,7 @@
 // what would let someone log in or read a private message.
 
 import crypto from 'node:crypto';
+import net from 'node:net';
 
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40, security: 35 };
 const SENSITIVE = /pass(word)?|token|secret|^code$|otp|cookie|authorization|recovery|mfa_?secret|totp|verifier|nonce_?secret|private|credential|smtp_?pass/i;
@@ -49,11 +50,12 @@ export function ipForLog(ip) {
     return truncateIp(ip);
 }
 
-// IPv4 /24, IPv6 /48 (IPv4-mapped IPv6 addresses are treated as IPv4).
+// IPv4 /24, IPv6 /48 (IPv4-mapped IPv6 addresses are treated as IPv4; any other IPv6 address
+// written with a dotted IPv4 tail is IPv6: its /48).
 export function truncateIp(ip) {
     let a = String(ip);
-    if (a.startsWith('::ffff:') && a.includes('.')) a = a.slice(7);
-    if (a.includes('.')) { const p = a.split('.'); return p.length === 4 ? `${p[0]}.${p[1]}.${p[2]}.0/24` : a; }
+    if (a.slice(0, 7).toLowerCase() === '::ffff:' && a.includes('.')) a = a.slice(7);
+    if (!a.includes(':') && a.includes('.')) { const p = a.split('.'); return p.length === 4 ? `${p[0]}.${p[1]}.${p[2]}.0/24` : a; }
     const parts = expandIPv6(a);
     return parts ? parts.slice(0, 3).join(':') + '::/48' : a;
 }
@@ -64,6 +66,14 @@ export function expandIPv6(a) {
     if (halves.length > 2) return null;
     const head = halves[0] ? halves[0].split(':') : [];
     const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+    // A dotted IPv4 tail ('2001:db8:1:2:3:4:5.6.7.8') is the last two groups.
+    const last = halves.length === 2 ? tail : head;
+    if (last.length && last[last.length - 1].includes('.')) {
+        const v4 = last.pop();
+        if (!net.isIPv4(v4)) return null;
+        const b = v4.split('.').map(Number);
+        last.push((b[0] * 256 + b[1]).toString(16), (b[2] * 256 + b[3]).toString(16));
+    }
     const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
     const all = [...head, ...Array(Math.max(0, fill)).fill('0'), ...tail];
     if (all.length !== 8) return null;

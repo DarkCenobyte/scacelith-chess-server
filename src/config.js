@@ -56,7 +56,7 @@ key('TLS_CERT_FILE', { section: 'tls', type: 'path', default: '', desc: 'PEM cer
 key('TLS_KEY_FILE', { section: 'tls', type: 'path', default: '', secretFile: true, desc: 'PEM private key. Never commit it.' });
 key('TLS_MIN_VERSION', { section: 'tls', type: 'enum', values: ['TLSv1.2', 'TLSv1.3'], default: 'TLSv1.2', desc: 'Oldest TLS version accepted.' });
 key('TRUSTED_PROXIES', { section: 'tls', type: 'list', default: '127.0.0.1,::1',
-    desc: 'With TLS_MODE=proxy: addresses whose X-Forwarded-For / X-Forwarded-Proto headers are trusted.' });
+    desc: 'With TLS_MODE=proxy: addresses whose X-Forwarded-For header is trusted.' });
 key('ALLOW_INSECURE_DEV', { section: 'tls', type: 'bool', default: false, desc: 'Allows TLS_MODE=off. Development only; never on a public server.' });
 
 // ---- Storage -------------------------------------------------------------------------------------
@@ -188,7 +188,7 @@ key('PASSWORD_HASH_CONCURRENCY', { section: 'limits', type: 'int', default: 1, m
 key('PASSWORD_HASH_QUEUE_MAX', { section: 'limits', type: 'int', default: 32, min: 0,
     desc: 'Password hashes that may wait for a free slot in one worker process; one more is refused at once with 503 server_busy and a Retry-After of 5 to 15 s (0: no waiting at all). Once half of them wait, one client (an IPv4 address, or an IPv6 /48) may have at most PASSWORD_HASH_WAITERS_PER_SOURCE of them waiting; its next one is refused with 429 rate_limited.' });
 key('PASSWORD_HASH_WAITERS_PER_SOURCE', { section: 'limits', type: 'int', default: 2, min: 1,
-    desc: 'Password hashes one client (an IPv4 address, or an IPv6 /48) may have waiting in one worker process once PASSWORD_HASH_QUEUE_MAX is at least half full; its next request is then refused with 429 rate_limited and a Retry-After of 5 to 15 s, and that refused attempt does not count against AUTH_RATE_PER_IP. While less than half of the queue waits, one client may queue more, so that players who log in together behind one address (a school or a company network) are served when the server is not busy, and one client never holds more than half of the queue. Raise it for such a site if its players log in while the server is busy, together with MAX_PENDING_HANDSHAKES_PER_IP and AUTH_RATE_PER_IP.' });
+    desc: 'Password hashes one client (an IPv4 address, or an IPv6 /48) may have waiting in one worker process once PASSWORD_HASH_QUEUE_MAX is at least half full; its next request is then refused with 429 rate_limited and a Retry-After of 5 to 15 s, and that refused attempt does not count against AUTH_RATE_PER_IP. While less than half of the queue waits, one client may queue more, so that players who log in together behind one address (a school or a company network) are served when the server is not busy, and, as long as PASSWORD_HASH_WAITERS_PER_SOURCE is at most half of PASSWORD_HASH_QUEUE_MAX, one client never holds more than half of the queue. Raise it for such a site if its players log in while the server is busy, together with MAX_PENDING_HANDSHAKES_PER_IP and AUTH_RATE_PER_IP.' });
 key('PASSWORD_HASH_QUEUE_TIMEOUT_MS', { section: 'limits', type: 'int', default: 10000, min: 100, max: 13000,
     desc: 'Longest wait for a password hash slot, for all the hashes of one request together (a password change hashes twice); the request is then refused with 503 server_busy. At most 13000: the game gives up after 15 s, and the hash itself takes a second or two, so that the player sees the "busy" answer rather than a timeout.' });
 

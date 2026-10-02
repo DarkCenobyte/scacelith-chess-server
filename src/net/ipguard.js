@@ -43,13 +43,14 @@
 // in-flight cap, never counted, never blocked. Login, registration and per-account limits apply
 // to exempt addresses as to the others (they are not part of this layer).
 //
-// Cost: keys are computed once per connection (cached on the socket, re-computed only when the
-// client address of a request differs, as behind a proxy); a request then costs one or two Map
-// lookups for the blocks and one or two token-bucket updates (about 1 µs measured, see
-// test/unit/net.ipguard.test.js and docs/SIZING.md). Memory is bounded: 50,000 buckets per
-// limiter (an evicted bucket is full again, which only makes the limit more lenient; the /48
-// bucket bounds /64 rotation), counters only for open connections and requests in progress,
-// ABUSE_MAX_BLOCKS blocks.
+// Cost: keys are computed once per socket (cached on it, re-computed only when the client address
+// of a request differs, as behind a proxy; with native TLS, twice per connection: for the raw
+// socket at admission and for its TLS socket, another object, at the first request or upgrade);
+// a request then costs one or two Map lookups for the blocks and one or two token-bucket updates
+// (about 1 µs measured, see test/unit/net.ipguard.test.js and docs/SIZING.md). Memory is
+// bounded: 50,000 buckets per limiter (an evicted bucket is full again, which only makes the
+// limit more lenient; the /48 bucket bounds /64 rotation), counters only for open connections and
+// requests in progress, ABUSE_MAX_BLOCKS blocks.
 
 import { performance } from 'node:perf_hooks';
 import { AbuseTracker, ABUSE_MAX_BLOCKS, ABUSE_PREFIX_FACTOR } from '../cluster/abuse.js';
@@ -181,7 +182,7 @@ export class IpGuard {
 
     /**
      * The keys of the client of a request, cached on its socket while the address stays the same
-     * (one computation per connection; behind a proxy, per change of client).
+     * (one computation per socket; behind a proxy, per change of client).
      * @param {string} ip client address
      * @param {object} [socket]
      */

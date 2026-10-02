@@ -201,9 +201,18 @@ export function createPasswordHasher(opts = {}) {
     }
 
     let dummy = null;
+    // The dummy hash, computed once. A failure (memory, thread pool) is not kept: the next call
+    // computes it again, instead of every unknown-account login failing until a restart.
+    function dummyHash() {
+        if (!dummy) {
+            const p = hash(crypto.randomBytes(18).toString('base64'));
+            dummy = p;
+            p.catch(() => { if (dummy === p) dummy = null; });
+        }
+        return dummy;
+    }
     async function dummyWork(pw) {
-        if (!dummy) dummy = hash(crypto.randomBytes(18).toString('base64'));
-        const d = parse(await dummy);
+        const d = parse(await dummyHash());
         if (d.alg === 'scrypt') await scryptKey(pw, d.salt, d.logN, d.r, d.p, d.key.length);
         else await argon2Async({ message: pw, nonce: d.salt, parallelism: d.parallelism, tagLength: d.key.length, memory: d.memory, passes: d.passes });
     }
@@ -234,8 +243,7 @@ export function createPasswordHasher(opts = {}) {
         };
         const pw = Buffer.from(crypto.randomBytes(18).toString('base64'), 'utf8');
         if (!dummy) {
-            dummy = hash(crypto.randomBytes(18).toString('base64'));
-            await timed(() => dummy);
+            await timed(() => dummyHash());
         } else {
             await dummy;
             await timed(() => dummyWork(pw));
@@ -281,10 +289,12 @@ export class PasswordBusyError extends Error {
  * `queueMax` tasks already waiting is refused at once. So is a task whose `source` (a client
  * address or network prefix) already has `perSourceMax` tasks waiting, but only under contention,
  * once at least half of `queueMax` tasks wait: one source (a classroom behind one IPv4 address)
- * may use an idle queue, and it cannot take more than half of it, so the other half stays open to
- * the other sources. A waiting task gives up after `queueTimeoutMs`, or after its own shorter
- * `maxWaitMs` (it leaves the queue). All of these reject with PasswordBusyError. A finished task
- * (resolved, rejected or thrown) hands its slot straight to the oldest waiter.
+ * may use an idle queue, and, as long as `perSourceMax` is at most half of `queueMax`, it cannot
+ * take more than half of it, so the other half stays open to the other sources (a larger
+ * `perSourceMax` lets it hold that many). A waiting task gives up after `queueTimeoutMs`, or
+ * after its own shorter `maxWaitMs` (it leaves the queue). All of these reject with
+ * PasswordBusyError. A finished task (resolved, rejected or thrown) hands its slot straight to
+ * the oldest waiter.
  * @param {{ concurrency?: number, queueMax?: number, queueTimeoutMs?: number, perSourceMax?: number }} [opts]
  */
 export function createHashLimiter({ concurrency = 1, queueMax = 32, queueTimeoutMs = 10000, perSourceMax = Infinity } = {}) {

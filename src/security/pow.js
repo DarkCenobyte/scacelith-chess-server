@@ -12,6 +12,7 @@
 // with the primary's `once.consume` (keyed by the signature) for the challenge's remaining life.
 
 import crypto from 'node:crypto';
+import { safeEqual } from './keys.js';
 import { ipKey } from './ratelimit.js';
 
 export const POW_TTL_MS = 2 * 60000;
@@ -89,9 +90,11 @@ export function createPow({ key, ipKeyHash, now = Date.now, ttlMs = POW_TTL_MS, 
         if (typeof nonce !== 'string' || !NONCE_RE.test(nonce)) return { ok: false, reason: 'malformed' };
         const dot = challenge.indexOf('.');
         const part = challenge.slice(0, dot);
-        const sig = Buffer.from(challenge.slice(dot + 1), 'base64url');
-        const expect = Buffer.from(sign(part), 'base64url');
-        if (sig.length !== expect.length || !crypto.timingSafeEqual(sig, expect)) return { ok: false, reason: 'signature' };
+        // The signature text itself, in constant time: decoding it would accept 4 spellings of one
+        // signature (base64url ignores the low 2 bits of its 43rd character), and single use is
+        // keyed by that text.
+        const sig = sign(part);
+        if (!safeEqual(challenge.slice(dot + 1), sig)) return { ok: false, reason: 'signature' };
         let p;
         try { p = JSON.parse(Buffer.from(part, 'base64url').toString('utf8')); } catch { return { ok: false, reason: 'malformed' }; }
         if (!p || p.v !== 1) return { ok: false, reason: 'malformed' };
@@ -101,7 +104,7 @@ export function createPow({ key, ipKeyHash, now = Date.now, ttlMs = POW_TTL_MS, 
         if (!(p.x > t) || p.x > t + ttlMs + 1000) return { ok: false, reason: 'expired' };
         if (!(p.b >= bits)) return { ok: false, reason: 'bits' };
         if (!checkWork(challenge, nonce, p.b)) return { ok: false, reason: 'work' };
-        const fresh = await once('pow:' + challenge.slice(dot + 1), p.x - t + 1000);
+        const fresh = await once('pow:' + sig, p.x - t + 1000);
         if (!fresh) return { ok: false, reason: 'replayed' };
         return { ok: true };
     }

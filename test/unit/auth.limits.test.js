@@ -208,7 +208,9 @@ test('second factors: AUTH_MFA_PER_ACCOUNT per 15 minutes for the account, whole
     const token = await mfaToken(a);
     r = await a.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: token, recoveryCode: alice.recoveryCodes[0] }, ip: '192.0.2.4' });
     assert.deepEqual([r.status, r.json.error], [429, 'too_many_attempts']);
-    assert.ok(r.json.retryAfter > 0 && r.json.retryAfter <= 900);
+    // The three count in full until the 15 minutes roll over, then decay over the next 15: one
+    // more fits a third of the way in (the primary's sliding window, cluster/limits.js).
+    assert.ok(r.json.retryAfter > 0 && r.json.retryAfter <= 1200);
     assert.equal(a.store.mfa.countRecoveryCodes(alice.u.id), codes, 'no recovery code spent');
     r = await b.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: token, code: totp(alice.secret, a.now()) }, ip: '192.0.2.5' });
     assert.deepEqual([r.status, r.json.error], [429, 'too_many_attempts'], 'the other worker too');

@@ -380,7 +380,9 @@ test('render quotas per account, whole server: 4 per minute and 30 per hour (429
     let r = await next(a);
     assert.deepEqual([r.status, r.json.error], [429, 'rate_limited'], 'the fifth of the minute, whatever the worker');
     assert.equal(r.headers['retry-after'], String(r.json.retryAfter));
-    assert.ok(r.json.retryAfter >= 1 && r.json.retryAfter <= 60);
+    // The four count in full until the minute rolls over, then decay over the next one: one more
+    // fits a quarter of the way in (the primary's sliding window, cluster/limits.js).
+    assert.ok(r.json.retryAfter >= 1 && r.json.retryAfter <= 75);
     assert.equal(counter('scacelith_http_rate_limited_total', 'gif_user_min'), before + 1);
     assert.equal((await gif(a, g.id, { token: alice.token, query: '?delay=100' })).status, 200, 'a cached GIF is still served');
     assert.equal((await next(b, bob)).status, 200, 'another account');

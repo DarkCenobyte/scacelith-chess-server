@@ -10,6 +10,7 @@
 
 import { metrics as defaultRegistry } from '../metrics.js';
 import { WS_SUBPROTOCOL } from '../protocol/index.js';
+import { ipMatcher } from '../net/ip.js';
 import { IpGuard } from '../net/ipguard.js';
 import { Listeners, makeClientIp } from '../net/listeners.js';
 import { WsServer } from '../net/ws.js';
@@ -77,6 +78,9 @@ export async function startShard({ config, shard, serverId, primary, host, auth,
         // The /info serverId again, so that a client that reuses an /info answer checks it before Hello.
         upgradeHeaders: serverId ? { 'Scacelith-Server-Id': serverId } : null,
         guard: theGuard,
+        // The heads a dedicated WS_PORT cannot read count toward a block unless a trusted proxy
+        // sent them (the predicate hardenHttp uses on the API port).
+        isTrusted: config.tlsMode === 'proxy' ? ipMatcher(config.trustedProxies || []) : null,
     });
     let ready = false, draining = false, stopping = null;
     const listeners = new Listeners({

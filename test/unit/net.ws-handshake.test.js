@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import net from 'node:net';
 import { after, before, describe, it } from 'node:test';
+import { testConfig } from '../../src/config.js';
 import { Registry } from '../../src/metrics.js';
+import { ipMatcher } from '../../src/net/ip.js';
+import { IpGuard } from '../../src/net/ipguard.js';
 import { WsServer, parseRequestHead, acceptKey } from '../../src/net/ws.js';
 import { connectWs } from '../../src/net/ws-raw-client.js';
 
@@ -169,6 +173,105 @@ for (const mode of ['raw', 'http']) {
         }
     });
 }
+
+describe('ws handshake on a raw socket: client gone, head in pieces', () => {
+    const rejected = (registry, reason) => {
+        const m = registry.metrics.get('scacelith_ws_handshakes_rejected_total');
+        return [...m.children.values()].find((c) => c.labelValues[0] === reason)?.value ?? 0;
+    };
+
+    it('a client that leaves before the end of its head is no handshake timeout', async () => {
+        const registry = new Registry();
+        const wss = new WsServer({ registry, handshakeTimeoutMs: 200, onConnection: () => {} });
+        const srv = await listenRaw(wss);
+        const port = srv.address().port;
+        try {
+            const s = net.connect(port, '127.0.0.1');
+            s.on('error', () => {});
+            await new Promise((r) => s.once('connect', r));
+            s.write('GET /ws HTTP/1.1\r\nHo');
+            await new Promise((r) => setTimeout(r, 50));
+            s.destroy();
+            await new Promise((r) => setTimeout(r, 400));
+            assert.equal(rejected(registry, 'timeout'), 0);
+            assert.match(await rawRequest(port, 'GET /ws HTTP/1.1\r\nHost: x\r\n'), /^HTTP\/1\.1 408/, 'one that stays still gets 408');
+            assert.equal(rejected(registry, 'timeout'), 1);
+        } finally { srv.close(); }
+    });
+
+    it('a head read in any pieces gets the same answer, and the same frames after it, as in one read', () => {
+        // handleSocket on a fake socket: what it writes and what the connection delivers.
+        function run(chunks) {
+            const out = [], msgs = [];
+            const wss = new WsServer({
+                registry: new Registry(), handshakeTimeoutMs: 100000, maxHeaderBytes: 512,
+                onConnection: (c) => { c.onMessage = (cn, b) => msgs.push(Buffer.from(b).toString('hex')); },
+            });
+            const s = new EventEmitter();
+            s.setNoDelay = s.pause = s.resume = s.setTimeout = s.cork = s.uncork = () => {};
+            s.end = (x) => { out.push('END:' + (x ? String(x).split('\r\n')[0] : '')); };
+            s.destroy = () => { s.destroyed = true; };
+            s.write = (x) => { out.push(Buffer.from(x).toString('latin1')); return true; };
+            s.remoteAddress = '192.0.2.1';
+            s.writableLength = 0;
+            wss.handleSocket(s);
+            for (const c of chunks) if (s.listenerCount('data')) s.emit('data', Buffer.from(c));
+            return JSON.stringify([out, msgs]);
+        }
+        let seed = 7;
+        const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+        const keys = ['dGhlIHNhbXBsZSBub25jZQ==', 'bad', 'AAAAAAAAAAAAAAAAAAAAAA=='];
+        for (let t = 0; t < 300; t++) {
+            const pad = 'p'.repeat(rnd(4) === 0 ? 400 + rnd(200) : rnd(50));       // around maxHeaderBytes: 431 or not
+            const head = `GET ${rnd(5) ? '/ws' : '/x'} HTTP/1.${rnd(6) ? 1 : 0}\r\nHost: h\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
+                `Sec-WebSocket-Key: ${keys[rnd(3)]}\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: scacelith.v1\r\nX-P: ${pad}\r\n` +
+                `${rnd(10) ? '' : 'Bad Line\r\n'}\r\n`;
+            const frames = [];
+            for (let i = rnd(3); i > 0; i--) frames.push(Buffer.from([0x82, 0x83, 1, 2, 3, 4, rnd(256), rnd(256), rnd(256)]));
+            const all = Buffer.concat([Buffer.from(head, 'latin1'), ...frames]);
+            const pieces = [];
+            for (let o = 0; o < all.length;) { const n = 1 + rnd(rnd(2) ? 5 : 200); pieces.push(all.subarray(o, o + n)); o += n; }
+            assert.equal(run(pieces), run([all]), `head ${t}`);
+        }
+    });
+});
+
+describe('ws handshake on a raw socket: unreadable heads and the address guard', () => {
+    // Malformed HTTP on the API port counts 1 toward a block of the address (hardenHttp); so does a
+    // head the dedicated port cannot read, unless the peer is a trusted proxy.
+    async function counted(isTrusted) {
+        const config = testConfig({ ABUSE_BLOCK_REFUSALS_PER_MIN: '100000' });
+        const guard = new IpGuard({ config, workers: 1, registry: new Registry(), report: () => {} });
+        const wss = new WsServer({
+            registry: new Registry(), handshakeTimeoutMs: 200, maxHeaderBytes: 512, onConnection: () => {}, guard, isTrusted,
+        });
+        const srv = await listenRaw(wss);
+        const port = srv.address().port;
+        try {
+            assert.match(await rawRequest(port, 'GET /ws HTTP/1.1\r\nBad Header\r\n\r\n'), /^HTTP\/1\.1 400/);
+            assert.match(await rawRequest(port, 'GET /ws HTTP/1.1\r\nX-Pad: ' + 'a'.repeat(600) + '\r\n\r\n'), /^HTTP\/1\.1 431/);
+            assert.match(await rawRequest(port, 'GET /ws HTTP/1.1\r\nHost: x\r\n'), /^HTTP\/1\.1 408/);
+            // A client that leaves before the end of its head is neither refused nor counted.
+            const s = net.connect(port, '127.0.0.1');
+            s.on('error', () => {});
+            await new Promise((r) => s.once('connect', r));
+            s.write('GET /ws HTTP/1.1\r\nHo');
+            await new Promise((r) => setTimeout(r, 50));
+            s.destroy();
+            await new Promise((r) => setTimeout(r, 300));
+            return guard.flushReports();
+        } finally { srv.close(); guard.close(); }
+    }
+
+    it('400, 431 and 408 count 1 each toward a block of the address', async () => {
+        assert.deepEqual(await counted(null), [['127.0.0.1', null, 3]]);
+    });
+
+    it('behind a proxy, only the peers outside TRUSTED_PROXIES are counted', async () => {
+        assert.deepEqual(await counted(ipMatcher(['127.0.0.1'])), []);
+        assert.deepEqual(await counted(ipMatcher(['10.0.0.1'])), [['127.0.0.1', null, 3]]);
+    });
+});
 
 describe('ws upgrade headers', () => {
     it('refuses header names and values that would break the 101 response', () => {

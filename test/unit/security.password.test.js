@@ -63,6 +63,25 @@ test('argon2id is preferred when available; scrypt hashes are then upgraded', as
     assert.equal((await a.verifyDummy('x')), false);
 });
 
+test('a dummy hash that failed (memory, thread pool) is computed again at the next call, not kept', async () => {
+    // argon2 that fails its first `failures` calls, then works.
+    const flaky = (failures) => {
+        const ok = fakeArgon2();
+        return (alg, p, cb) => {
+            if (failures-- > 0) { setImmediate(() => cb(new Error('argon2: out of memory'))); return; }
+            ok(alg, p, cb);
+        };
+    };
+    const params = { argon2Params: { memory: 1024, passes: 1, parallelism: 1 } };
+    const a = createPasswordHasher({ argon2: flaky(1), ...params });
+    await assert.rejects(a.warmUp(), /out of memory/);
+    assert.equal(await a.verifyDummy('an unknown account'), false, 'unknown accounts still get their dummy check');
+    assert.equal((await a.verify('not a hash', 'x')).ok, false);
+    const b = createPasswordHasher({ argon2: flaky(1), ...params });
+    await assert.rejects(b.verifyDummy('x'), /out of memory/);
+    assert.equal(await b.verifyDummy('x'), false);
+});
+
 test('the real crypto.argon2 when the runtime has it', { skip: typeof crypto.argon2 !== 'function' && 'crypto.argon2 needs Node >= 24.7' }, async () => {
     const a = createPasswordHasher({ argon2Params: { memory: 8192, passes: 1, parallelism: 1 } });
     const h = await a.hash('real argon2 passphrase');
