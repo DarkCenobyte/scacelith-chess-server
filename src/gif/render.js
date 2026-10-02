@@ -211,11 +211,6 @@ function tile(size, kind, code) {
     return t;
 }
 
-/** Drops the cached square pictures (tests, memory). */
-export function clearRenderCache() {
-    tileCache.clear();
-}
-
 // Printable text of a name: characters of the font only.
 function cleanText(s, maxLen = 64) {
     let out = '';
