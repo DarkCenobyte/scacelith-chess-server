@@ -12,9 +12,8 @@ import { templates } from './templates.js';
 import { metrics } from '../metrics.js';
 
 /**
- * Text of a secret setting. NOTE: config.js decodes every `secret` key as hex/base64 bytes, which
- * is lossy for SMTP_PASSWORD and GOOGLE_CLIENT_SECRET (they are opaque text). This accepts a
- * string (when config keeps those keys as text) or a Buffer holding the UTF-8 text.
+ * Text of a secretText setting (SMTP_PASSWORD, GOOGLE_CLIENT_SECRET), which config.js keeps as
+ * written. A Buffer holding UTF-8 text is also accepted.
  * @param {string|Buffer|null} v
  * @returns {string}
  */
