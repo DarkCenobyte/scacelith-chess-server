@@ -40,7 +40,7 @@ describe('AbuseTracker', () => {
         assert.equal(metric(registry, 'scacelith_abuse_blocked', ['ip']), 1);
         assert.equal(warned.length, 1);
         assert.equal(warned[0].msg, 'ip blocked');
-        assert.deepEqual([warned[0].ip, warned[0].scope, warned[0].level, warned[0].ttlSec, warned[0].refusals], ['198.51.100.0/24', 'ip', 1, 60, 100]);
+        assert.deepEqual([warned[0].ip, warned[0].scope, warned[0].blockLevel, warned[0].ttlSec, warned[0].refusals], ['198.51.100.0/24', 'ip', 1, 60, 100]);
     });
 
     it('counts over a sliding minute', () => {

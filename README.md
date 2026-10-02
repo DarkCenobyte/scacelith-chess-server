@@ -513,8 +513,8 @@ exactly: when the proxy is not trusted, every player shares its address, and the
 block would hit them all together.
 
 **Watching it.** The primary logs each block at `warn` level: `ip blocked` with the address
-(truncated as `LOG_IP` says), `scope` (`ip` or `prefix`), `level`, `ttlSec` and `refusals`. On the
-metrics endpoint: `scacelith_http_rate_limited_total{limit}` (`ip`, `ip48`, `inflight`,
+(truncated as `LOG_IP` says), `scope` (`ip` or `prefix`), `blockLevel`, `ttlSec` and `refusals`.
+On the metrics endpoint: `scacelith_http_rate_limited_total{limit}` (`ip`, `ip48`, `inflight`,
 `blocked`), `scacelith_tls_refused_total{reason}` (`blocked`, `conn_rate`, `conn_open`),
 `scacelith_abuse_blocks_total{scope,level}` and `scacelith_abuse_blocked{scope}` in the primary,
 `scacelith_abuse_blocked_keys`, `scacelith_tls_connections_open` and `scacelith_http_inflight`

@@ -1285,8 +1285,8 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
     shares the address with an abuser (a school, a mobile operator's CGNAT) keeps the game in
     progress; a player whose connection drops can only come back when the block ends, which is
     why the first one is short. At most 20,000 blocks run at once (the oldest end first); the
-    primary logs each one (`ip blocked`, with `ipForLog`, the scope, level, duration and
-    refusals).
+    primary logs each one (`ip blocked`, with `ipForLog`, the scope, level (`blockLevel`),
+    duration and refusals).
   * `ABUSE_EXEMPT` (addresses and CIDR subnets: a school or club network, monitoring, a load
     generator) skips all of the above. Login, registration, the other route limits and the
     per-account quotas still apply.

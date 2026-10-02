@@ -146,7 +146,7 @@ test('a flooding address is refused, then blocked before TLS on both workers; ot
     for (const l of perShard) assert.ok(Number(l.split(' ').at(-1)) >= 1, l);
     assert.ok(await metric('scacelith_tls_refused_total{reason="blocked"}') - refusedBefore >= 6);
     const log = await srv.waitLog((r) => r.msg === 'ip blocked' && r.ip === FLOODER);
-    assert.deepEqual([log.scope, log.level, log.ttlSec], ['ip', 1, BASE_SEC]);
+    assert.deepEqual([log.level, log.scope, log.blockLevel, log.ttlSec], ['warn', 'ip', 1, BASE_SEC]);
 
     // The exempt address is served; the WebSocket that 127.0.0.2 opened before is not cut.
     assert.equal(await getFrom('127.0.0.1'), 200);
@@ -173,7 +173,7 @@ test('the block ends after its time; a second flood is blocked 4 times longer', 
     })();
     await flood(FLOODER, { stop: () => blockedAt > 0, ms: 15000 });
     await watcher;
-    const log = await srv.waitLog((r) => r.msg === 'ip blocked' && r.ip === FLOODER && r.level === 2);
+    const log = await srv.waitLog((r) => r.msg === 'ip blocked' && r.ip === FLOODER && r.blockLevel === 2);
     assert.equal(log.ttlSec, 4 * BASE_SEC);
     await sleep((BASE_SEC + 1) * 1000);
     assert.equal(await tlsFrom(FLOODER), 'ECONNRESET', 'still blocked after the first duration');

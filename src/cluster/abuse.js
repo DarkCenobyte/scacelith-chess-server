@@ -177,7 +177,7 @@ export class AbuseTracker {
         if (key48 !== null) this.blockedPerPrefix.set(key48, (this.blockedPerPrefix.get(key48) || 0) + 1);
         this._blocksTotal.labels(scope, String(Math.min(level, 4))).inc();
         fresh.push([key, ttlMs, level]);
-        this.log?.warn?.('ip blocked', { ip: ipForLog(key), scope, level, ttlSec: Math.round(ttlMs / 1000), refusals: Math.round(refusals) || undefined });
+        this.log?.warn?.('ip blocked', { ip: ipForLog(key), scope, blockLevel: level, ttlSec: Math.round(ttlMs / 1000), refusals: Math.round(refusals) || undefined });
     }
 
     _unblock(key, b) {
