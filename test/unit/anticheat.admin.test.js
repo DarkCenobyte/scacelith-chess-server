@@ -276,11 +276,14 @@ test('bench-accounts: refused without the test-server flag; creates verified acc
     assert.equal(sess.length, 1);
     assert.equal(sess[0].tokenHash, hashToken(tokens[1]));
     assert.ok(sess[0].expiresAt > NOW);
-    // Running again reuses the accounts and adds sessions.
+    // Running again reuses the accounts and adds sessions; an existing file is made 600 too.
+    if (process.platform !== 'win32') fs.chmodSync(out, 0o644);
     const again = await run(store, ['bench-accounts', '--count', '3', '--out', out, '--format', 'tsv', '--i-know-this-is-a-test-server']);
     assert.equal(again.json, null);
     assert.match(again.out, /0 created, 3 reused/);
     assert.match(fs.readFileSync(out, 'utf8'), /^bench0001\tsct_/);
+    assert.equal(fs.readFileSync(out, 'utf8').trim().split('\n').length, 3);
+    if (process.platform !== 'win32') assert.equal(fs.statSync(out).mode & 0o777, 0o600);
     // A real account with a matching name is never taken over.
     store._.addUser('bench0004');
     assert.equal((await run(store, ['bench-accounts', '--count', '4', '--out', out, '--i-know-this-is-a-test-server'])).code, 1);

@@ -549,7 +549,15 @@ function benchAccounts(ctx) {
             idleExpiresAt: now + idleDays * DAY_MS, clientLabel: 'bench', ip: null });
         lines.push(format === 'tsv' ? `${username}\t${token}` : token);
     }
-    fs.writeFileSync(out, lines.join('\n') + '\n', { mode: 0o600 });
+    // The mode of open() only applies to a new file: an existing one is made 600 before the
+    // tokens go in.
+    const fd = fs.openSync(out, 'w', 0o600);
+    try {
+        fs.fchmodSync(fd, 0o600);
+        fs.writeFileSync(fd, lines.join('\n') + '\n');
+    } finally {
+        fs.closeSync(fd);
+    }
     audit(ctx, 'bench_accounts', null, { count, prefix, created, reused });
     return { data: { count, created, reused, out }, text: `${count} bench accounts ready (${created} created, ${reused} reused); tokens written to ${out} (mode 600).\n` };
 }
