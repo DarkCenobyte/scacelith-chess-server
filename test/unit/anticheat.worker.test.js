@@ -167,20 +167,26 @@ test('another engine restarts the statistics: its own population, players scored
     assert.equal(store._.population.get(`${old.profile}|5+0|1500|accuracy`).n, 2, 'the earlier population is left as it was');
 });
 
-test('a job is renewed (store.analysis.touch) while the engine works on it, and no longer after', async () => {
+test('a job is renewed (store.analysis.touch) while the engine works on it, and no longer after', { timeout: 30000 }, async () => {
     const store = createFakeStore();
     const { moves } = addGame(store, 48);
     const { moveToUci } = await import('../../src/anticheat/analysis/moves.js');
     const quick = fakeEngine((ply) => (ply < moves.length ? moveToUci(moves[ply]) : null));
-    let slow = true;
-    // A long analysis: the first position takes a while.
-    const engine = { ...quick, async analyse(...a) { if (slow) { slow = false; await sleep(80); } return quick.analyse(...a); } };
     const touches = [];
-    store.analysis.touch = (gameId, worker, t) => { touches.push([gameId, worker, t]); return true; };
+    let twoBeats;
+    const beaten = new Promise((resolve) => { twoBeats = resolve; });
+    store.analysis.touch = (gameId, worker, t) => { touches.push([gameId, worker, t]); if (touches.length === 2) twoBeats(); return true; };
+    // A long analysis: the first position takes two heartbeats.
+    let slow = true;
+    const engine = { ...quick, async analyse(...a) { if (slow) { slow = false; await beaten; } return quick.analyse(...a); } };
     const worker = createAnalysisWorker({ config, store, engineFactory: () => engine, workerId: 'w7', now: () => 1234, heartbeatMs: 10 });
-    assert.ok(await worker.processJob(engine, store.analysis.next(1, 'w7', 0)[0]));
-    assert.ok(touches.length >= 2, `${touches.length} heartbeats`);
-    assert.deepEqual(touches[0], [48, 'w7', 1234]);
+    const alive = setInterval(() => {}, 1000);      // the heartbeat timer does not keep the process alive
+    try {
+        assert.ok(await worker.processJob(engine, store.analysis.next(1, 'w7', 0)[0]));
+    } finally {
+        clearInterval(alive);
+    }
+    assert.deepEqual(touches.slice(0, 2), [[48, 'w7', 1234], [48, 'w7', 1234]]);
     const n = touches.length;
     await sleep(50);
     assert.equal(touches.length, n, 'stopped with the job');
