@@ -205,6 +205,24 @@ bad('ChallengeCreate: baseSec below min', mod('ChallengeCreate', { baseSec: 14 }
 bad('ChallengeCreate: baseSec above max', mod('ChallengeCreate', { baseSec: 10801 }));
 bad('ChallengeCreate: incSec above max', mod('ChallengeCreate', { incSec: 181 }));
 bad('GameSnapshot: MoveRec move bit 15', mod('GameSnapshot', { moves: [{ move: 0x8000, spentMs: 0, clockMs: 0 }] }));
+// Gesture: the only signed bounded integers (yaw, pitch), both directions, and INT32_MIN.
+bad('C_Gesture: yaw below min', mod('C_Gesture', { yaw: -3143 }));
+bad('C_Gesture: yaw above max', mod('C_Gesture', { yaw: 3143 }));
+bad('C_Gesture: yaw = INT32_MIN', mod('C_Gesture', { yaw: -0x80000000 }));
+bad('C_Gesture: pitch below min', mod('C_Gesture', { pitch: -1572 }));
+bad('C_Gesture: pitch above max', mod('C_Gesture', { pitch: 1572 }));
+bad('C_Gesture: touch above max', mod('C_Gesture', { touch: 65 }));
+bad('C_Gesture: flags above max', mod('C_Gesture', { flags: 8 }));
+bad('C_Gesture: lean above max', mod('C_Gesture', { lean: 101 }));
+bad('C_Gesture: ply above max', mod('C_Gesture', { ply: 1200 }));
+bad('C_Gesture: placed above max', mod('C_Gesture', { placed: 0x8000 }));
+bad('S_Gesture: yaw below min', mod('S_Gesture', { yaw: -3143 }));
+bad('S_Gesture: yaw above max', mod('S_Gesture', { yaw: 3143 }));
+bad('S_Gesture: pitch = INT32_MIN', mod('S_Gesture', { pitch: -0x80000000 }));
+bad('S_Gesture: pitch above max', mod('S_Gesture', { pitch: 1572 }));
+bad('S_Gesture: aim above max', mod('S_Gesture', { aim: 65 }));
+bad('Welcome: gestureRate above max', mod('Welcome', { gestureRate: 61 }));
+bad('Welcome: gestureBurst above max', mod('Welcome', { gestureBurst: 121 }));
 // bools
 bad('Move: drawOffer = 2', mod('Move', { drawOffer: 2 }));
 bad('QueueJoin: rated = 255', mod('QueueJoin', { rated: 255 }));

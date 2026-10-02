@@ -372,6 +372,7 @@ export function buildVectors() {
     const u8 = (v) => (b, o) => { b[o] = v; };
     const u16 = (v) => (b, o) => { b.writeUInt16LE(v, o); };
     const u32at = (d, v) => (b, o) => { b.writeUInt32LE(v, o + d); };
+    const i32 = (v) => (b, o) => { b.writeInt32LE(v, o); };
     const f64bits = (hi, lo) => (b, o) => { b.writeUInt32LE(lo, o); b.writeUInt32LE(hi, o + 4); };
     // Replaces the payload of the str8 at fieldPath (same length) with raw bytes.
     const strBytes = (key, fields, fieldPath, raw) => {
@@ -479,6 +480,24 @@ export function buildVectors() {
     bad(patch('ChallengeCreate', T.ChallengeCreate, 'baseSec', u16(14)), 'c2s', 'baseSec below min', 'ChallengeCreate.baseSec = 14 (min 15)');
     bad(patch('ChallengeCreate', T.ChallengeCreate, 'baseSec', u16(10801)), 'c2s', 'baseSec above max', 'ChallengeCreate.baseSec = 10801 (max 10800)');
     bad(patch('ChallengeCreate', T.ChallengeCreate, 'incSec', u8(181)), 'c2s', 'incSec above max', 'ChallengeCreate.incSec = 181 (max 180)');
+    // Gesture has the only signed bounded integers (yaw, pitch): both directions, and INT32_MIN.
+    bad(patch('C_Gesture', T.C_Gesture, 'yaw', i32(-3143)), 'c2s', 'yaw below min', 'Gesture.yaw = -3143 (min -3142)');
+    bad(patch('C_Gesture', T.C_Gesture, 'yaw', i32(3143)), 'c2s', 'yaw above max', 'Gesture.yaw = 3143 (max 3142)');
+    bad(patch('C_Gesture', T.C_Gesture, 'yaw', i32(-0x80000000)), 'c2s', 'yaw below min', 'Gesture.yaw = INT32_MIN');
+    bad(patch('C_Gesture', T.C_Gesture, 'pitch', i32(-1572)), 'c2s', 'pitch below min', 'Gesture.pitch = -1572 (min -1571)');
+    bad(patch('C_Gesture', T.C_Gesture, 'pitch', i32(1572)), 'c2s', 'pitch above max', 'Gesture.pitch = 1572 (max 1571)');
+    bad(patch('C_Gesture', T.C_Gesture, 'touch', u8(65)), 'c2s', 'touch above max', 'Gesture.touch = 65 (max 64)');
+    bad(patch('C_Gesture', T.C_Gesture, 'flags', u8(8)), 'c2s', 'flags above max', 'Gesture.flags = 8 (max 7)');
+    bad(patch('C_Gesture', T.C_Gesture, 'lean', u8(101)), 'c2s', 'lean above max', 'Gesture.lean = 101 (max 100)');
+    bad(patch('C_Gesture', T.C_Gesture, 'ply', u16(1200)), 'c2s', 'ply above max', 'Gesture.ply = 1200 (max 1199)');
+    bad(patch('C_Gesture', T.C_Gesture, 'placed', u16(0x8000)), 'c2s', 'placed above max', 'Gesture.placed = 0x8000 (max 0x7FFF)');
+    bad(patch('S_Gesture', T.S_Gesture, 'yaw', i32(-3143)), 's2c', 'yaw below min', 'server Gesture.yaw = -3143 (min -3142)');
+    bad(patch('S_Gesture', T.S_Gesture, 'yaw', i32(3143)), 's2c', 'yaw above max', 'server Gesture.yaw = 3143 (max 3142)');
+    bad(patch('S_Gesture', T.S_Gesture, 'pitch', i32(-0x80000000)), 's2c', 'pitch below min', 'server Gesture.pitch = INT32_MIN');
+    bad(patch('S_Gesture', T.S_Gesture, 'pitch', i32(1572)), 's2c', 'pitch above max', 'server Gesture.pitch = 1572 (max 1571)');
+    bad(patch('S_Gesture', T.S_Gesture, 'aim', u8(65)), 's2c', 'aim above max', 'server Gesture.aim = 65 (max 64)');
+    bad(patch('Welcome', T.Welcome, 'gestureRate', u16(61)), 's2c', 'gestureRate above max', 'Welcome.gestureRate = 61 (max 60)');
+    bad(patch('Welcome', T.Welcome, 'gestureBurst', u16(121)), 's2c', 'gestureBurst above max', 'Welcome.gestureBurst = 121 (max 120)');
     bad(patch('Welcome', T.Welcome, 'serverTime', f64bits(0x7ff80000, 0)), 's2c', 'serverTime not finite', 'Welcome.serverTime = NaN');
     bad(patch('S_Ping', T.S_Ping, 'serverTime', f64bits(0x7ff00000, 0)), 's2c', 'serverTime not finite', 'Ping.serverTime = +Infinity');
     bad(patch('Notice', T.Notice, 'arg', f64bits(0xfff00000, 0)), 's2c', 'arg not finite', 'Notice.arg = -Infinity');
