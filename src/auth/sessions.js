@@ -65,17 +65,15 @@ export function createSessionManager(svc) {
      */
     function create(user, { clientLabel = null, ip = null } = {}) {
         const t = now();
-        let active = [];
-        try { active = (store.sessions.listForUser(user.id) || []).filter((r) => isActiveRow(r, t)); } catch { active = []; }
         const token = randomToken('sct_');
         const tokenHash = sha256Hex(token);
         const expiresAt = t + maxMs;
         const idleExpiresAt = Math.min(expiresAt, t + idleMs);
         const sessionId = store.sessions.create({ userId: user.id, tokenHash, createdAt: t, expiresAt, idleExpiresAt, clientLabel: clientLabel || null, ip: ip || null });
-        const revoked = store.sessions.enforceLimit(user.id, config.maxSessionsPerUser);
-        if (active.length + 1 > config.maxSessionsPerUser) {
-            broadcast(user.id, Array.isArray(revoked) ? revoked.filter((h) => typeof h === 'string' && h !== tokenHash) : []);
-        }
+        // Decided from what the store revoked (in its transaction): a login of the same user on
+        // another worker may have added a session since any earlier read.
+        const revoked = store.sessions.enforceLimit(user.id, config.maxSessionsPerUser, t) || [];
+        if (revoked.length) broadcast(user.id, revoked.filter((h) => typeof h === 'string' && h !== tokenHash));
         return { token, tokenHash, expiresAt, sessionId };
     }
 
