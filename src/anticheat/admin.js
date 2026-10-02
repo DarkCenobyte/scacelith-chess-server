@@ -181,7 +181,8 @@ function userShow(ctx) {
     const sanctions = safe(() => s.sanctions.list(u.id), []);
     const activeBan = safe(() => s.sanctions.activeBan(u.id, now), null);
     const integ = readIntegrity(s, u.id);
-    const sessions = safe(() => s.sessions.listForUser(u.id), []).filter((x) => !x.revokedAt && (!x.expiresAt || x.expiresAt > now)).length;
+    const sessions = safe(() => s.sessions.listForUser(u.id), []).filter((x) => !x.revokedAt && (!x.expiresAt || x.expiresAt > now)
+        && (!x.idleExpiresAt || x.idleExpiresAt > now)).length;
     const anomalies = { info: 0, suspicious: 0, certain: 0 };
     for (const a of safe(() => s.anomalies.forUser(u.id, 1000), [])) if (a.severity in anomalies) anomalies[a.severity]++;
     const rep = reportsAgainst(ctx, u.id);

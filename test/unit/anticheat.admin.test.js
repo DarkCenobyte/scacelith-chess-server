@@ -72,6 +72,14 @@ test('user show hides secrets', async () => {
     assert.match(t.out, /integrity none/);
 });
 
+test('user show counts the sessions that are neither expired nor idle-expired', async () => {
+    const { store, eve } = world();
+    store.sessions.create({ userId: eve, tokenHash: 'idle', createdAt: NOW - 40 * 86400000, expiresAt: NOW + 1e9, idleExpiresAt: NOW - 1 });
+    store.sessions.create({ userId: eve, tokenHash: 'old', createdAt: NOW - 100 * 86400000, expiresAt: NOW - 1, idleExpiresAt: NOW + 1e9 });
+    const r = await run(store, ['user', 'show', 'eve', '--json']);
+    assert.equal(r.json.activeSessions, 2, 'the two live sessions of world()');
+});
+
 test('user ban / unban are audited', async () => {
     const { store, eve } = world();
     assert.equal((await run(store, ['user', 'ban', 'eve', '--hours', '5'])).code, 1, 'reason required');
