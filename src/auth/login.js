@@ -200,9 +200,14 @@ export function createLogin(svc) {
         const ok = await mfa.checkSecondFactor(user, { code, recoveryCode, allowRecovery: true, ip });
         if (!ok) {
             mfaFailures.fail(fkey);
-            const attempts = (data.attempts | 0) + 1;
+            // Counted on the step as it is now: other codes for it may have been counted while
+            // this one was checked (an await), and the last of its 5 may have ended it.
+            const current = store.tokens.get('mfa_login', h);
+            if (!isLive(current, now())) throw invalidMfaToken();
+            const counted = dataOf(current);
+            const attempts = (counted.attempts | 0) + 1;
             if (attempts >= MFA_TOKEN_ATTEMPTS) store.tokens.consume('mfa_login', h, now());
-            else store.tokens.update('mfa_login', h, { ...data, attempts });
+            else store.tokens.update('mfa_login', h, { ...counted, attempts });
             events.record('mfa_failed', { userId: user.id, ip, detail: { attempts } });
             throw new AuthError(401, 'invalid_code', 'Wrong or already used code.');
         }

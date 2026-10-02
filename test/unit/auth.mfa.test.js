@@ -2,14 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { base32Decode, hotp, totp, totpStep } from '../../src/security/totp.js';
 import { StoreError } from '../../src/store/index.js';
-import { linkIn, startTestServer } from './helpers/auth-fakes.js';
+import { createClock, createFakePrimary, linkIn, startTestServer } from './helpers/auth-fakes.js';
 import { startReal } from './helpers/real-auth.js';
 
 const PW = 'correct horse battery';
 
-/** A server with a logged-in user who has enrolled TOTP. */
-async function enrolled(env = {}) {
-    const s = await startTestServer({ env });
+/** A server with a logged-in user who has enrolled TOTP (`opts`: more startTestServer options). */
+async function enrolled(env = {}, opts = {}) {
+    const s = await startTestServer({ env, ...opts });
     const u = await s.createUser({ username: 'alice', password: PW });
     const { token } = await s.login('alice', PW);
     const setup = await s.request('POST', '/api/v1/account/mfa/totp/setup', { token, body: { password: PW } });
@@ -135,6 +135,27 @@ test('the MFA token: 5 wrong codes, expiry after 5 minutes, per-account delay', 
     assert.equal(r.json.error, 'invalid_mfa_token');
     r = await s.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: await mfaStep(s) } });
     assert.equal(r.status, 400);
+});
+
+test('the MFA token: wrong codes sent at once still end it after 5', async (t) => {
+    // The primary answers the per-account limit of each code after a while (the IPC round trip).
+    const now = createClock();
+    const primary = createFakePrimary({ now });
+    const request = primary.request;
+    primary.request = async (type, payload) => {
+        if (type === 'ratelimit.take' && payload.key.startsWith('mfa:')) await new Promise((r) => setTimeout(r, 20));
+        return request(type, payload);
+    };
+    const { s, secret } = await enrolled({}, { primary, now });
+    t.after(s.close);
+    const tok = await mfaStep(s);
+    const answers = await Promise.all(Array.from({ length: 9 }, (_, i) =>
+        s.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: tok, code: String(100000 + i) } })));
+    const errors = answers.map((r) => r.json.error);
+    assert.equal(errors.filter((e) => e === 'invalid_code').length, 5, errors.join());
+    assert.equal(errors.filter((e) => e === 'invalid_mfa_token').length, 4, errors.join());
+    const r = await s.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: tok, code: totp(secret, s.now()) } });
+    assert.equal(r.json.error, 'invalid_mfa_token', 'ended');
 });
 
 test('a ban decided between the two steps is enforced at the second', async (t) => {
