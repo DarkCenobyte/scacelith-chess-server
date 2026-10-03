@@ -15,9 +15,9 @@ pub fn server_path(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel)
 }
 
-/// A path relative to this crate's `tests/data`.
-pub fn data_path(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data").join(rel)
+/// A path relative to this crate's `tests/fixtures`.
+pub fn fixture_path(rel: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(rel)
 }
 
 pub fn read_json(path: PathBuf) -> serde_json::Value {

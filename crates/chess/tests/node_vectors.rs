@@ -1,5 +1,5 @@
-//! Reference vectors of the former Node.js server (tests/data/node-vectors.json, written by
-//! tests/data/gen-node-vectors.mjs): the PGN reader on thousands of mutated texts and byte
+//! Reference vectors of the former Node.js server (tests/fixtures/node-vectors.json, written by
+//! tests/fixtures/gen-node-vectors.mjs): the PGN reader on thousands of mutated texts and byte
 //! strings (with default and lowered caps), lenient SAN on random and mutated strings, and the
 //! PGN writer on random games with unicode tags, odd comments and every ending. The inputs are
 //! regenerated here with the same generator; the games are drawn from `legal_moves`, so its
@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{XorShift, data_path, read_json, repo_path};
+use common::{XorShift, fixture_path, read_json, repo_path};
 use scacelith_chess::{
     ChessGame, Color, EndReason, GameStatus, PGN_LIMITS, PgnComment, PgnError, PgnGame, PgnLimits, PgnTags,
     Position, fnv1a32, move_uci, parse_san, read_pgn, read_pgn_bytes,
@@ -15,7 +15,7 @@ use scacelith_chess::{
 use serde_json::Value;
 
 fn vectors() -> Value {
-    read_json(data_path("node-vectors.json"))
+    read_json(fixture_path("node-vectors.json"))
 }
 
 /// A reader outcome as one line, as the generator writes it.
