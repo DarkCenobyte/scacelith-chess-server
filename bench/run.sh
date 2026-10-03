@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Benchmark harness: the Rust server against the Node.js server (Node 24 and Node 26), same
+# Benchmark harness: the Rust server against the Node.js server (Node 26 by default, Node 24 on request), same
 # machine, same settings, same load generator (docs/BENCHMARK.md).
 #
-#   bench/run.sh [--targets rust,node24,node26] [--scenarios idle,connections,...] [--quick]
+#   bench/run.sh [--targets rust,node26] [--scenarios idle,connections,...] [--quick]
 #
 # For each target it prepares a fresh data directory (migrations, bench accounts with live
 # sessions), then for each scenario starts the server pinned to the server CPUs, runs
@@ -20,7 +20,7 @@ usage() {
     cat <<'EOF'
 Usage: bench/run.sh [options] [-- extra scacelith-bench options]
 
-  --targets LIST      rust,node24,node26                                  [all three]
+  --targets LIST      comma-separated: rust, node26, node24              [rust,node26]
   --scenarios LIST    idle,connections,games,matchmaking,rest,login       [all]
   --quick             small sizes and short windows (checks the set-up in a few minutes)
   --node24 PATH       Node.js 24 binary                                   [$NODE24]
@@ -40,7 +40,7 @@ Usage: bench/run.sh [options] [-- extra scacelith-bench options]
 EOF
 }
 
-TARGETS=rust,node24,node26
+TARGETS=rust,node26
 SCENARIOS=idle,connections,games,matchmaking,rest,login
 QUICK=0
 NODE24=${NODE24:-}
