@@ -1,15 +1,17 @@
 //! Test doubles for the game module and for the modules that embed game hosts: scripted rules
-//! (the chess rules do not matter to a room), and recording event and anomaly sinks. Not used by
-//! the server itself.
+//! (the chess rules do not matter to a room), recording event and anomaly sinks, and a store of
+//! finished games with failure injection. Not used by the server itself.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use scacelith_protocol::{EndReason, ErrorCode, GameStatus, move_flag};
 use tokio::sync::oneshot;
 
+use super::host::{CommitFuture, GameStore};
 use crate::events::{Anomaly, AnomalySink, GameEnded, HostEvents, IncidentKind, RematchRequest};
 use crate::ids::{GameId, UserId};
+use crate::store::{CommitEntry, CommitRatings, ErrorKind, GameRecord, RatingChange, StoreError};
 
 use super::rules::{Played, Rules, Side};
 
@@ -330,3 +332,108 @@ impl AnomalySink for RecordingEvents {
 
 /// Alias kept for readability where only anomalies matter.
 pub type RecordingAnomalies = RecordingEvents;
+
+/// Called with each batch [`FakeStore`] receives, when it receives it.
+pub type CommitHook = Box<dyn Fn(&[GameRecord]) + Send + Sync>;
+
+#[derive(Default)]
+struct FakeStoreState {
+    batches: Vec<Vec<GameRecord>>,
+    failures: u32,
+    bad: HashSet<GameId>,
+    hook: Option<CommitHook>,
+}
+
+/// A [`GameStore`] double: records the batches it commits, fails the next calls on demand
+/// (`busy`), refuses a batch holding a bad game (`invalid_record` with the game id), and rates
+/// every rated game +8 for White and -8 for Black from the ratings of the record.
+#[derive(Default)]
+pub struct FakeStore {
+    state: Mutex<FakeStoreState>,
+}
+
+impl std::fmt::Debug for FakeStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FakeStore").finish_non_exhaustive()
+    }
+}
+
+impl FakeStore {
+    /// A store that commits everything.
+    #[must_use]
+    pub fn new() -> Self {
+        FakeStore::default()
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, FakeStoreState> {
+        self.state.lock().expect("fake store lock")
+    }
+
+    /// The next `n` calls fail (`busy`, without a game id).
+    pub fn fail_next(&self, n: u32) {
+        self.state().failures = n;
+    }
+
+    /// Calls still to fail.
+    #[must_use]
+    pub fn failures_left(&self) -> u32 {
+        self.state().failures
+    }
+
+    /// A batch holding this game fails with its id.
+    pub fn refuse(&self, game: GameId) {
+        self.state().bad.insert(game);
+    }
+
+    /// Calls `hook` with each batch when it is received (before it is committed).
+    pub fn set_hook(&self, hook: Option<CommitHook>) {
+        self.state().hook = hook;
+    }
+
+    /// The committed batches, in order.
+    #[must_use]
+    pub fn batches(&self) -> Vec<Vec<GameRecord>> {
+        self.state().batches.clone()
+    }
+
+    /// The committed game ids, in order.
+    #[must_use]
+    pub fn committed_ids(&self) -> Vec<GameId> {
+        self.state().batches.iter().flatten().map(|r| r.id).collect()
+    }
+}
+
+impl GameStore for FakeStore {
+    fn finish_batch(&self, records: Vec<GameRecord>) -> CommitFuture {
+        let mut st = self.state();
+        if let Some(hook) = &st.hook {
+            hook(&records);
+        }
+        let result = if st.failures > 0 {
+            st.failures -= 1;
+            Err(StoreError::new(ErrorKind::Busy, "database is locked"))
+        } else if let Some(bad) = records.iter().find(|r| st.bad.contains(&r.id)) {
+            Err(StoreError::new(ErrorKind::InvalidRecord, "invalid finished game record").with_game(bad.id))
+        } else {
+            let change = |rating: Option<i64>, delta: i64| {
+                let before = rating.unwrap_or(1500);
+                RatingChange { before, after: before + delta, games: 1, provisional: true }
+            };
+            let entries = records
+                .iter()
+                .map(|r| CommitEntry {
+                    game_id: r.id,
+                    duplicate: false,
+                    ratings: r
+                        .rated
+                        .then(|| CommitRatings { white: change(r.white_rating, 8), black: change(r.black_rating, -8) }),
+                    analysis_skipped: None,
+                    analysis_displaced: Vec::new(),
+                })
+                .collect();
+            st.batches.push(records);
+            Ok(entries)
+        };
+        Box::pin(async move { result })
+    }
+}
