@@ -29,7 +29,7 @@ static GAMES_COMMITTED: LazyLock<Counter> = LazyLock::new(|| {
     metrics::counter("scacelith_store_games_committed_total", "Finished games written to the database")
 });
 
-static ANALYSIS_SKIPPED: LazyLock<CounterVec> = LazyLock::new(|| {
+pub(super) static ANALYSIS_SKIPPED: LazyLock<CounterVec> = LazyLock::new(|| {
     metrics::counter_vec(
         "scacelith_anticheat_analysis_skipped_total",
         "Finished rated games not queued for engine analysis (sample: ANALYSIS_SAMPLE_RATE, backlog: \

@@ -292,38 +292,45 @@ impl std::fmt::Debug for RetentionApi {
 
 impl RetentionApi {
     /// The whole purge in chunks of 1000 rows, without pauses.
-    pub async fn run(&self, now: i64, policy: RetentionPolicy) -> Result<PurgeCounts, RetentionError> {
+    pub fn run(
+        &self,
+        now: i64,
+        policy: RetentionPolicy,
+    ) -> impl Future<Output = Result<PurgeCounts, RetentionError>> + Send + 'static + use<> {
         let opts = PurgeOptions { slice_ms: f64::INFINITY, chunk: Some(CHUNK), ..PurgeOptions::default() };
-        self.run_steps(&steps(now, policy), opts).await
+        self.clone().run_steps(steps(now, policy).to_vec(), opts)
     }
 
     /// The purge in adaptive chunks and slices (module documentation). Stops before the next
     /// statement once `opts.abort` is raised or the store is closed (what was deleted stays
     /// deleted) and returns the counts so far. A failure returns the error with the counts done
     /// before it.
-    pub async fn run_async(
+    pub fn run_async(
         &self,
         now: i64,
         policy: RetentionPolicy,
         opts: PurgeOptions,
-    ) -> Result<PurgeCounts, RetentionError> {
-        self.run_steps(&steps(now, policy), opts).await
+    ) -> impl Future<Output = Result<PurgeCounts, RetentionError>> + Send + 'static + use<> {
+        self.clone().run_steps(steps(now, policy).to_vec(), opts)
     }
 
     /// Erases the IP addresses of the security events older than `ip_days`, then deletes those
     /// older than `security_days` (chunks of 1000 rows).
-    pub async fn purge_security(
+    pub fn purge_security(
         &self,
         now: i64,
         policy: RetentionPolicy,
-    ) -> Result<SecurityPurge, RetentionError> {
+    ) -> impl Future<Output = Result<SecurityPurge, RetentionError>> + Send + 'static + use<> {
         let all = steps(now, policy);
         let opts = PurgeOptions { slice_ms: f64::INFINITY, chunk: Some(CHUNK), ..PurgeOptions::default() };
-        let counts = self.run_steps(&[all[1], all[6]], opts).await?;
-        Ok(SecurityPurge { deleted: counts.security_events, ip_erased: counts.ip_erased })
+        let run = self.clone().run_steps(vec![all[1], all[6]], opts);
+        async move {
+            let counts = run.await?;
+            Ok(SecurityPurge { deleted: counts.security_events, ip_erased: counts.ip_erased })
+        }
     }
 
-    async fn run_steps(&self, steps: &[Step], opts: PurgeOptions) -> Result<PurgeCounts, RetentionError> {
+    async fn run_steps(self, steps: Vec<Step>, opts: PurgeOptions) -> Result<PurgeCounts, RetentionError> {
         let mut counts = PurgeCounts::default();
         let clock = opts.clock.clone().unwrap_or_else(default_clock);
         let fixed = opts.chunk.map(|c| c.max(1));
@@ -336,7 +343,7 @@ impl RetentionApi {
                     return Ok(counts);
                 }
                 let used = limit;
-                let (n, t0, t1) = match self.chunk(*step, used, clock.clone()).await {
+                let (n, t0, t1) = match self.chunk(step, used, clock.clone()).await {
                     Ok(r) => r,
                     Err(error) => return Err(RetentionError { error, counts }),
                 };
@@ -376,16 +383,16 @@ impl RetentionApi {
     }
 }
 
-static PURGED: LazyLock<CounterVec> = LazyLock::new(|| {
+pub(super) static PURGED: LazyLock<CounterVec> = LazyLock::new(|| {
     metrics::counter_vec("scacelith_retention_purged_total", "Rows deleted by the retention purge", &["kind"])
 });
-static IP_ERASED: LazyLock<Counter> = LazyLock::new(|| {
+pub(super) static IP_ERASED: LazyLock<Counter> = LazyLock::new(|| {
     metrics::counter(
         "scacelith_retention_ip_erased_total",
         "Stored IP addresses erased by the retention purge",
     )
 });
-static RUNS: LazyLock<CounterVec> = LazyLock::new(|| {
+pub(super) static RUNS: LazyLock<CounterVec> = LazyLock::new(|| {
     metrics::counter_vec("scacelith_retention_runs_total", "Retention purge runs, by result", &["result"])
 });
 static RUN_SECONDS: LazyLock<Histogram> = LazyLock::new(|| {
@@ -493,9 +500,20 @@ impl std::fmt::Debug for RetentionScheduler {
 impl RetentionScheduler {
     /// Schedules the purge of `store` with the policy of `config`.
     pub fn for_store(store: &Store, config: &Config) -> RetentionScheduler {
+        RetentionScheduler::for_store_with(
+            store,
+            RetentionPolicy::from_config(config),
+            SchedulerOptions::from_config(config),
+        )
+    }
+
+    /// Schedules the purge of `store` with explicit options (`opts.slice_ms` is the purge's slice).
+    pub fn for_store_with(
+        store: &Store,
+        policy: RetentionPolicy,
+        opts: SchedulerOptions,
+    ) -> RetentionScheduler {
         let api = store.retention();
-        let policy = RetentionPolicy::from_config(config);
-        let opts = SchedulerOptions::from_config(config);
         let slice_ms = opts.slice_ms;
         let purge: PurgeFn = Arc::new(move |now, abort| {
             let api = api.clone();

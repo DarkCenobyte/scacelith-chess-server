@@ -94,7 +94,10 @@ pub use ratings::{
 };
 pub use refunds::{CheaterRefunds, GivenRefund, PendingRefund, PendingRefunds, Refund, RefundScope, Refunds};
 pub use reports::{NewReport, Report, ReportCategory, ReportCounts, ReportStatus, ReportWeights, Reports};
-pub use retention::{PurgeCounts, RetentionApi, RetentionPolicy, RetentionScheduler};
+pub use retention::{
+    AbortFlag, PurgeCounts, PurgeOptions, RetentionApi, RetentionError, RetentionPolicy, RetentionScheduler,
+    SchedulerOptions, SecurityPurge,
+};
 pub use sessions::{NewSession, SessionAuth, SessionInfo, Sessions};
 pub use tokens::{NewSignup, NewToken, Signup, Signups, Sso, SsoIdentity, SsoLink, Token, Tokens};
 pub use users::{Anonymized, Mfa, NewUser, User, UserStatus, UserUpdate, Users};
@@ -248,7 +251,7 @@ impl Store {
 
     /// Runs `f` in a read transaction on a reader connection (on a blocking thread): every query
     /// of `f` sees the same snapshot, which includes every write answered before the call.
-    pub fn read<R, E, F>(&self, f: F) -> impl Future<Output = Result<R, E>> + Send + 'static
+    pub fn read<R, E, F>(&self, f: F) -> impl Future<Output = Result<R, E>> + Send + 'static + use<R, E, F>
     where
         F: FnOnce(&Db<'_>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
@@ -271,7 +274,7 @@ impl Store {
     /// returns `Ok`, rolled back when it returns an error or panics. The job is queued now (see
     /// the module documentation on ordering). Errors: `readonly`, `closed`, `busy` (the lock was
     /// not obtained within `busy_timeout`), and whatever `f` returns.
-    pub fn write<R, E, F>(&self, f: F) -> impl Future<Output = Result<R, E>> + Send + 'static
+    pub fn write<R, E, F>(&self, f: F) -> impl Future<Output = Result<R, E>> + Send + 'static + use<R, E, F>
     where
         F: FnOnce(&Db<'_>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
@@ -346,7 +349,7 @@ impl Store {
     pub fn finish_batch(
         &self,
         records: Vec<GameRecord>,
-    ) -> impl Future<Output = Result<Vec<CommitEntry>>> + Send + 'static {
+    ) -> impl Future<Output = Result<Vec<CommitEntry>>> + Send + 'static + use<> {
         let logger = self.inner.ctx.logger.clone();
         let submitted = if records.is_empty() {
             None
@@ -373,7 +376,7 @@ impl Store {
     }
 
     /// [`Store::write`] that also returns the duration of the transaction in milliseconds.
-    fn write_timed<R, F>(&self, f: F) -> impl Future<Output = Result<(R, f64)>> + Send + 'static
+    fn write_timed<R, F>(&self, f: F) -> impl Future<Output = Result<(R, f64)>> + Send + 'static + use<R, F>
     where
         F: FnOnce(&Db<'_>) -> Result<R> + Send + 'static,
         R: Send + 'static,
@@ -528,7 +531,7 @@ macro_rules! async_api {
         impl $api {
             $(
                 $(#[$fm])*
-                pub fn $name(&self, $($arg: $ty),*) -> impl Future<Output = Result<$ret>> + Send + 'static {
+                pub fn $name(&self, $($arg: $ty),*) -> impl Future<Output = Result<$ret>> + Send + 'static + use<> {
                     self.store.$kind(move |$db: &Db<'_>| $body)
                 }
             )*

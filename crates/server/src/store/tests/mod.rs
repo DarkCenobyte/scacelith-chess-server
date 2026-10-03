@@ -2,9 +2,13 @@
 
 mod account_api;
 mod accounts;
+mod analysis_queue;
+mod games;
 mod migrations;
 mod moderation;
+mod retention;
 mod support;
+mod writer;
 
 mod smoke {
     use super::support::*;

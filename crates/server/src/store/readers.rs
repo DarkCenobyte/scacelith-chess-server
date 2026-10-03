@@ -38,7 +38,10 @@ impl Readers {
     }
 
     /// Runs `f` on a free connection, in a read transaction, on a blocking thread.
-    pub(crate) fn read<R, E, F>(self: &Arc<Self>, f: F) -> impl Future<Output = Result<R, E>> + Send + 'static
+    pub(crate) fn read<R, E, F>(
+        self: &Arc<Self>,
+        f: F,
+    ) -> impl Future<Output = Result<R, E>> + Send + 'static + use<R, E, F>
     where
         F: FnOnce(&Db<'_>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,

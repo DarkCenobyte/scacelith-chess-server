@@ -160,7 +160,10 @@ impl Writer {
     /// Queues `f` (now, before the future is polled) and returns its outcome. Fails with
     /// [`ErrorKind::Closed`](super::ErrorKind::Closed) when the writer is closing, or when it closed
     /// before answering.
-    pub(crate) fn submit<R, E, F>(&self, f: F) -> impl Future<Output = Result<R, E>> + Send + 'static
+    pub(crate) fn submit<R, E, F>(
+        &self,
+        f: F,
+    ) -> impl Future<Output = Result<R, E>> + Send + 'static + use<R, E, F>
     where
         F: FnOnce(&mut WriterConn) -> Result<R, E> + Send + 'static,
         R: Send + 'static,

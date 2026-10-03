@@ -81,6 +81,46 @@ pub async fn memory_store() -> Store {
     store
 }
 
+/// A migrated store with a configuration and options (in memory unless `opts.path` says).
+pub async fn store_with(config: &Config, mut opts: StoreOptions) -> Store {
+    if opts.path.is_none() {
+        opts.path = Some(":memory:".into());
+    }
+    let store = Store::open(config, opts).await.unwrap();
+    store.migrate().await.unwrap();
+    store
+}
+
+/// Keeps the log lines in memory while alive (one capture at a time in the test binary).
+pub struct LogCapture {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl LogCapture {
+    pub fn start() -> LogCapture {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::log::capture(false);
+        crate::log::capture(true);
+        LogCapture { _lock: lock }
+    }
+
+    /// The captured records of a logger component, parsed.
+    pub fn records(&self, component: &str) -> Vec<serde_json::Value> {
+        crate::log::capture(true)
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+            .filter(|v| v["c"] == component)
+            .collect()
+    }
+}
+
+impl Drop for LogCapture {
+    fn drop(&mut self) {
+        crate::log::capture(false);
+    }
+}
+
 /// A migrated store on a file of `dir`.
 pub async fn file_store(dir: &TempDir) -> Store {
     file_store_with(dir, &config(), options(None)).await
