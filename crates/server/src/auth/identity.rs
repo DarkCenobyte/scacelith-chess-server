@@ -229,6 +229,8 @@ mod tests {
         assert_eq!(mask_email(" x@y.z "), "x***@y.z");
         assert_eq!(mask_email("@example.org"), "***");
         assert_eq!(mask_email("nobody"), "***");
+        assert_eq!(mask_email("n@example.org"), "n***@example.org");
+        assert_eq!(mask_email(""), "***");
         assert!(is_valid_email("alice@example.org"));
         assert!(is_valid_email("a.b+tag@mail.example.co.uk"));
         for bad in [

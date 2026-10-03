@@ -4,6 +4,7 @@
 //! cheap Argon2id hasher.
 
 mod account;
+mod email_change;
 mod login;
 mod mfa;
 mod password;
@@ -88,6 +89,8 @@ pub(crate) struct Setup {
     pub hasher: Option<Arc<dyn PasswordHasher>>,
     /// The clock (shared by two servers of one test).
     pub clock: Option<Arc<ManualClock>>,
+    /// A database file instead of a private in-memory database.
+    pub db_path: Option<String>,
 }
 
 impl Setup {
@@ -120,18 +123,28 @@ pub(crate) fn test_hasher() -> Arc<dyn PasswordHasher> {
     Arc::new(Argon2Hasher::new(Argon2Params { memory_kib: 64, passes: 1, lanes: 1, ..Argon2Params::DEFAULT }))
 }
 
-/// A hasher that counts its hashes and can run a hook once, before its next hash (to land a
-/// change while a request hashes).
+/// A one-shot hook of a [`CountingHasher`].
+type Hook = Mutex<Option<Box<dyn FnOnce() + Send>>>;
+
+/// A hasher that counts its hashes and can run a hook once, before its next hash or after its
+/// next verification (to land a change while a request hashes or right after it checked a
+/// password).
 pub(crate) struct CountingHasher {
     inner: Arc<dyn PasswordHasher>,
     hashes: AtomicUsize,
-    hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    hook: Hook,
+    verify_hook: Hook,
 }
 
 impl CountingHasher {
     /// Counts the hashes of the cheap test hasher.
     pub(crate) fn new() -> Arc<CountingHasher> {
-        Arc::new(CountingHasher { inner: test_hasher(), hashes: AtomicUsize::new(0), hook: Mutex::new(None) })
+        Arc::new(CountingHasher {
+            inner: test_hasher(),
+            hashes: AtomicUsize::new(0),
+            hook: Mutex::new(None),
+            verify_hook: Mutex::new(None),
+        })
     }
 
     /// New hashes so far.
@@ -142,6 +155,11 @@ impl CountingHasher {
     /// Runs `hook` on the blocking thread of the next hash, before it.
     pub(crate) fn before_next_hash(&self, hook: impl FnOnce() + Send + 'static) {
         *self.hook.lock() = Some(Box::new(hook));
+    }
+
+    /// Runs `hook` on the blocking thread of the next verification of a stored hash, after it.
+    pub(crate) fn after_next_verify(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.verify_hook.lock() = Some(Box::new(hook));
     }
 }
 
@@ -160,7 +178,12 @@ impl PasswordHasher for CountingHasher {
     }
 
     fn verify(&self, stored: &str, password: &str) -> Result<Verified, HashFailure> {
-        self.inner.verify(stored, password)
+        let verified = self.inner.verify(stored, password);
+        let hook = self.verify_hook.lock().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        verified
     }
 
     fn verify_dummy(&self, password: &str) -> Result<(), HashFailure> {
@@ -189,7 +212,7 @@ impl Harness {
         let store = Store::open(
             &config,
             StoreOptions {
-                path: Some(":memory:".into()),
+                path: Some(setup.db_path.unwrap_or_else(|| ":memory:".into())),
                 clock: Some(shared.clone()),
                 ..StoreOptions::default()
             },
