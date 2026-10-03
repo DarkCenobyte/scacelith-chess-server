@@ -26,7 +26,16 @@ Stockfish 19 binary for the anti-cheat analysis (see the [README](../README.md) 
 
 ## 1. Build and install the binary
 
-The release binary is static (`x86_64-unknown-linux-musl`) and runs on any x86-64 Linux,
+Each [release](https://github.com/DarkCenobyte/scacelith-chess-server/releases) has the binary
+built below, alone and in an archive with these docs, `.env.example` and the `deploy/systemd`
+files; check a download before installing it (GitHub CLI):
+
+```sh
+gh attestation verify scacelith-server-0.9.0-x86_64-linux-musl --repo DarkCenobyte/scacelith-chess-server
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+To build it yourself: the release binary is static (`x86_64-unknown-linux-musl`) and runs on any x86-64 Linux,
 whatever its C library. It needs Rust 1.99.0 with the musl target (`rust-toolchain.toml`; with
 rustup: `rustup toolchain install 1.99.0 --target x86_64-unknown-linux-musl`) and a musl C
 compiler for *ring* and the bundled SQLite (Debian and Ubuntu: `apt install musl-tools`):

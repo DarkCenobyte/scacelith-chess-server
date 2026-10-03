@@ -1,0 +1,7 @@
+# actionlint configuration. actionlint 1.7.12 does not know GitHub's self-repository syntax yet
+# (`uses: $/.github/workflows/...`, a reusable workflow of this repository at the running commit),
+# which the workflows use instead of the workspace-relative `./` form.
+paths:
+  .github/workflows/**/*.yml:
+    ignore:
+      - 'reusable workflow call "\$/\.github/workflows/[^"]+" at "uses" is not following the format'
