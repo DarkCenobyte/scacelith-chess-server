@@ -12,7 +12,8 @@
 //! process metrics, the open file limit, the data directory, the store (opened with the Elo rules
 //! of [`crate::matching::elo`], migrated, its server id read), the lobby's inbox, the mailer and
 //! the auth service (which announces revoked sessions into that inbox), the background jobs
-//! (retention purge, analysis queue gauges, engine analysis pool), the GIF service, the anti-cheat
+//! (retention purge, analysis queue gauges, the sweep of the auth service's control counters every
+//! 10 s, engine analysis pool), the GIF service, the anti-cheat
 //! services (anomalies and sanctions, reports), the game hosts (`STATUS=recovering N games`: each
 //! shard replays its journal and announces the games it recovers into the lobby's inbox), the
 //! lobby actor, the realtime connections, the HTTP API, and the listeners, bound last. A failure
@@ -34,9 +35,10 @@
 //! the HTTP requests in progress finish), the lobby's periodic work stops, the engine analysis and
 //! the retention purge stop, and the realtime connections drain (`Notice{ServerShutdown}`,
 //! `SHUTDOWN_GRACE_MS`, then `Error{ShuttingDown}` and 4008). Then the game hosts make their
-//! final commits and flush their journals, the lobby ends, the mailer sends what it holds (5 s at
-//! most), the route modules close (GIF render threads), the auth service saves its security
-//! events, and the store closes. The watchdog keeps pinging until the end.
+//! final commits and flush their journals, the lobby ends, the anomalies still buffered go to the
+//! store writer, the mailer sends what it holds (5 s at most), the route modules close (GIF render
+//! threads), the auth service saves its security events, and the store closes. The watchdog keeps
+//! pinging until the end.
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -85,6 +87,7 @@ use crate::net::ws::{CLOSE_TIMEOUT, WsSettings};
 use crate::realtime::lobby::LobbyDeps;
 use crate::realtime::{Admissions, GameHosts, Lobby, Realtime, RealtimeDeps, TokenValidator};
 use crate::security::password::PasswordHasher;
+use crate::security::ratelimit::LocalControl;
 use crate::store::{
     GameOutcome, MigrationReport, RatingFn, RatingRecord, RetentionScheduler, SideOutcome, Store,
     StoreOptions,
@@ -98,6 +101,8 @@ const RUNTIME_SHUTDOWN: Duration = Duration::from_secs(1);
 const MAIL_DRAIN: Duration = Duration::from_secs(5);
 /// Interval of the analysis backlog gauges.
 const BACKLOG_EVERY: Duration = Duration::from_secs(5);
+/// Interval of the sweep of the auth service's control counters and single-use keys.
+const CONTROL_SWEEP_EVERY: Duration = Duration::from_secs(10);
 /// Interval of the `recovering N games` status during the journal replay.
 const RECOVERY_STATUS_EVERY: Duration = Duration::from_secs(1);
 /// The header of the `101` answer that names the server (the `serverId` of `/api/v1/info`).
@@ -438,6 +443,8 @@ pub(crate) struct Instance {
     background: Background,
     mailer: Mailer,
     hosts: Arc<Hosts>,
+    /// Kept to flush its buffered anomalies after the final commits.
+    anticheat: Anticheat,
     recovered: usize,
     lobby: Lobby,
     lobby_task: JoinHandle<()>,
@@ -504,9 +511,13 @@ impl Instance {
         // sessions into its inbox, and the hosts the games they recover.
         let (lobby, inbox) = Lobby::channel();
         let mailer = Mailer::new(&config, Logger::root().child("mail"));
+        // The HTTP layer counts with its own `SharedLimits` (swept by the lobby): the control
+        // counters are the auth service's alone, swept by a background job.
+        let control = Arc::new(LocalControl::new(clock.clone()));
         let mut auth_deps =
             AuthDeps::new(config.clone(), store.clone(), mailer.clone(), Arc::new(lobby.clone()));
         auth_deps.clock = clock.clone();
+        auth_deps.control = Some(control.clone());
         auth_deps.password_hasher = options.password_hasher.clone();
         let auth = match Auth::new(auth_deps) {
             Ok(auth) => auth,
@@ -518,6 +529,7 @@ impl Instance {
         let mut background = Background {
             retention: RetentionScheduler::for_store(&store, &config),
             backlog: spawn_backlog_gauges(store.clone()),
+            sweep: spawn_control_sweep(control),
             pool: AnalysisPool::start(&config, store.clone(), clock.clone()),
         };
         let limits = Arc::new(SharedLimits::new(clock.clone()));
@@ -559,7 +571,7 @@ impl Instance {
             store: store.clone(),
             hosts: game_hosts,
             tokens,
-            anomalies: Arc::new(anticheat),
+            anomalies: Arc::new(anticheat.clone()),
             lobby: lobby.clone(),
         });
 
@@ -598,6 +610,7 @@ impl Instance {
                 // Nothing was served: the recovered games stay in the journals for the next start.
                 hosts.shutdown().await;
                 lobby.stop();
+                anticheat.flush();
                 background.stop().await;
                 api.close().await;
                 auth.close().await;
@@ -625,6 +638,7 @@ impl Instance {
             background,
             mailer,
             hosts,
+            anticheat,
             recovered,
             lobby,
             lobby_task,
@@ -687,6 +701,7 @@ impl Instance {
             mut background,
             mailer,
             hosts,
+            anticheat,
             lobby,
             lobby_task,
             auth,
@@ -716,6 +731,8 @@ impl Instance {
         if let Err(e) = lobby_task.await {
             log_error!(log, "lobby failed", { "err": e.to_string() });
         }
+        // The anomalies of the last moves and of the drained connections, before the store closes.
+        anticheat.flush();
         if !mailer.drain(MAIL_DRAIN).await {
             log_warn!(log, "e-mails not sent before the stop", { "waitedMs": MAIL_DRAIN.as_millis() as u64 });
         }
@@ -732,11 +749,12 @@ impl Instance {
     }
 }
 
-/// The background jobs on the store: the retention purge, the analysis queue gauges and the
-/// engine analysis.
+/// The background jobs: the retention purge, the analysis queue gauges, the sweep of the auth
+/// service's control counters and the engine analysis.
 struct Background {
     retention: RetentionScheduler,
     backlog: JoinHandle<()>,
+    sweep: JoinHandle<()>,
     pool: AnalysisPool,
 }
 
@@ -744,6 +762,7 @@ impl Background {
     /// Stops every job (the engines are closed; the store can be closed afterwards).
     async fn stop(&mut self) {
         self.backlog.abort();
+        self.sweep.abort();
         tokio::join!(self.pool.stop(), self.retention.stop());
     }
 }
@@ -794,6 +813,20 @@ fn spawn_backlog_gauges(store: Store) -> JoinHandle<()> {
                 ordinary.set(backlog.ordinary as f64);
                 priority.set(backlog.priority as f64);
             }
+        }
+    })
+}
+
+/// Removes the auth service's expired control windows and single-use keys every
+/// [`CONTROL_SWEEP_EVERY`] (their expiry is otherwise lazy), giving the memory of a burst back.
+fn spawn_control_sweep(control: Arc<LocalControl>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(CONTROL_SWEEP_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            control.sweep();
         }
     })
 }
