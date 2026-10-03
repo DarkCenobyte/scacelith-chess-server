@@ -1,0 +1,21 @@
+[package]
+name = "scacelith-gif"
+description = "Animated GIF of a chess game (renderer and encoder) for the Scacelith server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+scacelith-chess.workspace = true
+libm.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true
+hex.workspace = true
+
+[lints]
+workspace = true
