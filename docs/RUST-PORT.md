@@ -142,7 +142,7 @@ the crate's manifest in their own commit.
 * `ids`: `UserId = u32`, `GameId = u64`, `ConnId = u32`, `GameIdAllocator`, `shard_of`,
   `is_game_id`, `created_ms`, `ID53_LIMIT`.
 * `log`: `log::init(Options)`, `Logger::root().child("name")`, macros, `log::flush()`,
-  `log::capture()` for tests, `scrub`, `iso_time`, `civil_from_days`. Journald priorities when
+  `log::capture_logs(level)` for tests, `scrub`, `iso_time`, `civil_from_days`. Journald priorities when
   `JOURNAL_STREAM` is set.
 * `metrics`: `counter`, `counter_vec`, `gauge`, `gauge_vec`, `gauge_fn`, `histogram`,
   `histogram_vec`, `registry().render()`, `js_number`.
@@ -326,7 +326,7 @@ router from every group in the order of the Node `DEFAULT_ROUTES` (the `Allow` h
 * Sources: environment, then `.env` next to the binary's working directory or the file named by
   `SCACELITH_ENV_FILE`; secrets may come from `<KEY>_FILE` (systemd `LoadCredential=`). A
   declarative key table generates `.env.example` and `docs/CONFIG.md` (`scacelith-server
-  gen-config-docs`, with a test that the committed files are current).
+  gen-config-docs [--check]`, with a test that the committed files are current).
 * `check-config` prints the effective configuration (secrets as `<set>`/`<unset>`) or every error.
 * Node-only keys are removed (`SHARD_OVERLOAD_LAG_MS`, `LISTEN_REUSE_PORT`, `UV_THREADPOOL_SIZE`
   and the like): an unknown key in the environment is ignored, an obsolete key in `.env` gets a

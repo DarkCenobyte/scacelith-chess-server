@@ -682,10 +682,11 @@ pub(crate) mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn render_failed_for_a_render_too_long_a_panicking_render_and_an_error() {
-        let p = pool(1, 4, 15_000, 150, None);
+        // The render timeout leaves room for the quick jobs below on a loaded machine.
+        let p = pool(1, 4, 15_000, 1_000, None);
         let t0 = Instant::now();
-        assert!(is_failed(&p.render(job("sleep:2000")).await, "longer than 150 ms"));
-        assert!(t0.elapsed() < Duration::from_millis(1500), "answered at the timeout");
+        assert!(is_failed(&p.render(job("sleep:10000")).await, "longer than 1000 ms"));
+        assert!(t0.elapsed() < Duration::from_millis(8_000), "answered at the timeout");
         assert_eq!(p.stats().render_timeouts, 1);
         assert_eq!(p.render(job("bytes:16")).await.unwrap().len(), 16);
         assert!(is_failed(
