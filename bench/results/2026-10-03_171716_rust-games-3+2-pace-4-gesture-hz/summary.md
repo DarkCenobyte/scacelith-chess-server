@@ -3,7 +3,7 @@
 - Machine: 4 CPUs (Intel(R) Xeon(R) Processor @ 2.10GHz), 15.7 GiB RAM, kernel 6.18.44-fc-v64
 - Server CPUs: 0,1, load generator CPUs: 2,3, WORKERS=2, TLS (ECDSA P-256, no resumption)
 - rust: scacelith-server b02f03b; password hash argon2id m=65536 t=3 p=4, PASSWORD_HASH_CONCURRENCY=2 (whole server)
-- Games at a realistic 3+2 pace: `bench/run.sh --targets rust --scenarios games -- --steps 1000,4000,8000 --move-interval-ms 5000 --gesture-hz 4` (one move every 5 s per player, 4 gesture(s) per second per player)
+- Games at a realistic 3+2 pace: `bench/run.sh --targets rust --scenarios games -- --steps 1000,4000,8000 --move-interval-ms 5000 --gesture-hz 4` (the side to move thinks 5 s +-50 %, so one ply every 5 s per game; 4 gesture(s) per second per player)
 
 ### games
 
