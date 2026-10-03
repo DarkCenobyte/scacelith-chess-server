@@ -275,6 +275,26 @@ async fn retention_on_a_real_database_old_rows_go_recent_rows_stay_ips_are_erase
 }
 
 #[tokio::test]
+async fn retention_days_beyond_the_millisecond_range_keep_the_rows_instead_of_deleting_them() {
+    // A huge RETENTION_SECURITY_DAYS / RETENTION_IP_DAYS (the configuration has no maximum) means
+    // "keep": the cutoff saturates far in the past, it never wraps into the future.
+    let db = temp_store().await;
+    let now = purge_now();
+    seed(&db, now).await;
+    let before = dump(&db.raw);
+    for forever in [i64::MAX, 200_000_000_000] {
+        let policy = RetentionPolicy { security_days: forever, ip_days: forever };
+        let counts = db.store.retention().run(now, policy).await.unwrap();
+        assert_eq!((counts.security_events, counts.anomalies, counts.ip_erased), (0, 0, 0), "{forever}");
+        let purge = db.store.retention().purge_security(now, policy).await.unwrap();
+        assert_eq!((purge.deleted, purge.ip_erased), (0, 0), "{forever}");
+        let d = dump(&db.raw);
+        assert_eq!((&d.security, &d.anomalies), (&before.security, &before.anomalies), "{forever}");
+        assert!(d.sessions.iter().any(|(_, ip)| ip.as_deref() == Some("198.51.100.3")), "{forever}");
+    }
+}
+
+#[tokio::test]
 async fn run_and_run_async_execute_the_same_statements_with_the_same_result() {
     let (one, two) = (temp_store().await, temp_store().await);
     let now = purge_now();

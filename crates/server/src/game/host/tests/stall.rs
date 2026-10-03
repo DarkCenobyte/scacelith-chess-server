@@ -7,9 +7,12 @@ use scacelith_protocol::{
     ClientMsg, Color, EndReason as ER, ErrorCode as EC, GameStatus as GS, ServerMsg, close,
 };
 
+use tokio::sync::mpsc;
+
 use super::{Ep, Opts, Rig, T0, ended_at, move_msg, rematch, result, resync, snapshot};
 use crate::config::test_config;
 use crate::events::IncidentKind;
+use crate::game::host::{Msg, beat};
 use crate::ids::GameId;
 
 /// A game where White's clock runs (both first moves played), with its connections and its flag
@@ -246,4 +249,30 @@ async fn a_first_move_timeout_that_fell_during_a_stall_longer_than_the_credit_re
     assert_eq!(h.events.conduct(), [(1, IncidentKind::NoShow)]);
     assert_eq!(snapshot(eb.last()).running, Color::None);
     h.drain();
+}
+
+#[tokio::test]
+async fn a_beat_handles_the_requests_already_queued_before_its_timers() {
+    let (mut h, id, ew, eb, deadline) = running(Opts::default()).await;
+    assert!(!h.beat(deadline - 5));
+    // White's move is read 3 ms before its flag deadline and still waits in the inbox when the
+    // next beat comes due, 2 ms after the deadline (a busy actor: both are ready at once).
+    let (tx, mut inbox) = mpsc::unbounded_channel();
+    let msg = ClientMsg::Move(move_msg(h.room(id), 5));
+    let read_at = (deadline - 3) as f64;
+    tx.send(Msg::Client { user: 1, msg, ep: ew.endpoint(), recv_at: read_at }).expect("inbox open");
+    h.set(deadline + 2);
+    assert!(beat(&mut h.shard, &mut inbox).await.is_continue());
+    assert!(matches!(eb.last(), ServerMsg::MoveMade(_)), "the move arrived in time: {:?}", eb.last());
+    let room = h.room(id);
+    assert_eq!((room.is_over(), room.ply()), (false, 3));
+    assert_eq!(h.deadline(id), deadline + 2 + 180000 + 150, "Black's clock starts at the MoveMade");
+    assert_eq!(h.shard.counters().stalls, 0, "no stall: an ordinary beat");
+    // Without a request, the same beat flags.
+    let (mut h, id, _, _, deadline) = running(Opts::default()).await;
+    assert!(!h.beat(deadline - 5));
+    let (_tx, mut inbox) = mpsc::unbounded_channel();
+    h.set(deadline + 2);
+    assert!(beat(&mut h.shard, &mut inbox).await.is_continue());
+    assert_eq!((result(h.room(id)).1, ended_at(h.room(id))), (ER::Timeout, deadline + 2));
 }

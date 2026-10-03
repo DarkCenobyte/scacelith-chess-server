@@ -58,6 +58,9 @@ pub const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 pub const PING_RATE: f64 = 2.0;
 /// Pongs in a burst.
 pub const PING_BURST: f64 = 5.0;
+/// Pongs waiting for a socket the client does not read (the ping burst); newer pings go
+/// unanswered until it drains.
+const PONG_QUEUE: usize = 5;
 /// Longest close reason sent (bytes).
 pub const MAX_CLOSE_REASON: usize = 123;
 
@@ -485,9 +488,17 @@ struct WsShared {
     close_sent: AtomicBool,
     close_written: AtomicBool,
     close: Mutex<Option<CloseInfo>>,
+    pongs: Mutex<PongQueue>,
     destroy_at: watch::Sender<Option<Instant>>,
     close_timeout: Duration,
     _permit: AdmissionPermit,
+}
+
+/// The pongs to write, in order, by one task at a time.
+#[derive(Default)]
+struct PongQueue {
+    payloads: VecDeque<Bytes>,
+    writing: bool,
 }
 
 impl Drop for WsShared {
@@ -546,26 +557,49 @@ impl WsShared {
         true
     }
 
-    /// Answers a ping (skipped once our close started).
+    /// Answers a ping (skipped once our close started). One task writes the pongs and at most
+    /// [`PONG_QUEUE`] wait: a client that pings without reading cannot pile up tasks and bytes.
     fn pong(self: &Arc<Self>, payload: Bytes) {
+        {
+            let mut q = self.pongs.lock();
+            if q.payloads.len() >= PONG_QUEUE {
+                ws_metrics().pings_dropped.inc();
+                return;
+            }
+            q.payloads.push_back(payload);
+            if std::mem::replace(&mut q.writing, true) {
+                return;
+            }
+        }
         let me = self.clone();
         tokio::spawn(async move {
-            let work = async {
-                let mut out = me.out.lock().await;
-                if me.close_sent.load(Ordering::Acquire) {
-                    return;
-                }
-                let frame = server_frame(OP_PONG, &payload);
-                ws_metrics().bytes_out.add(frame.len() as u64);
-                if out.write_all(&frame).await.is_ok() {
-                    let _ = out.flush().await;
-                }
-            };
             tokio::select! {
-                _ = work => {}
+                _ = me.write_pongs() => {}
                 _ = me.destroyed() => {}
             }
         });
+    }
+
+    /// Writes the queued pongs until none is left, our close started or the socket failed.
+    async fn write_pongs(&self) {
+        let mut out = self.out.lock().await;
+        let mut failed = false;
+        loop {
+            let payload = {
+                let mut q = self.pongs.lock();
+                match q.payloads.pop_front() {
+                    Some(p) if !failed && !self.close_sent.load(Ordering::Acquire) => p,
+                    _ => {
+                        q.payloads.clear();
+                        q.writing = false;
+                        return;
+                    }
+                }
+            };
+            let frame = server_frame(OP_PONG, &payload);
+            ws_metrics().bytes_out.add(frame.len() as u64);
+            failed = out.write_all(&frame).await.is_err() || out.flush().await.is_err();
+        }
     }
 }
 
@@ -743,6 +777,7 @@ impl WsConnection {
             close_sent: AtomicBool::new(false),
             close_written: AtomicBool::new(false),
             close: Mutex::new(None),
+            pongs: Mutex::default(),
             destroy_at: watch::Sender::new(None),
             close_timeout: settings.close_timeout,
             _permit: permit,
@@ -1277,6 +1312,46 @@ pub(crate) mod tests {
         assert!(started.elapsed() >= CLOSE_TIMEOUT);
         let mut sink = Vec::new();
         let _ = tokio::time::timeout(Duration::from_secs(1), client.read_to_end(&mut sink)).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pongs_to_a_client_that_does_not_read_do_not_pile_up() {
+        let clock = crate::clock::ManualClock::new(0.0, 0);
+        let s = WsSettings { clock: clock.clone(), ..settings() };
+        let (server, mut client) = tokio::io::duplex(64);
+        let c = WsConnection::new(
+            Box::new(server),
+            Bytes::new(),
+            IpAddr::from([192, 0, 2, 1]),
+            AdmissionPermit::none(),
+            &s,
+        );
+        let WsConnection { reader, writer: _writer, info } = c;
+        let _reading = drive(reader);
+        // Within the ping rate, but the client never reads: the first pong fills the socket.
+        for i in 0..100u8 {
+            clock.advance(500.0);
+            client.write_all(&frame(9, &[i; 125])).await.expect("write");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let holders = Arc::strong_count(&info.0);
+        assert!(holders <= 4, "the reader, the writer, the view and one pong task, not {holders}");
+        let mut pongs = Vec::new();
+        while let Ok(Some((op, payload))) =
+            tokio::time::timeout(Duration::from_millis(100), read_server_frame(&mut client)).await
+        {
+            assert_eq!((op, payload.len()), (OP_PONG, 125));
+            pongs.push(payload[0]);
+        }
+        assert_eq!(
+            pongs.len(),
+            1 + PONG_QUEUE,
+            "the pong being written, then a queue of one burst: {pongs:?}"
+        );
+        assert_eq!(pongs[..PONG_QUEUE], [0, 1, 2, 3, 4], "in order");
+        clock.advance(500.0);
+        client.write_all(&frame(9, b"again")).await.expect("write");
+        assert_eq!(read_server_frame(&mut client).await, Some((OP_PONG, b"again".to_vec())));
     }
 
     #[tokio::test]

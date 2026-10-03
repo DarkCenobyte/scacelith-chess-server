@@ -6,15 +6,19 @@
 //! order: the anomalies recorded right before a commit of finished games are written before it
 //! (the commit's analysis queue policy sees them), and a certain anomaly before the ban it causes.
 //!
-//! Recording never waits. The rows of non-certain anomalies wait in a buffer drained by one store
-//! job, queued by the first anomaly that finds no job waiting: repeats of the same kind by the
-//! same player in the same game while the job waits are coalesced into one row (`count`,
-//! `lastAt`), so a flood of anomalies costs one row per writer turn, not one per message. A
-//! certain anomaly gets a job of its own.
+//! Recording never waits. The rows of non-certain anomalies wait in a buffer drained by store jobs.
+//! The first anomaly of a kind by a player in a game is handed to the writer at once (the drain job
+//! waiting, or a new one), so a commit queued after it sees it. Its repeats within [`FLUSH_MS`] of
+//! the last write of that row wait for a timer, coalesced into one row (`count`, `lastAt`), as do
+//! the repeats that arrive while a drain job waits: a flood of anomalies costs about one row per
+//! second for each kind, player and game, not one per message (the former server batched them
+//! every second). A certain anomaly gets a job of its own. [`Anticheat::flush`] writes the buffer
+//! at once (the shutdown, before the store closes).
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use indexmap::IndexMap;
 use parking_lot::{Mutex, RwLock};
@@ -54,6 +58,9 @@ const NEEDS_SYNC: [&str; 2] = ["out_of_turn", "illegal_move"];
 
 /// Distinct buffered rows past which info anomalies are dropped (twice as many for the others).
 pub const MAX_PENDING: usize = 5000;
+/// Batching period of the repeats of an anomaly (ms): a row written less than this long ago has
+/// its repeats written together when the period ends.
+pub const FLUSH_MS: u32 = 1000;
 /// Remembered sanctions (player, game) past which the expired ones are forgotten.
 const MAX_SANCTIONED: usize = 10_000;
 const HOUR_MS: i64 = 3_600_000;
@@ -145,15 +152,30 @@ type PendingKey = (UserId, GameId, &'static str);
 #[derive(Default)]
 struct Pending {
     rows: IndexMap<PendingKey, PendingRow>,
+    /// When the rows of each key were last handed to the writer (monotonic ms), for the keys
+    /// handed over less than `FLUSH_MS` ago (pruned at each drain).
+    written: HashMap<PendingKey, f64>,
     /// The drain job waiting on the writer, if any (its generation).
     queued: Option<u64>,
     generation: u64,
+    /// The timer that drains the repeats is running.
+    timer: bool,
 }
 
 impl Pending {
-    fn take(&mut self) -> Vec<NewAnomaly> {
+    /// Whether a row of `key` was handed to the writer less than `FLUSH_MS` before `now`.
+    fn recent(&self, key: &PendingKey, now: f64) -> bool {
+        self.written.get(key).is_some_and(|&t| now - t < f64::from(FLUSH_MS))
+    }
+
+    /// The buffered rows, handed to the writer at `now` (monotonic ms).
+    fn take(&mut self, now: f64) -> Vec<NewAnomaly> {
         self.queued = None;
-        std::mem::take(&mut self.rows).into_values().map(PendingRow::into_row).collect()
+        let horizon = now - f64::from(FLUSH_MS);
+        self.written.retain(|_, t| *t > horizon);
+        let rows = std::mem::take(&mut self.rows);
+        self.written.extend(rows.keys().map(|&key| (key, now)));
+        rows.into_values().map(PendingRow::into_row).collect()
     }
 }
 
@@ -222,7 +244,9 @@ impl Anticheat {
     }
 
     /// Records an anomaly: metrics, log, and its row queued on the store writer before this
-    /// returns (certain ones in a job of their own, the others coalesced in the drain job).
+    /// returns (certain ones in a job of their own, the others in the drain job), except for a
+    /// repeat within [`FLUSH_MS`] of the last write of its row, which is counted in the row the
+    /// timer writes (module documentation).
     pub fn record_anomaly(&self, a: &Anomaly) -> Classification {
         let c = classify(a.kind, Some(a.pos_matched));
         let label: &'static str = if c.known { a.kind } else { "unknown" };
@@ -256,45 +280,33 @@ impl Anticheat {
                 "severity": c.severity.as_str(), "detail": row.detail });
         }
         let len = pending.rows.len();
+        // A buffered row is already due: in the drain job waiting, or when the timer fires.
         if let Some(prev) = pending.rows.get_mut(&key) {
             prev.count += 1;
             prev.last_at = at;
         } else if (len >= MAX_PENDING && c.severity == Severity::Info) || len >= 2 * MAX_PENDING {
             METRICS.dropped.inc();
         } else {
+            let repeat = pending.recent(&key, self.inner.clock.mono_ms());
             pending.rows.insert(key, PendingRow { row, count: 1, last_at: at });
-        }
-        if pending.queued.is_none() && !pending.rows.is_empty() {
-            pending.generation += 1;
-            let generation = pending.generation;
-            pending.queued = Some(generation);
-            // Queued under the lock: the drain jobs keep the order of the anomalies.
-            self.queue_drain(generation);
+            if !repeat {
+                self.inner.drain_soon(&mut pending);
+            } else if let Some(timer) = self.inner.timer(&mut pending) {
+                // Started without the lock: a runtime shutting down drops the task at once.
+                drop(pending);
+                timer.start();
+            }
         }
         c
     }
 
-    /// Queues the job that writes every buffered row when the writer runs it.
-    fn queue_drain(&self, generation: u64) {
-        let inner = self.inner.clone();
-        let fut = self.inner.store.write(move |db| {
-            let rows = inner.pending.lock().take();
-            let n = rows.len();
-            db.anomalies().insert_batch(&rows).map_err(|e| BatchError { rows: n, error: e })?;
-            Ok::<_, BatchError>(())
-        });
-        let inner = self.inner.clone();
-        spawn_detached(async move {
-            if let Err(mut e) = fut.await {
-                // The job did not run (store closed, writer lock not obtained): its rows are lost.
-                let mut pending = inner.pending.lock();
-                if pending.queued == Some(generation) {
-                    e.rows = pending.take().len();
-                }
-                drop(pending);
-                lost(&inner.logger, "anomaly batch lost", &e);
-            }
-        });
+    /// Hands every buffered anomaly row to the store writer now, without waiting for the end of
+    /// its batching period (the shutdown, before the store closes).
+    pub fn flush(&self) {
+        let mut pending = self.inner.pending.lock();
+        if !pending.rows.is_empty() {
+            self.inner.drain_soon(&mut pending);
+        }
     }
 
     fn write_rows(&self, rows: Vec<NewAnomaly>, what: &'static str) {
@@ -389,6 +401,79 @@ impl Anticheat {
         let (settings, logger) = (inner.settings, inner.logger.clone());
         let fut = inner.store.write(move |db| apply_certain_sanction(db, settings, &cheat, &logger));
         Ok((key, fut))
+    }
+}
+
+impl Inner {
+    /// Queues the drain job unless one waits already. Called under the buffer's lock: the drain
+    /// jobs keep the order of the anomalies.
+    fn drain_soon(self: &Arc<Self>, pending: &mut Pending) {
+        if pending.queued.is_none() {
+            pending.generation += 1;
+            pending.queued = Some(pending.generation);
+            self.queue_drain(pending.generation);
+        }
+    }
+
+    /// Queues the job that writes every buffered row when the writer runs it.
+    fn queue_drain(self: &Arc<Self>, generation: u64) {
+        let inner = self.clone();
+        let fut = self.store.write(move |db| {
+            let rows = inner.pending.lock().take(inner.clock.mono_ms());
+            let n = rows.len();
+            db.anomalies().insert_batch(&rows).map_err(|e| BatchError { rows: n, error: e })?;
+            Ok::<_, BatchError>(())
+        });
+        let inner = self.clone();
+        spawn_detached(async move {
+            if let Err(mut e) = fut.await {
+                // The job did not run (store closed, writer lock not obtained): its rows are lost.
+                let mut pending = inner.pending.lock();
+                if pending.queued == Some(generation) {
+                    e.rows = pending.take(inner.clock.mono_ms()).len();
+                }
+                drop(pending);
+                lost(&inner.logger, "anomaly batch lost", &e);
+            }
+        });
+    }
+
+    /// The timer to start for the repeats in the buffer, unless one runs already. Outside a
+    /// runtime (tools), the buffer is drained at once instead.
+    fn timer(self: &Arc<Self>, pending: &mut Pending) -> Option<FlushTimer> {
+        if pending.timer {
+            return None;
+        }
+        if tokio::runtime::Handle::try_current().is_err() {
+            self.drain_soon(pending);
+            return None;
+        }
+        pending.timer = true;
+        Some(FlushTimer(self.clone()))
+    }
+}
+
+/// The flush timer of the repeats: drains the buffer when it fires, or when it is dropped (the
+/// runtime shuts down).
+struct FlushTimer(Arc<Inner>);
+
+impl FlushTimer {
+    /// Starts it on the current runtime; must not be called under the buffer's lock.
+    fn start(self) {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(u64::from(FLUSH_MS))).await;
+            drop(self);
+        });
+    }
+}
+
+impl Drop for FlushTimer {
+    fn drop(&mut self) {
+        let mut pending = self.0.pending.lock();
+        pending.timer = false;
+        if !pending.rows.is_empty() {
+            self.0.drain_soon(&mut pending);
+        }
     }
 }
 

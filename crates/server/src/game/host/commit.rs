@@ -25,8 +25,9 @@
 //! until it is committed and its rematch window is closed.
 //!
 //! The anomalies of a game need no flush before its commit (the former server's
-//! `anticheat.flush()`): [`AnomalySink::record`](crate::events::AnomalySink::record) queues them
-//! on the store writer at once, ahead of the commit.
+//! `anticheat.flush()`): [`AnomalySink::record`](crate::events::AnomalySink::record) queues the
+//! first anomaly of each kind on the store writer at once, ahead of the commit, which is what the
+//! analysis queue policy reads; later repeats only update its count.
 
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;

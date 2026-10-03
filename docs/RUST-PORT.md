@@ -310,8 +310,9 @@ Used by the HTTP Bearer hook and by the Hello. Revocations call `SessionEvents`.
 
 ### 8.4 Anti-cheat (owner: anticheat)
 
-Implements `AnomalySink` (anomaly rows enqueued on the store writer in call order; automatic
-sanction of certain cheats), applies sanctions and refunds (calls `SanctionEvents`), stores
+Implements `AnomalySink` (the first anomaly of a user, game and kind enqueued on the store writer
+before `record` returns, repeats merged into that row once a second; automatic sanction of certain
+cheats; `Anticheat::flush` at shutdown), applies sanctions and refunds (calls `SanctionEvents`), stores
 reports, runs the analysis workers (Stockfish pool, `anticheat::analysis`) on the analysis queue
 and the integrity updates, and provides the `admin` commands.
 
