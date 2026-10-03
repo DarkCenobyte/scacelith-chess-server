@@ -95,7 +95,12 @@ pub fn outputs(root: &Path, schema: &Schema) -> Result<Vec<(&'static str, String
 pub fn run(root: &Path, mode: Mode) -> Result<Vec<String>, String> {
     let schema = load(root)?;
     let frozen = frozen(root)?;
-    let schemas: Vec<Schema> = frozen.iter().map(|(_, s)| s.clone()).collect();
+    // A forced freeze replaces the manifest of the schema's own minor (not released yet), which
+    // then does not bind the schema; the manifests of the earlier minors still do.
+    let replaced = |s: &Schema| {
+        mode == Mode::Freeze { force: true } && (s.protocol, s.minor) == (schema.protocol, schema.minor)
+    };
+    let schemas: Vec<Schema> = frozen.iter().map(|(_, s)| s).filter(|s| !replaced(s)).cloned().collect();
     let violations = manifest::check(&schema, &schemas);
     if !violations.is_empty() {
         return Err(format!("append-only rule:\n  {}", violations.join("\n  ")));
@@ -162,5 +167,41 @@ mod tests {
         if let Err(e) = run(&default_root(), Mode::Check) {
             panic!("{e}");
         }
+    }
+
+    /// A scratch root holding the committed schema and, frozen as its own minor, `manifest`.
+    fn scratch_root(tag: &str, manifest: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("scacelith-protogen-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(FROZEN_DIR)).unwrap();
+        fs::create_dir_all(root.join("protocol")).unwrap();
+        fs::copy(default_root().join(SCHEMA_PATH), root.join(SCHEMA_PATH)).unwrap();
+        let schema = load(&root).unwrap();
+        let name = manifest::file_name(schema.protocol, schema.minor);
+        fs::write(root.join(FROZEN_DIR).join(name), manifest).unwrap();
+        root
+    }
+
+    /// When the wire of a minor frozen but not released changed, only a forced freeze replaces
+    /// its manifest, and the schema keeps the new one.
+    #[test]
+    fn forced_freeze_replaces_the_current_minor() {
+        let schema = load(&default_root()).unwrap();
+        let mut older: serde_json::Value = serde_json::from_str(&manifest::render(&schema)).unwrap();
+        let messages = older["messages"].as_array_mut().unwrap();
+        let welcome = messages.iter_mut().find(|m| m["name"] == "Welcome").unwrap();
+        welcome["fields"].as_array_mut().unwrap().pop();
+        let root = scratch_root("force", &serde_json::to_string_pretty(&older).unwrap());
+        let refused = run(&root, Mode::Freeze { force: false }).unwrap_err();
+        assert!(refused.contains("the wire of the frozen v1.0 changed"), "{refused}");
+        assert!(run(&root, Mode::Check).unwrap_err().contains("append-only rule"));
+        assert_eq!(run(&root, Mode::Freeze { force: true }).unwrap(), ["wrote protocol/frozen/v1.0.json"]);
+        let written = fs::read_to_string(root.join(FROZEN_DIR).join("v1.0.json")).unwrap();
+        assert_eq!(written, manifest::render(&schema));
+        assert_eq!(
+            run(&root, Mode::Freeze { force: false }).unwrap(),
+            ["protocol/frozen/v1.0.json up to date"]
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }
