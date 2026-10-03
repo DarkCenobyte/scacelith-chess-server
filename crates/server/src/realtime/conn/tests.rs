@@ -448,6 +448,22 @@ async fn accepts_the_hello_of_a_later_minor_with_fields_it_does_not_know() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_second_hello_of_any_minor_is_a_violation_that_keeps_the_connection() {
+    let rig = Rig::new(&[]).await;
+    let (mut c, _) = rig.login(ALICE).await;
+    for trailing in [&[][..], &[1, 2, 3][..]] {
+        let seq = c.next_seq();
+        let mut bytes = hello(seq, ALICE).to_vec().unwrap();
+        bytes.extend_from_slice(trailing);
+        c.raw(&bytes).await;
+        let ServerMsg::Error(e) = c.next().await else { panic!("an Error expected") };
+        assert_eq!((e.r#ref, e.code, e.fatal), (seq, ErrorCode::ProtocolViolation, false), "{trailing:?}");
+    }
+    let seq = c.queue_leave().await;
+    assert_eq!(ack_of(&c.next().await), Some(seq), "still open, in step");
+}
+
+#[tokio::test(start_paused = true)]
 async fn closes_a_banned_account_with_the_end_of_its_ban() {
     let rig = Rig::new(&[]).await;
     let until = START + 86_400_000;

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use scacelith_protocol::{
     ClientGesture, ClientMsg, ErrorCode, Message, MsgType, NoticeCode, ServerPing, ServerPong,
-    close_code_for, peek_seq,
+    close_code_for, decode_hello, peek_seq,
 };
 use serde_json::{Value, json};
 use tokio::task::{JoinError, JoinHandle};
@@ -182,7 +182,13 @@ impl Session {
             self.forged(type_byte);
             return;
         }
-        let msg = match ClientMsg::decode(&buf) {
+        // A Hello is read as at the handshake: a later minor's appended fields are ignored.
+        let decoded = if type_byte == MsgType::Hello.to_u8() {
+            decode_hello(&buf).map(ClientMsg::Hello)
+        } else {
+            ClientMsg::decode(&buf)
+        };
+        let msg = match decoded {
             Ok(msg) => msg,
             Err(e) => {
                 self.anomaly("malformed", json!({ "reason": e.to_string(), "type": type_byte }), 0);
