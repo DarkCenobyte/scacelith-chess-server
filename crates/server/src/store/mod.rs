@@ -59,7 +59,7 @@ mod values;
 mod writer;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::future::Future;
 use std::sync::Arc;

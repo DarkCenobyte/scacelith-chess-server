@@ -7,7 +7,7 @@ mod games;
 mod migrations;
 mod moderation;
 mod retention;
-mod support;
+pub(crate) mod support;
 mod writer;
 
 mod smoke {
