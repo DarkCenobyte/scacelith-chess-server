@@ -13,6 +13,7 @@
 
 pub mod analysis;
 pub mod integrity;
+pub mod notices;
 pub mod num;
 pub mod players;
 pub mod priors;
