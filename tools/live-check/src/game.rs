@@ -47,9 +47,8 @@ async fn register_with_pow(api: &ApiClient, name: &str) -> Result<(), String> {
 }
 
 pub(crate) async fn run(ctx: &Ctx) -> i32 {
-    let srv =
+    let mut srv =
         ctx.server().workers(2).env("POW_REGISTER_BITS", "12").env("GIF_ENABLED", "false").start().await;
-    let mut srv = srv;
     let pin = srv.pin();
     println!("[game] server on {}:{} (API + WSS), certificate SHA-256 {pin}", ctx.host, srv.addr.port());
     let code = play(ctx, &srv, &pin).await;
