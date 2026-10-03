@@ -311,6 +311,7 @@ async fn framing(d: &mut Duo) {
         ("raw-del-in-path", "GET /api/v1/info\x7f HTTP/1.1\r\nHost: {host}\r\n\r\n".into(), 0),
         ("cl-list-same", "POST /api/v1/auth/login HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: 2, 2\r\n\r\n{}".into(), 0),
         ("cl-and-te", "POST /api/v1/auth/login HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n".into(), 0),
+        ("cl-double-after-empty-lines", "\r\n\r\nPOST /api/v1/auth/login HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{}".into(), 0),
         ("te-chunked-bad-ending", "POST /api/v1/auth/login HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}XX0\r\n\r\n".into(), 0),
         ("nul-in-header", "GET /api/v1/info HTTP/1.1\r\nHost: {host}\r\nX-A: a\0b\r\n\r\n".into(), 0),
         ("ctl-in-target", "GET /api/v1/info?\x01 HTTP/1.1\r\nHost: {host}\r\n\r\n".into(), 0),
@@ -329,6 +330,41 @@ async fn framing(d: &mut Duo) {
     d.step("header-17k", fresh_ip(), 0, |_| raw(&big(17_000))).await;
     d.step("header-64k", fresh_ip(), 0, |_| raw(&big(64_000))).await;
     d.step("header-200k", fresh_ip(), 0, |_| raw(&big(200_000))).await;
+    // A head over hyper's read buffer (9216 bytes) whose URL, names and values stay small:
+    // llhttp does not count the whitespace before a value.
+    let padded = |headers: &str| {
+        format!(
+            "POST {LOGIN} HTTP/1.1\r\nHost: {{host}}\r\nContent-Type: application/json\r\nX-Pad:{}v\r\n{headers}\r\n{{}}",
+            " ".repeat(9300)
+        )
+    };
+    d.step("header-padded-9300", fresh_ip(), 0, |_| raw(&padded("Content-Length: 2\r\n"))).await;
+    d.step("header-padded-9300-cl-and-te", fresh_ip(), 0, |_| {
+        raw(&padded("Content-Length: 2\r\nTransfer-Encoding: chunked\r\n"))
+    })
+    .await;
+    // Chunk extensions and trailers: llhttp allows 16 KiB of extensions per chunk and trailers
+    // within the limits of a head; hyper 16 KiB of extensions per body and 16 KiB, 100 lines of
+    // trailers.
+    let chunked = |body: String| {
+        format!(
+            "POST {LOGIN} HTTP/1.1\r\nHost: {{host}}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{body}"
+        )
+    };
+    let ext = "a".repeat(6000);
+    let trailer_lines = |n: usize| (0..n).map(|i| format!("X-T{i}: v\r\n")).collect::<String>();
+    let chunk_cases = [
+        ("chunk-extensions-17k", format!("2;{}\r\n{{}}\r\n0\r\n\r\n", "a".repeat(17_000))),
+        ("chunk-extensions-3x6000", format!("1;{ext}\r\n{{\r\n1;{ext}\r\n}}\r\n1;{ext}\r\n \r\n0\r\n\r\n")),
+        ("chunk-trailers-9000", format!("2\r\n{{}}\r\n0\r\nX-T: {}\r\n\r\n", "a".repeat(9000))),
+        ("chunk-trailers-17k", format!("2\r\n{{}}\r\n0\r\nX-T: {}\r\n\r\n", "a".repeat(17_000))),
+        ("chunk-trailers-70-lines", format!("2\r\n{{}}\r\n0\r\n{}\r\n", trailer_lines(70))),
+        ("chunk-trailers-101-lines", format!("2\r\n{{}}\r\n0\r\n{}\r\n", trailer_lines(101))),
+    ];
+    for (name, body) in chunk_cases {
+        let text = chunked(body);
+        d.step(name, fresh_ip(), 0, |_| raw(&text)).await;
+    }
     let many = |n: usize| {
         let mut s = String::from("GET /api/v1/info HTTP/1.1\r\nHost: {host}\r\n");
         for i in 0..n {
