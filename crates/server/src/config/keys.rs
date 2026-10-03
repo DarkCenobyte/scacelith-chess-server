@@ -662,10 +662,10 @@ pub static KEYS: &[KeySpec] = &[
         "HEARTBEAT_INTERVAL_MS",
         Limits,
         Int,
-        "Server ping interval: each connection gets a ping every half interval to one interval (it also \
-         measures each player's latency). The game client sends a Ping of its own after 1.5 times this with \
-         nothing received (at least 7.5 s, at most 90 s), and considers the connection dead after twice this \
-         (at least 10 s, at most 120 s).",
+        "Server ping interval: each connection gets a ping every interval, the first half an interval after \
+         it opens (it also measures each player's latency). The game client sends a Ping of its own after \
+         1.5 times this with nothing received (at least 7.5 s, at most 90 s), and considers the connection \
+         dead after twice this (at least 10 s, at most 120 s).",
     )
     .default("10000")
     .min(1000),
