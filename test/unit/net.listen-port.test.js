@@ -26,13 +26,13 @@ describe('API_PORT', () => {
         assert.match(spec.desc, /443, the HTTPS port: firewalls and proxies let it through; any free port works for a community server/);
     });
 
-    it('leaves the port out of e-mail links and the Google redirect URI on 443, and keeps another one', () => {
+    it('leaves the port out of e-mail links on 443, and keeps another one; the Google sign-in origin always has it', () => {
         const c = testConfig({ TLS_MODE: 'native', ALLOW_INSECURE_DEV: '0', TLS_CERT_FILE: '/x/cert.pem', TLS_KEY_FILE: '/x/key.pem', SERVER_PUBLIC_HOST: 'chess.example.org' });
         assert.equal(publicBaseUrl(c), 'https://chess.example.org');
-        assert.equal(c.googleRedirectUri, 'https://chess.example.org/auth/sso/google/callback');
+        assert.equal(c.ssoOrigin, 'chess.example.org:443');
         const other = testConfig({ TLS_MODE: 'native', ALLOW_INSECURE_DEV: '0', TLS_CERT_FILE: '/x/cert.pem', TLS_KEY_FILE: '/x/key.pem', SERVER_PUBLIC_HOST: 'chess.example.org', API_PORT: '8443' });
         assert.equal(publicBaseUrl(other), 'https://chess.example.org:8443');
-        assert.equal(other.googleRedirectUri, 'https://chess.example.org:8443/auth/sso/google/callback');
+        assert.equal(other.ssoOrigin, 'chess.example.org:8443');
     });
 
     it('.env.example and docs/CONFIG.md carry the new default', () => {

@@ -5,7 +5,9 @@
 //    on, each attempt must wait exponentially longer (2 s, 4 s, ... up to 15 min): 429
 //    too_many_attempts with retryAfter. Counters are per process, memory-bounded (LRU); the
 //    per-IP limit of the auth endpoints (router, shared through the primary) and the login
-//    proof of work bound what several shards add up to.
+//    proof of work bound what several shards add up to. The password step of a Google link
+//    (auth/sso.js) is the same check (verifyPassword) under the same counter, the account's
+//    username, counted before its hash so that parallel requests are all counted.
 //  * Whole server: each failed login is counted locally and through the primary
 //    (`ratelimit.take` on a server-wide key with limit POW_LOGIN_TRIGGER_PER_MIN / min). Above the
 //    trigger, every login needs a proof of work (POW_LOGIN_BITS) for the next 5 minutes.
@@ -21,7 +23,8 @@
 //  * The MFA step: an `mfa_` token (5 min, 5 wrong codes at most, single use) and a per-account
 //    failure counter. The token of a password login holds a digest of the password hash it was
 //    issued for (`pwh`); a password reset or change between the two steps makes the step fail
-//    (invalid_mfa_token), so no session opens with a password the reset replaced.
+//    (invalid_mfa_token), so no session opens with a password the reset replaced. The step of a
+//    Google link (auth/sso.js) holds `pwh` too, and the link, which a correct code stores.
 
 import { AuthError, invalidCredentials, tooManyAttempts } from './errors.js';
 import { MFA_TOKEN_RE, TOKEN_TTL_MS, dataOf, isLive } from './tokens.js';
@@ -65,11 +68,15 @@ export function createLogin(svc) {
             .then((r) => { if (r && (r.allowed === false || r.count >= trigger)) activatePow('global'); }, () => {});
     }
 
-    /** Refuses a banned account, or an unconfirmed one when confirmation is required. */
-    function checkAccountAllowed(user) {
+    /**
+     * Refuses a banned account, or an unconfirmed one when confirmation is required.
+     * `addressProven`: the request proved the address itself (a Google link, auth/sso.js), so only
+     * the ban counts.
+     */
+    function checkAccountAllowed(user, { addressProven = false } = {}) {
         const ban = store.sanctions.activeBan(user.id, now());
         if (ban) throw new AuthError(403, 'banned', 'This account is banned.', { until: ban.endsAt ?? null });
-        if (config.requireEmailVerification && !user.emailVerified) {
+        if (!addressProven && config.requireEmailVerification && !user.emailVerified) {
             throw new AuthError(403, 'email_unverified', 'Confirm your e-mail address first: open the link we sent you.');
         }
     }
@@ -86,11 +93,14 @@ export function createLogin(svc) {
     /** Digest of a stored password hash, kept in an MFA step instead of the hash itself. */
     const passwordHashDigest = (passwordHash) => sha256Hex(passwordHash || '');
 
-    /** After the first factor: the MFA challenge, or the session. */
-    function finishLogin(user, { clientLabel = null, ip = null, method = 'password' }) {
+    /**
+     * After the first factor: the MFA challenge, or the session. `extra`: more data for the MFA
+     * step (the Google link it stores, auth/sso.js).
+     */
+    function finishLogin(user, { clientLabel = null, ip = null, method = 'password', extra = null }) {
         if (user.mfaEnabled) {
             const mfaToken = randomToken('mfa_');
-            const data = { attempts: 0, clientLabel, method };
+            const data = { attempts: 0, clientLabel, method, ...extra };
             // A password login's step is only good for the password hash it was issued for.
             if (method === 'password') data.pwh = passwordHashDigest(user.passwordHash);
             store.tokens.create({
@@ -110,11 +120,16 @@ export function createLogin(svc) {
     }
 
     /**
-     * POST /auth/login.
-     * @param {{ login: string, password: string, clientLabel?: string, pow?: { challenge: string, nonce: string }, ip: string }} p
+     * The password check of a login, for the account `user` (null: unknown) under the failure
+     * counter `key`: the wait of a counter at its threshold (429), the login proof of work while
+     * it is on (428), then the check. Unknown account, wrong password and account without a usable
+     * password (Google-only, or a bench account's '!' hash) do the same work and fail alike
+     * (401 invalid_credentials, counted). `reserve`: the failure is counted before the hash and
+     * cleared on success, so that parallel checks are all counted (the Google link step). `method`
+     * other than 'password' is noted in the failure events.
+     * @returns {Promise<object>} the account as stored now (after a rehash), the password matching it
      */
-    async function login({ login: loginName, password, clientLabel = null, pow, ip }) {
-        const key = 'l:' + loginName.trim().toLowerCase();
+    async function verifyPassword({ key, user, password, ip, pow, method = 'password', reserve = false }) {
         const wait = failures.retryAfter(key);
         if (wait > 0) {
             loginThrottled.inc();
@@ -122,9 +137,9 @@ export function createLogin(svc) {
             throw tooManyAttempts(wait);
         }
         if (powActive()) await svc.requirePow('login', config.powLoginBits, ip, pow);
+        const reserved = reserve ? failures.fail(key) : null;
         const budget = svc.hashBudget(ip);
-        const user = findLoginUser(loginName);
-        const stored = user && user.passwordHash ? user.passwordHash : null;
+        const stored = user && typeof user.passwordHash === 'string' && !user.passwordHash.startsWith('!') ? user.passwordHash : null;
         // Unknown account or no password: the dummy check, in the same queue, padded alike.
         const { ok, needsRehash } = await hasher.checkPassword(stored, password, budget.next());
         let current = null;
@@ -133,14 +148,25 @@ export function createLogin(svc) {
             current = await svc.stillCurrent(user.id, checked, password, budget.next());
         }
         if (!current) {
-            const f = failures.fail(key);
+            const f = reserved || failures.fail(key);
             noteFailure();
             loginFailed.inc();
-            events.record('login_failed', { userId: user ? user.id : null, ip, detail: { failures: f.failures } });
-            if (f.failures === config.authFailuresPerAccount) events.record('login_lockout', { userId: user ? user.id : null, ip, detail: { retryAfterMs: f.retryAfterMs } });
+            const how = method === 'password' ? {} : { method };
+            events.record('login_failed', { userId: user ? user.id : null, ip, detail: { failures: f.failures, ...how } });
+            if (f.failures === config.authFailuresPerAccount) events.record('login_lockout', { userId: user ? user.id : null, ip, detail: { retryAfterMs: f.retryAfterMs, ...how } });
             throw invalidCredentials();
         }
         failures.reset(key);
+        return current;
+    }
+
+    /**
+     * POST /auth/login.
+     * @param {{ login: string, password: string, clientLabel?: string, pow?: { challenge: string, nonce: string }, ip: string }} p
+     */
+    async function login({ login: loginName, password, clientLabel = null, pow, ip }) {
+        const key = 'l:' + loginName.trim().toLowerCase();
+        const current = await verifyPassword({ key, user: findLoginUser(loginName), password, ip, pow });
         checkAccountAllowed(current);
         return finishLogin(current, { clientLabel, ip, method: 'password' });
     }
@@ -219,13 +245,18 @@ export function createLogin(svc) {
         // Again after the code check (an await: a reset in this process or in another worker may
         // land meanwhile); the reset wins.
         if (fresh.status !== 'active' || !samePassword(data, fresh)) throw invalidMfaToken();
-        checkAccountAllowed(fresh);
+        checkAccountAllowed(fresh, { addressProven: !!data.link });
+        // The step of a Google link (auth/sso.js): the link is stored only now, after the account
+        // check (a banned account gets none) and before the session (410 or 409 when the account
+        // or the Google identity changed meanwhile).
+        if (data.link) await svc.sso.linkProven(fresh, data.link, ip, { expectMfa: true });
         return sessionAnswer(fresh, { clientLabel: data.clientLabel ?? null, ip, method: `${data.method || 'password'}+totp` });
     }
 
     return {
         login,
         loginWithMfa,
+        verifyPassword,
         finishLogin,
         checkAccountAllowed,
         sessionAnswer,

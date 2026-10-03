@@ -21,8 +21,8 @@ test('migrate creates every table from an empty database and records the migrati
     const file = path.join(dir, 'fresh.db');
     const store = openStore(testConfig({ DB_PATH: file }));
     const res = migrate(store);
-    assert.deepEqual(res.applied, [1, 2, 3, 4, 5, 6, 7]);
-    assert.equal(res.version, 7);
+    assert.deepEqual(res.applied, [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.equal(res.version, 8);
     assert.match(store.meta.get('server_id'), /^[0-9a-f-]{36}$/);
     // Inspect the schema through a second, raw connection (node:sqlite is already loaded by the store).
     const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
@@ -31,7 +31,7 @@ test('migrate creates every table from an empty database and records the migrati
     for (const t of TABLES) assert.ok(names.has(t), `table ${t}`);
     const mig = raw.prepare('SELECT version, name, applied_at, checksum FROM schema_migrations').all();
     assert.deepEqual(mig.map((m) => m.name), ['001_initial', '002_analysis_priority', '003_analysis_players', '004_fide_ratings_refunds',
-        '005_counted_games', '006_analysis_profiles', '007_pending_signups']);
+        '005_counted_games', '006_analysis_profiles', '007_pending_signups', '008_sso_address_links']);
     assert.match(mig[0].checksum, /^[0-9a-f]{64}$/);
     assert.equal(raw.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
     raw.close();
@@ -89,7 +89,7 @@ test('migration 004: the records with games stay rated, a record without games s
     raw.close();
 
     store = openStore(cfg);
-    assert.deepEqual(migrate(store).applied, [4, 5, 6, 7]);
+    assert.deepEqual(migrate(store).applied, [4, 5, 6, 7, 8]);
     assert.deepEqual(store.ratings.get(a, '3+2'), { rating: 1712, games: 3, wins: 3, draws: 0, losses: 0, peak: 1712,
         reachedSenior: false, rated: true, countedGames: 3, unratedGames: 0, unratedOpponents: 0, unratedHalfPoints: 0 });
     assert.equal(store.ratings.get(b, '3+2').rated, false);
@@ -124,6 +124,63 @@ test('counted games migration: the records stored before it count all their game
     assert.equal(store.ratings.forUser(a)[0].provisional, false);
     assert.deepEqual(store.ratings.leaderboard('3+2', 100, 30).map((r) => r.userId), [a]);
     assert.equal(store.ratings.get(b, '3+2').countedGames, 3);
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('migration 008: Google links made by address on password accounts go, with their sessions; links made at creation stay', () => {
+    const dir = tmpDir();
+    const migDir = path.join(dir, 'migrations');
+    fs.mkdirSync(migDir);
+    const all = fs.readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort();
+    for (const f of all.filter((n) => n < '008')) fs.copyFileSync(path.join(MIGRATIONS, f), path.join(migDir, f));
+    const cfg = testConfig({ DB_PATH: path.join(dir, 'x.db') });
+    let store = openStore(cfg);
+    assert.equal(migrate(store, { dir: migDir }).version, 7);
+    const T = Date.UTC(2026, 0, 1);
+    const user = (name, passwordHash) => store.users.create({ username: name, email: `${name}@example.org`, passwordHash, emailVerified: true, createdAt: T });
+    const byAddress = user('ByAddress', 'scrypt$x');            // linked by address an hour after its creation
+    const late = user('Late', 'scrypt$w');                       // 61 s after
+    const atCreation = user('AtCreation', 'scrypt$y');           // created by Google, a password set since
+    const googleOnly = user('GoogleOnly', null);
+    const bench = user('Bench', '!bench-account-no-password');
+    const otherProvider = user('Other', 'scrypt$z');
+    store.sso.link(byAddress, 'google', 'g1', 'byaddress@example.org', T + 3600000);
+    store.sso.link(late, 'google', 'g5', 'late@example.org', T + 61000);
+    store.sso.link(atCreation, 'google', 'g2', 'atcreation@example.org', T + 50);
+    store.sso.link(googleOnly, 'google', 'g3', 'googleonly@example.org', T + 3600000);
+    store.sso.link(bench, 'google', 'g4', 'bench@example.org', T + 3600000);
+    store.sso.link(otherProvider, 'example', 'e1', 'other@example.org', T + 3600000);
+    let n = 0;
+    const session = (userId) => store.sessions.create({ userId, tokenHash: Buffer.from(`session ${++n}`), createdAt: T, expiresAt: Date.now() + 86400000 });
+    const sessionsOf = {};
+    for (const id of [byAddress, late, atCreation, googleOnly, bench, otherProvider]) sessionsOf[id] = [session(id), session(id)];
+    store.sessions.revoke(sessionsOf[byAddress][1], byAddress, T + 5);
+    for (const [kind, h] of [['sso_state', 'h1'], ['sso_attempt', 'h2'], ['sso_ticket', 'h3'], ['email_verify', 'h4']]) {
+        store.tokens.create({ kind, tokenHash: h, data: { x: 1 }, expiresAt: Date.now() + 600000 });
+    }
+    store.close();
+
+    store = openStore(cfg);
+    const before = Date.now();
+    assert.deepEqual(migrate(store).applied, [8]);
+    assert.equal(store.sso.find('google', 'g1'), null);
+    assert.equal(store.sso.find('google', 'g5'), null);
+    for (const [sub, id] of [['g2', atCreation], ['g3', googleOnly], ['g4', bench]]) assert.equal(store.sso.find('google', sub).userId, id, sub);
+    assert.equal(store.sso.find('example', 'e1').userId, otherProvider);
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
+    const raw = new DatabaseSync(cfg.dbPath, { readOnly: true });
+    const revokedAt = (id) => raw.prepare('SELECT revoked_at FROM sessions WHERE id = ?').get(id).revoked_at;
+    assert.ok(revokedAt(sessionsOf[byAddress][0]) >= before - 1000, 'a live session of an account that lost its link is revoked');
+    assert.equal(revokedAt(sessionsOf[byAddress][1]), T + 5, 'a session revoked before keeps its time');
+    assert.ok(sessionsOf[late].every((id) => revokedAt(id) >= before - 1000));
+    for (const id of [atCreation, googleOnly, bench, otherProvider]) {
+        for (const sid of sessionsOf[id]) assert.equal(revokedAt(sid), null, `session ${sid} of user ${id}`);
+    }
+    raw.close();
+    assert.equal(store.tokens.get('sso_state', 'h1'), null);
+    assert.equal(store.tokens.get('sso_attempt', 'h2'), null);
+    assert.ok(store.tokens.get('sso_ticket', 'h3') && store.tokens.get('email_verify', 'h4'), 'the other tokens stay');
     store.close();
     fs.rmSync(dir, { recursive: true, force: true });
 });

@@ -162,6 +162,15 @@ export function createFakeStore({ now = Date.now } = {}) {
                 return copy(r);
             },
             get: (kind, tokenHash) => copy(tokens.get(`${kind}:${tokenHash}`)),
+            // Like the real store: one more try on a live token while it has fewer than `max`.
+            reserveTry(kind, tokenHash, max, t) {
+                const r = tokens.get(`${kind}:${tokenHash}`);
+                if (!r || r.usedAt || r.expiresAt <= t) return null;
+                const data = JSON.parse(r.data) || {};
+                if ((data.tries ?? 0) >= max) return null;
+                r.data = JSON.stringify({ ...data, tries: (data.tries ?? 0) + 1 });
+                return copy(r);
+            },
             update(kind, tokenHash, data) { const r = tokens.get(`${kind}:${tokenHash}`); if (r) r.data = JSON.stringify(data); },
             deleteForUser(userId, kind) {
                 let n = 0;

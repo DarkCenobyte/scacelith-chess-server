@@ -32,7 +32,7 @@ Sections:
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
 | `SERVER_NAME` | text (at most 64 bytes in UTF-8) | `Scacelith Community Server` | Name shown to players (menus, scoresheet "Event"). |
-| `SERVER_PUBLIC_HOST` | text | `localhost` | Public DNS name of the server, used in e-mail links and the Google SSO redirect URI. |
+| `SERVER_PUBLIC_HOST` | text | `localhost` | Public DNS name of the server, used in e-mail links, and Google sign-in works only for players who added the server under exactly this name and PUBLIC_API_PORT. |
 | `SERVER_MOTD` | text (at most 200 characters) | (empty) | Short message of the day shown in the online menu. |
 | `BIND_ADDRESS` | text | `0.0.0.0` | Address the API and WebSocket listeners bind to. |
 | `API_PORT` | port (0-65535) | `443` | HTTPS API port (TCP). 443, the HTTPS port: firewalls and proxies let it through; any free port works for a community server. A port below 1024 needs the CAP_NET_BIND_SERVICE capability (README, systemd unit) unless the server runs as root. |
@@ -109,10 +109,9 @@ Sections:
 
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
-| `SSO_GOOGLE_ENABLED` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Offers "Sign in with Google" (OpenID Connect, authorization code + PKCE through the system browser). |
-| `GOOGLE_CLIENT_ID` | text | (empty) | OAuth client ID of a "Web application" client in Google Cloud Console. |
+| `SSO_GOOGLE_ENABLED` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Offers "Sign in with Google" (authorization code + PKCE; Google sends the browser back to the game on 127.0.0.1 and the game hands the code to this server). An existing account is linked only after its password, and its two-step code when on, is entered once in the game. |
+| `GOOGLE_CLIENT_ID` | text | (empty) | OAuth client ID of a "Desktop app" client (Google Auth Platform &gt; Clients). Not a "Web application" client: Google sends the browser back to the game on 127.0.0.1 and only a Desktop app client accepts that. |
 | `GOOGLE_CLIENT_SECRET`<br>`GOOGLE_CLIENT_SECRET_FILE` | secretText | (empty) | OAuth client secret. Never commit it. |
-| `GOOGLE_REDIRECT_URI` | text | (empty) | Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST/auth/sso/google/callback, with :PUBLIC_API_PORT after the host when that port is not 443). |
 
 ## Protection per address (background layer)
 

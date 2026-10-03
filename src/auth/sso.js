@@ -1,41 +1,64 @@
-// Google sign-in for a desktop game (docs/DESIGN.md 5.9):
+// Google sign-in for a desktop game (docs/DESIGN.md 5.9, docs/API.md "Google sign-in"): the
+// installed-app flow with a loopback redirect (RFC 8252 s.7.3).
 //
-//  1. start   The game makes a PKCE pair and sends only its S256 challenge. The server creates an
-//             attempt (10 min) and its own state, nonce and PKCE pair for Google, and answers the
-//             attempt id and the Google URL the game opens in the system browser.
-//  2. callback Google sends the browser to /auth/sso/google/callback?code&state. The server
-//             exchanges the code (client secret + its verifier), verifies the ID token, resolves
-//             the account and stores the result in the attempt. The page only says "You can go
-//             back to Scacelith"; it never shows a token.
-//  3. poll    The game polls with the attempt id AND its PKCE verifier (S256 must match the start
-//             challenge): an attempt id alone is useless to whoever sees it (browser history,
-//             logs). The result is delivered once: a login answer (session or MFA step), or
-//             { needsUsername, ssoTicket } for a new account.
-//  4. complete (new accounts) { ssoTicket, username } creates the account, links it and logs in.
+//  1. start   The game listens on 127.0.0.1 (a port the system chose), makes a PKCE pair and
+//             sends { codeChallenge, redirectPort }. The server creates an attempt (10 min) with
+//             its own state, nonce and PKCE pair for Google, and the redirect URI
+//             http://127.0.0.1:<redirectPort>/oauth2/google/<this server's origin tag>
+//             (config.ssoRedirectTag, auth/oidc.js ssoOriginTag), built from the port alone. It
+//             answers the attempt id, the Google URL and the state; the game checks the URL (the
+//             tag of the server it is connected to) and opens it in the system browser.
+//  2.         Google sends the browser to the game's listener with code and state; this server is
+//             not involved. A browser that someone else's link brought to Google lands on its own
+//             127.0.0.1, so whoever started that attempt never gets the code.
+//  3. finish  The game posts the attempt id, its PKCE verifier (S256 must match the start
+//             challenge: an attempt id alone is useless), the state and the code. The attempt is
+//             consumed; the state and the issuer are checked; the code is exchanged (client
+//             secret, the attempt's verifier and redirect URI) and the ID token verified. The
+//             answer: a login answer (session or MFA step) for a linked Google account,
+//             { needsUsername, ssoTicket } for a new account, or { needsPassword, linkTicket,
+//             username } when an account with a password uses the address.
+//  4. link    { linkTicket, password }: the account's password, typed in the game (5 tries per
+//             ticket, the login's failure counter and proof of work). The link is stored then, or,
+//             with two-step verification on, once POST /auth/login/mfa accepts a code.
+//  5. complete (new accounts) { ssoTicket, username } creates the account, links it and logs in.
 //
-// Account resolution: an existing link -> that user; else a local account with the same e-mail
-// is linked when both our address and Google's are confirmed; an unconfirmed local account with
-// that e-mail is refused (clear page); otherwise a new account (needs a username; a pending signup
-// of the address is no account: its link then finds the address taken, auth/accounts.js).
+// INVARIANT: A Google identity is attached to an existing account only after the person proved
+// the Google address (ID token, email_verified) AND the account (its current password, plus its
+// second factor when on), in the game. It never depends on users.email_verified or
+// REQUIRE_EMAIL_VERIFICATION. A Google-created account is linked at creation (complete()).
+//
+// Account resolution: an existing link -> that user; else an active account with the Google
+// address: the password step when it has a usable password, else 409 sso_account_exists (the
+// account is not named); otherwise a new account (needs a username; a pending signup of the
+// address is no account: its link then finds the address taken, auth/accounts.js).
 
-import { AuthError } from './errors.js';
-import { LINK_TOKEN_RE, SSO_TOKEN_RE, TOKEN_TTL_MS, dataOf, isLive } from './tokens.js';
+import { AuthError, serverBusy } from './errors.js';
+import { SSO_TOKEN_RE, TOKEN_TTL_MS, dataOf, isLive } from './tokens.js';
 import { checkUsername, normalizeEmail, suggestUsername } from './identity.js';
 import { pkceChallenge } from './oidc.js';
 import { randomToken, safeEqual, sha256Hex } from '../security/keys.js';
 
-export const SSO_POLL_MS = 2000;
 const PROVIDER = 'google';
+/** Password tries per link ticket. */
+export const LINK_TRIES = 5;
 
 const MESSAGES = {
-    sso_cancelled: 'The sign-in was cancelled.',
     sso_failed: 'Google sign-in could not be completed.',
     sso_email_unverified: 'Google has not confirmed the e-mail address of this Google account.',
-    sso_account_unverified: 'An account with this e-mail address already exists but its address is not confirmed. Log in with your password, confirm the address with the link we e-mailed you, then use Google sign-in.',
+    sso_account_exists: 'An account already uses this e-mail address and cannot be linked to Google sign-in here. Sign in to it as usual, or ask the server\'s operator.',
+    sso_already_linked: 'This Google account was linked to another account meanwhile.',
+    sso_expired: 'This sign-in has expired; start again from Scacelith.',
     registration_closed: 'Registration is closed on this server.',
     account_disabled: 'This account can no longer be used.',
 };
-const STATUS = { sso_cancelled: 409, sso_failed: 502, sso_email_unverified: 403, sso_account_unverified: 409, registration_closed: 403, account_disabled: 403 };
+const STATUS = {
+    sso_failed: 502, sso_email_unverified: 403, sso_account_exists: 409, sso_already_linked: 409, sso_expired: 410,
+    registration_closed: 403, account_disabled: 403,
+};
+
+/** A password the account can sign in with (not a Google-only account, not a bench account's '!' hash). */
+const usablePassword = (user) => typeof user.passwordHash === 'string' && !user.passwordHash.startsWith('!');
 
 /**
  * @param {object} svc the auth service internals (see auth/index.js); svc.oidc is the provider client
@@ -47,24 +70,24 @@ export function createSso(svc) {
     function requireEnabled() {
         if (!enabled()) throw new AuthError(404, 'sso_disabled', 'Google sign-in is not enabled on this server.');
     }
-    const expired = () => new AuthError(410, 'sso_expired', 'This sign-in attempt has expired; start again.');
+    const fail = (code) => new AuthError(STATUS[code], code, MESSAGES[code]);
+    const expired = () => fail('sso_expired');
 
     /** POST /auth/sso/google/start. */
-    function start({ codeChallenge, ip }) {
+    function start({ codeChallenge, redirectPort, ip }) {
         requireEnabled();
         const attemptId = randomToken('sso_');
-        const attemptHash = sha256Hex(attemptId);
         const state = randomToken('', 32), nonce = randomToken('', 32), verifier = randomToken('', 32);
-        const exp = now() + TOKEN_TTL_MS.sso_attempt;
-        store.tokens.create({ kind: 'sso_attempt', tokenHash: attemptHash, userId: null, data: { challenge: codeChallenge, status: 'pending' }, expiresAt: exp });
-        store.tokens.create({ kind: 'sso_state', tokenHash: sha256Hex(state), userId: null, data: { attempt: attemptHash, nonce, verifier }, expiresAt: exp });
+        // From the port alone and this server's own tag: never a host, path or URI of the client.
+        const redirectUri = `http://127.0.0.1:${redirectPort}/oauth2/google/${config.ssoRedirectTag}`;
+        const authUrl = svc.oidc.authorizationUrl({ state, nonce, codeChallenge: pkceChallenge(verifier), redirectUri });
+        store.tokens.create({
+            kind: 'sso_attempt', tokenHash: sha256Hex(attemptId), userId: null,
+            data: { challenge: codeChallenge, stateHash: sha256Hex(state), nonce, verifier, redirectUri },
+            expiresAt: now() + TOKEN_TTL_MS.sso_attempt,
+        });
         events.record('sso_started', { ip, detail: { provider: PROVIDER } });
-        return {
-            attemptId,
-            authUrl: svc.oidc.authorizationUrl({ state, nonce, codeChallenge: pkceChallenge(verifier) }),
-            pollMs: SSO_POLL_MS,
-            expiresIn: TOKEN_TTL_MS.sso_attempt / 1000,
-        };
+        return { attemptId, authUrl, state, expiresIn: TOKEN_TTL_MS.sso_attempt / 1000 };
     }
 
     function resolveAccount(claims) {
@@ -79,70 +102,49 @@ export function createSso(svc) {
         if (!email || !googleVerified) return { kind: 'error', error: 'sso_email_unverified' };
         const local = store.users.byEmail(email);
         if (local && local.status === 'active') {
-            if (!local.emailVerified) return { kind: 'error', error: 'sso_account_unverified' };
-            store.sso.link(local.id, PROVIDER, sub, email);
-            events.record('sso_linked', { userId: local.id, detail: { provider: PROVIDER } });
-            return { kind: 'login', userId: local.id };
+            // Never linked here, whatever the account's address confirmation: link() asks its password.
+            if (usablePassword(local)) return { kind: 'link', userId: local.id, username: local.username, sub, email };
+            return { kind: 'error', error: 'sso_account_exists' };
         }
         if (config.registration !== 'open') return { kind: 'error', error: 'registration_closed' };
         const suggestion = suggestUsername(claims.given_name || claims.name || '', config) || suggestUsername(email.split('@')[0], config);
         return { kind: 'new', sub, email, suggestion };
     }
 
-    /**
-     * GET /auth/sso/google/callback: returns what the page shows.
-     * @returns {Promise<{ ok: boolean, title?: string, message?: string }>}
-     */
-    async function callback({ code, state, error, ip }) {
-        if (!enabled()) return { ok: false, title: 'Google sign-in disabled', message: 'Google sign-in is not enabled on this server.' };
-        if (typeof state !== 'string' || !LINK_TOKEN_RE.test(state)) return { ok: false, message: 'This sign-in link is invalid.' };
-        const st = store.tokens.consume('sso_state', sha256Hex(state), now());
-        if (!st || (st.expiresAt != null && st.expiresAt <= now())) return { ok: false, title: 'Sign-in expired', message: 'This sign-in has expired or was already completed.' };
-        const sd = dataOf(st);
-        const att = store.tokens.get('sso_attempt', sd.attempt);
-        if (!isLive(att, now())) return { ok: false, title: 'Sign-in expired', message: 'This sign-in has expired; start again from Scacelith.' };
-        const setResult = (result) => store.tokens.update('sso_attempt', sd.attempt, { ...dataOf(att), status: 'done', result });
-
-        if (error || typeof code !== 'string' || !code || code.length > 2048) {
-            setResult({ kind: 'error', error: 'sso_cancelled' });
-            events.record('sso_cancelled', { ip, detail: { provider: PROVIDER } });
-            return { ok: false, title: 'Sign-in cancelled', message: MESSAGES.sso_cancelled };
-        }
-        let claims;
-        try {
-            const idToken = await svc.oidc.exchangeCode(code, sd.verifier);
-            claims = await svc.oidc.verifyIdToken(idToken, { nonce: sd.nonce });
-        } catch (err) {
-            log.warn('google sign-in failed', { reason: err.reason || 'error', err: { message: err.message } });
-            setResult({ kind: 'error', error: 'sso_failed' });
-            events.record('sso_failed', { ip, detail: { provider: PROVIDER, reason: err.reason || 'error' } });
-            return { ok: false, message: MESSAGES.sso_failed };
-        }
-        const r = resolveAccount(claims);
-        setResult(r);
-        if (r.kind === 'error') return { ok: false, message: MESSAGES[r.error] };
-        if (r.kind === 'new') return { ok: true, title: 'Almost there', message: 'You can go back to Scacelith and choose your username.' };
-        return { ok: true, message: 'You can go back to Scacelith.' };
-    }
-
-    /** POST /auth/sso/google/poll. */
-    function poll({ attemptId, codeVerifier, clientLabel = null, ip }) {
+    /** POST /auth/sso/google/finish: the code Google sent to the game's listener. */
+    async function finish({ attemptId, codeVerifier, state, code, iss, clientLabel = null, ip }) {
         requireEnabled();
         if (!SSO_TOKEN_RE.test(attemptId)) throw expired();
         const h = sha256Hex(attemptId);
         const row = store.tokens.get('sso_attempt', h);
         if (!isLive(row, now())) throw expired();
         const d = dataOf(row);
+        // An attempt stored before this flow (browser callback) has none of these.
+        if (typeof d.stateHash !== 'string' || typeof d.redirectUri !== 'string' || typeof d.verifier !== 'string') throw expired();
         if (!safeEqual(pkceChallenge(codeVerifier), String(d.challenge || ''))) {
             events.record('sso_bad_verifier', { ip });
             throw new AuthError(403, 'invalid_verifier', 'This sign-in attempt belongs to another client.');
         }
-        if (d.status !== 'done' || !d.result) return { status: 'pending' };
         if (!store.tokens.consume('sso_attempt', h, now())) throw expired();
-        const r = d.result;
+        // Never Google's text, the code or the state in the answer, the log or the event.
+        const failed = (reason, err) => {
+            log.warn('google sign-in failed', { reason, ...(err ? { err: { message: err.message } } : {}) });
+            events.record('sso_failed', { ip, detail: { provider: PROVIDER, reason } });
+            return fail('sso_failed');
+        };
+        if (!safeEqual(sha256Hex(state), d.stateHash)) throw failed('state_mismatch');
+        if (iss !== undefined && !svc.oidc.issuers.includes(iss)) throw failed('bad_iss');
+        let claims;
+        try {
+            const idToken = await svc.oidc.exchangeCode(code, d.verifier, d.redirectUri);
+            claims = await svc.oidc.verifyIdToken(idToken, { nonce: d.nonce });
+        } catch (err) {
+            throw failed(err.reason || 'error', err);
+        }
+        const r = resolveAccount(claims);
         if (r.kind === 'login') {
             const user = store.users.byId(r.userId);
-            if (!user || user.status !== 'active') throw new AuthError(403, 'account_disabled', MESSAGES.account_disabled);
+            if (!user || user.status !== 'active') throw fail('account_disabled');
             login.checkAccountAllowed(user);
             events.record('sso_login', { userId: user.id, ip, detail: { provider: PROVIDER } });
             return login.finishLogin(user, { clientLabel, ip, method: PROVIDER });
@@ -152,8 +154,81 @@ export function createSso(svc) {
             store.tokens.create({ kind: 'sso_ticket', tokenHash: sha256Hex(ssoTicket), userId: null, data: { sub: r.sub, email: r.email }, expiresAt: now() + TOKEN_TTL_MS.sso_ticket });
             return { needsUsername: true, ssoTicket, suggestedUsername: r.suggestion || '' };
         }
-        const code = MESSAGES[r.error] ? r.error : 'sso_failed';
-        throw new AuthError(STATUS[code] || 502, code, MESSAGES[code]);
+        if (r.kind === 'link') {
+            const linkTicket = randomToken('sso_');
+            store.tokens.create({
+                kind: 'sso_link', tokenHash: sha256Hex(linkTicket), userId: r.userId,
+                data: { userId: r.userId, sub: r.sub, email: r.email, tries: 0 }, expiresAt: now() + TOKEN_TTL_MS.sso_link,
+            });
+            events.record('sso_link_required', { userId: r.userId, detail: { provider: PROVIDER } });
+            return { needsPassword: true, linkTicket, username: r.username, expiresIn: TOKEN_TTL_MS.sso_link / 1000 };
+        }
+        throw fail(r.error);
+    }
+
+    /**
+     * Stores the Google link of `user` after its password (and, with `expectMfa`, its second
+     * factor) was proven for `proven` ({ sub, email, pwh }), in one transaction with the checks
+     * that the account is still the one proven: active, the same address and password hash, two-step
+     * verification as it was (410 sso_expired otherwise). 409 sso_already_linked when the Google
+     * identity was linked to another account meanwhile. The link confirms the address.
+     */
+    function linkProven(user, proven, ip, { expectMfa }) {
+        try {
+            svc.atomically(() => {
+                const u = store.users.byId(user.id);
+                if (!u || u.status !== 'active' || normalizeEmail(u.email) !== proven.email || sha256Hex(u.passwordHash || '') !== proven.pwh
+                    || !!u.mfaEnabled !== expectMfa) throw expired();
+                const holder = store.sso.find(PROVIDER, proven.sub);
+                if (holder && holder.userId !== u.id) throw fail('sso_already_linked');
+                try {
+                    store.sso.link(u.id, PROVIDER, proven.sub, proven.email);
+                } catch (err) {
+                    if (err && err.code === 'sso_taken') throw fail('sso_already_linked');
+                    throw err;
+                }
+                if (!u.emailVerified) store.users.update(u.id, { emailVerified: true });
+            });
+        } catch (err) {
+            if (err && err.code === 'busy' && !err.expose) throw serverBusy(1);
+            throw err;
+        }
+        events.record('sso_linked', { userId: user.id, ip, detail: { provider: PROVIDER, method: expectMfa ? 'password+totp' : 'password' } });
+    }
+
+    /** POST /auth/sso/google/link: the account's password, typed in the game, before its Google link. */
+    async function link({ linkTicket, password, clientLabel = null, pow, ip }) {
+        requireEnabled();
+        if (!SSO_TOKEN_RE.test(linkTicket)) throw expired();
+        const h = sha256Hex(linkTicket);
+        // One of the ticket's tries, taken before the check: parallel requests cannot pass LINK_TRIES.
+        const row = store.tokens.reserveTry('sso_link', h, LINK_TRIES, now());
+        if (!row) throw expired();
+        const d = dataOf(row);
+        const user = store.users.byId(d.userId);
+        if (!user || user.status !== 'active') {
+            store.tokens.consume('sso_link', h, now());
+            throw expired();
+        }
+        let current;
+        try {
+            current = await login.verifyPassword({ key: 'l:' + user.username.toLowerCase(), user, password, ip, pow, method: 'google_link', reserve: true });
+        } catch (err) {
+            // The last try's wrong password ends the ticket; a wait (429) or a busy hash queue keep it.
+            if (err instanceof AuthError && err.code === 'invalid_credentials' && d.tries >= LINK_TRIES) {
+                store.tokens.consume('sso_link', h, now());
+                throw expired();
+            }
+            throw err;
+        }
+        if (!store.tokens.consume('sso_link', h, now())) throw expired();
+        if (current.status !== 'active' || normalizeEmail(current.email) !== d.email || !usablePassword(current)) throw expired();
+        login.checkAccountAllowed(current, { addressProven: true });
+        // The hash the password matched now (after a rehash): the MFA step and linkProven check it.
+        const proven = { sub: d.sub, email: d.email, pwh: sha256Hex(current.passwordHash) };
+        if (current.mfaEnabled) return login.finishLogin(current, { clientLabel, ip, method: PROVIDER, extra: { link: proven, pwh: proven.pwh } });
+        linkProven(current, proven, ip, { expectMfa: false });
+        return login.sessionAnswer(store.users.byId(current.id) || current, { clientLabel, ip, method: 'google+password' });
     }
 
     /** POST /auth/sso/complete: creates the account of a first Google sign-in. */
@@ -187,5 +262,5 @@ export function createSso(svc) {
         return login.sessionAnswer(user, { clientLabel, ip, method: PROVIDER });
     }
 
-    return { enabled, start, callback, poll, complete };
+    return { enabled, start, finish, link, linkProven, complete };
 }

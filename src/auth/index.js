@@ -231,9 +231,10 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
     else if (config.ssoGoogleEnabled && config.googleClientId) {
         svc.oidc = createOidcClient({
             clientId: config.googleClientId, clientSecret: secretText(config.googleClientSecret),
-            redirectUri: config.googleRedirectUri, endpoints: oidcEndpoints, now, allowHttp: oidcAllowHttp,
+            endpoints: oidcEndpoints, now, allowHttp: oidcAllowHttp,
         });
     } else svc.oidc = null;
+    // After svc.login: the MFA step of a Google link calls svc.sso.linkProven when it runs.
     svc.sso = createSso(svc);
 
     // Prepare the dummy hash now, so that the first login of an unknown user is not faster (it
@@ -274,7 +275,7 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
         exportAccount: a.exportAccount,
         /** The account as GET /account/me shows it (svc.accountView). */
         accountView: (user) => svc.accountView(user),
-        sso: { enabled: s.enabled, start: s.start, callback: s.callback, poll: s.poll, complete: s.complete },
+        sso: { enabled: s.enabled, start: s.start, finish: s.finish, link: s.link, complete: s.complete },
 
         /** True while the login proof of work is on (credential-stuffing wave). */
         loginPowActive: () => l.powActive(),

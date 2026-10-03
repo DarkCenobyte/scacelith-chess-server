@@ -1,7 +1,13 @@
-// OpenID Connect client for Google sign-in (authorization code flow, PKCE S256, confidential
-// client): builds the authorization URL, exchanges the code at the token endpoint and verifies
-// the ID token (RS256 signature with the provider's JWKS, cached according to Cache-Control; iss,
-// aud, azp, exp, iat with a small skew, nonce).
+// OpenID Connect client for Google sign-in (authorization code flow, PKCE S256): an installed-app
+// ("Desktop app") client, loopback redirect per attempt (RFC 8252 s.7.3), client secret held only
+// by this server. It builds the authorization URL, exchanges the code at the token endpoint and
+// verifies the ID token (RS256 signature with the provider's JWKS, cached according to
+// Cache-Control; iss, aud, azp, exp, iat with a small skew, nonce).
+//
+// The redirect URI is given per call: http://127.0.0.1:<the game's port>/oauth2/google/<origin
+// tag>, the game's own listener (auth/sso.js). Both calls refuse any other form
+// (OidcError 'bad_redirect_uri'), so that the URI the exchange sends is always one the
+// authorization request could carry.
 //
 // Only node:https is used (node:http only when `allowHttp` is set, for tests against a local
 // fake provider). Answers are size-limited and time-limited.
@@ -20,6 +26,27 @@ export const GOOGLE_OIDC = Object.freeze({
 
 export class OidcError extends Error {
     constructor(reason, message) { super(message || reason); this.reason = reason; }
+}
+
+/** The loopback redirect URI of an attempt (contract: docs/API.md, Google sign-in). */
+export const LOOPBACK_REDIRECT_RE = /^http:\/\/127\.0\.0\.1:(\d{4,5})\/oauth2\/google\/[A-Za-z0-9_-]{22}$/;
+
+function checkRedirectUri(redirectUri) {
+    const m = typeof redirectUri === 'string' ? LOOPBACK_REDIRECT_RE.exec(redirectUri) : null;
+    if (!m || +m[1] < 1024 || +m[1] > 65535) throw new OidcError('bad_redirect_uri', 'redirect URI is not a loopback one');
+}
+
+/**
+ * The origin tag of a server: the first 22 characters of base64url(SHA-256("scacelith-sso-origin-v1\n"
+ * + origin)), origin being the lower-case host (an IPv6 literal in brackets), ':' and the API port
+ * as players reach it ("play.example.org:443"). It is the last part of the loopback redirect path,
+ * which the game recomputes from the server it is connected to: a server can only get a Google URL
+ * carrying its own tag, so it cannot relay a sign-in started with another server.
+ * @param {string} origin
+ * @returns {string}
+ */
+export function ssoOriginTag(origin) {
+    return crypto.createHash('sha256').update(`scacelith-sso-origin-v1\n${origin}`, 'utf8').digest('base64url').slice(0, 22);
 }
 
 /**
@@ -85,10 +112,10 @@ export function pkceChallenge(verifier) {
 }
 
 /**
- * @param {{ clientId: string, clientSecret: string, redirectUri: string, endpoints?: typeof GOOGLE_OIDC,
+ * @param {{ clientId: string, clientSecret: string, endpoints?: typeof GOOGLE_OIDC,
  *           now?: () => number, skewMs?: number, allowHttp?: boolean, request?: typeof httpRequest }} opts
  */
-export function createOidcClient({ clientId, clientSecret, redirectUri, endpoints = GOOGLE_OIDC, now = Date.now,
+export function createOidcClient({ clientId, clientSecret, endpoints = GOOGLE_OIDC, now = Date.now,
     skewMs = 120000, allowHttp = false, request = httpRequest }) {
     let jwks = { keys: new Map(), expiresAt: 0, fetchedAt: 0 };
     let inflight = null;
@@ -122,10 +149,11 @@ export function createOidcClient({ clientId, clientSecret, redirectUri, endpoint
 
     /**
      * The URL of the provider's consent page.
-     * @param {{ state: string, nonce: string, codeChallenge: string }} p
+     * @param {{ state: string, nonce: string, codeChallenge: string, redirectUri: string }} p
      * @returns {string}
      */
-    function authorizationUrl({ state, nonce, codeChallenge }) {
+    function authorizationUrl({ state, nonce, codeChallenge, redirectUri }) {
+        checkRedirectUri(redirectUri);
         const u = new URL(endpoints.authorizationEndpoint);
         u.searchParams.set('client_id', clientId);
         u.searchParams.set('redirect_uri', redirectUri);
@@ -140,10 +168,12 @@ export function createOidcClient({ clientId, clientSecret, redirectUri, endpoint
     }
 
     /**
-     * Exchanges an authorization code (with our PKCE verifier) for the ID token.
+     * Exchanges an authorization code (with our PKCE verifier and the redirect URI of its
+     * authorization request, byte for byte) for the ID token.
      * @returns {Promise<string>} the ID token
      */
-    async function exchangeCode(code, codeVerifier) {
+    async function exchangeCode(code, codeVerifier, redirectUri) {
+        checkRedirectUri(redirectUri);
         const body = new URLSearchParams({
             grant_type: 'authorization_code', code, redirect_uri: redirectUri,
             client_id: clientId, client_secret: clientSecret, code_verifier: codeVerifier,
@@ -184,5 +214,5 @@ export function createOidcClient({ clientId, clientSecret, redirectUri, endpoint
         return c;
     }
 
-    return { authorizationUrl, exchangeCode, verifyIdToken, _jwks: () => jwks };
+    return { authorizationUrl, exchangeCode, verifyIdToken, issuers: endpoints.issuers, _jwks: () => jwks };
 }

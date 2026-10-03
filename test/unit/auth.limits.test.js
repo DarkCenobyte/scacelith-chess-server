@@ -50,7 +50,11 @@ test('the rates of the auth family: keys, windows, /48 ceilings, shared, refusal
 
     const sso = routesOf(registerSso, { config, auth: {} });
     assert.deepEqual(keys(sso['POST /auth/sso/google/start']), ['sso_start:30/600000,48:90,shared']);
+    assert.deepEqual(keys(sso['POST /auth/sso/google/finish']), ['sso_finish:30/60000']);
+    assert.deepEqual(keys(sso['POST /auth/sso/google/link']), ['auth:20/600000,48:100,shared'], 'the password step: the auth bucket');
     assert.deepEqual(keys(sso['POST /auth/sso/complete']), ['auth:20/600000,48:100,shared'], 'the auth bucket, its /48 included');
+    assert.deepEqual(Object.keys(sso).sort(), ['POST /auth/sso/complete', 'POST /auth/sso/google/finish', 'POST /auth/sso/google/link',
+        'POST /auth/sso/google/start'], 'no poll route, no callback page');
 
     const account = routesOf(registerAccount, { config, auth: {} });
     for (const p of ['/account/password', '/account/mfa/totp/setup', '/account/mfa/totp/enable', '/account/mfa/totp/disable',

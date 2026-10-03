@@ -58,7 +58,7 @@ const ROWS_MAX = 100000;
 export const DETAIL_FIELDS = Object.freeze({
     login: ['method'],
     sso_login: ['provider'],
-    sso_linked: ['provider'],
+    sso_linked: ['provider', 'method'],
     sso_account_created: ['provider'],
     login_failed: ['failures'],
     login_lockout: ['retryAfterMs'],
@@ -81,7 +81,7 @@ export const MODERATOR_ACTIONS = Object.freeze(['ban', 'unban', 'reset_mfa', 've
  * account's address: their IP may be another person's).
  */
 export const IP_KINDS = Object.freeze([
-    'register', 'email_verified', 'login', 'sso_login', 'sso_account_created', 'recovery_code_used', 'password_reset',
+    'register', 'email_verified', 'login', 'sso_login', 'sso_linked', 'sso_account_created', 'recovery_code_used', 'password_reset',
     'password_changed', 'reauth_failed', 'mfa_setup_started', 'mfa_enabled', 'mfa_disabled', 'recovery_codes_regenerated',
     'session_revoked', 'sessions_revoked_all', 'email_change_requested', 'email_changed', 'email_change_refused', 'account_exported',
 ]);
