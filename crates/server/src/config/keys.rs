@@ -879,7 +879,7 @@ pub static KEYS: &[KeySpec] = &[
         Int,
         "Password hashes and verifications (login, registration, password change and reset, account changes \
          that ask for the password) that the server runs at once, each on a thread of its own. Each costs \
-         about 0.5 s of CPU and 64-128 MiB. Empty (the default) = WORKERS. check-config warns when it is above \
+         about 0.5 s of CPU and 64 MiB (Argon2id). Empty (the default) = WORKERS. check-config warns when it is above \
          the number of CPU cores, as the hashes would then slow the games down.",
     )
     .range(1, 64),
