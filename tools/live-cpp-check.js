@@ -571,21 +571,25 @@ function ssoControl(srv, pin) {
             return secret ? freshTotp(totpSteps, secret) : [404, { error: 'no_secret' }];
         },
         // ?url=<authUrl of a start answer>, then the Google account picked (?sub=&email=&name=,
-        // ?verified=false for an address Google has not confirmed) or ?error=access_denied: Google's
-        // 302 to the redirect URI of that URL (Location, also given as { location }).
-        'GET /fake-authorize': (q) => {
+        // ?verified=false for an address Google has not confirmed) or ?error=access_denied: the
+        // fake provider's GET /authorize with that URL's query, whose 302 to the redirect URI is
+        // passed on (Location, also given as { location }), with the parameters Google adds.
+        'GET /fake-authorize': async (q) => {
             const url = q.get('url') || '';
-            let answer;
-            try {
-                answer = q.get('error') ? srv.idp.authorizeError(url, q.get('error'))
-                    : { ...srv.idp.authorize(url, {
-                        sub: q.get('sub') || '1000001', email: q.get('email') || 'live.player@gmail.com',
-                        email_verified: q.get('verified') !== 'false', name: q.get('name') || 'Live Player',
-                    }), ...GOOGLE_EXTRA };
-            } catch (e) {
-                return [400, { error: 'bad_authorization_request', message: e.message }];
-            }
-            const location = `${new URL(url).searchParams.get('redirect_uri')}?${new URLSearchParams(answer)}`;
+            Object.assign(srv.idp.state, {
+                consentError: q.get('error') || null,
+                consentClaims: {
+                    sub: q.get('sub') || '1000001', email: q.get('email') || 'live.player@gmail.com',
+                    email_verified: q.get('verified') !== 'false', name: q.get('name') || 'Live Player',
+                },
+            });
+            const at = url.indexOf('?');
+            const res = await new Promise((resolve, reject) => {
+                http.get(`${srv.idp.base}/authorize?${at < 0 ? '' : url.slice(at + 1)}`, (r) => { r.resume(); resolve(r); }).on('error', reject);
+            });
+            if (res.statusCode !== 302) return [400, { error: 'bad_authorization_request', status: res.statusCode }];
+            let location = res.headers.location;
+            if (!q.get('error')) location += `&${new URLSearchParams(GOOGLE_EXTRA)}`;
             return [302, { location }, { Location: location }];
         },
         // The Google links stored (sso_identities), oldest first.
