@@ -172,9 +172,15 @@ test('matchmaker: repeat limit for rated pairings, with expiry', () => {
     for (let i = 0; i < cfg.matchRepeatLimit; i++) {
         m.join(player(1500, { userId: 1, joinedAt: i * 1000 }));
         m.join(player(1500, { userId: 2, joinedAt: i * 1000 }));
-        assert.equal(m.tick(i * 1000).length, 1);
+        const pairs = m.tick(i * 1000);
+        assert.equal(pairs.length, 1);
+        // A pairing counts once its game exists: the primary records it then.
+        assert.equal(m.repeatCount(1, 2, i * 1000), i);
+        assert.equal(m.repeatLimited(1, 2, i * 1000), false);
+        m.recordPairing(pairs[0].white, pairs[0].black, i * 1000);
     }
     assert.equal(m.repeatCount(1, 2, 3000), 3);
+    assert.equal(m.repeatLimited(2, 1, 3000), true, 'the primary refuses their rated challenges and rematches');
     m.join(player(1500, { userId: 1, joinedAt: 3000 }));
     m.join(player(1500, { userId: 2, joinedAt: 3000 }));
     assert.deepEqual(m.tick(3000), []);
@@ -191,13 +197,31 @@ test('matchmaker: repeat limit for rated pairings, with expiry', () => {
     m.join(player(1500, { userId: 2, joinedAt: H }));
     assert.deepEqual(m.tick(H - 1), []);
     assert.equal(m.tick(H).length, 1);
+    assert.equal(m.repeatLimited(1, 2, H), false);
 
-    // Rated games made elsewhere count too.
+    // recordPairing() takes user ids too.
     const n = mm();
     for (let i = 0; i < 3; i++) n.recordPairing({ userId: 7 }, 8, 0);
     n.join(player(1500, { userId: 7 }));
     n.join(player(1500, { userId: 8 }));
     assert.deepEqual(n.tick(0), []);
+});
+
+test('matchmaker: a held pair is not made before its time, in any queue; other pairs are', () => {
+    const m = mm();
+    m.holdPair(2, 1, 5000);
+    for (const rated of [true, false]) {
+        m.join(player(1500, { userId: 1, rated }));
+        m.join(player(1500, { userId: 2, rated }));
+        assert.deepEqual(m.tick(4999), [], `rated ${rated}`);
+        m.join(player(1500, { userId: 3, rated }));
+        assert.deepEqual(m.tick(4999).map(ids), [[1, 3]]);
+        m.leave(2);
+    }
+    m.join(player(1500, { userId: 1 }));
+    m.join(player(1500, { userId: 2 }));
+    assert.deepEqual(m.tick(5000).map(ids), [[1, 2]]);
+    assert.equal(m.holds.size, 0, 'an ended hold is dropped');
 });
 
 test('matchmaker: recentOpponents exclusions apply both ways', () => {
@@ -366,6 +390,7 @@ test('matchmaker: same pairs as a brute-force reference over a random simulation
             }
             const got = new Map();
             for (const p of m.tick(now)) {
+                if (p.rated) m.recordPairing(p.white, p.black, now);     // the primary, once the game exists
                 const key = p.category + (p.rated ? '|r' : '|c');
                 if (!got.has(key)) got.set(key, []);
                 got.get(key).push(ids(p));

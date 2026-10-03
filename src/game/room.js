@@ -7,7 +7,7 @@
 // arrives after the flag deadline finds the game already lost on time.
 //
 // Each call returns an Outcome:
-//   { broadcast: [Buffer], toWhite: [Buffer], toBlack: [Buffer], reply: [Buffer] (to the sender),
+//   { broadcast: [Buffer], reply: [Buffer] (to the sender),
 //     anomaly: null | { color, kind, detail, posMatched }, ended: bool, journal: [{kind, at, payload}],
 //     // additions to the DESIGN 5.3 contract:
 //     conduct: [{ userId, kind: 'abandon'|'abort'|'noshow' }],  // forwarded as conduct.record
@@ -21,7 +21,7 @@
 //                                // once the call is done (unless a MoveMade or a GameEnd already
 //                                // told it)
 // Buffers are encoded once with the codec (the MoveMade of a move is one Buffer for both players).
-// The host sends `broadcast` to both players, then `toWhite` / `toBlack`, then `reply`.
+// The host sends `broadcast` to both players, then `reply`.
 // `gseq` increments on every broadcast event (MoveMade, GameEvent, GameEnd).
 //
 // Deviations from the DESIGN 5.3 signatures (compatible additions):
@@ -187,8 +187,6 @@ function decodeSnapshot(payload) {
 export class Outcome {
     constructor() {
         this.broadcast = [];
-        this.toWhite = [];
-        this.toBlack = [];
         this.reply = [];
         this.anomaly = null;
         this.ended = false;
@@ -647,10 +645,13 @@ export class GameRoom {
     recover(now) {
         now = Math.floor(now);
         const out = new Outcome();
-        if (!this._over && this.game.status !== undefined && this.game.status !== GS.Ongoing) {
-            // The journal kept the move that ended the game but not its `ended` record.
+        if (!this._over) {
+            // The journal kept the move that ended the game but not its `ended` record: an ending of
+            // the rules, or the ply limit's (as in onMove).
             const at = this.ply ? this.recvTime[this.ply - 1] : this.createdAt;
-            this._end(this.game.status, this.game.reason | 0, at, out, NONE, NONE);
+            const st = this.game.status;
+            if (st !== undefined && st !== GS.Ongoing) this._end(st, this.game.reason | 0, at, out, NONE, NONE);
+            else if (this.ply >= MAX_PLIES) this._end(GS.Aborted, ER.ServerAborted, at, out, NONE, NONE);
         }
         if (this._over) {
             this.rematchState = RM_CLOSED;

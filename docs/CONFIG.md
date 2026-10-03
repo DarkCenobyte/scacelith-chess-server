@@ -31,8 +31,8 @@ Sections:
 
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
-| `SERVER_NAME` | text (at most 64 characters) | `Scacelith Community Server` | Name shown to players (menus, scoresheet "Event"). |
-| `SERVER_PUBLIC_HOST` | text | `localhost` | Public DNS name of the server, used in e-mail links and the Google SSO redirect URI. |
+| `SERVER_NAME` | text (at most 64 bytes in UTF-8) | `Scacelith Community Server` | Name shown to players (menus, scoresheet "Event"). |
+| `SERVER_PUBLIC_HOST` | text | `localhost` | Public DNS name of the server, used in e-mail links, and Google sign-in works only for players who added the server under exactly this name and PUBLIC_API_PORT. |
 | `SERVER_MOTD` | text (at most 200 characters) | (empty) | Short message of the day shown in the online menu. |
 | `BIND_ADDRESS` | text | `0.0.0.0` | Address the API and WebSocket listeners bind to. |
 | `API_PORT` | port (0-65535) | `443` | HTTPS API port (TCP). 443, the HTTPS port: firewalls and proxies let it through; any free port works for a community server. A port below 1024 needs the CAP_NET_BIND_SERVICE capability (README, systemd unit) unless the server runs as root. |
@@ -46,7 +46,7 @@ Sections:
 | `SHUTDOWN_GRACE_MS` | integer (0-120000) | `3000` | On SIGTERM/SIGINT players are warned (ServerShutdown notice) this long before their connections close. Games in progress survive the restart (journal). |
 | `LISTEN_REUSE_PORT` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Linux: every worker binds its own listening socket (SO_REUSEPORT) and the kernel spreads new connections, instead of the primary accepting them and handing them out round-robin. Ignored on other systems. |
 | `LISTEN_BACKLOG` | integer (128-65535) | `2048` | Length of the kernel queue of new connections not yet accepted (listen backlog), which absorbs reconnection bursts. The kernel caps it at net.core.somaxconn (Linux), so raise that sysctl as well (README, kernel settings). |
-| `SHARD_OVERLOAD_LAG_MS` | integer (5-5000) | `250` | Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker. |
+| `SHARD_OVERLOAD_LAG_MS` | integer (5-5000) | `250` | Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker. The delay is sampled every 10 ms and includes that period (an idle worker reads about 10 ms), so a value below about 20 marks every worker overloaded. |
 
 ## TLS
 
@@ -56,7 +56,7 @@ Sections:
 | `TLS_CERT_FILE` | path (relative to the working directory) | (empty) | PEM certificate chain (fullchain). Reloaded on SIGHUP and when the file changes. |
 | `TLS_KEY_FILE` | path (relative to the working directory) | (empty) | PEM private key. Never commit it. |
 | `TLS_MIN_VERSION` | one of TLSv1.2, TLSv1.3 | `TLSv1.2` | Oldest TLS version accepted. |
-| `TRUSTED_PROXIES` | comma-separated list | `127.0.0.1,::1` | With TLS_MODE=proxy: addresses whose X-Forwarded-For / X-Forwarded-Proto headers are trusted. |
+| `TRUSTED_PROXIES` | comma-separated list | `127.0.0.1,::1` | With TLS_MODE=proxy: addresses whose X-Forwarded-For header is trusted. |
 | `ALLOW_INSECURE_DEV` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Allows TLS_MODE=off. Development only; never on a public server. |
 
 ## Storage
@@ -85,7 +85,7 @@ Sections:
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
 | `REGISTRATION` | one of open, closed | `open` | Whether new accounts can be created from the game. |
-| `REQUIRE_EMAIL_VERIFICATION` | boolean (true/false, 1/0, yes/no, on/off) | `true` | Accounts must confirm their e-mail address before playing online. |
+| `REQUIRE_EMAIL_VERIFICATION` | boolean (true/false, 1/0, yes/no, on/off) | `true` | An account is created only once its e-mail address is confirmed with the link sent to it (24 h). false: created at once, with no link. |
 | `USERNAME_MIN` | integer (2-24) | `3` | Shortest username. |
 | `USERNAME_MAX` | integer (3-24) | `20` | Longest username (the scoresheet has room for 24 characters). |
 | `PASSWORD_MIN_LENGTH` | integer (8-64) | `10` | Shortest password. |
@@ -103,16 +103,15 @@ Sections:
 | `SMTP_PORT` | port (0-65535) | `587` | SMTP port (587 STARTTLS, 465 implicit TLS). |
 | `SMTP_SECURITY` | one of starttls, tls, none | `starttls` | starttls (required, not opportunistic), tls (implicit, port 465) or none (local relay only). |
 | `SMTP_USER` | text | (empty) | SMTP user name (empty = no authentication). |
-| `SMTP_PASSWORD` | secretText | (empty) | SMTP password. |
+| `SMTP_PASSWORD`<br>`SMTP_PASSWORD_FILE` | secretText | (empty) | SMTP password. |
 
 ## Google single sign-on
 
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
-| `SSO_GOOGLE_ENABLED` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Offers "Sign in with Google" (OpenID Connect, authorization code + PKCE through the system browser). |
-| `GOOGLE_CLIENT_ID` | text | (empty) | OAuth client ID of a "Web application" client in Google Cloud Console. |
-| `GOOGLE_CLIENT_SECRET` | secretText | (empty) | OAuth client secret. Never commit it. |
-| `GOOGLE_REDIRECT_URI` | text | (empty) | Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST/auth/sso/google/callback, with :PUBLIC_API_PORT after the host when that port is not 443). |
+| `SSO_GOOGLE_ENABLED` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Offers "Sign in with Google" (authorization code + PKCE; Google sends the browser back to the game on 127.0.0.1 and the game hands the code to this server). An existing account is linked only after its password, and its two-step code when on, is entered once in the game. |
+| `GOOGLE_CLIENT_ID` | text | (empty) | OAuth client ID of a "Desktop app" client (Google Auth Platform &gt; Clients). Not a "Web application" client: Google sends the browser back to the game on 127.0.0.1 and only a Desktop app client accepts that. |
+| `GOOGLE_CLIENT_SECRET`<br>`GOOGLE_CLIENT_SECRET_FILE` | secretText | (empty) | OAuth client secret. Never commit it. |
 
 ## Protection per address (background layer)
 
@@ -158,12 +157,14 @@ Sections:
 | `AUTH_MFA_PER_ACCOUNT` | integer (&gt;= 1) | `10` | Second-factor codes (authenticator or recovery codes) tried per 15 minutes for one account, whole server, from any address, at sign-in and in account changes; then 429 too_many_attempts before the code is checked (a recovery code is not spent). It bounds a code guesser who knows the password, whatever the number of addresses. |
 | `AUTH_REAUTH_PER_USER` | integer (&gt;= 1) | `10` | Account changes that ask for the password or a code (password, two-step verification, e-mail, data export, deletion) per 10 minutes for one account, whole server, from any address, on top of the per-address limit AUTH_RATE_PER_IP: a stolen session used from many addresses cannot guess the password faster. |
 | `USER_RATE_PER_MIN` | integer (&gt;= 1) | `120` | API requests per minute of one signed-in account (every request with a valid session token), all endpoints together, whatever its address. Each worker allows its share, max(1, min(this, ceil(2 x this / WORKERS))) (all of it with 1 or 2 workers, half with 4), with a burst of half a minute; beyond it 429 rate_limited with Retry-After. The game's busiest use, paging through the history, is about one request per second. |
+| `CHALLENGE_UNPLAYED_PER_MIN` | integer (&gt;= 1) | `5` | Direct challenges of one player that may end withdrawn or declined within a minute (each one popped up on its target's screen, and no game came of it); the player's next direct challenge is then refused with ChallengeLimit until the minute has passed, so that create/cancel cycles cannot flood a player with challenges. Accepted challenges and private games do not count. |
+| `PRIVATE_CODE_FAILURES_PER_MIN` | integer (&gt;= 1) | `10` | Wrong private game codes one player may try within a minute; ChallengeJoinCode is then refused with RateLimited, even for a right code, until the minute has passed, so that the codes of other players' private games cannot be guessed. |
 | `POW_REGISTER_BITS` | integer (0-26) | `18` | Proof-of-work difficulty (leading zero bits of SHA-256) required to register; 0 disables it. |
 | `POW_LOGIN_BITS` | integer (0-26) | `18` | Proof-of-work difficulty required to log in while the server sees a credential-stuffing wave; 0 disables it. |
 | `POW_LOGIN_TRIGGER_PER_MIN` | integer (&gt;= 1) | `30` | Failed logins per minute (whole server) that turn on the login proof-of-work. Every failed login costs a password hash (about 0.5 s of CPU), so 30 per minute already keeps a quarter of a core busy, and a few hundred would need several cores: with PASSWORD_HASH_CONCURRENCY at 1 per worker, a small server could never reach such a trigger. Raise it only on a large server where honest typos alone come near it. |
 | `PASSWORD_HASH_CONCURRENCY` | integer (1-64) | `1` | Password hashes and verifications (login, registration, password change and reset, account changes that ask for the password) that one worker process runs at once. Each costs about 0.5 s of CPU and 64-128 MiB in the libuv thread pool; 1 leaves the rest of the core to the games of the worker. Keep it below UV_THREADPOOL_SIZE (4 by default) so that the journal and DNS keep free threads: the server warns at start (and check-config) when it is not. |
 | `PASSWORD_HASH_QUEUE_MAX` | integer (&gt;= 0) | `32` | Password hashes that may wait for a free slot in one worker process; one more is refused at once with 503 server_busy and a Retry-After of 5 to 15 s (0: no waiting at all). Once half of them wait, one client (an IPv4 address, or an IPv6 /48) may have at most PASSWORD_HASH_WAITERS_PER_SOURCE of them waiting; its next one is refused with 429 rate_limited. |
-| `PASSWORD_HASH_WAITERS_PER_SOURCE` | integer (&gt;= 1) | `2` | Password hashes one client (an IPv4 address, or an IPv6 /48) may have waiting in one worker process once PASSWORD_HASH_QUEUE_MAX is at least half full; its next request is then refused with 429 rate_limited and a Retry-After of 5 to 15 s, and that refused attempt does not count against AUTH_RATE_PER_IP. While less than half of the queue waits, one client may queue more, so that players who log in together behind one address (a school or a company network) are served when the server is not busy, and one client never holds more than half of the queue. Raise it for such a site if its players log in while the server is busy, together with MAX_PENDING_HANDSHAKES_PER_IP and AUTH_RATE_PER_IP. |
+| `PASSWORD_HASH_WAITERS_PER_SOURCE` | integer (&gt;= 1) | `2` | Password hashes one client (an IPv4 address, or an IPv6 /48) may have waiting in one worker process once PASSWORD_HASH_QUEUE_MAX is at least half full; its next request is then refused with 429 rate_limited and a Retry-After of 5 to 15 s, and that refused attempt does not count against AUTH_RATE_PER_IP. While less than half of the queue waits, one client may queue more, so that players who log in together behind one address (a school or a company network) are served when the server is not busy, and, as long as PASSWORD_HASH_WAITERS_PER_SOURCE is at most half of PASSWORD_HASH_QUEUE_MAX, one client never holds more than half of the queue. Raise it for such a site if its players log in while the server is busy, together with MAX_PENDING_HANDSHAKES_PER_IP and AUTH_RATE_PER_IP. |
 | `PASSWORD_HASH_QUEUE_TIMEOUT_MS` | integer (100-13000) | `10000` | Longest wait for a password hash slot, for all the hashes of one request together (a password change hashes twice); the request is then refused with 503 server_busy. At most 13000: the game gives up after 15 s, and the hash itself takes a second or two, so that the player sees the "busy" answer rather than a timeout. |
 
 ## Games
@@ -200,7 +201,7 @@ Sections:
 | `MATCH_WINDOW_STEP_MS` | integer (&gt;= 100) | `5000` | Time between two widenings. |
 | `MATCH_WINDOW_MAX` | integer (&gt;= 0) | `500` | Widest window (reached after about a minute with the defaults). |
 | `MATCH_PROVISIONAL_BONUS` | integer (&gt;= 0) | `150` | Extra window for a provisional rating (its value is still uncertain). |
-| `MATCH_REPEAT_LIMIT` | integer (&gt;= 1) | `3` | Rated games two players may be paired for within MATCH_REPEAT_WINDOW_MS by the matchmaker (limits rating manipulation between friends). |
+| `MATCH_REPEAT_LIMIT` | integer (&gt;= 1) | `3` | Rated games two players may play together within MATCH_REPEAT_WINDOW_MS, whatever made them (queue, direct challenge, private game, rematch); beyond it the matchmaker no longer pairs them, and their rated challenges, private games and rematches are refused (limits rating manipulation between friends). Unrated games stay free. The counts are kept in memory: a restart forgets them. |
 | `MATCH_REPEAT_WINDOW_MS` | integer (&gt;= 60000) | `3600000` | See MATCH_REPEAT_LIMIT. |
 | `CONDUCT_ABANDON_LIMIT` | integer (&gt;= 1) | `3` | Abandoned / aborted / no-show games in 24 hours before rated matchmaking is paused for the player (15 min, then 1 h, then 6 h). |
 
@@ -245,10 +246,10 @@ Sections:
 | --- | --- | --- | --- |
 | `METRICS_PORT` | port (0-65535) | `9464` | Prometheus metrics and health endpoint (plain HTTP; 0 disables it). |
 | `METRICS_BIND` | text | `127.0.0.1` | Keep it private: 127.0.0.1 or an internal address. |
-| `METRICS_TOKEN`<br>`METRICS_TOKEN_FILE` | secret | (unset) | Optional bearer token required to read the metrics. |
+| `METRICS_TOKEN`<br>`METRICS_TOKEN_FILE` | secretText | (empty) | Optional bearer token required to read the metrics: /metrics then needs the header "Authorization: Bearer &lt;token&gt;" with this exact text (no spaces). |
 | `LOG_LEVEL` | one of debug, info, warn, error | `info` | Log verbosity. |
 | `LOG_FORMAT` | one of json, pretty | `json` | JSON lines (for log collectors) or readable text. |
 | `LOG_IP` | one of truncated, full, hashed | `truncated` | How client addresses appear in the logs: truncated (IPv4 /24, IPv6 /48), full, or hashed (keyed HMAC, rotated daily). |
 | `RETENTION_SECURITY_DAYS` | integer (&gt;= 1) | `90` | Security events (failed logins, anomalies without sanction) are deleted after this many days. |
 | `RETENTION_IP_DAYS` | integer (&gt;= 1) | `30` | Stored IP addresses (sessions, security events) are erased after this many days. |
-| `RETENTION_INTERVAL_MS` | integer (60000-2147483647) | `3600000` | Interval of the retention purge run by the primary (expired sessions and tokens, old security events, anomalies, conduct events and failed analysis jobs, IP erasure). The first run starts about a minute after the server starts. At most 2147483647 (about 24.8 days, the longest timer of Node.js). |
+| `RETENTION_INTERVAL_MS` | integer (60000-2147483647) | `3600000` | Interval of the retention purge run by the primary (expired sessions, tokens and pending signups, old security events, anomalies, conduct events and failed analysis jobs, IP erasure). The first run starts about a minute after the server starts. At most 2147483647 (about 24.8 days, the longest timer of Node.js). |

@@ -10,7 +10,8 @@
 //        -> 200 { token, expiresAt, user } | 200 { mfaRequired: true, mfaToken, expiresIn }
 //        errors: 401 invalid_credentials, 403 email_unverified | banned{until}, 428 pow_required, 429 too_many_attempts{retryAfter}
 //   POST /auth/login/mfa       { mfaToken, code? , recoveryCode? } -> 200 { token, expiresAt, user }
-//        errors: 401 invalid_mfa_token | invalid_code, 403 banned, 429
+//        errors: 401 invalid_mfa_token | invalid_code, 403 banned | email_unverified, 429, and after a Google link step
+//                410 sso_expired, 409 sso_already_linked, 503 server_busy{retryAfter: 1}
 //   POST /auth/logout, /auth/logout-all (bearer) -> 200 { status: 'logged_out' }
 //   GET  /auth/sessions (bearer) -> { sessions: [{ id, createdAt, lastSeenAt, expiresAt, clientLabel, current }] }
 //   DELETE /auth/sessions/:id (bearer) -> { status: 'revoked' } | 404
@@ -49,9 +50,14 @@ export const POW_FIELD = Object.freeze({
     type: 'object', optional: true,
     fields: { challenge: { type: 'string', min: 16, max: 512 }, nonce: { type: 'string', min: 1, max: 20, pattern: /^[0-9]+$/ } },
 });
-const PASSWORD = { type: 'string', min: 1, max: 1024 };
-const EMAIL = { type: 'string', min: 1, max: 254 };
-const LINK_TOKEN = { type: 'string', min: 1, max: 128 };
+/** Body fields of the account routes too (routes/account.js, routes/account-export.js). */
+export const PASSWORD_FIELD = Object.freeze({ type: 'string', min: 1, max: 1024 });
+export const CODE_FIELD = Object.freeze({ type: 'string', min: 1, max: 32 });
+export const EMAIL_FIELD = Object.freeze({ type: 'string', min: 1, max: 254 });
+export const LINK_TOKEN_FIELD = Object.freeze({ type: 'string', min: 1, max: 128 });
+
+/** The `page` limit of the GET pages of the e-mail links (routes/account.js too): one bucket. */
+export const PAGE_RATE = Object.freeze({ key: 'page', limit: 60, windowMs: 60000 });
 
 /**
  * How much more a refusal of the auth family counts toward blocking an address (abuse design
@@ -80,17 +86,16 @@ export function register(router, { config, auth }) {
     const mailRate = perHour('auth_mail', config.authMailPerHour);
     const forgotRates = [perHour('auth_forgot', config.authForgotPerHour), perHour('auth_forgot_day', config.authForgotPerDay, 86400000)];
     const resetRate = perHour('auth_reset', config.authResetPerHour);
-    const pageRate = { key: 'page', limit: 60, windowMs: 60000 };
     const sessionRate = { key: 'sessions', limit: 60, windowMs: 60000, by: 'user' };
 
     router.post('/auth/register', async (ctx) => auth.register({ ...ctx.body, ip: ctx.ip }), {
         auth: 'none', rate: [authRate, registerRate],
-        body: { username: { type: 'string', min: 1, max: 64 }, email: EMAIL, password: PASSWORD, pow: POW_FIELD },
+        body: { username: { type: 'string', min: 1, max: 64 }, email: EMAIL_FIELD, password: PASSWORD_FIELD, pow: POW_FIELD },
     });
 
     router.post('/auth/login', async (ctx) => ({ body: await auth.login({ ...ctx.body, ip: ctx.ip }) }), {
         auth: 'none', rate: authRate,
-        body: { login: { type: 'string', min: 1, max: 254 }, password: PASSWORD, clientLabel: { type: 'string', max: 64, optional: true }, pow: POW_FIELD },
+        body: { login: { type: 'string', min: 1, max: 254 }, password: PASSWORD_FIELD, clientLabel: { type: 'string', max: 64, optional: true }, pow: POW_FIELD },
     });
 
     router.post('/auth/login/mfa', async (ctx) => ({ body: await auth.loginMfa({ ...ctx.body, ip: ctx.ip }) }), {
@@ -104,32 +109,35 @@ export function register(router, { config, auth }) {
     router.delete('/auth/sessions/:id', (ctx) => ({ body: auth.revokeSession(ctx.user, ctx.params.id, ctx.ip) }), { auth: 'required', rate: sessionRate });
 
     router.post('/auth/verify-email/resend', async (ctx) => ({ status: 202, body: await auth.resendVerification({ email: ctx.body.email, ip: ctx.ip }) }), {
-        auth: 'none', rate: [authRate, mailRate], body: { email: EMAIL },
+        auth: 'none', rate: [authRate, mailRate], body: { email: EMAIL_FIELD },
     });
     router.post('/auth/password/forgot', async (ctx) => ({ status: 202, body: await auth.forgotPassword({ email: ctx.body.email, ip: ctx.ip }) }), {
-        auth: 'none', rate: [authRate, ...forgotRates], body: { email: EMAIL },
+        auth: 'none', rate: [authRate, ...forgotRates], body: { email: EMAIL_FIELD },
     });
     router.post('/auth/password/reset', async (ctx) => ({ body: await auth.resetPassword({ ...ctx.body, ip: ctx.ip }) }), {
-        auth: 'none', rate: [authRate, resetRate], body: { token: LINK_TOKEN, newPassword: PASSWORD },
+        auth: 'none', rate: [authRate, resetRate], body: { token: LINK_TOKEN_FIELD, newPassword: PASSWORD_FIELD },
     });
 
     // ---- HTML pages of the e-mail links (GET shows a button / form, POST acts) ----
     const serverName = config.serverName;
     router.page('GET', '/verify-email', (ctx) => {
         const token = ctx.query.token;
-        if (!auth.peekToken('email_verify', token)) return { status: 400, html: verifyPages.verifyInvalid({ serverName }) };
+        if (!auth.peekVerification(token)) return { status: 400, html: verifyPages.verifyInvalid({ serverName }) };
         return { html: verifyPages.verifyForm({ serverName, token }) };
-    }, { rate: pageRate });
+    }, { rate: PAGE_RATE });
+    // The link of an account confirms its address; the link of a pending signup creates the account.
     router.page('POST', '/verify-email', (ctx) => {
-        if (!auth.verifyEmail(ctx.body.token, ctx.ip)) return { status: 400, html: verifyPages.verifyInvalid({ serverName }) };
+        const r = auth.verifyEmail(ctx.body.token, ctx.ip);
+        if (r === 'taken') return { status: 409, html: verifyPages.verifyTaken({ serverName }) };
+        if (r !== 'confirmed') return { status: 400, html: verifyPages.verifyInvalid({ serverName }) };
         return { html: verifyPages.verifyDone({ serverName }) };
-    }, { rate: authRate, body: { token: LINK_TOKEN } });
+    }, { rate: authRate, body: { token: LINK_TOKEN_FIELD } });
 
     router.page('GET', '/reset-password', (ctx) => {
         const token = ctx.query.token;
         if (!auth.peekToken('password_reset', token)) return { status: 400, html: resetPages.resetInvalid({ serverName }) };
         return { html: resetPages.resetForm({ serverName, token, minLength: config.passwordMinLength }) };
-    }, { rate: pageRate });
+    }, { rate: PAGE_RATE });
     router.page('POST', '/reset-password', async (ctx) => {
         const { token, newPassword, confirmPassword } = ctx.body;
         const form = (error) => ({ status: 400, html: resetPages.resetForm({ serverName, token, minLength: config.passwordMinLength, error }) });
@@ -147,5 +155,5 @@ export function register(router, { config, auth }) {
             throw err;
         }
         return { html: resetPages.resetDone({ serverName }) };
-    }, { rate: [authRate, resetRate], body: { token: LINK_TOKEN, newPassword: PASSWORD, confirmPassword: PASSWORD } });
+    }, { rate: [authRate, resetRate], body: { token: LINK_TOKEN_FIELD, newPassword: PASSWORD_FIELD, confirmPassword: PASSWORD_FIELD } });
 }

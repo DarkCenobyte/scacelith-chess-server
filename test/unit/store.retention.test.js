@@ -164,13 +164,13 @@ test('retention.runAsync with a fixed chunk of 1000 rows: pauses between slices,
     for (let i = 0; i < 1200; i++) store.conduct.record(a, 'abort', NOW - 40 * DAY);
     const left = () => raw.prepare('SELECT (SELECT count(*) FROM security_events) AS sec, (SELECT count(*) FROM conduct_events) AS conduct').get();
 
-    // Aborted at the 6th pause: 5 statements with nothing to do, then the first chunk of events.
+    // Aborted at the 7th pause: 6 statements with nothing to do, then the first chunk of events.
     const ctl = new AbortController();
     let pauses = 0;
     const first = await store.retention.runAsync(NOW, undefined, {
-        sliceMs: 0, chunk: 1000, signal: ctl.signal, pause: async () => { if (++pauses === 6) ctl.abort(); },
+        sliceMs: 0, chunk: 1000, signal: ctl.signal, pause: async () => { if (++pauses === 7) ctl.abort(); },
     });
-    assert.equal(pauses, 6);
+    assert.equal(pauses, 7);
     assert.equal(first.securityEvents, 1000);
     assert.deepEqual({ ...left() }, { sec: 1500, conduct: 1200 });
 
@@ -181,7 +181,7 @@ test('retention.runAsync with a fixed chunk of 1000 rows: pauses between slices,
     assert.equal(done.securityEvents, 1500);
     assert.equal(done.conductEvents, 1200);
     assert.deepEqual({ ...left() }, { sec: 0, conduct: 0 });
-    assert.equal(pauses, 5 + 2 + 1 + 2 + 1, 'session IPs, event IPs, sessions x2, tokens, events x2, anomalies, conduct x2, jobs');
+    assert.equal(pauses, 6 + 2 + 1 + 2 + 1, 'session IPs, event IPs, sessions x2, tokens, pending signups, events x2, anomalies, conduct x2, jobs');
 
     // A large slice runs everything without pausing.
     pauses = 0;

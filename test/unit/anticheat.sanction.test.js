@@ -1,8 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { testConfig } from '../../src/config.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { loadConfig, testConfig } from '../../src/config.js';
 import { createAnticheat, startAnalysisProcess } from '../../src/anticheat/index.js';
+import { applyCertainSanction } from '../../src/anticheat/sanction.js';
+import { Population, updatePlayerIntegrity } from '../../src/anticheat/scoring.js';
 import { createFakeStore } from '../../src/anticheat/testing/fake-store.js';
+import { openStore, migrate } from '../../src/store/index.js';
 
 const quiet = { debug() {}, info() {}, warn() {}, error() {}, security() {}, child() { return this; } };
 
@@ -60,6 +67,55 @@ test('idempotency across processes: an existing ban of the same game is reused',
     assert.equal(c.applied, true);
     assert.equal(store._.sanctions.length, 2);
     assert.equal(store.integrity.get(9).evidence.certain.length, 3, 'every sanction call adds evidence');
+});
+
+test('a ban that cannot be stored writes nothing else, and the next certain anomaly of the game tries again', async () => {
+    const store = createFakeStore();
+    const primary = fakePrimary();
+    const t = 1_800_000_000_000;
+    const ac = createAnticheat({ config: testConfig(), store, primary, log: quiet, now: () => t });
+    const create = store.sanctions.create;
+    store.sanctions.create = () => { throw Object.assign(new Error('database is locked'), { code: 'busy' }); };
+    const a = ac.sanctionCertain({ userId: 5, gameId: 77, kind: 'illegal_move' });
+    assert.deepEqual(a, { banUntil: 0, applied: false, refunds: 0 });
+    assert.equal(store.integrity.get(5), null, 'not confirmed without the ban');
+    assert.equal(store._.security.length, 0);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(primary.sent.length, 0);
+    store.sanctions.create = create;
+    const b = ac.sanctionCertain({ userId: 5, gameId: 77, kind: 'illegal_move' });
+    assert.equal(b.applied, true, 'retried');
+    assert.equal(store._.sanctions.length, 1);
+    assert.equal(store.integrity.get(5).level, 'confirmed');
+    await new Promise((r) => setImmediate(r));
+    assert.equal(primary.sent.length, 1);
+    ac.close();
+});
+
+test('an analysis update does not overwrite a certain-cheat ban committed meanwhile by another process', (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-integrity-race-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const config = testConfig({ DB_PATH: path.join(dir, 'db.sqlite') });
+    const analysis = openStore(config);       // the analysis process's connection
+    migrate(analysis);
+    const shard = openStore(config);          // a shard's store writer thread
+    t.after(() => { analysis.close(); shard.close(); });
+    const userId = analysis.users.create({ username: 'cheat', email: 'cheat@example.org' });
+    const t0 = 1_800_000_000_000;
+    const forUser = analysis.analysis.forUser;
+    let banned = false;
+    analysis.analysis.forUser = (...a) => {
+        // The shard bans the player while the analysis reads their games.
+        if (!banned) { banned = true; applyCertainSanction(shard, config, { userId, gameId: 7, kind: 'illegal_move', at: t0 }); }
+        return forUser(...a);
+    };
+    const r = updatePlayerIntegrity({ store: analysis, userId, population: new Population(null), now: t0 + 1, log: quiet });
+    assert.ok(banned);
+    assert.equal(r.level, 'confirmed');
+    const integ = analysis.integrity.get(userId);
+    assert.equal(integ.level, 'confirmed');
+    assert.deepEqual(integ.evidence.certain.map((c) => c.kind), ['illegal_move'], 'the evidence of the ban is kept');
+    assert.equal(integ.evidence.statistics.games, 0);
 });
 
 test('a longer ban stands for the automatic one only when it is a ban for cheating that refunds', () => {
@@ -148,6 +204,40 @@ process.on('message', (m) => { if (m.type === 'shutdown') { ipc.close(); process
     assert.deepEqual(snapshot.map((m) => [m.name, m.children[0].v]), [['scacelith_anticheat_analysis_engines_shared', 2]]);
     await h.stop(3000);
     assert.equal(await h.metricsSnapshot(), null, 'no process, no metrics');
+});
+
+test('the analysis process runs the configuration the primary loaded, not .env and the secret files as they are at its start', async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ac-proc-'));
+    let h = null;
+    // The process and its engine run in `dir`: stopped first when an assertion failed.
+    t.after(async () => { await h?.stop(3000); fs.rmSync(dir, { recursive: true, force: true }); });
+    // A UCI engine that starts at once (helpers/fake-uci-engine.js).
+    const engine = path.join(dir, 'engine.sh');
+    const fake = fileURLToPath(new URL('./helpers/fake-uci-engine.js', import.meta.url));
+    fs.writeFileSync(engine, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fake)}\n`, { mode: 0o755 });
+    const envFile = path.join(dir, '.env'), secretFile = path.join(dir, 'secret');
+    const dotEnv = (workers) => `DATA_DIR=${dir}\nANALYSIS_ENGINE_PATH=${engine}\nANALYSIS_WORKERS=${workers}\nSERVER_SECRET_FILE=${secretFile}\n`;
+    fs.writeFileSync(envFile, dotEnv(2));
+    fs.writeFileSync(secretFile, Buffer.alloc(32, 1).toString('base64'));
+    // The server's environment, which the analysis process inherits.
+    const env = { SCACELITH_ENV_FILE: envFile, TLS_MODE: 'off', ALLOW_INSECURE_DEV: '1', MAIL_TRANSPORT: 'none', LOG_LEVEL: 'error', METRICS_PORT: '0' };
+    const config = loadConfig({ env: { ...process.env, ...env } });
+    const store = openStore(config);
+    migrate(store);
+    store.close();
+    // The operator edits .env and removes the secret file, to apply them at the next restart.
+    fs.writeFileSync(envFile, dotEnv(1));
+    fs.rmSync(secretFile);
+    h = startAnalysisProcess(config, { log: quiet, env });
+    let engines = null;
+    for (const end = Date.now() + 15000; engines !== 2 && Date.now() < end;) {
+        const snapshot = await h.metricsSnapshot(500);
+        engines = snapshot?.find((m) => m.name === 'scacelith_anticheat_analysis_engines')?.children[0].v ?? null;
+        if (engines !== 2) await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.equal(engines, 2, 'the ANALYSIS_WORKERS the primary loaded');
+    assert.equal(h.restarts, 0);
+    await h.stop(3000);
 });
 
 test('startAnalysisProcess restarts a crashing worker with backoff and stops cleanly', async (t) => {

@@ -2,9 +2,10 @@
 // e-mail confirmation on and the mails read from the log transport: register and confirm, log
 // in, play a rated game to its end, the player's history (/account/games), the caller-aware game
 // record (/games/:id: you, reportable), its PGN, an e-mail change through its link, the data
-// export, and the deletion of the account. Then the default port: a server started without the
-// right to bind 443 logs how to fix it and its worker exits non-zero. Needs the openssl command
-// line (skipped without it).
+// export, the deletion of the account and a password reset (both close the live connection of
+// the revoked sessions). Then the default port: a server started without the right to bind 443
+// logs how to fix it and its worker exits non-zero. Needs the openssl command line (skipped
+// without it).
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
@@ -17,6 +18,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { startServer, haveOpenssl } from './helpers/harness.js';
 import { PASSWORD, connect, challengeGame, Table, closeAll } from './helpers/players.js';
 import { ApiClient } from '../../src/client/index.js';
+import { CloseCode, enums } from '../../src/protocol/index.js';
 
 const skip = !haveOpenssl() && 'openssl not available';
 const FORM = 'application/x-www-form-urlencoded';
@@ -57,13 +59,27 @@ function page(method, p, form) {
     });
 }
 
+/** The close code of the player's connection, once it got Notice{SessionRevoked} and closed. */
+async function closedAsRevoked(p) {
+    const notice = p.client.waitFor('Notice', (n) => n.code === enums.NoticeCode.SessionRevoked, 10000);
+    const closed = p.client.waitFor('close', null, 10000);
+    await notice;
+    return (await closed).code;
+}
+
 /** Registers `name`, confirms the address with the link of the mail, logs in and connects. */
 async function verifiedPlayer(name) {
     const api = new ApiClient({ host: '127.0.0.1', port: srv.apiPort, ca: srv.ca, servername: 'localhost' });
     const email = `${name}@example.org`;
     const r = await api.register({ username: name, email, password: PASSWORD });
     assert.deepEqual([r.status, r.body], [202, { status: 'verification_sent' }]);
-    assert.equal((await api.login(name, PASSWORD)).body.error, 'email_unverified');
+    // No account before the link is used: the sign-in fails as for an unknown name, and the
+    // database has no row for it.
+    const early = await api.login(name, PASSWORD);
+    assert.deepEqual([early.status, early.body.error], [401, 'invalid_credentials']);
+    const db = new DatabaseSync(path.join(srv.dir, 'scacelith.db'), { readOnly: true });
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM users WHERE username = ?').get(name).n, 0);
+    db.close();
     const mail = await mailTo(email, /Confirm your e-mail address for/);
     const token = new URL(`https://x${linkPath(mail.text)}`).searchParams.get('token');
     assert.equal((await page('GET', linkPath(mail.text))).status, 200);
@@ -175,15 +191,26 @@ test('register, play, history, game record, PGN, e-mail change, export, deletion
         for (const h of hashes) assert.ok(!json.includes(h), 'no session token hash');
         assert.ok(!json.includes(alice.token));
 
-        // The deletion.
+        // The deletion; it closes the live connection too.
+        let kicked = closedAsRevoked(alice);
         r = await alice.api.post('/account/delete', { password: PASSWORD });
         assert.deepEqual([r.status, r.body], [200, { status: 'deleted' }]);
+        assert.equal(await kicked, CloseCode.Unauthorized);
         assert.equal((await alice.api.me()).status, 401);
         assert.equal((await alice.api.post('/account/export', { password: PASSWORD })).status, 401);
         assert.equal((await alice.api.login('alice_api', PASSWORD)).status, 401);
         const after = await bob.api.get(`/games/${g.id}`);
         assert.equal(after.body.white.name, `deleted#${alice.userId}`);
         assert.equal((await bob.api.get('/account/games')).body.games[0].white.name, `deleted#${alice.userId}`);
+
+        // A password reset revokes every session and closes the live connection.
+        assert.equal((await bob.api.post('/auth/password/forgot', { email: bob.email }, { token: null })).status, 202);
+        const reset = new URL(`https://x${linkPath((await mailTo(bob.email, /Reset your/)).text)}`).searchParams.get('token');
+        kicked = closedAsRevoked(bob);
+        r = await bob.api.post('/auth/password/reset', { token: reset, newPassword: 'another passphrase 42' }, { token: null });
+        assert.deepEqual([r.status, r.body], [200, { status: 'password_reset' }]);
+        assert.equal(await kicked, CloseCode.Unauthorized);
+        assert.equal((await bob.api.me()).status, 401);
     } finally {
         await closeAll(alice, bob);
     }

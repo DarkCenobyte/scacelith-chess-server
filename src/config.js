@@ -13,15 +13,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ipMatcher } from './net/ip.js';
+import { ssoOriginTag } from './auth/oidc.js';
 
 const KEYS = [];
 function key(name, spec) { KEYS.push({ name, ...spec }); }
 
 // ---- Server identity and network ----------------------------------------------------------------
-key('SERVER_NAME', { section: 'server', type: 'string', default: 'Scacelith Community Server', max: 64,
+key('SERVER_NAME', { section: 'server', type: 'string', default: 'Scacelith Community Server', max: 64, maxBytes: 64,
     desc: 'Name shown to players (menus, scoresheet "Event").' });
 key('SERVER_PUBLIC_HOST', { section: 'server', type: 'string', default: 'localhost',
-    desc: 'Public DNS name of the server, used in e-mail links and the Google SSO redirect URI.' });
+    desc: 'Public DNS name of the server, used in e-mail links, and Google sign-in works only for players who added the server under exactly this name and PUBLIC_API_PORT.' });
 key('SERVER_MOTD', { section: 'server', type: 'string', default: '', max: 200,
     desc: 'Short message of the day shown in the online menu.' });
 key('BIND_ADDRESS', { section: 'server', type: 'string', default: '0.0.0.0', desc: 'Address the API and WebSocket listeners bind to.' });
@@ -47,16 +48,16 @@ key('LISTEN_REUSE_PORT', { section: 'server', type: 'bool', default: false,
 key('LISTEN_BACKLOG', { section: 'server', type: 'int', default: 2048, min: 128, max: 65535,
     desc: 'Length of the kernel queue of new connections not yet accepted (listen backlog), which absorbs reconnection bursts. The kernel caps it at net.core.somaxconn (Linux), so raise that sysctl as well (README, kernel settings).' });
 key('SHARD_OVERLOAD_LAG_MS', { section: 'server', type: 'int', default: 250, min: 5, max: 5000,
-    desc: 'Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker.' });
+    desc: 'Event-loop delay (p99, ms) above which a worker counts as overloaded: new games are then hosted by the least loaded worker. The delay is sampled every 10 ms and includes that period (an idle worker reads about 10 ms), so a value below about 20 marks every worker overloaded.' });
 
 // ---- TLS -----------------------------------------------------------------------------------------
 key('TLS_MODE', { section: 'tls', type: 'enum', values: ['native', 'proxy', 'off'], default: 'native',
     desc: 'native: this server terminates TLS with TLS_CERT_FILE/TLS_KEY_FILE. proxy: a reverse proxy (nginx, haproxy, caddy) terminates TLS and forwards plain HTTP/WebSocket to this server on a private address. off: plain text, refused unless ALLOW_INSECURE_DEV=1 (local development only).' });
 key('TLS_CERT_FILE', { section: 'tls', type: 'path', default: '', desc: 'PEM certificate chain (fullchain). Reloaded on SIGHUP and when the file changes.' });
-key('TLS_KEY_FILE', { section: 'tls', type: 'path', default: '', secretFile: true, desc: 'PEM private key. Never commit it.' });
+key('TLS_KEY_FILE', { section: 'tls', type: 'path', default: '', desc: 'PEM private key. Never commit it.' });
 key('TLS_MIN_VERSION', { section: 'tls', type: 'enum', values: ['TLSv1.2', 'TLSv1.3'], default: 'TLSv1.2', desc: 'Oldest TLS version accepted.' });
 key('TRUSTED_PROXIES', { section: 'tls', type: 'list', default: '127.0.0.1,::1',
-    desc: 'With TLS_MODE=proxy: addresses whose X-Forwarded-For / X-Forwarded-Proto headers are trusted.' });
+    desc: 'With TLS_MODE=proxy: addresses whose X-Forwarded-For header is trusted.' });
 key('ALLOW_INSECURE_DEV', { section: 'tls', type: 'bool', default: false, desc: 'Allows TLS_MODE=off. Development only; never on a public server.' });
 
 // ---- Storage -------------------------------------------------------------------------------------
@@ -84,7 +85,7 @@ key('MFA_ENCRYPTION_KEY', { section: 'secrets', type: 'secret', default: '', min
 // ---- Accounts ------------------------------------------------------------------------------------
 key('REGISTRATION', { section: 'accounts', type: 'enum', values: ['open', 'closed'], default: 'open', desc: 'Whether new accounts can be created from the game.' });
 key('REQUIRE_EMAIL_VERIFICATION', { section: 'accounts', type: 'bool', default: true,
-    desc: 'Accounts must confirm their e-mail address before playing online.' });
+    desc: 'An account is created only once its e-mail address is confirmed with the link sent to it (24 h). false: created at once, with no link.' });
 key('USERNAME_MIN', { section: 'accounts', type: 'int', default: 3, min: 2, max: 24, desc: 'Shortest username.' });
 key('USERNAME_MAX', { section: 'accounts', type: 'int', default: 20, min: 3, max: 24, desc: 'Longest username (the scoresheet has room for 24 characters).' });
 key('PASSWORD_MIN_LENGTH', { section: 'accounts', type: 'int', default: 10, min: 8, max: 64, desc: 'Shortest password.' });
@@ -104,11 +105,11 @@ key('SMTP_USER', { section: 'mail', type: 'string', default: '', desc: 'SMTP use
 key('SMTP_PASSWORD', { section: 'mail', type: 'secretText', default: '', desc: 'SMTP password.' });
 
 // ---- Google single sign-on ---------------------------------------------------------------------------
-key('SSO_GOOGLE_ENABLED', { section: 'sso', type: 'bool', default: false, desc: 'Offers "Sign in with Google" (OpenID Connect, authorization code + PKCE through the system browser).' });
-key('GOOGLE_CLIENT_ID', { section: 'sso', type: 'string', default: '', desc: 'OAuth client ID of a "Web application" client in Google Cloud Console.' });
+key('SSO_GOOGLE_ENABLED', { section: 'sso', type: 'bool', default: false,
+    desc: 'Offers "Sign in with Google" (authorization code + PKCE; Google sends the browser back to the game on 127.0.0.1 and the game hands the code to this server). An existing account is linked only after its password, and its two-step code when on, is entered once in the game.' });
+key('GOOGLE_CLIENT_ID', { section: 'sso', type: 'string', default: '',
+    desc: 'OAuth client ID of a "Desktop app" client (Google Auth Platform > Clients). Not a "Web application" client: Google sends the browser back to the game on 127.0.0.1 and only a Desktop app client accepts that.' });
 key('GOOGLE_CLIENT_SECRET', { section: 'sso', type: 'secretText', default: '', desc: 'OAuth client secret. Never commit it.' });
-key('GOOGLE_REDIRECT_URI', { section: 'sso', type: 'string', default: '',
-    desc: 'Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST/auth/sso/google/callback, with :PUBLIC_API_PORT after the host when that port is not 443).' });
 
 // ---- Protection per address (background layer, net/ipguard.js) -------------------------------------
 // Every request and every connection, before routing and before TLS; quotas per signed-in account
@@ -179,6 +180,10 @@ key('AUTH_REAUTH_PER_USER', { section: 'limits', type: 'int', default: 10, min: 
     desc: 'Account changes that ask for the password or a code (password, two-step verification, e-mail, data export, deletion) per 10 minutes for one account, whole server, from any address, on top of the per-address limit AUTH_RATE_PER_IP: a stolen session used from many addresses cannot guess the password faster.' });
 key('USER_RATE_PER_MIN', { section: 'limits', type: 'int', default: 120, min: 1,
     desc: 'API requests per minute of one signed-in account (every request with a valid session token), all endpoints together, whatever its address. Each worker allows its share, max(1, min(this, ceil(2 x this / WORKERS))) (all of it with 1 or 2 workers, half with 4), with a burst of half a minute; beyond it 429 rate_limited with Retry-After. The game\'s busiest use, paging through the history, is about one request per second.' });
+key('CHALLENGE_UNPLAYED_PER_MIN', { section: 'limits', type: 'int', default: 5, min: 1,
+    desc: 'Direct challenges of one player that may end withdrawn or declined within a minute (each one popped up on its target\'s screen, and no game came of it); the player\'s next direct challenge is then refused with ChallengeLimit until the minute has passed, so that create/cancel cycles cannot flood a player with challenges. Accepted challenges and private games do not count.' });
+key('PRIVATE_CODE_FAILURES_PER_MIN', { section: 'limits', type: 'int', default: 10, min: 1,
+    desc: 'Wrong private game codes one player may try within a minute; ChallengeJoinCode is then refused with RateLimited, even for a right code, until the minute has passed, so that the codes of other players\' private games cannot be guessed.' });
 key('POW_REGISTER_BITS', { section: 'limits', type: 'int', default: 18, min: 0, max: 26, desc: 'Proof-of-work difficulty (leading zero bits of SHA-256) required to register; 0 disables it.' });
 key('POW_LOGIN_BITS', { section: 'limits', type: 'int', default: 18, min: 0, max: 26, desc: 'Proof-of-work difficulty required to log in while the server sees a credential-stuffing wave; 0 disables it.' });
 key('POW_LOGIN_TRIGGER_PER_MIN', { section: 'limits', type: 'int', default: 30, min: 1,
@@ -188,7 +193,7 @@ key('PASSWORD_HASH_CONCURRENCY', { section: 'limits', type: 'int', default: 1, m
 key('PASSWORD_HASH_QUEUE_MAX', { section: 'limits', type: 'int', default: 32, min: 0,
     desc: 'Password hashes that may wait for a free slot in one worker process; one more is refused at once with 503 server_busy and a Retry-After of 5 to 15 s (0: no waiting at all). Once half of them wait, one client (an IPv4 address, or an IPv6 /48) may have at most PASSWORD_HASH_WAITERS_PER_SOURCE of them waiting; its next one is refused with 429 rate_limited.' });
 key('PASSWORD_HASH_WAITERS_PER_SOURCE', { section: 'limits', type: 'int', default: 2, min: 1,
-    desc: 'Password hashes one client (an IPv4 address, or an IPv6 /48) may have waiting in one worker process once PASSWORD_HASH_QUEUE_MAX is at least half full; its next request is then refused with 429 rate_limited and a Retry-After of 5 to 15 s, and that refused attempt does not count against AUTH_RATE_PER_IP. While less than half of the queue waits, one client may queue more, so that players who log in together behind one address (a school or a company network) are served when the server is not busy, and one client never holds more than half of the queue. Raise it for such a site if its players log in while the server is busy, together with MAX_PENDING_HANDSHAKES_PER_IP and AUTH_RATE_PER_IP.' });
+    desc: 'Password hashes one client (an IPv4 address, or an IPv6 /48) may have waiting in one worker process once PASSWORD_HASH_QUEUE_MAX is at least half full; its next request is then refused with 429 rate_limited and a Retry-After of 5 to 15 s, and that refused attempt does not count against AUTH_RATE_PER_IP. While less than half of the queue waits, one client may queue more, so that players who log in together behind one address (a school or a company network) are served when the server is not busy, and, as long as PASSWORD_HASH_WAITERS_PER_SOURCE is at most half of PASSWORD_HASH_QUEUE_MAX, one client never holds more than half of the queue. Raise it for such a site if its players log in while the server is busy, together with MAX_PENDING_HANDSHAKES_PER_IP and AUTH_RATE_PER_IP.' });
 key('PASSWORD_HASH_QUEUE_TIMEOUT_MS', { section: 'limits', type: 'int', default: 10000, min: 100, max: 13000,
     desc: 'Longest wait for a password hash slot, for all the hashes of one request together (a password change hashes twice); the request is then refused with 503 server_busy. At most 13000: the game gives up after 15 s, and the hash itself takes a second or two, so that the player sees the "busy" answer rather than a timeout.' });
 
@@ -229,7 +234,7 @@ key('MATCH_WINDOW_STEP_MS', { section: 'matchmaking', type: 'int', default: 5000
 key('MATCH_WINDOW_MAX', { section: 'matchmaking', type: 'int', default: 500, min: 0, desc: 'Widest window (reached after about a minute with the defaults).' });
 key('MATCH_PROVISIONAL_BONUS', { section: 'matchmaking', type: 'int', default: 150, min: 0, desc: 'Extra window for a provisional rating (its value is still uncertain).' });
 key('MATCH_REPEAT_LIMIT', { section: 'matchmaking', type: 'int', default: 3, min: 1,
-    desc: 'Rated games two players may be paired for within MATCH_REPEAT_WINDOW_MS by the matchmaker (limits rating manipulation between friends).' });
+    desc: 'Rated games two players may play together within MATCH_REPEAT_WINDOW_MS, whatever made them (queue, direct challenge, private game, rematch); beyond it the matchmaker no longer pairs them, and their rated challenges, private games and rematches are refused (limits rating manipulation between friends). Unrated games stay free. The counts are kept in memory: a restart forgets them.' });
 key('MATCH_REPEAT_WINDOW_MS', { section: 'matchmaking', type: 'int', default: 3600000, min: 60000, desc: 'See MATCH_REPEAT_LIMIT.' });
 key('CONDUCT_ABANDON_LIMIT', { section: 'matchmaking', type: 'int', default: 3, min: 1,
     desc: 'Abandoned / aborted / no-show games in 24 hours before rated matchmaking is paused for the player (15 min, then 1 h, then 6 h).' });
@@ -286,7 +291,8 @@ key('GIF_IP_RENDERS_PER_HOUR', { section: 'gif', type: 'int', default: 120, min:
 // ---- Observability -------------------------------------------------------------------------------------
 key('METRICS_PORT', { section: 'observability', type: 'port', default: 9464, desc: 'Prometheus metrics and health endpoint (plain HTTP; 0 disables it).' });
 key('METRICS_BIND', { section: 'observability', type: 'string', default: '127.0.0.1', desc: 'Keep it private: 127.0.0.1 or an internal address.' });
-key('METRICS_TOKEN', { section: 'observability', type: 'secret', default: '', desc: 'Optional bearer token required to read the metrics.' });
+key('METRICS_TOKEN', { section: 'observability', type: 'secretText', default: '',
+    desc: 'Optional bearer token required to read the metrics: /metrics then needs the header "Authorization: Bearer <token>" with this exact text (no spaces).' });
 key('LOG_LEVEL', { section: 'observability', type: 'enum', values: ['debug', 'info', 'warn', 'error'], default: 'info', desc: 'Log verbosity.' });
 key('LOG_FORMAT', { section: 'observability', type: 'enum', values: ['json', 'pretty'], default: 'json', desc: 'JSON lines (for log collectors) or readable text.' });
 key('LOG_IP', { section: 'observability', type: 'enum', values: ['truncated', 'full', 'hashed'], default: 'truncated',
@@ -294,7 +300,7 @@ key('LOG_IP', { section: 'observability', type: 'enum', values: ['truncated', 'f
 key('RETENTION_SECURITY_DAYS', { section: 'observability', type: 'int', default: 90, min: 1, desc: 'Security events (failed logins, anomalies without sanction) are deleted after this many days.' });
 key('RETENTION_IP_DAYS', { section: 'observability', type: 'int', default: 30, min: 1, desc: 'Stored IP addresses (sessions, security events) are erased after this many days.' });
 key('RETENTION_INTERVAL_MS', { section: 'observability', type: 'int', default: 3600000, min: 60000, max: 2147483647,
-    desc: 'Interval of the retention purge run by the primary (expired sessions and tokens, old security events, anomalies, conduct events and failed analysis jobs, IP erasure). The first run starts about a minute after the server starts. At most 2147483647 (about 24.8 days, the longest timer of Node.js).' });
+    desc: 'Interval of the retention purge run by the primary (expired sessions, tokens and pending signups, old security events, anomalies, conduct events and failed analysis jobs, IP erasure). The first run starts about a minute after the server starts. At most 2147483647 (about 24.8 days, the longest timer of Node.js).' });
 
 // ---------------------------------------------------------------------------------------------------------
 
@@ -313,8 +319,9 @@ export function defaultPendingPerGroup(maxPending) {
 export class ConfigError extends Error {}
 
 // Parses KEY=value lines. Supports comments (#), blank lines, optional "export ", and values in
-// single or double quotes (double quotes understand \n, \" and \\).
-export function parseEnvFile(text) {
+// single or double quotes (double quotes understand \n, \" and \\). A quoted value followed by a
+// comment keeps its quotes; `notes`, when given, receives a sentence for each such line.
+export function parseEnvFile(text, notes = null) {
     const out = {};
     for (const raw of text.split(/\r?\n/)) {
         const line = raw.trim();
@@ -328,7 +335,14 @@ export function parseEnvFile(text) {
             v = v.slice(1, -1);
         } else {
             const hash = v.indexOf(' #');
-            if (hash >= 0) v = v.slice(0, hash).trim();
+            if (hash >= 0) {
+                v = v.slice(0, hash).trim();
+                if (notes && (v[0] === '"' || v[0] === "'")) {
+                    notes.push(`${m[1]}: the value is quoted and followed by a comment on the same line of the .env file, `
+                        + 'so its quotes are part of the value. Put the comment on a line of its own (check the value first: '
+                        + 'a secret changes when its quotes go).');
+                }
+            }
         }
         out[m[1]] = v;
     }
@@ -348,25 +362,45 @@ function toCamel(name) {
 // Returns the frozen configuration. 'env' defaults to process.env; 'envFile' (default: the
 // SCACELITH_ENV_FILE variable, else ./.env when it exists) supplies values the environment does
 // not set. Values are exposed in camelCase (API_PORT -> apiPort); secrets as Buffers (keys of
-// type secret) and never appear in describe()/toJSON().
+// type secret) and never appear in describe()/toJSON(). `rawValues` (not enumerable) holds the
+// text of every key that was set, *_FILE contents included: loadConfig({ env: rawValues,
+// envFile: '' }) gives the same configuration without reading any file again (primaryConfig).
 export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } = {}) {
-    const fileName = envFile ?? env.SCACELITH_ENV_FILE ?? path.join(cwd, '.env');
-    let fileVars = {};
-    if (fileName && fs.existsSync(fileName)) fileVars = parseEnvFile(fs.readFileSync(fileName, 'utf8'));
-    const get = (n) => (env[n] !== undefined ? env[n] : fileVars[n]);
-
+    const named = envFile ?? env.SCACELITH_ENV_FILE;            // '' = no file
+    const fileName = named ?? path.join(cwd, '.env');
     const cfg = {};
     const errors = [];
+    const notes = [];           // configWarnings sentences found while loading
+    const rawValues = {};
+    let fileVars = {};
+    if (named) {
+        // A file named explicitly must be there: a typo would start the server on the defaults.
+        try { fileVars = parseEnvFile(fs.readFileSync(named, 'utf8'), notes); } catch (e) {
+            errors.push(`SCACELITH_ENV_FILE: cannot read ${named} (${e.code || e.message}).`);
+        }
+    } else if (fileName && fs.existsSync(fileName)) fileVars = parseEnvFile(fs.readFileSync(fileName, 'utf8'), notes);
+    const get = (n) => (env[n] !== undefined ? env[n] : fileVars[n]);
+
+    // The key is read from TLS_KEY_FILE already; its text must never become a path (and a log line).
+    const keyFileRef = get('TLS_KEY_FILE_FILE');
+    if (keyFileRef !== undefined && keyFileRef !== '') errors.push('TLS_KEY_FILE already names the key file; TLS_KEY_FILE_FILE is not supported.');
     for (const k of KEYS) {
         let raw = get(k.name);
         const fileRef = get(k.name + '_FILE');
         const secret = k.type === 'secret' || k.type === 'secretText';
-        if ((secret || k.secretFile) && fileRef && raw === undefined) {
+        // An empty KEY= (the .env.example line of a required secret, an unset docker-compose
+        // variable) does not hide KEY_FILE for a required secret; an optional one stays unset.
+        if (secret && fileRef && raw === '' && !k.required) {
+            notes.push(`${k.name} is set but empty, so ${k.name}_FILE is not read and ${k.name} is unset. `
+                + `Remove the empty ${k.name}= (or ${k.name}_FILE) to say which one you mean.`);
+        }
+        if (secret && fileRef && (raw === undefined || (raw === '' && k.required))) {
             try { raw = fs.readFileSync(path.resolve(cwd, fileRef), 'utf8').trim(); } catch (e) {
                 errors.push(`${k.name}_FILE: cannot read ${fileRef} (${e.code || e.message})`);
                 continue;
             }
         }
+        if (raw !== undefined) rawValues[k.name] = raw;
         const has = raw !== undefined && raw !== '';
         let v;
         if (!has) {
@@ -381,6 +415,8 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
             case 'string': case 'path':
                 v = String(raw);
                 if (k.max && v.length > k.max) errors.push(`${k.name}: at most ${k.max} characters.`);
+                else if (k.maxBytes && Buffer.byteLength(v, 'utf8') > k.maxBytes) errors.push(`${k.name}: at most ${k.maxBytes} bytes in UTF-8 (fewer characters with accents or other scripts).`);
+                if (k.maxBytes && v.includes('\0')) errors.push(`${k.name}: no NUL character.`);
                 if (k.type === 'path' && v) v = path.resolve(cwd, v);
                 break;
             case 'int': case 'port': {
@@ -442,6 +478,7 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     }
     if (cfg.abuseBlockBaseSec > cfg.abuseBlockMaxSec) errors.push('ABUSE_BLOCK_BASE_SEC must not exceed ABUSE_BLOCK_MAX_SEC.');
     try { ipMatcher(cfg.abuseExempt); } catch (e) { errors.push(`ABUSE_EXEMPT: ${e.message}.`); }
+    if (cfg.tlsMode === 'proxy') { try { ipMatcher(cfg.trustedProxies); } catch (e) { errors.push(`TRUSTED_PROXIES: ${e.message}.`); } }
     const w = String(cfg.workers).trim().toLowerCase();
     if (w === 'auto') cfg.workers = Math.max(1, Math.min(16, os.availableParallelism ? os.availableParallelism() : os.cpus().length));
     else if (/^\d+$/.test(w) && +w >= 1 && +w <= 64) cfg.workers = +w;
@@ -451,6 +488,11 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     if (cfg.tlsMode === 'off' && !cfg.allowInsecureDev) errors.push('TLS_MODE=off is refused unless ALLOW_INSECURE_DEV=1 (never on a public server).');
     if (cfg.usernameMin > cfg.usernameMax) errors.push('USERNAME_MIN must not exceed USERNAME_MAX.');
     if (cfg.ssoGoogleEnabled && (!cfg.googleClientId || !cfg.googleClientSecret)) errors.push('SSO_GOOGLE_ENABLED needs GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.');
+    // No longer a key; without this note it would be ignored silently.
+    const oldRedirect = get('GOOGLE_REDIRECT_URI');
+    if (oldRedirect !== undefined && oldRedirect !== '') {
+        notes.push('GOOGLE_REDIRECT_URI is no longer used: Google sign-in now returns to the game on 127.0.0.1. Remove it and use a "Desktop app" OAuth client.');
+    }
     if (cfg.mailTransport === 'smtp' && !cfg.smtpHost) errors.push('MAIL_TRANSPORT=smtp needs SMTP_HOST.');
     if (cfg.analysisDepthFast >= cfg.analysisDepthDeep) errors.push('ANALYSIS_DEPTH_FAST must be lower than ANALYSIS_DEPTH_DEEP.');
     if (cfg.authForgotPerDay < cfg.authForgotPerHour) errors.push('AUTH_FORGOT_PER_DAY must be at least AUTH_FORGOT_PER_HOUR.');
@@ -471,10 +513,11 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     } else if (Number.isInteger(cfg.recoveryGraceMs)) {
         cfg.recoveryClockHoldMs = Math.min(cfg.recoveryClockHoldMs, cfg.recoveryGraceMs - 1);
     }
-    if (!cfg.googleRedirectUri) {
-        const port = cfg.publicApiPort === 443 ? '' : `:${cfg.publicApiPort}`;
-        cfg.googleRedirectUri = `https://${cfg.serverPublicHost}${port}/auth/sso/google/callback`;
-    }
+    // The origin players reach the API at, and its tag in the Google sign-in redirect (auth/oidc.js).
+    let ssoHost = String(cfg.serverPublicHost).toLowerCase();
+    if (ssoHost.includes(':') && !ssoHost.startsWith('[')) ssoHost = `[${ssoHost}]`;
+    cfg.ssoOrigin = `${ssoHost}:${cfg.publicApiPort}`;
+    cfg.ssoRedirectTag = ssoOriginTag(cfg.ssoOrigin);
     const cats = [];
     for (const c of cfg.ratedCategories) {
         const m = /^(\d{1,3})\+(\d{1,3})$/.exec(c);
@@ -485,7 +528,23 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
 
     if (errors.length) throw new ConfigError('Invalid configuration:\n  - ' + errors.join('\n  - '));
     Object.defineProperty(cfg, 'toJSON', { value: () => describe(cfg), enumerable: false });
+    Object.defineProperty(cfg, 'loadNotes', { value: Object.freeze(notes), enumerable: false });
+    Object.defineProperty(cfg, 'rawValues', { value: Object.freeze(rawValues), enumerable: false });
     return Object.freeze(cfg);
+}
+
+/**
+ * The configuration of a process the primary started (a shard, the analysis process): the one the
+ * primary loaded at its start (environment, .env and the *_FILE secrets as it read them then),
+ * asked for over IPC ('config.snapshot'). Such a process restarted after an edit of .env or of a
+ * secret file keeps the settings of the primary and of its peers (bus token, journal, database)
+ * until the whole server restarts.
+ * @param {{ request(type: string): Promise<any> }} primary the Ipc to the primary
+ */
+export async function primaryConfig(primary) {
+    const snapshot = await primary.request('config.snapshot');
+    if (!snapshot || typeof snapshot !== 'object') throw new Error('the primary sent no configuration');
+    return loadConfig({ env: snapshot, envFile: '' });
 }
 
 /**
@@ -512,7 +571,7 @@ export function threadPoolSize(raw) {
  * @returns {string[]}
  */
 export function configWarnings(cfg, env = process.env) {
-    const out = [];
+    const out = [...(cfg.loadNotes || [])];
     const pool = threadPoolSize(env.UV_THREADPOOL_SIZE);
     if (cfg.passwordHashConcurrency >= pool) {
         out.push(`PASSWORD_HASH_CONCURRENCY (${cfg.passwordHashConcurrency}) is not below the size of the libuv thread pool `
@@ -524,6 +583,22 @@ export function configWarnings(cfg, env = process.env) {
         out.push(`IP_MAX_CONNECTIONS (${cfg.ipMaxConnections}) is below twice MAX_CONNECTIONS_PER_IP (${cfg.maxConnectionsPerIp}): `
             + 'the players behind one address (a school, a mobile operator) could be refused before TLS while their WebSockets '
             + 'and API connections are still within MAX_CONNECTIONS_PER_IP. Raise IP_MAX_CONNECTIONS, or list the address in ABUSE_EXEMPT.');
+    }
+    // A connection that only answers the pings is silent for up to an interval plus the sweeper
+    // tick (250 ms) when the router checks it (cluster/router.js heartbeat), plus round trip and
+    // event-loop lag.
+    if (cfg.heartbeatTimeoutMs < cfg.heartbeatIntervalMs + 2250) {
+        out.push(`HEARTBEAT_TIMEOUT_MS (${cfg.heartbeatTimeoutMs}) is less than HEARTBEAT_INTERVAL_MS (${cfg.heartbeatIntervalMs}) + 2250: `
+            + 'healthy idle connections, which only answer the server\'s pings, would be closed as silent (\'timeout\') and reconnect. '
+            + 'Raise HEARTBEAT_TIMEOUT_MS (the default is 3 times the interval).');
+    }
+    if (cfg.ssoGoogleEnabled && !cfg.requireEmailVerification) {
+        out.push('SSO_GOOGLE_ENABLED with REQUIRE_EMAIL_VERIFICATION=false: anyone can register a password account with someone else\'s e-mail '
+            + 'address. Google sign-in will not open that account without its password, but the address owner cannot create a Google account '
+            + 'with that address until she takes it back with "Forgot password" (needs MAIL_TRANSPORT=smtp) or you free it.');
+    }
+    if (cfg.ssoGoogleEnabled && String(cfg.serverPublicHost).toLowerCase() === 'localhost') {
+        out.push(`SSO_GOOGLE_ENABLED with SERVER_PUBLIC_HOST=localhost: Google sign-in only works for players who add this server as localhost:${cfg.publicApiPort}.`);
     }
     return out;
 }

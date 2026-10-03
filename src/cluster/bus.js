@@ -27,7 +27,8 @@
 //   transport.close() -> Promise<void>
 //   transport.describe(shard) -> string                               for logs
 // unixTransport (Unix domain sockets in runDir, named pipes on Windows) is the single-machine
-// implementation; tcpTransport (plain TCP or mutual TLS) the multi-machine one.
+// implementation; tcpTransport (plain TCP or mutual TLS) the multi-machine one, which no
+// configuration key selects yet (the shards run unixTransport, shard.js createBus; tests use both).
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -51,18 +52,35 @@ export function busToken(secret, serverId) {
     return crypto.createHmac('sha256', secret || Buffer.alloc(0)).update(`scacelith-bus-v1:${serverId}`).digest();
 }
 
+const MAX_SOCKET_PATH_BYTES = 100;                       // sun_path is 104-108 bytes
+
 /**
- * Single-machine transport: Unix domain sockets (`<runDir>/bus-<shard>.sock`, mode 0600) or, on
- * Windows, named pipes (`\\.\pipe\scacelith-<serverId>-<shard>`).
- * @param {{ runDir: string, serverId: string, platform?: string }} o
+ * The directory for the bus sockets whose path would be too long in runDir: made once by the
+ * primary (primary-main.js), which gives it to every worker; '' when every socket fits in runDir.
+ * A random name of mode 0700 (mkdtemp), so that no other local user can take a socket's place in
+ * the shared tmp directory.
+ * @param {string} runDir
+ * @param {string} [platform]
  */
-export function unixTransport({ runDir, serverId, platform = process.platform }) {
+export function makeBusFallbackDir(runDir, platform = process.platform) {
+    if (platform === 'win32' || Buffer.byteLength(path.join(runDir, 'bus-63.sock')) <= MAX_SOCKET_PATH_BYTES) return '';
+    return fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-bus-'));
+}
+
+/**
+ * Single-machine transport: Unix domain sockets (`<runDir>/bus-<shard>.sock`, mode 0600, or in
+ * fallbackDir when that path is too long, makeBusFallbackDir) or, on Windows, named pipes
+ * (`\\.\pipe\scacelith-<serverId>-<shard>`).
+ * @param {{ runDir: string, serverId: string, fallbackDir?: string, platform?: string }} o
+ */
+export function unixTransport({ runDir, serverId, fallbackDir = '', platform = process.platform }) {
     let server = null;
     const pathOf = (shard) => {
         if (platform === 'win32') return `\\\\.\\pipe\\scacelith-${serverId}-${shard}`;
         const p = path.join(runDir, `bus-${shard}.sock`);
-        if (Buffer.byteLength(p) <= 100) return p;           // sun_path is 104-108 bytes
-        return path.join(os.tmpdir(), `scacelith-${String(serverId).slice(0, 8)}-bus-${shard}.sock`);
+        if (Buffer.byteLength(p) <= MAX_SOCKET_PATH_BYTES) return p;
+        if (!fallbackDir) throw new Error(`bus socket path too long: ${p} (use a shorter DATA_DIR)`);
+        return path.join(fallbackDir, `bus-${shard}.sock`);
     };
     return {
         kind: 'unix',
@@ -392,6 +410,8 @@ export class Bus {
             if (avail < 4) { link.rest = Buffer.from(buf.subarray(off)); link.restNeed = 4; return true; }
             const len = buf.readUInt32LE(off);
             if (len < BUS_HEADER_BYTES - 4 || len > this.maxFrameBytes) { this._badLink(link, 'bad frame length'); return false; }
+            // The first frame is a Hello, of a known length: nothing longer is buffered before it is checked.
+            if (link.peer < 0 && len !== BUS_HEADER_BYTES - 4 + 2 + TOKEN_BYTES) { this._badLink(link, 'bad hello'); return false; }
             const total = 4 + len;
             if (avail < total) { link.rest = Buffer.from(buf.subarray(off)); link.restNeed = total; return true; }
             const kind = buf[off + 4];

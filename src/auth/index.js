@@ -20,11 +20,12 @@
 // address or an IPv6 /48) may have at most PASSWORD_HASH_WAITERS_PER_SOURCE hashes waiting. A
 // refused hash fails the request before the account changed, with 503 server_busy (queue full or
 // wait expired) or 429 rate_limited (too many waiting from that source), each with a random
-// Retry-After of 5 to 15 s: no failed login is counted and a reset link stays valid (a proof of
-// work already given is spent, as for any answer). The 429 of a source also gives the request's
-// auth rate tokens back (errors.js hashRateLimited, http/server.js). A new password hash is only
-// written while the stored one is still the hash the request checked (svc.setPasswordHashIf,
-// svc.stillCurrent), so a reset always wins a race.
+// Retry-After of 5 to 15 s: no failed login is counted (except by the password step of a Google
+// link, whose try of the ticket and failure of the account were taken before the hash, login.js)
+// and a reset link stays valid (a proof of work already given is spent, as for any answer). The 429
+// of a source also gives the request's auth rate tokens back (errors.js hashRateLimited,
+// http/server.js). A new password hash is only written while the stored one is still the hash the
+// request checked (svc.setPasswordHashIf, svc.stillCurrent), so a reset always wins a race.
 
 import { createAccounts } from './accounts.js';
 import { AuthError, hashRateLimited, serverBusy } from './errors.js';
@@ -184,7 +185,6 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
      * @returns {string|null}
      */
     svc.pendingEmail = (userId) => {
-        if (typeof store.tokens.liveForUser !== 'function') return null;
         const row = store.tokens.liveForUser(userId, 'email_change', now());
         const email = row ? dataOf(row).email : null;
         return typeof email === 'string' && email ? email : null;
@@ -196,9 +196,7 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
      */
     svc.accountView = (user) => {
         let googleLinked = !!user.googleLinked;
-        if (typeof store.sso.forUser === 'function') {
-            try { googleLinked = (store.sso.forUser(user.id) || []).some((l) => l.provider === 'google'); } catch { /* keep default */ }
-        }
+        try { googleLinked = (store.sso.forUser(user.id) || []).some((l) => l.provider === 'google'); } catch { /* keep default */ }
         let pendingEmail = null;
         try { pendingEmail = svc.pendingEmail(user.id); } catch { /* informative only */ }
         return {
@@ -234,20 +232,21 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
     else if (config.ssoGoogleEnabled && config.googleClientId) {
         svc.oidc = createOidcClient({
             clientId: config.googleClientId, clientSecret: secretText(config.googleClientSecret),
-            redirectUri: config.googleRedirectUri, endpoints: oidcEndpoints, now, allowHttp: oidcAllowHttp,
+            endpoints: oidcEndpoints, now, allowHttp: oidcAllowHttp,
         });
     } else svc.oidc = null;
+    // After svc.login: the MFA step of a Google link calls svc.sso.linkProven when it runs.
     svc.sso = createSso(svc);
 
     // Prepare the dummy hash now, so that the first login of an unknown user is not faster (it
     // takes a slot of the hash limiter like any other hash).
-    Promise.resolve().then(() => svc.hasher.warmUp?.()).catch(() => {});
+    Promise.resolve().then(() => svc.hasher.warmUp?.()).catch((err) => log.warn('password hashing warm-up failed', { err }));
 
     const a = svc.accounts, l = svc.login, s = svc.sso;
     return {
         /** Validates a session token (sync). */
         validateToken: (token) => svc.sessions.validate(token),
-        /** Drops cached sessions ({ userId, tokenHashes }: empty tokenHashes = every session of the user). */
+        /** Drops cached sessions ({ userId, tokenHashes }: null, absent or empty tokenHashes = every session of the user). */
         invalidate: (payload) => svc.sessions.invalidate(payload || {}),
 
         register: a.register,
@@ -261,6 +260,7 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
         forgotPassword: a.forgotPassword,
         resetPassword: a.resetPassword,
         peekToken: a.peekToken,
+        peekVerification: a.peekVerification,
         verifyEmail: a.verifyEmail,
         me: a.me,
         changePassword: a.changePassword,
@@ -276,13 +276,11 @@ export function createAuth({ config, store, primary = null, log, now = Date.now,
         exportAccount: a.exportAccount,
         /** The account as GET /account/me shows it (svc.accountView). */
         accountView: (user) => svc.accountView(user),
-        sso: { enabled: s.enabled, start: s.start, callback: s.callback, poll: s.poll, complete: s.complete },
+        sso: { enabled: s.enabled, start: s.start, finish: s.finish, link: s.link, complete: s.complete },
 
         /** True while the login proof of work is on (credential-stuffing wave). */
         loginPowActive: () => l.powActive(),
-        mailer: svc.mailer,
         events: svc.events,
-        pow: svc.pow,
         /** Flushes pending security events (shutdown). */
         close() { svc.events.close(); },
         _svc: svc,

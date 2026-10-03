@@ -2,6 +2,7 @@
 // new password (the token travels in the form; it is single use and expires after an hour).
 
 import { escapeHtml, renderMessage, renderPage } from './layout.js';
+import { PASSWORD_MAX_BYTES } from '../../security/password.js';
 
 /**
  * @param {{ serverName: string, token: string, minLength: number, error?: string }} p
@@ -16,8 +17,8 @@ export function resetForm({ serverName, token, minLength, error = '' }) {
             `<p>At least ${minLength} characters. Every device signed in to your account will be signed out.</p>` +
             '<form method="post" action="/reset-password">' +
             `<input type="hidden" name="token" value="${escapeHtml(token)}">` +
-            `<label for="np">New password</label><input id="np" type="password" name="newPassword" autocomplete="new-password" minlength="${minLength}" maxlength="256" required>` +
-            `<label for="cp">Repeat the new password</label><input id="cp" type="password" name="confirmPassword" autocomplete="new-password" minlength="${minLength}" maxlength="256" required>` +
+            `<label for="np">New password</label><input id="np" type="password" name="newPassword" autocomplete="new-password" minlength="${minLength}" maxlength="${PASSWORD_MAX_BYTES}" required>` +
+            `<label for="cp">Repeat the new password</label><input id="cp" type="password" name="confirmPassword" autocomplete="new-password" minlength="${minLength}" maxlength="${PASSWORD_MAX_BYTES}" required>` +
             '<button type="submit">Change my password</button></form>',
     });
 }

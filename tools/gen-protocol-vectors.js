@@ -10,10 +10,11 @@
 // File format (self-describing, deterministic):
 //   valid[]:     { name, type, dir, note, fields, hex }
 //                name = the message name of encode.<name> / the C++ struct (C_/S_ prefixes for
-//                Ping and Pong), type = its id, fields = every field by its schema name (enums as
-//                numbers, bools as true/false, id53 and f64 as JSON numbers, structs as objects,
-//                lists as arrays), hex = the exact encoding (lower-case). Decoding hex gives
-//                { type, ...fields } and encoding fields gives hex.
+//                the names of both directions: Ping, Pong, Gesture), type = its id, fields =
+//                every field by its schema name (enums as numbers, bools as true/false, id53 and
+//                f64 as JSON numbers, structs as objects, lists as arrays), hex = the exact
+//                encoding (lower-case). Decoding hex gives { type, ...fields } and encoding
+//                fields gives hex.
 //   malformed[]: { name, type, dir, note, reason, hex }
 //                bytes that a decoder receiving them in direction `dir` must refuse; name/type
 //                describe the type byte (null when unknown or empty); reason is the JS codec's
@@ -96,7 +97,7 @@ function snapshot(over = {}) {
 // ---- typical value of each message ---------------------------------------------------------------
 
 const TYPICAL = {
-    Hello: { seq: 1, proto: 2, schema: SCHEMA_HASH, client: 'Scacelith/1.4.0 (Windows x64)', token: TOKEN },
+    Hello: { seq: 1, proto: 3, schema: SCHEMA_HASH, client: 'Scacelith/1.4.0 (Windows x64)', token: TOKEN },
     C_Ping: { seq: 7, nonce: 123456 },
     C_Pong: { seq: 8, nonce: 0xdeadbeef },
     QueueJoin: { seq: 2, category: '3+2', rated: true },
@@ -115,7 +116,7 @@ const TYPICAL = {
     Resync: { seq: 10, game: GAME },
     Rematch: { seq: 30, game: GAME, accept: true },
     C_Gesture: { seq: 31, game: GAME, ply: 6, touch: 5, aim: 26, placed: 0, flags: 0, yaw: -212, pitch: -598, lean: 35 },
-    Welcome: { proto: 2, serverTime: T0, userId: 1017, username: 'Łukasz', serverName: 'Scacelith Community Server', heartbeatMs: 10000, clientPingMs: 10000, maxMsgPerSec: 20, activeGame: 0, gestureRate: 4, gestureBurst: 8 },
+    Welcome: { proto: 3, serverTime: T0, userId: 1017, username: 'Łukasz', serverName: 'Scacelith Community Server', heartbeatMs: 10000, clientPingMs: 10000, maxMsgPerSec: 20, activeGame: 0, gestureRate: 4, gestureBurst: 8 },
     Error: { ref: 12, code: E.IllegalMove, fatal: false, game: GAME },
     S_Ping: { nonce: 991, serverTime: T0 },
     S_Pong: { nonce: 123456, serverTime: T0 + 12.25 },
@@ -315,9 +316,9 @@ export function buildVectors() {
     ok('Move', { seq: 14, game: 0xffffffff, ply: 8, move: mv('e1g1'), posHash: 0x12345678, thinkMs: 812, drawOffer: false }, 'game = 2^32 - 1, castling e1g1');
     ok('Resign', { seq: 1, game: 1 }, 'smallest game id');
     ok('Rematch', { seq: 31, game: MAX53 - 1, accept: false }, 'decline, game = 2^53 - 2');
-    ok('Welcome', { proto: 2, serverTime: 0, userId: 0xffffffff, username: 'ユキユキユキユキ', serverName: '♜'.repeat(21) + 'x', heartbeatMs: 0, clientPingMs: 0xffffffff, maxMsgPerSec: 0xffff, activeGame: MAX53, gestureRate: 60, gestureBurst: 120 },
+    ok('Welcome', { proto: 3, serverTime: 0, userId: 0xffffffff, username: 'ユキユキユキユキ', serverName: '♜'.repeat(21) + 'x', heartbeatMs: 0, clientPingMs: 0xffffffff, maxMsgPerSec: 0xffff, activeGame: MAX53, gestureRate: 60, gestureBurst: 120 },
         'username at its maximum (24 bytes of 3-byte characters), serverName at its maximum (64 bytes), activeGame = 2^53 - 1, serverTime 0');
-    ok('Welcome', { proto: 2, serverTime: -123456.789, userId: 1, username: 'مُحَمَّد', serverName: '', heartbeatMs: 10000, clientPingMs: 0, maxMsgPerSec: 20, activeGame: GAME, gestureRate: 0, gestureBurst: 0 },
+    ok('Welcome', { proto: 3, serverTime: -123456.789, userId: 1, username: 'مُحَمَّد', serverName: '', heartbeatMs: 10000, clientPingMs: 0, maxMsgPerSec: 20, activeGame: GAME, gestureRate: 0, gestureBurst: 0 },
         'negative f64, Arabic username, empty serverName');
     ok('Error', { ref: 0, code: E.CheatDetected, fatal: true, game: 0 }, 'fatal, no request, no game');
     ok('Error', { ref: 1, code: E.Malformed, fatal: true, game: 0 }, 'smallest ErrorCode');
@@ -371,6 +372,7 @@ export function buildVectors() {
     const u8 = (v) => (b, o) => { b[o] = v; };
     const u16 = (v) => (b, o) => { b.writeUInt16LE(v, o); };
     const u32at = (d, v) => (b, o) => { b.writeUInt32LE(v, o + d); };
+    const i32 = (v) => (b, o) => { b.writeInt32LE(v, o); };
     const f64bits = (hi, lo) => (b, o) => { b.writeUInt32LE(lo, o); b.writeUInt32LE(hi, o + 4); };
     // Replaces the payload of the str8 at fieldPath (same length) with raw bytes.
     const strBytes = (key, fields, fieldPath, raw) => {
@@ -478,6 +480,24 @@ export function buildVectors() {
     bad(patch('ChallengeCreate', T.ChallengeCreate, 'baseSec', u16(14)), 'c2s', 'baseSec below min', 'ChallengeCreate.baseSec = 14 (min 15)');
     bad(patch('ChallengeCreate', T.ChallengeCreate, 'baseSec', u16(10801)), 'c2s', 'baseSec above max', 'ChallengeCreate.baseSec = 10801 (max 10800)');
     bad(patch('ChallengeCreate', T.ChallengeCreate, 'incSec', u8(181)), 'c2s', 'incSec above max', 'ChallengeCreate.incSec = 181 (max 180)');
+    // Gesture has the only signed bounded integers (yaw, pitch): both directions, and INT32_MIN.
+    bad(patch('C_Gesture', T.C_Gesture, 'yaw', i32(-3143)), 'c2s', 'yaw below min', 'Gesture.yaw = -3143 (min -3142)');
+    bad(patch('C_Gesture', T.C_Gesture, 'yaw', i32(3143)), 'c2s', 'yaw above max', 'Gesture.yaw = 3143 (max 3142)');
+    bad(patch('C_Gesture', T.C_Gesture, 'yaw', i32(-0x80000000)), 'c2s', 'yaw below min', 'Gesture.yaw = INT32_MIN');
+    bad(patch('C_Gesture', T.C_Gesture, 'pitch', i32(-1572)), 'c2s', 'pitch below min', 'Gesture.pitch = -1572 (min -1571)');
+    bad(patch('C_Gesture', T.C_Gesture, 'pitch', i32(1572)), 'c2s', 'pitch above max', 'Gesture.pitch = 1572 (max 1571)');
+    bad(patch('C_Gesture', T.C_Gesture, 'touch', u8(65)), 'c2s', 'touch above max', 'Gesture.touch = 65 (max 64)');
+    bad(patch('C_Gesture', T.C_Gesture, 'flags', u8(8)), 'c2s', 'flags above max', 'Gesture.flags = 8 (max 7)');
+    bad(patch('C_Gesture', T.C_Gesture, 'lean', u8(101)), 'c2s', 'lean above max', 'Gesture.lean = 101 (max 100)');
+    bad(patch('C_Gesture', T.C_Gesture, 'ply', u16(1200)), 'c2s', 'ply above max', 'Gesture.ply = 1200 (max 1199)');
+    bad(patch('C_Gesture', T.C_Gesture, 'placed', u16(0x8000)), 'c2s', 'placed above max', 'Gesture.placed = 0x8000 (max 0x7FFF)');
+    bad(patch('S_Gesture', T.S_Gesture, 'yaw', i32(-3143)), 's2c', 'yaw below min', 'server Gesture.yaw = -3143 (min -3142)');
+    bad(patch('S_Gesture', T.S_Gesture, 'yaw', i32(3143)), 's2c', 'yaw above max', 'server Gesture.yaw = 3143 (max 3142)');
+    bad(patch('S_Gesture', T.S_Gesture, 'pitch', i32(-0x80000000)), 's2c', 'pitch below min', 'server Gesture.pitch = INT32_MIN');
+    bad(patch('S_Gesture', T.S_Gesture, 'pitch', i32(1572)), 's2c', 'pitch above max', 'server Gesture.pitch = 1572 (max 1571)');
+    bad(patch('S_Gesture', T.S_Gesture, 'aim', u8(65)), 's2c', 'aim above max', 'server Gesture.aim = 65 (max 64)');
+    bad(patch('Welcome', T.Welcome, 'gestureRate', u16(61)), 's2c', 'gestureRate above max', 'Welcome.gestureRate = 61 (max 60)');
+    bad(patch('Welcome', T.Welcome, 'gestureBurst', u16(121)), 's2c', 'gestureBurst above max', 'Welcome.gestureBurst = 121 (max 120)');
     bad(patch('Welcome', T.Welcome, 'serverTime', f64bits(0x7ff80000, 0)), 's2c', 'serverTime not finite', 'Welcome.serverTime = NaN');
     bad(patch('S_Ping', T.S_Ping, 'serverTime', f64bits(0x7ff00000, 0)), 's2c', 'serverTime not finite', 'Ping.serverTime = +Infinity');
     bad(patch('Notice', T.Notice, 'arg', f64bits(0xfff00000, 0)), 's2c', 'arg not finite', 'Notice.arg = -Infinity');

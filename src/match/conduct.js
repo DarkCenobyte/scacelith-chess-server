@@ -117,7 +117,7 @@ export class Conduct {
         }
         if (started || level !== prev.level) {
             this.db.setCooldown(userId, until, level);
-            if (started && this.log) this.log.security('conduct_cooldown', { userId, kind, incidents, level, until });
+            if (started && this.log) this.log.security('conduct_cooldown', { userId, kind, incidents, cooldownLevel: level, until });
         }
         this.cache.set(userId, { until, level });
         return { until: until > now ? until : 0, level, incidents, started };
@@ -135,7 +135,7 @@ export class Conduct {
     }
 
     /**
-     * Cooldown state as cached ({ until, level }), for the admin CLI and tests.
+     * Cooldown state as cached ({ until, level }), for the tests (no admin command reads it yet).
      * @param {number} userId
      */
     state(userId) {
@@ -144,7 +144,8 @@ export class Conduct {
     }
 
     /**
-     * Forgets the cached state of a user (after an administrator changed it in the database).
+     * Forgets the cached state of a user (after a change made in the database; no admin command
+     * calls it yet, the tests do).
      * @param {number} [userId] all users when omitted
      */
     invalidate(userId) {

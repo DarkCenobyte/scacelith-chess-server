@@ -9,9 +9,9 @@ the generator. The HTTPS account API is described in `docs/DESIGN.md` section 5.
 
 | | |
 |---|---|
-| `PROTOCOL_VERSION` | 2 |
-| `PROTOCOL_MIN` | 2 |
-| `SCHEMA_HASH` | `0x77977684` (2006414980) |
+| `PROTOCOL_VERSION` | 3 |
+| `PROTOCOL_MIN` | 3 |
+| `SCHEMA_HASH` | `0xF7825229` (4152513065) |
 | WebSocket subprotocol | `scacelith.v1` |
 | Messages | 19 client->server, 16 server->client |
 
@@ -32,9 +32,9 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
   u8 type | field 1 | field 2 | ...
   ```
 
-  Type bytes `0x01`-`0x7F` are client->server (C2S), `0x80`-`0xFF` server->client (S2C). `Ping` and
-  `Pong` exist in both directions with different ids; code names them `C_Ping`/`S_Ping`,
-  `C_Pong`/`S_Pong`.
+  Type bytes `0x01`-`0x7F` are client->server (C2S), `0x80`-`0xFF` server->client (S2C). The
+  names used by both directions (currently `Ping`, `Pong` and `Gesture`) have a different id
+  in each; code names them `C_Ping`/`S_Ping`, `C_Pong`/`S_Pong`, `C_Gesture`/`S_Gesture`.
 * Every C2S message starts with `seq` (u32): 1 for `Hello`, then +1 for each message sent on the
   connection (Pongs included). Replies that refer to a request quote it as `ref`.
 * A message must be consumed exactly. The decoder rejects, and the server treats as malformed:
@@ -120,12 +120,15 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
    in a game restored after a restart, below) and the opponent receives
    `GameEvent{PlayerDisconnected, arg = grace ms}`. The client reconnects with
    exponential backoff and full jitter (attempt n waits a uniform random time between 0.5 s and
-   min(30 s, 2 s x 2^n); n is reset by a successful `Welcome`), sends a new `Hello` (seq starts
-   again at 1 on the new connection) and receives `Welcome` then `GameSnapshot`. A full server
-   (HTTP 503 at the upgrade, `Error{ServerFull}` or close 4006) is retried after 60 s to 120 s.
-   After a shutdown (`Notice{ServerShutdown}`, `Error{ShuttingDown}` or close 4008) the first
-   attempt waits 5 s to 35 s, which spreads the reconnection wave of a restart, and the first HTTP
-   503 that follows is the restart, retried like a failure (a later one is a full server again).
+   min(30 s, 2 s x 2^n); n starts again at 0 only after a connection that stayed up for 60 s after
+   its `Welcome`, so a server that closes right after `Welcome` is not called again every 0.5 s
+   to 2 s), sends a new `Hello` (seq starts again at 1 on the new connection) and receives
+   `Welcome` then `GameSnapshot`. A full server (HTTP 503 at the upgrade, `Error{ServerFull}`
+   or close 4006) is retried after 60 s to 120 s. After a shutdown (`Notice{ServerShutdown}`,
+   `Error{ShuttingDown}` or close 4008) the first attempt after a connection that reached
+   `Welcome` waits 5 s to 35 s whatever n, which spreads the reconnection wave of a restart, and
+   the first HTTP 503 that follows is the restart, retried like a failure (a later one is a full
+   server again).
    A player whose game is in progress only has the reconnection grace to come back: at least
    `RECONNECT_GRACE_MIN_MS` (15 s by default), and `RECOVERY_GRACE_MS` (90 s by default) for a
    game the server restored after a restart. Their attempts are 8 s apart at most, whatever the
@@ -333,15 +336,23 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
   beyond it, so that such a player can reach `Hello`.
 * A client that does not read its messages (more than `WS_SEND_BUFFER_LIMIT` bytes queued) is closed
   with 4303 (`SlowConsumer`); it reconnects and resynchronises from the snapshot.
-* Challenges, private games and queue joins have their own limits (`ChallengeLimit`,
-  `MatchmakingCooldown` with `Notice{MatchmakingCooldown, arg = until}`).
+* Challenges, private games and queue joins have their own limits (`ChallengeLimit`, also after
+  `CHALLENGE_UNPLAYED_PER_MIN` (5) direct challenges withdrawn or declined in a minute;
+  `RateLimited` for `ChallengeJoinCode` after `PRIVATE_CODE_FAILURES_PER_MIN` (10) wrong codes in
+  a minute; `MatchmakingCooldown` with `Notice{MatchmakingCooldown, arg = until}`). Two players who
+  played `MATCH_REPEAT_LIMIT` (3) rated games together within `MATCH_REPEAT_WINDOW_MS` (an hour),
+  whatever made them, are no longer paired by the rated queue, and their rated challenges and private
+  games are refused with `RatedRepeatLimit` (a refused `ChallengeJoinCode` leaves the code valid;
+  a target who does not accept challenges still answers `UserUnavailable`, as an offline one), their
+  rated rematches with `RematchUnavailable`.
 
 ## Error handling
 
 * `Error{ref, code, fatal, game}`: `ref` is the `seq` of the refused request (0 when none), `game`
   the game concerned (0 when none). `fatal` = the server closes the connection right after it, with
   the matching close code below: `4000 + code` for the connection errors (e.g. `Unauthorized` ->
-  4003), `4300`-`4303` for `ProtocolViolation`, `Flood`, `CheatDetected` and `SlowConsumer`.
+  4003; `EmailUnverified` closes with 4003 too), `4300`-`4303` for `ProtocolViolation`, `Flood`,
+  `CheatDetected` and `SlowConsumer`.
 * Requests without another answer are confirmed with `Ack{ref}` (queue leave, challenge decline or
   cancel, draw offer...); requests with an answer get that answer (`QueueStatus`,
   `ChallengeStatus`, `MoveMade`, `GameSnapshot`...).
@@ -976,6 +987,7 @@ Every enum travels as a u8; a value outside the enum is malformed.
 | 207 | `MatchmakingCooldown` |  |
 | 208 | `InvalidTimeControl` |  |
 | 209 | `RematchUnavailable` |  |
+| 210 | `RatedRepeatLimit` | rated challenge or private game refused: MATCH_REPEAT_LIMIT reached with this player |
 | 240 | `ProtocolViolation` |  |
 | 241 | `Flood` |  |
 | 242 | `CheatDetected` |  |
@@ -1040,8 +1052,9 @@ The start position digests
 | 1009 | `TooBig` | message larger than `WS_MAX_MESSAGE_BYTES` |
 | 1011 | `Internal` | unexpected server error |
 | 4002 | `UnsupportedProtocol` | `Hello.proto` / `Hello.schema` not supported: update the game or the server (no automatic retry) |
-| 4003 | `Unauthorized` | session token refused: log in again (no automatic retry) |
+| 4003 | `Unauthorized` | session token refused (log in again) or e-mail address not verified (`Error{EmailUnverified}`): no automatic retry |
 | 4004 | `Banned` | account banned (a `Notice{Banned}` gives the end) |
+| 4006 | `ServerFull` | a new player beyond `MAX_CONNECTIONS` (a player whose game is in progress is admitted): retried after 60 s to 120 s |
 | 4007 | `Replaced` | another connection of the same account took over (no automatic retry) |
 | 4008 | `ShuttingDown` | server shutting down: reconnect later |
 | 4010 | `HelloTimeout` | no `Hello` within `WS_HELLO_TIMEOUT_MS` |

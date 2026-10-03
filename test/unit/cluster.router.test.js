@@ -28,7 +28,6 @@ const SESSIONS = {
     [TOKEN]: { userId: 1, username: 'alice', emailVerified: true, sessionId: 5 },
     ['b'.repeat(43)]: { userId: 2, username: 'bob', emailVerified: true },
     ['c'.repeat(43)]: { userId: 3, username: 'carl', emailVerified: false },
-    ['d'.repeat(43)]: { userId: 4, username: 'dan', emailVerified: true, bannedUntil: Date.UTC(2099, 0, 1) },
 };
 
 class FakeHost {
@@ -37,10 +36,12 @@ class FakeHost {
     attach(gameId, userId, ep) { this.calls.push(['attach', gameId, userId, ep]); }
     detach(gameId, userId, ep) { this.calls.push(['detach', gameId, userId, ep]); }
     onClientMessage(gameId, userId, msg, ep) { this.calls.push(['msg', gameId, userId, msg, ep]); }
+    declineRematch(gameId, userId) { this.calls.push(['decline', gameId, userId]); }
     onRtt(gameId, userId, ms) { this.calls.push(['rtt', gameId, userId, ms]); }
     relayGesture(gameId, userId, frame) { this.calls.push(['gesture', gameId, userId, Buffer.from(frame)]); return true; }
     stallDuring() { return this.stalled; }
     forfeitUser(userId) { this.calls.push(['forfeit', userId]); return true; }
+    cancelGame(gameId) { this.calls.push(['cancel', gameId]); return true; }
     stats() { return { games: this.games }; }
     of(kind) { return this.calls.filter((c) => c[0] === kind); }
 }
@@ -63,7 +64,7 @@ class Client {
 }
 
 const envs = [];
-function setup({ config = {}, claim = null, host = new FakeHost(), bus = null, primaryHandlers = {}, store = null } = {}) {
+function setup({ config = {}, claim = null, host = new FakeHost(), bus = null, primaryHandlers = {}, store = null, ipcTimeoutMs = 5000 } = {}) {
     const cfg = testConfig({ WS_HELLO_TIMEOUT_MS: '1000', HEARTBEAT_INTERVAL_MS: '1000', HEARTBEAT_TIMEOUT_MS: '3000', REQUIRE_EMAIL_VERIFICATION: 'true', ...config });
     const [a, b] = channelPair();
     const primary = new Ipc(b);
@@ -81,7 +82,7 @@ function setup({ config = {}, claim = null, host = new FakeHost(), bus = null, p
     const anticheat = { recordAnomaly: (x) => { anomalies.push(x); }, sanctionCertain: (x) => { sanctions.push(x); } };
     const auth = { validateToken: async (t) => SESSIONS[t] || null, invalidate: (p) => invalidated.push(p) };
     const registry = new Registry();
-    const shardSide = new Ipc(a);
+    const shardSide = new Ipc(a, { timeoutMs: ipcTimeoutMs });
     const router = new Router({
         config: cfg, shard: 0, host, auth, primary: shardSide, bus, anticheat, store, registry, isShard: (s) => s < 4,
     });
@@ -108,7 +109,7 @@ describe('router: hello', () => {
         assert.equal(w.clientPingMs, 10000);          // CLIENT_PING_INTERVAL_MS default
         assert.equal(w.activeGame, 0);
         const claim = env.seen.find((x) => x.type === 'presence.claim').p;
-        assert.deepEqual([claim.userId, claim.username, claim.shard, claim.ip], [1, 'alice', 0, '127.0.0.1']);
+        assert.deepEqual([claim.userId, claim.username, claim.shard], [1, 'alice', 0]);
         assert.ok(env.seen.some((x) => x.type === 'conn.ipAcquire' && x.p.ip === '127.0.0.1'));
         c.ws.close(1000);
         await waitFor(() => env.seen.some((x) => x.type === 'presence.release'));
@@ -173,20 +174,67 @@ describe('router: hello', () => {
         });
     }
 
-    it('closes a banned session with the ban end (session or primary)', async () => {
-        const env = await setup();
+    it('closes a banned session with the ban end (from the primary)', async () => {
+        const env = await setup({ claim: { error: E.Banned, until: Date.UTC(2099, 0, 1) } });
         const c = await env.connect();
-        c.hello('d'.repeat(43));
+        c.hello();
         assert.equal((await c.recv()).code, E.Banned);
         const n = await c.recv();
         assert.deepEqual([n.name, n.code, n.arg], ['Notice', N.Banned, Date.UTC(2099, 0, 1)]);
         assert.equal(await c.closed(), 4004);
-        const env2 = await setup({ claim: { error: E.Banned, until: 12345 } });
-        const c2 = await env2.connect();
-        c2.hello();
-        assert.equal((await c2.recv()).code, E.Banned);
-        assert.equal((await c2.recv()).arg, 12345);
-        assert.equal(await c2.closed(), 4004);
+    });
+
+    it('closes 1011 and releases the claim when the Welcome cannot be encoded', async () => {
+        // A server name over the 64 bytes of Welcome.serverName (loadConfig refuses it since).
+        const env = await setup();
+        env.router.config = { ...env.cfg, serverName: 'é'.repeat(40) };
+        const c = await env.connect();
+        c.hello();
+        const m = await c.recv();
+        assert.deepEqual([m.name, m.code, m.fatal], ['Error', E.Internal, true]);
+        assert.equal(await c.closed(), 1011);
+        await waitFor(() => env.seen.some((x) => x.type === 'presence.release'));
+        assert.equal(env.router.byUser.size, 0);
+    });
+
+    it('gives back the counts and claims the primary took after the shard gave up waiting', async () => {
+        // The primary answers after the shard's IPC timeout (a stall of either side): an upgrade
+        // counted late is released, one refused late is not, and a late claim is released.
+        const late = (reply) => () => new Promise((r) => setTimeout(() => r(reply), 150));
+        const env = await setup({ ipcTimeoutMs: 50, primaryHandlers: { 'conn.ipAcquire': late({ ok: true }) } });
+        await assert.rejects(env.connect(), (e) => e.status === 503);
+        await waitFor(() => env.seen.some((x) => x.type === 'conn.ipRelease'));
+        assert.deepEqual(env.seen.find((x) => x.type === 'conn.ipRelease').p, { ip: '127.0.0.1', shard: 0 });
+        env.primary.on('conn.ipAcquire', late({ ok: false, reason: 'per_ip' }));
+        await assert.rejects(env.connect(), (e) => e.status === 503);
+        await sleep(250);
+        assert.equal(env.seen.filter((x) => x.type === 'conn.ipRelease').length, 1);
+        env.primary.on('conn.ipAcquire', () => ({ ok: true }));
+        env.primary.on('presence.claim', late({ ok: true, activeGame: 0 }));
+        const c = await env.connect();
+        c.hello();
+        assert.equal((await c.recv()).code, E.Internal);
+        await waitFor(() => env.seen.some((x) => x.type === 'presence.release'));
+        assert.equal(env.seen.find((x) => x.type === 'presence.release').p.userId, 1);
+    });
+
+    it('runs a game.attach and a conn.send that come with the presence.claim reply after the Welcome', async () => {
+        // The primary posts them in the turn it answers the claim: one batch, dispatched before
+        // the hello resumes.
+        const gameId = new GameIdAllocator(0).next();
+        let env, sent = null;
+        env = await setup({ primaryHandlers: { 'presence.claim': (p) => {
+            env.primary.notify('game.attach', { gameId, userId: 1, connId: p.connId });
+            sent = env.primary.request('conn.send', { connId: p.connId, frames: [encode.Notice({ code: N.Motd, arg: 7 })] });
+            return { ok: true, activeGame: 0 };
+        } } });
+        const c = await env.connect();
+        c.hello();
+        assert.equal((await c.recv()).name, 'Welcome');
+        const n = await c.recv();
+        assert.deepEqual([n.name, n.code, n.arg], ['Notice', N.Motd, 7]);
+        assert.deepEqual(await sent, { ok: true });
+        assert.deepEqual(env.host.of('attach').map((x) => [x[1], x[2]]), [[gameId, 1]]);
     });
 
     it('closes 4006 when the server is full', async () => {
@@ -339,8 +387,7 @@ describe('router: ready connections', () => {
         assert.equal((await c.until('Ack')).ref, 2);
         const j = env.seen.find((x) => x.type === 'mm.join').p;
         assert.deepEqual([j.userId, j.username, j.category, j.rated, j.rating, j.provisional, j.shard, j.connId], [1, 'alice', '5+0', true, 1777, false, 0, env.conn().id]);
-        const decline = env.host.of('msg')[0];
-        assert.deepEqual([decline[1], decline[2], decline[3].type, decline[3].accept, decline[4]], [lastGame, 1, MSG.Rematch, false, null]);
+        assert.deepEqual(env.host.of('decline'), [['decline', lastGame, 1]]);
         c.send('QueueJoin', { category: '3+2', rated: true });
         assert.equal((await c.until('Ack')).ref, 3);
         const j2 = env.seen.filter((x) => x.type === 'mm.join')[1].p;
@@ -375,13 +422,15 @@ describe('router: ready connections', () => {
 });
 
 describe('router: primary and bus', () => {
-    it('serves game.create, conn.send, conn.kick and game.forfeit from the primary', async () => {
+    it('serves game.create, game.cancel, conn.send, conn.kick and game.forfeit from the primary', async () => {
         const env = await setup();
         const { c } = await env.login();
         const r = await env.primary.request('game.create', { spec: { category: '5+0' } });
         assert.equal(r.ok, true);
         assert.equal(env.host.of('createGame')[0][1].category, '5+0');
         assert.deepEqual(await env.primary.request('game.forfeit', { userId: 1, gameId: r.gameId }), { ok: true });
+        assert.deepEqual(await env.primary.request('game.cancel', { gameId: r.gameId }), { ok: true });
+        assert.deepEqual(env.host.of('cancel'), [['cancel', r.gameId]]);
         const id = env.conn().id;
         assert.deepEqual(await env.primary.request('conn.send', { connId: id, frames: [encode.Notice({ code: N.Motd, arg: 1 })] }), { ok: true });
         assert.equal((await c.recv()).code, N.Motd);
@@ -417,6 +466,39 @@ describe('router: primary and bus', () => {
         assert.equal(env.invalidated.length, 2);
     });
 
+    it('closes the user\'s connection when every session was revoked (no list); an empty list closes nothing', async () => {
+        const env = await setup();
+        const { c } = await env.login();
+        assert.deepEqual(await env.primary.request('auth.invalidate', { userId: 1, tokenHashes: [] }), { ok: true, closed: 0 });
+        assert.deepEqual(await env.primary.request('auth.invalidate', { userId: 1, tokenHashes: null }), { ok: true, closed: 1 });
+        assert.equal((await c.recv()).code, N.SessionRevoked);
+        assert.equal((await c.recv()).code, E.Unauthorized);
+        assert.equal(await c.closed(), 4003);
+        assert.deepEqual(env.invalidated, [{ userId: 1, tokenHashes: [] }, { userId: 1, tokenHashes: null }]);
+    });
+
+    it('closes a hello whose session is revoked while its presence.claim is under way', async () => {
+        // The revocation reaches the shard before the claim reply (the same batch), when the
+        // connection is not in byUser yet; a revocation of another session keeps it.
+        for (const [revokeMine, tokenHashes] of [[true, null], [false, [crypto.createHash('sha256').update('x'.repeat(43)).digest('hex')]]]) {
+            let env, revoked = false;
+            env = await setup({ primaryHandlers: { 'presence.claim': () => {
+                revoked = revokeMine;                           // committed before the broadcast
+                env.primary.notify('auth.invalidate', { userId: 1, tokenHashes });
+                return { ok: true, activeGame: 0 };
+            } } });
+            env.router.auth = { validateToken: async (t) => (revoked ? null : SESSIONS[t] || null), invalidate: () => {} };
+            const c = await env.connect();
+            c.hello();
+            if (!revokeMine) { assert.equal((await c.recv()).name, 'Welcome'); continue; }
+            assert.equal((await c.recv()).code, N.SessionRevoked);
+            assert.equal((await c.recv()).code, E.Unauthorized);
+            assert.equal(await c.closed(), 4003);
+            await waitFor(() => env.seen.some((x) => x.type === 'presence.release'));
+            assert.equal(env.router.byUser.size, 0);
+        }
+    });
+
     it('hosts remote players: attach, relay both ways, RTT, close, detach, shard down', async () => {
         const bus = new FakeBus();
         const env = await setup({ bus });
@@ -439,7 +521,7 @@ describe('router: primary and bus', () => {
         env.router.onBus(BusKind.Control, 2, 55, 7, gameId, Buffer.from([BusOp.Forfeit]));
         assert.deepEqual(env.host.of('forfeit'), [['forfeit', 7]]);
         env.router.onBus(BusKind.Control, 2, 55, 7, gameId, Buffer.from([BusOp.RematchDecline]));
-        assert.equal(env.host.of('msg')[1][3].accept, false);
+        assert.deepEqual(env.host.of('decline'), [['decline', gameId, 7]]);
         assert.deepEqual(env.router.forgetShard(2), { ok: true, detached: 1 });
         assert.equal(env.router.remote.size, 0);
     });

@@ -14,13 +14,25 @@
 //   const r = await writer.sanction({ userId, gameId, kind, at });   // applyCertainSanction
 //   await writer.close();
 //
-// The store's commit metrics (scacelith_store_commit_batch_ms, scacelith_store_games_committed_total,
-// scacelith_store_busy_total, scacelith_anticheat_analysis_skipped_total) are counted in the
-// shard's own registry from the thread's answers.
+// The store's commit metrics (store/commit-metrics.js: scacelith_store_commit_batch_ms,
+// scacelith_store_games_committed_total, scacelith_store_busy_total,
+// scacelith_anticheat_analysis_skipped_total) are counted in the shard's own registry from the
+// thread's answers.
 
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
-import { metrics } from '../metrics.js';
+import { countCommit, mBusy } from './commit-metrics.js';
+
+// How long close() waits for the thread: longer than the store's busy_timeout (5 s), so that a
+// last batch (anomalies, a sanction) that waits once for another process's write lock is still
+// answered. Without such a wait the close takes milliseconds. The thread cannot be stopped inside
+// a lock wait: when the timer fires during one, the close (and the process exit) also waits for
+// its end. A shard closes its writer last in its stop (worker-main.js), after the drain
+// (SHUTDOWN_GRACE_MS) and the final commits, and the supervisor kills a worker
+// SHUTDOWN_GRACE_MS + 15 s after the 'shutdown' (supervisor.js stop): with one lock wait, before
+// or during this close, the stop ends about 6 s after the drain. Only a lock held through several
+// waits lets the kill come first (as with 5 s), and it then loses what the timeout would reject.
+const CLOSE_TIMEOUT_MS = 7000;
 
 if (!isMainThread && parentPort && workerData && workerData.scacelithStoreWriter) {
     const { configureLogging, logger } = await import('../log.js');
@@ -64,14 +76,12 @@ if (!isMainThread && parentPort && workerData && workerData.scacelithStoreWriter
  *            sanction(s: object): Promise<object>, close(): Promise<void> }}
  */
 export function startStoreWriter({ config, shard = 0, logging = true, log = null }) {
-    const mBatchMs = metrics.histogram('scacelith_store_commit_batch_ms', 'Duration of one finished-games commit transaction',
-        [1, 2, 5, 10, 25, 50, 100, 250, 1000]);
-    const mGames = metrics.counter('scacelith_store_games_committed_total', 'Finished games written to the database');
-    const mBusy = metrics.counter('scacelith_store_busy_total', 'Store operations that gave up waiting for the database lock');
-    const mSkipped = metrics.counter('scacelith_anticheat_analysis_skipped_total',
-        'Finished rated games not queued for engine analysis (sample: ANALYSIS_SAMPLE_RATE, backlog: ANALYSIS_QUEUE_MAX reached, player: 20 flagged games of a player already waiting, displaced: a waiting flagged game without an anomaly of its own gave its place to a game with one)', ['reason']);
     const waiting = new Map();
     let next = 1, w = null, closing = null;
+    const rejectAll = (e) => {
+        for (const p of waiting.values()) p.reject(e);
+        waiting.clear();
+    };
 
     // The thread is started on first use and again after it died (the failed batches are rejected:
     // GameHost retries them with backoff, and the games stay journaled meanwhile).
@@ -80,8 +90,7 @@ export function startStoreWriter({ config, shard = 0, logging = true, log = null
         const fail = (e) => {
             if (w !== t) return;
             w = null;
-            for (const p of waiting.values()) p.reject(e);
-            waiting.clear();
+            rejectAll(e);
             if (closing) closing();
             else log?.error?.('store writer thread failed; restarted on the next commit', { err: e });
         };
@@ -97,14 +106,7 @@ export function startStoreWriter({ config, shard = 0, logging = true, log = null
                 return;
             }
             if (!p.commit) { p.resolve(result); return; }
-            mBatchMs.observe(ms);
-            mGames.inc(Array.isArray(result) ? result.reduce((n, x) => n + (x && x.duplicate ? 0 : 1), 0) : 0);
-            if (Array.isArray(result)) {
-                for (const x of result) {
-                    if (x && x.analysisSkipped) mSkipped.labels(x.analysisSkipped).inc();
-                    if (x && x.analysisDisplaced) mSkipped.labels('displaced').inc(x.analysisDisplaced.length);
-                }
-            }
+            countCommit(result, ms);
             p.resolve(result);
         });
         t.on('error', fail);
@@ -130,12 +132,18 @@ export function startStoreWriter({ config, shard = 0, logging = true, log = null
         insertAnomalies: (rows) => send('anomalies', rows),
         sanction: (s) => send('sanction', s),
         // Closes the thread's database connection after the batches already sent, then the thread.
+        // The requests it has not answered within CLOSE_TIMEOUT_MS are rejected: they may have
+        // been carried out or not.
         close() {
             const t = w;
             if (!t) { closing = () => {}; return Promise.resolve(); }
             return new Promise((resolve) => {
-                const done = () => { clearTimeout(timer); closing = () => {}; w = null; t.terminate().finally(resolve); };
-                const timer = setTimeout(done, 5000);
+                const done = () => {
+                    clearTimeout(timer); closing = () => {};
+                    rejectAll(new Error('store writer closed before answering (outcome unknown)'));
+                    w = null; t.terminate().finally(resolve);
+                };
+                const timer = setTimeout(done, CLOSE_TIMEOUT_MS);
                 closing = done;
                 t.postMessage({ close: true });
             });

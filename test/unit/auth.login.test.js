@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { publicBaseUrl } from '../../src/auth/index.js';
+import { sha256Hex } from '../../src/security/keys.js';
 import { createPasswordHasher } from '../../src/security/password.js';
 import { solvePow } from '../../src/security/pow.js';
 import { testConfig } from '../../src/config.js';
@@ -19,7 +20,7 @@ test('login by username or e-mail (case-insensitive): session token, user view',
         assert.equal(r.json.expiresAt, s.now() + 90 * 86400000);
         assert.deepEqual(r.json.user, { id: u.id, username: 'Alice', email: 'alice@example.com', emailVerified: true, mfaEnabled: false, googleLinked: false, hasPassword: true, acceptChallenges: 'all', createdAt: s.now(), lastLoginAt: s.now(), pendingEmail: null });
     }
-    const rows = s.store.sessions.listForUser(u.id);
+    const rows = [...s.store._raw.sessions.values()];
     assert.equal(rows[0].clientLabel, 'Windows 11');
     assert.match(rows[0].tokenHash, /^[0-9a-f]{64}$/);
     assert.equal(s.store.users.byId(u.id).lastLoginAt, s.now());
@@ -161,6 +162,24 @@ test('MAX_SESSIONS_PER_USER: the oldest session is revoked and dropped from ever
     const revoked = s.primary.calls.filter((x) => x.type === 'session.revoked');
     assert.equal(revoked.length, 1);
     assert.equal(revoked[0].payload.tokenHashes.length, 1);
+});
+
+test('MAX_SESSIONS_PER_USER: the session revoked because of a login on another worker is broadcast too', async (t) => {
+    const s = await startTestServer({ env: { MAX_SESSIONS_PER_USER: '2' } });
+    t.after(s.close);
+    const u = await s.createUser({ username: 'alice' });
+    const a = await s.login('alice', 'correct horse battery');
+    s.now.advance(1000);
+    // A login of the same account on another worker inserts its session just before this one's.
+    const create = s.store.sessions.create;
+    s.store.sessions.create = (row) => {
+        s.store.sessions.create = create;
+        create({ ...row, tokenHash: 'f'.repeat(64) });
+        return create(row);
+    };
+    await s.login('alice', 'correct horse battery');
+    assert.deepEqual(s.primary.calls.filter((x) => x.type === 'session.revoked').map((x) => x.payload), [{ userId: u.id, tokenHashes: [sha256Hex(a.token)] }]);
+    assert.equal((await s.request('GET', '/api/v1/account/me', { token: a.token })).status, 401);
 });
 
 test('request validation of the login body', async (t) => {

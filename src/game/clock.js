@@ -36,8 +36,6 @@ export const RTT_EMA_ALPHA = 0.25;
 /** Round-trip assumed before the first measurement of a player. */
 export const INITIAL_RTT_MS = 100;
 
-const WHITE = 0, BLACK = 1;
-
 /**
  * Clock settings of a game, read once from the configuration (defaults = config.js defaults).
  * @param {object} config frozen configuration (camelCase keys of the "games" section)
@@ -208,5 +206,3 @@ export class GameClock {
     /** Whether the clock of the side to move is held at `nowMs` (its turn starts later). */
     heldAt(nowMs) { return this.turnStart > nowMs; }
 }
-
-export { WHITE, BLACK };

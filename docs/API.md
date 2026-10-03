@@ -46,13 +46,14 @@ configuration; a community server may change them.
   `GET /info` tells the client where it is).
 - HTTP/1.1 over TLS. With `TLS_MODE=proxy`, a reverse proxy terminates TLS in front of the server.
   `TLS_MODE=off` (plain HTTP) is for local development only.
-- A few HTML pages live outside `/api`, for the links of e-mails and the Google sign-in
-  ([section 14](#14-html-pages-outside-api)). The health endpoints answer both inside and outside
-  `/api/v1` ([section 15](#15-health-endpoints)).
+- A few HTML pages live outside `/api`, for the links of e-mails
+  ([section 14](#14-html-pages-outside-api)). Google sign-in has no page on the server: Google
+  sends the browser back to the game itself, on 127.0.0.1. The health endpoints answer both
+  inside and outside `/api/v1` ([section 15](#15-health-endpoints)).
 - A trailing slash is ignored (`/api/v1/info/` is `/api/v1/info`), and path parameters are
   URL-decoded.
 - The Node SDK in `src/client/` (`ApiClient`) wraps these calls for tests, bots and tools. It also
-  solves the proof of work.
+  solves the proof of work (up to `maxPowBits`, 28 by default; a harder one is returned unsolved).
 
 The curl examples below use two shell variables:
 
@@ -149,8 +150,9 @@ Endpoints that check or hash a password can also answer one of these:
   already has `PASSWORD_HASH_WAITERS_PER_SOURCE` hashes waiting.
 
 Both errors carry a random `retryAfter` of 5 to 15 s. Nothing was changed and no failed attempt
-was counted, and a reset link stays valid. The 429 also gives back the rate-limit tokens that the
-request took.
+was counted (except on [`POST /auth/sso/google/link`](#post-authssogooglelink), whose try of the
+ticket and failure of the account were taken before the hash), and a reset link stays valid. The
+429 also gives back the rate-limit tokens that the request took.
 
 The HTML pages (section 14) answer their errors as HTML pages with the same status codes.
 
@@ -166,7 +168,7 @@ Authorization: Bearer sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8
   these:
   - `POST /auth/login`;
   - after it, `POST /auth/login/mfa` when two-step verification is on;
-  - the Google sign-in poll (`POST /auth/sso/google/poll`);
+  - `POST /auth/sso/google/finish`, and after it `POST /auth/sso/google/link` (Google sign-in);
   - `POST /auth/sso/complete`.
 
   Every one of them answers `{ token, expiresAt, user }`. The server stores only a SHA-256 of the
@@ -191,8 +193,9 @@ Authorization: Bearer sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8
   - a password reset and the deletion of the account, which revoke every session;
   - an administrator (`bin/admin.js`).
 
-  A revocation from the API takes effect at once on every worker. Otherwise a worker may keep
-  using its record of a valid session for up to 30 s.
+  A revocation from the API takes effect at once on every worker, and the WebSocket opened with a
+  revoked session is closed (`Notice{SessionRevoked}`, then close 4003). Otherwise a worker may
+  keep using its record of a valid session for up to 30 s.
 - **Scope.** A token belongs to one server and opens its WebSocket too (`Hello.token`,
   [PROTOCOL.md](PROTOCOL.md)). Never send it to another server.
 
@@ -252,7 +255,7 @@ through the history, is about one request per second.
 |---|---|---|---|
 | per address | `HTTP_RATE_PER_IP` (600) / min for the whole server, each worker its share; `IP_MAX_INFLIGHT` (32) requests in progress per worker | client, and each IPv6 /48 (`HTTP_RATE_PER_PREFIX`, default 4 x `HTTP_RATE_PER_IP`) | Every request, the health endpoints and WebSocket upgrades included (see above). |
 | account budget | `USER_RATE_PER_MIN` (120) / min, each worker its share | player | Every request that carries a valid session (see above). |
-| `auth` | `AUTH_RATE_PER_IP` (20) / 10 min, shared | client, and each IPv6 /48 (`AUTH_RATE_PER_PREFIX`, default 5 x `AUTH_RATE_PER_IP`) | `POST /auth/register`, `/auth/login`, `/auth/login/mfa`, `/auth/verify-email/resend`, `/auth/password/forgot`, `/auth/password/reset`, `/auth/sso/complete`; `POST /verify-email`, `/reset-password`, `/confirm-email-change` |
+| `auth` | `AUTH_RATE_PER_IP` (20) / 10 min, shared | client, and each IPv6 /48 (`AUTH_RATE_PER_PREFIX`, default 5 x `AUTH_RATE_PER_IP`) | `POST /auth/register`, `/auth/login`, `/auth/login/mfa`, `/auth/verify-email/resend`, `/auth/password/forgot`, `/auth/password/reset`, `/auth/sso/google/link`, `/auth/sso/complete`; `POST /verify-email`, `/reset-password`, `/confirm-email-change` |
 | `auth_register` | `AUTH_REGISTER_PER_HOUR` (10) / hour, shared | client, and 3 times that per IPv6 /48 | `POST /auth/register` |
 | `auth_mail` | `AUTH_MAIL_PER_HOUR` (10) / hour, shared | client, and 3 times that per IPv6 /48 | `POST /auth/verify-email/resend` |
 | `auth_forgot` | `AUTH_FORGOT_PER_HOUR` (3) / hour, shared | client, and 3 times that per IPv6 /48 | `POST /auth/password/forgot` |
@@ -270,9 +273,8 @@ through the history, is about one request per second.
 | `gif_ip_min`, `gif_ip_hour` | `GIF_IP_RENDERS_PER_MIN` (12) / min and `GIF_IP_RENDERS_PER_HOUR` (120) / hour, shared | client (all its accounts together), and 3 times that per IPv6 /48 | The same, as above |
 | `reports` | 30 / hour | player | `POST /reports` |
 | `sso_start` | 30 / 10 min, shared | client, and 90 per IPv6 /48 | `POST /auth/sso/google/start` |
-| `sso_poll` | 120 / min | client | `POST /auth/sso/google/poll` |
+| `sso_finish` | 30 / min | client | `POST /auth/sso/google/finish` |
 | `page` | 60 / min | client | `GET /verify-email`, `/reset-password`, `/confirm-email-change` |
-| `sso_page` | 30 / min | client | `GET /auth/sso/google/callback` |
 
 `GET /info` and `GET /leaderboard` have no limit of their own: only the per-address layer.
 
@@ -321,9 +323,10 @@ Other throttles, answered by the endpoints themselves:
 ### 1.6 Proof of work
 
 `POST /auth/register` always needs a proof of work when `POW_REGISTER_BITS` is above 0 (18 by
-default; `GET /info` gives it as `pow.register`). `POST /auth/login` needs one only for 5 minutes
-after the server sees a wave of failed sign-ins (`POW_LOGIN_TRIGGER_PER_MIN`, then
-`POW_LOGIN_BITS`). A client cannot know that in advance, and finds out from the answer.
+default; `GET /info` gives it as `pow.register`). `POST /auth/login` and
+`POST /auth/sso/google/link` (one kind of challenge for both) need one only for 5 minutes after
+the server sees a wave of failed sign-ins (`POW_LOGIN_TRIGGER_PER_MIN`, then `POW_LOGIN_BITS`). A
+client cannot know that in advance, and finds out from the answer.
 
 1. The request without (or with a refused) proof answers 428:
 
@@ -398,7 +401,8 @@ Auth column:
 | `POST /auth/password/forgot` | none | `auth`, `auth_forgot`, `auth_forgot_day` | Send a password reset link |
 | `POST /auth/password/reset` | none | `auth`, `auth_reset` | Set a new password with a reset link's token |
 | `POST /auth/sso/google/start` | none | `sso_start` | Start a Google sign-in |
-| `POST /auth/sso/google/poll` | none | `sso_poll` | Collect the result of a Google sign-in |
+| `POST /auth/sso/google/finish` | none | `sso_finish` | Hand Google's answer to the server |
+| `POST /auth/sso/google/link` | none | `auth` | Link Google to an existing account with its password |
 | `POST /auth/sso/complete` | none | `auth` | Create the account of a first Google sign-in |
 | `GET /auth/sessions` | session | `sessions` | List the signed-in devices |
 | `DELETE /auth/sessions/:id` | session | `sessions` | Sign out one device |
@@ -424,7 +428,6 @@ Auth column:
 | `GET`, `POST /verify-email` | none (page) | `page`, `auth` | E-mail confirmation link |
 | `GET`, `POST /reset-password` | none (page) | `page`, `auth`, `auth_reset` | Password reset link |
 | `GET`, `POST /confirm-email-change` | none (page) | `page`, `auth` | E-mail change link |
-| `GET /auth/sso/google/callback` | none (page) | `sso_page` | Where Google sends the browser back |
 | `GET /healthz`, `GET /readyz` | none | per address | Liveness and readiness (also under `/api/v1`) |
 
 ## 3. Server info
@@ -442,7 +445,7 @@ curl -sS "$API/info"
   "name": "Scacelith",
   "serverId": "07dd26af-672a-43af-a8af-34011c7e977b",
   "motd": "",
-  "protocol": { "min": 2, "max": 2, "schema": 2006414980, "subprotocol": "scacelith.v1" },
+  "protocol": { "min": 3, "max": 3, "schema": 4152513065, "subprotocol": "scacelith.v1" },
   "wsPort": 443,
   "wsPath": "/ws",
   "registration": "open",
@@ -478,8 +481,9 @@ curl -sS "$API/info"
 
 ### POST /auth/register
 
-Creates an account. **Auth** none. **Limits** `auth` and `auth_register` (10 registrations per hour
-per client). **Proof of work** when `POW_REGISTER_BITS` > 0.
+Creates an account: once its e-mail address is confirmed with the link sent to it, or at once
+without e-mail confirmation. **Auth** none. **Limits** `auth` and `auth_register` (10
+registrations per hour per client). **Proof of work** when `POW_REGISTER_BITS` > 0.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -490,12 +494,20 @@ per client). **Proof of work** when `POW_REGISTER_BITS` > 0.
 
 Answers:
 
-- **202 `{ "status": "verification_sent" }`** with e-mail confirmation (the default). A link valid
-  for 24 h goes to the address. The answer is the same when another account already uses the
-  address: no account is created then, and that account's owner gets a notice instead (at most
-  one per hour).
+- **202 `{ "status": "verification_sent" }`** with e-mail confirmation (the default). No account
+  exists yet: the signup waits, for 24 h, and holds its username meanwhile. A link valid for those
+  24 h goes to the address, at most one per address every 5 minutes (the resend below sends a new
+  one); the account is created, its address confirmed, when the link is used (the button of the
+  `/verify-email` page), and the player can then sign in. Until then a sign-in
+  with that username answers `invalid_credentials`, as for an unknown account, and the public
+  profile does not exist. A new signup with the same address replaces the waiting one (its
+  username is freed and its link stops working). The answer is the same when another account
+  already uses the address: no link is sent then, its owner gets a notice instead (at most one per
+  hour), and the username is held in the same way, so that nothing tells whether the address has
+  an account. A signup whose link was not used is dropped after 24 h, and its username is free
+  again.
 - **201 `{ "status": "ready" }`** without e-mail confirmation (`REQUIRE_EMAIL_VERIFICATION=false`):
-  the account can sign in at once.
+  there is no link, so the account is created at once and can sign in.
 
 Errors, checked in this order:
 
@@ -504,7 +516,8 @@ Errors, checked in this order:
 - 400 `invalid_email`;
 - 400 `weak_password`, with `reason`: `too_short`, `too_long`, `contains_username`,
   `contains_email` or `too_common`;
-- 409 `username_taken`;
+- 409 `username_taken`: an account has the username, or a waiting signup of another address
+  holds it;
 - 428 `pow_required`;
 - the hash queue errors (section 1.3);
 - 409 `email_taken`, only without e-mail confirmation (with confirmation, the answer stays 202).
@@ -556,7 +569,9 @@ Errors:
 - 401 `invalid_credentials`: the same answer, after the same time, for an unknown account, a wrong
   password and an account without a password;
 - after a correct password only: 403 `banned`, with `until` (epoch ms, `null` for a permanent
-  ban), and 403 `email_unverified` (the address is not confirmed yet).
+  ban), and 403 `email_unverified` (an account created before signups waited for their link,
+  whose address is not confirmed yet; a signup whose link was not used has no account and gets
+  `invalid_credentials`).
 
 ```sh
 TOKEN=$(curl -sS "$API/auth/login" -H 'Content-Type: application/json' \
@@ -570,7 +585,7 @@ The second step of a sign-in. **Auth** none. **Limit** `auth`, and at most
 
 | Field | Type | Notes |
 |---|---|---|
-| `mfaToken` | string, 1-64 | From the login answer. |
+| `mfaToken` | string, 1-64 | From the login answer (or a Google sign-in's). |
 | `code` | string, max 32, optional | A 6-digit authenticator code, or a recovery code. |
 | `recoveryCode` | string, max 32, optional | A recovery code. |
 
@@ -584,7 +599,10 @@ gone. Errors:
 - 429 `too_many_attempts`: the account's `AUTH_MFA_PER_ACCOUNT` codes of the last 15 minutes are
   used up; the code was not checked, so a recovery code is not spent;
 - 401 `invalid_code`;
-- 403 `banned`, 403 `email_unverified`.
+- 403 `banned`, 403 `email_unverified`;
+- after the password step of a Google link (`POST /auth/sso/google/link`) only: 410
+  `sso_expired` (the account changed meanwhile), 409 `sso_already_linked`, and 503 `server_busy`
+  with `retryAfter: 1` (the store stayed locked: nothing was linked; start again from the game).
 
 ```sh
 curl -sS "$API/auth/login/mfa" -H 'Content-Type: application/json' \
@@ -605,8 +623,11 @@ curl -sS -X POST "$API/auth/logout" -H "Authorization: Bearer $TOKEN"
 
 Sends the e-mail confirmation link again. **Auth** none. **Limits** `auth` and `auth_mail` (10
 per hour per client). Body: `{ "email": string 1-254 }`. Answer:
-**202 `{ "status": "accepted" }`**, always. A link is sent only to an active, unconfirmed account
-with that address, at most once every 5 minutes per address.
+**202 `{ "status": "accepted" }`**, always, even when the store is busy. A request acts at most
+once every 5 minutes per address. A signup waiting with that address gets its 24 h again,
+whether or not another account uses the address, so that its username stays held as long in
+both cases. A link is sent only for that signup when the address has no account (a new link,
+valid 24 h, replaces the previous one), or for an active, unconfirmed account with that address.
 
 ### POST /auth/password/forgot
 
@@ -646,6 +667,7 @@ with the page: each attempt hashes a password).
 Answer: 200 `{ "status": "password_reset" }`. The password reset has these effects:
 
 - every session is revoked, and a pending e-mail change is cancelled;
+- the other reset links of the account stop working;
 - the address counts as confirmed (the link proved it);
 - the owner gets a mail;
 - two-step verification is not touched.
@@ -658,68 +680,180 @@ no longer has), 400 `weak_password`, the hash queue errors, and 503 `server_busy
 ### Google sign-in
 
 Offered when `GET /info` says `sso.google: true`; otherwise every endpoint below answers 404
-`sso_disabled`. The game signs in through the system browser with PKCE and never sees a Google
-credential:
+`sso_disabled`. The game signs in through the system browser with the installed-app flow of
+RFC 8252 (a "Desktop app" client): Google sends the browser back to a listener of the game on
+127.0.0.1, never to this server, and the game never sees a Google credential.
 
-1. The client makes a PKCE pair: a `codeVerifier` of 43-128 characters `[A-Za-z0-9._~-]` and
+1. The client listens on `127.0.0.1:0` (the system picks the port) and makes a PKCE pair: a
+   `codeVerifier` of 43-128 characters `[A-Za-z0-9._~-]` and
    `codeChallenge = BASE64URL(SHA-256(codeVerifier))`, which has 43 characters and no padding.
-2. `POST /auth/sso/google/start` with the challenge returns the Google URL, which the client opens
-   in the browser.
-3. Google sends the browser back to `/auth/sso/google/callback` (section 14). The page only says
-   to go back to the game.
-4. The client polls `POST /auth/sso/google/poll` with the attempt id and its `codeVerifier`. An
-   attempt id is useless without the verifier.
+2. `POST /auth/sso/google/start` with the challenge and the port returns the Google URL and the
+   attempt's `state`. The client checks the URL (below) and opens it in the browser.
+3. Google sends the browser to `http://127.0.0.1:<port>/oauth2/google/<tag>?code=...&state=...`.
+   The client accepts only the `state` of the start answer, and sends nothing after an `error=`
+   redirect.
+4. `POST /auth/sso/google/finish` with the attempt id, the `codeVerifier`, the `state` and the
+   `code` (and `iss` when Google sent it). An attempt id is useless without the verifier, and
+   the code is useless without the server's own PKCE verifier and client secret.
 5. The answer is a session, a two-step verification step (continue with `POST /auth/login/mfa`),
-   or, for a new player, `needsUsername`: the client then calls `POST /auth/sso/complete` with a
-   user name.
+   `needsUsername` for a new player (continue with `POST /auth/sso/complete`), or
+   `needsPassword` when an account with a password uses the address (continue with
+   `POST /auth/sso/google/link`).
 
-Which account the Google sign-in reaches:
+**The origin tag.** The redirect URI carries a tag of the server the player added, so a URL that
+another server got for its own players is refused by the game:
+
+- the origin is the lower-case host (an IPv6 literal in brackets), `:` and the decimal API port,
+  which is always written, 443 included. The server takes `SERVER_PUBLIC_HOST` and the public API
+  port (`PUBLIC_API_PORT`, else `API_PORT`); the game takes the address it is connected to;
+- the tag is the first 22 characters of base64url without padding of
+  SHA-256(UTF-8 `"scacelith-sso-origin-v1\n"` + origin);
+- the redirect URI is `"http://127.0.0.1:" + port + "/oauth2/google/" + tag`: always the IPv4
+  literal (no `localhost`, no `[::1]`), and the port of the game's listener, 1024-65535. The
+  server builds it from the port and its own tag; it never takes a URI, host or path from the
+  client.
+
+| Origin | Tag |
+|---|---|
+| `play.scacelith.example:443` | `IhcScoV7eDOzTEcSnqPUPt` |
+| `localhost:8443` | `TFGx7zQ_8QlGZW5zpqznCr` |
+| `[::1]:8443` | `XToJm0DG5PjciEVmZa9Cho` |
+| `127.0.0.1:50443` | `3r653wM5ZjYsHcAJljmCwY` |
+
+So Google sign-in works only for players who added the server under exactly `SERVER_PUBLIC_HOST`
+and its public API port; under another name or address the game stops with its own error
+`sso_origin`. A hostile server that relays the game's start to this one gets a URL with this
+server's tag, which its players' game refuses; if it rewrites `redirect_uri`, the exchange sends
+the stored URI and Google refuses the code (RFC 6749 s.4.1.3).
+
+**What the game checks before it opens the browser.** The `authUrl` starts with exactly
+`https://accounts.google.com/o/oauth2/v2/auth?` and is printable ASCII under 4096 characters, and
+its query has exactly one `response_type=code`, exactly one `redirect_uri` equal to the URI the
+game computes from its port and its origin tag, exactly one `state` equal to the answer's
+`state`, `code_challenge_method=S256` and a 43-character `code_challenge`. Otherwise it stops its
+listener and opens nothing. It posts `finish` and `link` only to the server that answered
+`start`.
+
+**Which account the Google sign-in reaches:**
 
 - the account already linked to that Google account;
-- otherwise, a local account with the same address: it is linked when both Google and the server
-  have confirmed that address;
-- otherwise, a new account.
+- otherwise, an active account with the address that Google confirmed: when it has a password,
+  `finish` answers `needsPassword` with its username (only someone who proved that address to
+  Google sees it), and the link is stored only once its password, then its two-step code when
+  that is on, pass in the game. An account without a password answers 409
+  `sso_account_exists`, without naming it;
+- otherwise, a new account (`needsUsername`).
+
+A Google account is never linked to an existing account by its address alone, whether or not
+the server confirmed the address (`REQUIRE_EMAIL_VERIFICATION`). An account that Google created
+is linked when it is created. The account's address gets a mail when Google sign-in creates an
+account and when it is added to an existing one (after the password and the code), never on a
+later sign-in: it names the account, the server and the time (UTC), and says what to do if it was
+not the owner. The mail never holds a code, a token or an IP address, and a mail that cannot be
+sent does not change the sign-in.
+
+**Accepted residual.** A player talked into sending the whole 127.0.0.1 address bar (it holds the
+code) to someone who started the attempt gives that person a session on an account already
+linked to that Google account (its two-step verification still applies), or a new account bound
+to the player's Google account. In the `needsPassword` case that person still needs the
+account's password. RFC 8252 has no fix for this in the protocol; the device-code flow is not an
+option. The mails above warn the owner of the address in both cases.
 
 #### POST /auth/sso/google/start
 
-**Auth** none. **Limit** `sso_start`. Body: `{ "codeChallenge": string of exactly 43 [A-Za-z0-9_-] }`.
+**Auth** none. **Limit** `sso_start`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `codeChallenge` | string, exactly 43 `[A-Za-z0-9_-]` | S256 of the client's `codeVerifier`. |
+| `redirectPort` | integer, 1024-65535 | The port of the client's listener on 127.0.0.1. |
+
 Answer:
 
 ```json
-{ "attemptId": "sso_...", "authUrl": "https://accounts.google.com/...", "pollMs": 2000, "expiresIn": 600 }
+{ "attemptId": "sso_...", "authUrl": "https://accounts.google.com/o/oauth2/v2/auth?...", "state": "...", "expiresIn": 600 }
 ```
 
-#### POST /auth/sso/google/poll
+`authUrl` holds `client_id`, `redirect_uri` (as above), `response_type=code`,
+`scope=openid email profile`, `state`, `nonce`, `code_challenge` (S256 of the server's own
+verifier for Google) with `code_challenge_method=S256`, and `prompt=select_account`. `state` is
+43 characters `[A-Za-z0-9_-]`. Errors: 400 `invalid_request`, 429 `rate_limited`.
 
-**Auth** none. **Limit** `sso_poll`. Poll every `pollMs`.
+#### POST /auth/sso/google/finish
+
+**Auth** none. **Limit** `sso_finish`.
 
 | Field | Type | Notes |
 |---|---|---|
 | `attemptId` | string, 1-64 | From `start`. |
 | `codeVerifier` | string, 43-128 `[A-Za-z0-9._~-]` | Its SHA-256 must match `start`'s challenge. |
+| `state` | string, exactly 43 `[A-Za-z0-9_-]` | As Google sent it back. |
+| `code` | string, 1-2048 printable ASCII without spaces | As Google sent it back. |
+| `iss` | string, 1-256, optional | As Google sent it back. |
 | `clientLabel` | string, max 64, optional | As at sign-in. |
 
-Answers (200). The result is given once:
+The server checks the attempt (unknown, used or expired: 410), then the verifier (a wrong one
+leaves the attempt usable), then uses the attempt once, checks `state` and `iss`, exchanges the
+code with Google and verifies the ID token. Answers (200), one of:
 
-- `{ "status": "pending" }`: the browser has not come back yet;
-- `{ token, expiresAt, user }`: signed in;
+- `{ token, expiresAt, user }`: signed in to the linked account;
 - `{ "mfaRequired": true, "mfaToken": "...", "expiresIn": 300 }`: continue with
   `POST /auth/login/mfa`;
 - `{ "needsUsername": true, "ssoTicket": "sso_...", "suggestedUsername": "alice" }`: a new
   account. `suggestedUsername` comes from the Google name or the address, and is `""` when
-  nothing fits.
+  nothing fits;
+- `{ "needsPassword": true, "linkTicket": "sso_...", "username": "alice", "expiresIn": 600 }`:
+  the account with that address has a password; continue with `POST /auth/sso/google/link`.
+  Nothing is linked yet.
 
 Errors:
 
+- 403 `invalid_verifier`: the verifier does not match the attempt's challenge;
 - 410 `sso_expired`: an unknown, used or expired attempt;
-- 403 `invalid_verifier`;
-- 409 `sso_cancelled`;
-- 502 `sso_failed`;
+- 502 `sso_failed`: a wrong `state` or `iss`, or Google refused the code or sent an ID token that
+  does not verify. It never carries Google's text;
 - 403 `sso_email_unverified`: Google has not confirmed the address;
-- 409 `sso_account_unverified`: a local account uses the address without having confirmed it;
+- 409 `sso_account_exists`: an active account without a password uses the address (not named);
 - 403 `registration_closed`;
 - 403 `account_disabled`;
-- 403 `banned`, 403 `email_unverified`.
+- for a linked account only: 403 `banned` (with `until`), 403 `email_unverified`.
+
+#### POST /auth/sso/google/link
+
+Links Google to an existing account with that account's password, typed in the game. **Auth**
+none. **Limit** `auth` (with its IPv6 /48 count). A proof of work is asked as for
+`POST /auth/login` (428 `pow_required`).
+
+| Field | Type | Notes |
+|---|---|---|
+| `linkTicket` | string, 1-64 | From `finish`, valid for 10 minutes. |
+| `password` | string, 1-1024 | The account's password. |
+| `clientLabel` | string, max 64, optional | As at sign-in. |
+| `pow` | object, optional | Section 1.6. |
+
+Answers (200):
+
+- `{ token, expiresAt, user }`: the link is stored and the player signed in;
+- `{ "mfaRequired": true, "mfaToken": "...", "expiresIn": 300 }`: continue with
+  `POST /auth/login/mfa`. The link is stored only when a code passes there.
+
+Errors:
+
+- 401 `invalid_credentials`: a wrong password; the ticket stays, for 5 tries in all. A try is
+  taken just before the password is checked: a 429 `too_many_attempts` or a 428 `pow_required`
+  answer takes none, a refusal of the hash queue (503 `server_busy`, 429 `rate_limited`) has
+  taken one and counts as a failure of the account;
+- 410 `sso_expired`: an unknown, used or expired ticket, the 5th wrong password, an account
+  whose status or address changed since `finish`, or one whose status, address, password or
+  two-step verification changed while the link was being stored; start again from the game;
+- 429 `too_many_attempts` (`retryAfter`): the account's failure delay, the same counter as
+  `POST /auth/login`;
+- 403 `banned` (with `until`), only after a correct password;
+- 409 `sso_already_linked`: the Google account was linked to another account meanwhile;
+- 428 `pow_required`, the hash queue errors and 503 `server_busy`, as for `POST /auth/login`.
+
+`POST /auth/login/mfa` after a link step stores the link when the code passes (its other errors
+are listed there).
 
 #### POST /auth/sso/complete
 
@@ -728,7 +862,7 @@ count).
 
 | Field | Type | Notes |
 |---|---|---|
-| `ssoTicket` | string, 1-64 | From the poll answer, valid for 10 minutes. |
+| `ssoTicket` | string, 1-64 | From the `finish` answer, valid for 10 minutes. |
 | `username` | string, 1-64 | Username rules as at registration. |
 | `clientLabel` | string, max 64, optional | |
 
@@ -738,7 +872,8 @@ and "Forgot password" gives it one. Errors:
 - 403 `registration_closed`;
 - 400 `invalid_username`;
 - 410 `sso_expired`;
-- 409 `username_taken`;
+- 409 `username_taken`: an account has the username, or a waiting signup of another address
+  holds it;
 - 409 `sso_already_linked`;
 - 409 `email_taken`.
 
@@ -842,7 +977,7 @@ needed, but no second factor, even with two-step verification on.
 Answer: 200 `{ "status": "password_changed" }`. The change has these effects:
 
 - every other session is revoked, and this one stays signed in;
-- a pending e-mail change is cancelled;
+- a pending e-mail change is cancelled, and the account's password reset links stop working;
 - the owner gets a mail.
 
 Errors: the re-authentication errors (section 1.7) and 400 `weak_password` (checked after the
@@ -1043,16 +1178,18 @@ shortened here):
 - `securityEvents`: newest first, kept `RETENTION_SECURITY_DAYS`, with `ip` erased after
   `RETENTION_IP_DAYS`. `ip` is given only for what was done while signed in, with the account's
   password (and second factor) or with a link mailed to its address: `register`,
-  `email_verified`, `login`, `sso_login`, `sso_account_created`, `recovery_code_used`,
+  `email_verified`, `login`, `sso_login`, `sso_linked`, `sso_account_created`, `recovery_code_used`,
   `password_reset`, `password_changed`, `reauth_failed`, `mfa_setup_started`, `mfa_enabled`,
   `mfa_disabled`, `recovery_codes_regenerated`, `session_revoked`, `sessions_revoked_all`,
   `email_change_requested`, `email_changed`, `email_change_refused` and `account_exported`. Every
   other kind has `ip: null`: failed sign-ins (`login_failed`, `login_lockout`, `mfa_failed`) and
   the requests anyone can make by typing the account's name or address
   (`password_reset_requested`, `verification_resent`, `register_existing_email`) may come from
-  another person. `detail` keeps only the fields that the export allows for the event's kind:
+  another person, as may `sso_link_required` (a Google sign-in with the account's address, before
+  its password). `detail` keeps only the fields that the export allows for the event's kind:
   - `login`: `method`;
-  - `sso_login`, `sso_linked`, `sso_account_created`: `provider`;
+  - `sso_login`, `sso_account_created`: `provider`;
+  - `sso_linked`: `provider` and `method` (`password`, or `password+totp` with the second factor);
   - `login_failed`: `failures`;
   - `login_lockout`: `retryAfterMs`;
   - `mfa_failed`: `attempts`;
@@ -1585,7 +1722,7 @@ curl -sS "$API/reports" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: appl
 
 ## 14. HTML pages outside /api
 
-Pages for a browser, opened from the links of e-mails and by Google. Their links point to
+Pages for a browser, opened from the links of e-mails. Their links point to
 `https://<SERVER_PUBLIC_HOST>` (with `:<PUBLIC_API_PORT>` when it is not 443).
 
 - The pages run no JavaScript and load no external resource. They are served with
@@ -1599,12 +1736,11 @@ Pages for a browser, opened from the links of e-mails and by Google. Their links
 | Page | Answers |
 |---|---|
 | `GET /verify-email?token=` | 200: a "Confirm my e-mail address" button. 400: link invalid or expired. Limit `page`. |
-| `POST /verify-email` (form `token`) | 200: address confirmed. 400: link invalid, used or expired. Limit `auth`. |
+| `POST /verify-email` (form `token`) | 200: address confirmed (the link of a new signup creates the account then). 400: link invalid, used or expired. 409: the link of a new signup, whose username or address another account took in the meantime; no account is created. 503 (`Retry-After: 1`): the database stayed locked; nothing changed and the link still works. Limit `auth`. |
 | `GET /reset-password?token=` | 200: the new password form (password twice). 400: link invalid (also when it was mailed to an address the account no longer has). Limit `page`. |
 | `POST /reset-password` (form `token`, `newPassword`, `confirmPassword`) | 200: password changed, and every device signed out. 400: the form again with the error (the passwords differ, a weak password), or link invalid. 503 / 429: the form again with `Retry-After` when the server is busy (the password hash queue, or the database stayed locked); the link stays valid. Limits `auth` and `auth_reset`. |
 | `GET /confirm-email-change?token=` | 200: shows the new address and the account's name, with a "Use this e-mail address" button. 400: link invalid or expired (also when the account's address changed since the request). Limit `page`. |
 | `POST /confirm-email-change` (form `token`) | 200: address changed. 400: link invalid, used or expired. 409: another account took the address in the meantime. 503 (`Retry-After: 1`): the database stayed locked; nothing changed and the link still works. Limit `auth`. |
-| `GET /auth/sso/google/callback?code=&state=` | 200: "You can go back to Scacelith" (or "choose your username"). 400: the sign-in failed, was cancelled or expired. Never shows a token. Limit `sso_page`. |
 
 ## 15. Health endpoints
 

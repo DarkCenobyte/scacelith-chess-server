@@ -42,8 +42,10 @@
 // stops.
 //
 // No CORS: the API serves the game, not browsers; no Access-Control-* header is ever sent, so a
-// web page cannot read an answer, and the JSON-only rule makes every cross-site write need a
-// preflight that fails.
+// web page cannot read an answer. The API carries no ambient credentials (bearer tokens, no
+// cookies), and a JSON body needs a preflight that fails. The HTML form pages (router.page POSTs)
+// accept simple form posts, which need no preflight, and rely on the secret single-use token each
+// form carries: any new page POST must carry such a token (or another CSRF defence).
 //
 // Client address: `req.clientIp` when the listener set it (proxy mode, X-Forwarded-For from a
 // trusted proxy), else the socket's remote address.
@@ -52,7 +54,7 @@
 
 import { API_PREFIX, HttpError, Router, validate } from './router.js';
 import { PAGE_CSP, renderMessage } from './pages/layout.js';
-import { TokenBucketLimiter, ipKey, normalizeIp, prefixKey } from '../security/ratelimit.js';
+import { TokenBucketLimiter, ipKey, normalizeIp, prefixKey, workerShare } from '../security/ratelimit.js';
 import { ipForLog } from '../log.js';
 import { metrics } from '../metrics.js';
 import { admitRequest } from '../net/listeners.js';
@@ -109,17 +111,16 @@ function rateLimited(ms, label) {
 /**
  * The budget of one signed-in account across every call that carries a valid session
  * (USER_RATE_PER_MIN, abuse design 3.6): each worker allows its share of the whole-server rate,
- * max(1, min(L, ceil(2 L / WORKERS))) (all of it with 1 or 2 workers, half with 4), as a token
- * bucket holding half a minute of that share. Local to the worker: no IPC per request; a client
- * spread over every worker gets at most twice the rate. A refusal is the account's problem, not
- * its network's: it never counts toward blocking an address.
+ * workerShare(L, WORKERS) (security/ratelimit.js: all of it with 1 or 2 workers, half with 4), as
+ * a token bucket holding half a minute of that share. Local to the worker: no IPC per request; a
+ * client spread over every worker gets at most twice the rate. A refusal is the account's problem,
+ * not its network's: it never counts toward blocking an address.
  * @param {object} config
  * @param {() => number} now
  */
 function createUserBudget(config, now) {
     const perMin = Number.isInteger(config.userRatePerMin) && config.userRatePerMin > 0 ? config.userRatePerMin : 120;
-    const workers = Math.max(1, Number(config.workers) || 1);
-    const share = Math.max(1, Math.min(perMin, Math.ceil(2 * perMin / workers)));
+    const share = workerShare(perMin, config.workers);
     const burst = Math.max(1, Math.ceil(share / 2));
     const windowMs = Math.max(1, Math.round(burst * 60000 / share));
     const buckets = new TokenBucketLimiter({ now });
@@ -417,7 +418,7 @@ export function createApiHandler({ config, store, auth, primary = null, antichea
                 label = 'readyz';
                 if (method !== 'GET' && method !== 'HEAD') throw new HttpError(405, 'method_not_allowed', 'Method not allowed.', null, { Allow: 'GET, HEAD' });
                 if (ready()) send(req, res, 200, { body: { status: 'ready' } });
-                else send(req, res, 503, { body: { error: 'not_ready', message: 'The server is starting or stopping.' } });
+                else send(req, res, 503, { body: { status: 'not_ready' } });
                 return;
             }
 

@@ -9,19 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { loadConfig, ConfigError } from '../src/config.js';
 import { configureLogging, logger } from '../src/log.js';
-import { runAdmin, USAGE, defaultHashToken } from '../src/anticheat/admin.js';
-
-// The session-token hash must be the auth module's (sessions are looked up by it). Use its
-// exported helper when there is one; the fallback is hex SHA-256.
-async function resolveHashToken() {
-    for (const mod of ['../src/auth/tokens.js', '../src/auth/sessions.js', '../src/auth/index.js']) {
-        try {
-            const m = await import(mod);
-            for (const name of ['hashToken', 'hashSessionToken', 'tokenHash']) if (typeof m[name] === 'function') return m[name];
-        } catch { /* module absent */ }
-    }
-    return defaultHashToken;
-}
+import { runAdmin, USAGE } from '../src/anticheat/admin.js';
+import { sha256Hex } from '../src/security/keys.js';    // auth/sessions.js's session-token hash
 
 function moderatorName() {
     if (process.env.SCACELITH_MODERATOR) return process.env.SCACELITH_MODERATOR;
@@ -51,7 +40,7 @@ async function main(argv) {
     try { ({ applyGame } = await import('../src/match/elo.js')); } catch { applyGame = undefined; }
     const store = openStore(config, { applyGame });
     try {
-        return await runAdmin(argv, { store, config, moderator: moderatorName(), log: logger.child('admin'), hashToken: await resolveHashToken() });
+        return await runAdmin(argv, { store, config, moderator: moderatorName(), log: logger.child('admin'), hashToken: sha256Hex });
     } finally {
         try { store.close(); } catch { /* ignore */ }
     }

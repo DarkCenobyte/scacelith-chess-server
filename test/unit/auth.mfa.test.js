@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { base32Decode, hotp, totp, totpStep } from '../../src/security/totp.js';
-import { linkIn, startTestServer } from './helpers/auth-fakes.js';
+import { StoreError } from '../../src/store/index.js';
+import { createClock, createFakePrimary, linkIn, startTestServer } from './helpers/auth-fakes.js';
+import { startReal } from './helpers/real-auth.js';
 
 const PW = 'correct horse battery';
 
-/** A server with a logged-in user who has enrolled TOTP. */
-async function enrolled(env = {}) {
-    const s = await startTestServer({ env });
+/** A server with a logged-in user who has enrolled TOTP (`opts`: more startTestServer options). */
+async function enrolled(env = {}, opts = {}) {
+    const s = await startTestServer({ env, ...opts });
     const u = await s.createUser({ username: 'alice', password: PW });
     const { token } = await s.login('alice', PW);
     const setup = await s.request('POST', '/api/v1/account/mfa/totp/setup', { token, body: { password: PW } });
@@ -135,6 +137,29 @@ test('the MFA token: 5 wrong codes, expiry after 5 minutes, per-account delay', 
     assert.equal(r.status, 400);
 });
 
+test('the MFA token: wrong codes sent at once still end it after 5', async (t) => {
+    // The primary answers the per-account limit of each code after a while (the IPC round trip).
+    const now = createClock();
+    const primary = createFakePrimary({ now });
+    const request = primary.request;
+    primary.request = async (type, payload) => {
+        if (type === 'ratelimit.take' && payload.key.startsWith('mfa:')) await new Promise((r) => setTimeout(r, 20));
+        return request(type, payload);
+    };
+    const { s, secret } = await enrolled({}, { primary, now });
+    t.after(s.close);
+    const tok = await mfaStep(s);
+    const answers = await Promise.all(Array.from({ length: 9 }, (_, i) =>
+        s.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: tok, code: String(100000 + i) } })));
+    const errors = answers.map((r) => r.json.error);
+    assert.equal(errors.filter((e) => e === 'invalid_code').length, 5, errors.join());
+    assert.equal(errors.filter((e) => e === 'invalid_mfa_token').length, 4, errors.join());
+    s.auth.events.flush();
+    assert.equal(s.store._raw.securityEvents.filter((e) => e.kind === 'mfa_failed').length, 9, 'every checked code is recorded');
+    const r = await s.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: tok, code: totp(secret, s.now()) } });
+    assert.equal(r.json.error, 'invalid_mfa_token', 'ended');
+});
+
 test('a ban decided between the two steps is enforced at the second', async (t) => {
     const { s, u, secret } = await enrolled();
     t.after(s.close);
@@ -191,6 +216,30 @@ test('re-authentication failures are throttled per account', async (t) => {
     assert.deepEqual([r.status, r.json.error], [429, 'too_many_attempts']);
     s.now.advance(r.json.retryAfter * 1000);
     assert.equal((await s.request('POST', '/api/v1/account/mfa/totp/setup', { token, body: { password: PW } })).status, 200);
+});
+
+test('enable and disable write the MFA state and the recovery codes together (real store)', async (t) => {
+    const s = await startReal(t);
+    const id = s.store.users.create({ username: 'alice', email: 'alice@example.org', passwordHash: await s.hasher.hash(PW), emailVerified: true });
+    const { token } = (await s.request('POST', '/api/v1/auth/login', { body: { login: 'alice', password: PW } })).json;
+    const setup = await s.request('POST', '/api/v1/account/mfa/totp/setup', { token, body: { password: PW } });
+    const secret = base32Decode(setup.json.secret);
+    const codes = s.store.mfa.replaceRecoveryCodes;
+    const failOnce = () => { s.store.mfa.replaceRecoveryCodes = () => { s.store.mfa.replaceRecoveryCodes = codes; throw new StoreError('busy', 'database is locked'); }; };
+    failOnce();
+    let r = await s.request('POST', '/api/v1/account/mfa/totp/enable', { token, body: { code: totp(secret, s.now()) } });
+    assert.equal(r.status, 500);
+    assert.equal(s.store.users.byId(id).mfaEnabled, false, 'not enabled without its recovery codes');
+    r = await s.request('POST', '/api/v1/account/mfa/totp/enable', { token, body: { code: totp(secret, s.now()) } });
+    assert.equal(r.status, 200);
+    assert.equal(s.store.mfa.countRecoveryCodes(id), 10);
+
+    s.now.advance(30000);
+    failOnce();
+    r = await s.request('POST', '/api/v1/account/mfa/totp/disable', { token, body: { password: PW, code: totp(secret, s.now()) } });
+    assert.equal(r.status, 500);
+    assert.equal(s.store.users.byId(id).mfaEnabled, true, 'still on');
+    assert.equal(s.store.mfa.countRecoveryCodes(id), 10);
 });
 
 test('enable without setup', async (t) => {

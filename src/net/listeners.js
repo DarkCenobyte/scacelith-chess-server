@@ -11,12 +11,14 @@
 //           X-Forwarded-For is never trusted.
 //
 // TLS: TLS_MIN_VERSION, Node's default (secure) cipher list with server preference, ALPN
-// http/1.1, session tickets on. Ticket keys are derived from SERVER_SECRET (HKDF, rotated daily)
-// so that every worker can resume every other worker's sessions: a reconnecting client usually
-// skips the full handshake whichever worker the kernel hands it to. Certificates are reloaded
-// without a restart on SIGHUP (the primary forwards it as the 'tls.reload' IPC message) and when
-// the files change (stat polling, which also follows certbot's symlink swaps); a broken new
-// certificate is refused and the old one stays in use.
+// http/1.1, session tickets on. Every worker applies the same ticket keys, rotated daily (UTC), so
+// that it can resume every other worker's sessions: a reconnecting client usually skips the full
+// handshake whichever worker the kernel hands it to. They come from a random key the primary draws
+// at its start and moves forward one way each day (net/ticket-keys.js), never from SERVER_SECRET:
+// neither that secret nor a later memory dump recomputes a past day's keys. Certificates are
+// reloaded without a restart on SIGHUP (the primary forwards it as the 'tls.reload' IPC message)
+// and when the files change (stat polling, which also follows certbot's symlink swaps); a broken
+// new certificate is refused and the old one stays in use.
 //
 // Cluster: by default workers listen through the cluster module (the primary accepts and hands
 // connections out round-robin). LISTEN_REUSE_PORT=true on Linux makes each worker bind its own
@@ -99,7 +101,8 @@
 // reads a large answer, a GIF or a PGN, a few bytes at a time). Malformed HTTP ('clientError':
 // 400, 408 for a header timeout, 431 for oversized headers) is counted in
 // scacelith_http_client_errors_total{reason} and toward a block of the address, unless the peer
-// is a trusted proxy.
+// is a trusted proxy, and its socket is closed once the answer is flushed (1 s at most); a client
+// that ends or resets its connection in the middle of a request is closed without being counted.
 //
 // Privileged ports: API_PORT defaults to 443, and Linux lets only a process with the
 // CAP_NET_BIND_SERVICE capability (root has it) bind a port below 1024
@@ -109,7 +112,6 @@
 // on the node binary, or the sysctl; the worker logs it and exits non-zero (worker-main.js), like
 // any other listen failure (EADDRINUSE...), which keeps its own error.
 
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
@@ -120,7 +122,6 @@ import { defaultPendingPerGroup } from '../config.js';
 import { metrics as defaultRegistry } from '../metrics.js';
 import { ipGroupKey, ipMatcher, normalizeIp, resolveClientIp } from './ip.js';
 
-const DAY_MS = 86400000;
 const DEFAULT_BACKLOG = 2048;
 /** TLS handshake timeout of the native listeners (Node's handshakeTimeout). */
 export const HANDSHAKE_TIMEOUT_MS = 10000;
@@ -446,15 +447,6 @@ export function makeClientIp(config) {
 }
 
 /**
- * TLS session-ticket keys (48 bytes) for a given day, derived from the server secret.
- * @param {Buffer} secret
- * @param {number} day days since the epoch
- */
-export function deriveTicketKeys(secret, day) {
-    return Buffer.from(crypto.hkdfSync('sha256', secret, 'scacelith-tls-tickets', `day:${day}`, 48));
-}
-
-/**
  * Reads the certificate and key files and builds the TLS options.
  * @param {object} config
  */
@@ -470,8 +462,8 @@ export function tlsOptions(config) {
 }
 
 /**
- * A small JSON answer with the security headers of the API (the answers given before the API
- * handler: health, refusals of the protection per address).
+ * A small JSON answer with most of the API's security headers (no Cross-Origin-Resource-Policy;
+ * the answers given before the API handler: health, refusals of the protection per address).
  * @param {import('node:http').ServerResponse} res
  * @param {number} status
  * @param {object} body
@@ -588,6 +580,7 @@ function refuseRequest(res, retryAfterMs, native, close) {
 }
 
 function destroyResponse(res) { res.destroy(); }
+function destroySocket(socket) { socket.destroy(); }
 
 // The inactivity timeout (server.timeout, IDLE_TIMEOUT_MS) is for a client that stops reading. A
 // request whose handler is still at work (a GIF waiting for a render thread, a data export) keeps
@@ -643,10 +636,12 @@ export function wrapApiHandler(apiHandler, { clientIp, ready, native, guard = nu
 
 const CLIENT_ERROR_STATUS = { timeout: '408 Request Timeout', too_large: '431 Request Header Fields Too Large', malformed: '400 Bad Request' };
 
-// What a 'clientError' says about the client: null for a connection that simply went away.
+// What a 'clientError' says about the client: null for a connection that simply went away (reset,
+// or ended by the client in the middle of a request: HPE_INVALID_EOF_STATE).
 function clientErrorReason(err) {
     const code = err && err.code;
     if (code === 'ECONNRESET' || code === 'EPIPE' || code === 'ECONNABORTED' || code === 'ETIMEDOUT') return null;
+    if (code === 'HPE_INVALID_EOF_STATE') return null;
     if (code === 'ERR_HTTP_REQUEST_TIMEOUT') return 'timeout';
     if (code === 'HPE_HEADER_OVERFLOW' || code === 'HPE_CHUNK_EXTENSIONS_OVERFLOW') return 'too_large';
     return 'malformed';
@@ -670,6 +665,11 @@ function hardenHttp(server, { guard, isTrusted, clientErrors, headersTimeoutMs, 
         }
         if (reason !== null && socket.writable && !socket.destroyed) {
             socket.end(`HTTP/1.1 ${CLIENT_ERROR_STATUS[reason]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+            // Ending is not enough: the parser stays attached to the socket (after a header timeout
+            // Node no longer watches it, and a client that keeps sending would hold the socket and
+            // could still complete its request). Closed once the answer is flushed, 1 s at most.
+            socket.destroySoon();
+            setTimeout(destroySocket, 1000, socket).unref();
         } else {
             socket.destroy();
         }
@@ -699,12 +699,15 @@ export class Listeners {
      * @param {number} [o.idleTimeoutMs] socket inactivity timeout
      * @param {number} [o.sendTimeoutMs] send deadline of an answer
      * @param {number} [o.checkIntervalMs] Node's connectionsCheckingInterval
+     * @param {import('./ticket-keys.js').TicketKeys|null} [o.ticketKeys] the session-ticket keys every
+     *   worker shares (native mode; from the primary). Without them, each TLS server keeps Node's
+     *   random keys and resumes only its own sessions.
      */
     constructor({
         config, apiHandler, wsServer, log = null, ready = () => true, reusePort, full = null, registry = defaultRegistry,
         handshakeTimeoutMs = HANDSHAKE_TIMEOUT_MS, helloTimeoutMs = HELLO_TIMEOUT_MS, guard = null,
         headersTimeoutMs = HEADERS_TIMEOUT_MS, requestTimeoutMs = REQUEST_TIMEOUT_MS, idleTimeoutMs = IDLE_TIMEOUT_MS,
-        sendTimeoutMs = SEND_TIMEOUT_MS, checkIntervalMs = CONNECTIONS_CHECK_MS,
+        sendTimeoutMs = SEND_TIMEOUT_MS, checkIntervalMs = CONNECTIONS_CHECK_MS, ticketKeys = null,
     }) {
         this.config = config;
         this.log = log;
@@ -716,6 +719,7 @@ export class Listeners {
         this.servers = [];            // [{ kind, server, port }]
         this._tlsServers = [];
         this._watchers = [];
+        this.ticketKeys = ticketKeys;
         this._ticketDay = -1;
         this._ticketTimer = null;
         this._reloadTimer = null;
@@ -802,11 +806,13 @@ export class Listeners {
     }
 
     _rotateTicketKeys(now = Date.now()) {
-        const day = Math.floor(now / DAY_MS);
-        if (day === this._ticketDay || !this.config.serverSecret) return;
+        if (!this.ticketKeys) return;
+        const day = this.ticketKeys.advance(now);
+        if (day === this._ticketDay) return;
         this._ticketDay = day;
-        const keys = deriveTicketKeys(this.config.serverSecret, day);
+        const keys = this.ticketKeys.ticketKeys(now);
         for (const s of this._tlsServers) s.setTicketKeys(keys);
+        keys.fill(0);           // the TLS contexts keep their own copy
     }
 
     _watchCertificates() {
@@ -838,6 +844,10 @@ export class Listeners {
             return false;
         }
         for (const s of this._tlsServers) s.setSecureContext(opts);
+        // setSecureContext installs random ticket keys: put the day's shared ones back, or the
+        // other workers could not resume this one's sessions until the next day.
+        this._ticketDay = -1;
+        this._rotateTicketKeys();
         this.log?.info?.('certificate reloaded');
         return true;
     }

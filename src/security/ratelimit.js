@@ -5,6 +5,7 @@
 //   FailureCounter         per-key failure counter with exponential delay (login brute force)
 //   SlidingWindowCounter   approximate count of events over the last window (failure-rate detector)
 //   workerShare()          the part of a whole-server per-address limit one worker enforces
+//   randomRetryAfter()     a Retry-After drawn at random in a range (refused clients spread out)
 //   createLocalControl()   in-process implementation of the primary's `ratelimit.take`,
 //                          `ratelimit.refund` and `once.consume` IPC requests (docs/DESIGN.md
 //                          5.7). Used when no primary is available (single process, tests) and as
@@ -12,7 +13,8 @@
 //
 // Complexity: every operation is O(1) (amortised), no timers: expiry is lazy.
 
-import { expandIPv6 } from '../log.js';
+import { OnceStore, SlidingWindowLimiter } from '../cluster/limits.js';
+import { ipGroupKey, normalizeIp as normalizeAddress } from '../net/ip.js';
 
 /** Map with a maximum size; get() refreshes an entry, set() evicts the least recently used. */
 export class LruMap {
@@ -45,18 +47,14 @@ export class LruMap {
 
 /**
  * Normalises a client address for rate limiting: IPv4-mapped IPv6 becomes IPv4, IPv6 is reduced
- * to its /64 (one customer network), everything else is kept as is. See also prefixKey().
+ * to its /64 (one customer network; net/ip.js ipGroupKey), anything that is not an address is
+ * kept as is. See also prefixKey().
  * @param {string} ip
  * @returns {string}
  */
 export function ipKey(ip) {
-    let a = String(ip || '');
-    if (a.startsWith('::ffff:') && a.includes('.')) a = a.slice(7);
-    if (a.includes(':')) {
-        const parts = expandIPv6(a);
-        if (parts) return parts.slice(0, 4).join(':') + '::/64';
-    }
-    return a;
+    const k = ipGroupKey(ip, 64);           // 'unknown' exactly when ip is not an address
+    return k === 'unknown' ? String(ip || '') : k;
 }
 
 /**
@@ -67,22 +65,18 @@ export function ipKey(ip) {
  * @returns {string}
  */
 export function prefixKey(ip) {
-    const a = normalizeIp(ip);
-    if (a.includes(':')) {
-        const parts = expandIPv6(a);
-        if (parts) return parts.slice(0, 3).join(':') + '::/48';
-    }
-    return a;
+    const k = ipGroupKey(ip, 48);
+    return k === 'unknown' ? String(ip || '') : k;
 }
 
 /**
- * Normalises the address itself (IPv4-mapped IPv6 -> IPv4).
+ * Normalises the address itself (net/ip.js normalizeIp: IPv4-mapped IPv6 -> IPv4, IPv6
+ * lower-cased); anything that is not an address is kept as is.
  * @param {string} ip
  * @returns {string}
  */
 export function normalizeIp(ip) {
-    const a = String(ip || '');
-    return a.startsWith('::ffff:') && a.includes('.') ? a.slice(7) : a;
+    return normalizeAddress(ip) || String(ip || '');
 }
 
 /**
@@ -101,6 +95,16 @@ export function workerShare(limit, workers) {
     const l = Math.max(0, Math.floor(+limit || 0));
     const n = Math.max(1, Math.floor(+workers || 1));
     return Math.max(1, Math.min(l, Math.ceil(2 * l / n)));
+}
+
+/**
+ * A Retry-After in seconds, an integer drawn at random in [min, max], so that the clients refused
+ * during one burst do not all come back together.
+ * @param {{ min: number, max: number }} range
+ * @returns {number}
+ */
+export function randomRetryAfter({ min, max }) {
+    return min + Math.floor(Math.random() * (max - min + 1));
 }
 
 /**
@@ -220,55 +224,20 @@ export class SlidingWindowCounter {
  *   ratelimit.take   { key, limit, windowMs, cost }   -> { allowed, retryAfterMs, count }
  *   ratelimit.refund { key, windowMs, cost, ageMs }   -> { refunded }
  *   once.consume     { key, ttlMs }                   -> { fresh }
- * ratelimit.take counts over a sliding window (two weighted fixed windows); a refused take is
- * not counted. ratelimit.refund takes back `cost` from the fixed window that counted a take made
- * `ageMs` ago (the current one or the one before; an older one no longer counts anyway).
+ * They are the primary's own SlidingWindowLimiter and OnceStore (cluster/limits.js), so that the
+ * fallback answers exactly as the primary would (its Retry-After included). ratelimit.take counts
+ * over a sliding window (two weighted fixed windows); a refused take is not counted.
+ * ratelimit.refund takes back `cost` from the fixed window that counted a take made `ageMs` ago
+ * (the current one or the one before; an older one no longer counts anyway).
  * @param {{ now?: () => number, maxKeys?: number }} [opts]
  * @returns {{ request(type: string, payload: object): Promise<object>, take(p: object): object, consume(p: object): object }}
  */
 export function createLocalControl({ now = Date.now, maxKeys = 200000 } = {}) {
-    const windows = new LruMap(maxKeys);
-    const once = new LruMap(maxKeys);
-    function take({ key, limit, windowMs, cost = 1 }) {
-        const t = now();
-        const k = `${key}\u0001${windowMs}`;
-        let w = windows.get(k);
-        const start = Math.floor(t / windowMs) * windowMs;
-        if (!w) { w = { start, cur: 0, prev: 0 }; windows.set(k, w); }
-        if (w.start !== start) {
-            w.prev = start - w.start === windowMs ? w.cur : 0;
-            w.cur = 0;
-            w.start = start;
-        }
-        const frac = (t - start) / windowMs;
-        const est = w.prev * (1 - frac) + w.cur;
-        if (est + cost > limit) {
-            let retryAfterMs = start + windowMs - t;
-            const free = limit - w.cur - cost;
-            if (free >= 0 && w.prev > 0) retryAfterMs = Math.max(1, Math.ceil(windowMs * (1 - free / w.prev) - (t - start)));
-            return { allowed: false, retryAfterMs: Math.max(1, retryAfterMs), count: Math.ceil(est) };
-        }
-        w.cur += cost;
-        return { allowed: true, retryAfterMs: 0, count: Math.ceil(est + cost) };
-    }
-    function refund({ key, windowMs, cost = 1, ageMs = 0 }) {
-        const t = now();
-        const w = windows.peek(`${key}\u0001${windowMs}`);
-        if (!w) return { refunded: false };
-        const at = t - Math.max(0, +ageMs || 0);
-        const start = Math.floor(at / windowMs) * windowMs;
-        if (start === w.start) w.cur = Math.max(0, w.cur - cost);
-        else if (start === w.start - windowMs) w.prev = Math.max(0, w.prev - cost);
-        else return { refunded: false };
-        return { refunded: true };
-    }
-    function consume({ key, ttlMs }) {
-        const t = now();
-        const exp = once.peek(key);
-        if (exp !== undefined && exp > t) return { fresh: false };
-        once.set(key, t + Math.max(1, ttlMs));
-        return { fresh: true };
-    }
+    const windows = new SlidingWindowLimiter({ maxKeys, now });
+    const once = new OnceStore({ maxKeys, now });
+    const take = (p) => windows.take(p);
+    const refund = (p) => windows.refund(p);
+    const consume = (p) => once.consume(p);
     return {
         take,
         refund,

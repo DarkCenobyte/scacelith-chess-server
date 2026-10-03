@@ -18,7 +18,9 @@
 //     ABUSE_BLOCK_FORGET_MS (6 h) ago; duration min(ABUSE_BLOCK_MAX_SEC, ABUSE_BLOCK_BASE_SEC *
 //     4^(level - 1)): 1 min, 4 min, 16 min, then 1 h with the defaults;
 //   - reports for a key that is blocked (or whose /48 is) are ignored: the workers no longer
-//     count its refused requests anyway, and a flood that resumes after the block escalates;
+//     count its refused requests anyway, and a flood that resumes after the block escalates. The
+//     refusals that led to a block are forgotten with it: after the block the key's count starts
+//     from zero (the /48 of a blocked /64 keeps its own);
 //   - at most ABUSE_MAX_BLOCKS (20,000) running blocks: beyond that the oldest end first
 //     (scacelith_abuse_blocks_evicted_total); that many attacking addresses is the provider's case
 //     (docs/SIZING.md, provider firewall);
@@ -29,7 +31,9 @@
 // that (re)starts gets the running blocks at its 'shard.ready' (snapshot()). A worker with no
 // primary (tests, an API handler used alone) runs its own AbuseTracker (IpGuard).
 //
-// Cost: one sliding-window update per reported key (at most 512 per worker and second), O(1).
+// Cost: one sliding-window update per reported key (at most 512 per worker and second), O(1),
+// except a new key when the window holds maxKeys keys: the eviction then costs O(log n) amortized,
+// through the window's heap by expiry, and never more than one walk of its map (limits.js).
 
 import { performance } from 'node:perf_hooks';
 import { ipForLog } from '../log.js';
@@ -170,6 +174,7 @@ export class AbuseTracker {
             this._evicted.inc();
         }
         this.blocks.set(key, { until: now + ttlMs, level, scope, key48 });
+        this.window.forget(key);
         this.history.delete(key);              // re-inserted: the Map keeps the newest last
         this.history.set(key, { level, at: now });
         if (this.history.size > 4 * this.maxBlocks) this.history.delete(this.history.keys().next().value);
@@ -177,7 +182,7 @@ export class AbuseTracker {
         if (key48 !== null) this.blockedPerPrefix.set(key48, (this.blockedPerPrefix.get(key48) || 0) + 1);
         this._blocksTotal.labels(scope, String(Math.min(level, 4))).inc();
         fresh.push([key, ttlMs, level]);
-        this.log?.warn?.('ip blocked', { ip: ipForLog(key), scope, level, ttlSec: Math.round(ttlMs / 1000), refusals: Math.round(refusals) || undefined });
+        this.log?.warn?.('ip blocked', { ip: ipForLog(key), scope, blockLevel: level, ttlSec: Math.round(ttlMs / 1000), refusals: Math.round(refusals) || undefined });
     }
 
     _unblock(key, b) {

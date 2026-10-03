@@ -38,6 +38,14 @@
 //     sessions.enforceLimit(userId, max, now?) -> [tokenHash] revoked (oldest first go);
 //     sessions.listForUser returns the non-revoked sessions (with clientLabel and ip).
 //   - tokens.consume(kind, hash, now) refuses expired tokens as well as consumed ones.
+//     tokens.reserveTry(kind, hash, max, now) adds one to data.tries of a live token in the same
+//     single UPDATE, only while it is below max: the row (tries counted), else null.
+//   - signups (pending signups, migration 007; auth/accounts.js): create({ username, email,
+//     passwordHash, tokenHash, createdAt, expiresAt }) -> id (StoreError 'username_taken' /
+//     'email_taken' when another pending signup has the name or the address; nothing is checked
+//     against the accounts, the caller does it in its transaction), byUsername(name),
+//     byEmail(email), byTokenHash(hash) (expired rows included), renew(id, { tokenHash,
+//     expiresAt }), delete(id). The retention deletes the expired ones (counted with the tokens).
 //   - sso.link throws StoreError 'sso_taken' when the identity belongs to another account;
 //     sso.forUser(userId) lists an account's identities.
 //   - ratings.leaderboard(category, limit, minGames) ranks the records with at least minGames
@@ -48,9 +56,10 @@
 //     the games that entered the rating; a record stored without them counts all its games when
 //     rated, those of its unrated phase otherwise); a missing record is unrated at INITIAL_RATING.
 //     A rating function that returns records without `rated` (tests) rates and counts every game.
-//     `provisional` (forUser, the RatingChange objects) is: unrated, or fewer than
-//     PROVISIONAL_GAMES counted games. finishBatch also stores the K factor of each side's change
-//     (games.white_k / black_k, 0 when the K formula did not apply), which the refunds read.
+//     `provisional` (forUser, the RatingChange objects) is match/elo.js's isProvisional: unrated,
+//     or fewer than PROVISIONAL_GAMES counted games. finishBatch also stores the K factor of each
+//     side's change (games.white_k / black_k, 0 when the K formula did not apply), which the
+//     refunds read.
 //   - refunds (anticheat/refunds.js): applyForCheater({ cheaterId, since, now, sanctionId, source,
 //     by }) gives back, in one transaction, to each opponent of the cheater the rating points they
 //     lost (a K-formula change: k > 0, or NULL for the games finished before migration 004) in a
@@ -65,9 +74,13 @@
 //   - tokens.consume, mfa.consumeRecoveryCode and users.advanceMfaStep are single conditional
 //     statements (UPDATE/DELETE ... WHERE still-valid): atomic across processes without an
 //     explicit transaction (an autocommit write retries on the lock through busy_timeout).
-//   - analysis: a job is claimed at most 3 times (ANALYSIS_MAX_ATTEMPTS); a running job older than
-//     10 minutes is re-queued (or failed at the cap) by the next claim; fail() re-queues until the
-//     cap and returns the new status; extra enqueue(gameId, now) (manual re-analysis) and stats().
+//   - analysis.forUser(userId, limit, { doneOnly }) lists the player's jobs of every status, newest
+//     game first; with doneOnly the completed analyses only (anticheat/scoring.js, bin/admin.js).
+//   - analysis: a job is claimed at most 3 times (ANALYSIS_MAX_ATTEMPTS); a running job claimed (or
+//     renewed by touch(gameId, workerId, now), the worker's heartbeat) more than 10 minutes ago is
+//     re-queued (or failed at the cap) by the next claim; fail() re-queues until the cap and
+//     returns the new status; extra enqueue(gameId, now) (manual re-analysis), job(gameId) (the
+//     game's job, bin/admin.js analysis queue) and stats().
 //   - analysis queue policy (DESIGN.md 6.5): every job has a priority (AnalysisPriority: ordinary,
 //     signal, report, manual) and next() takes the highest first, then the oldest, except that
 //     every ORDINARY_SHARE-th claim of a store takes the oldest ordinary job first (when one
@@ -135,6 +148,14 @@
 //         each with reportedName and `outcome` (null while open, else 'actioned' | 'dismissed').
 //         anticheat/reports.js reads the outcomes for the reporter's track record when this call
 //         exists: before it, every reporter of a real store had the neutral track record.
+//       reports.weightSince(reportedId, since, lowThreshold) -> { total, low }: the summed weights of
+//         the reports against the player since `since`, and of those below lowThreshold (the 24-hour
+//         cap of anticheat/reports.js, over every report rather than forReported's newest 200).
+//       reports.resolveOpenFor(reportedId, category, outcome, by, now) -> [ids]: every open report
+//         of that category against the player resolved in one statement (forReported returns only
+//         the newest 200: bin/admin.js integrity confirm / clear).
+//       reports.countFor(reportedId) -> { total, open }: the number of reports against the player
+//         and of those still open (bin/admin.js user show; forReported returns only the newest 200).
 //       explainQueryPlan(store, sql, params) (module export): the EXPLAIN QUERY PLAN rows of a
 //         statement on the store's own connection (tests and diagnostics).
 
@@ -146,10 +167,14 @@ import { createRequire } from 'node:module';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { logger } from '../log.js';
-import { metrics } from '../metrics.js';
+import { isProvisional } from '../match/elo.js';
 import { enums } from '../protocol/schema.js';
+import { SIGNAL_JOBS_PER_PLAYER, countCommit, mBusy } from './commit-metrics.js';
 
 const { DatabaseSync } = loadSqlite();
+// For the other connections of a process that uses the store (bin/admin.js backup): importing
+// node:sqlite directly would print the warning loadSqlite() filters.
+export { DatabaseSync };
 
 // node:sqlite prints an ExperimentalWarning on Node 22 when it is first loaded. Only that notice
 // is filtered, only while the module loads; every other warning goes through unchanged.
@@ -194,12 +219,8 @@ const REPORT_SIGNAL_MIN_WEIGHT = 0.5;
 // the ordinary games (the random sample that feeds the population statistics) get at least that
 // share of the engine time however many prioritized games arrive.
 const ORDINARY_SHARE = 4;
-// Waiting 'signal' jobs per player: a flagged player's further games are not queued while this
-// many of their games wait (the scoring reads their 30 latest analysed games, so these renew most
-// of that window); one prolific flagged player cannot grow the signal tier without bound. A game
-// with an anomaly of its own replaces a waiting one without (queueAnalysis), so games flagged only
-// through the player cannot keep one with evidence out.
-const SIGNAL_JOBS_PER_PLAYER = 20;
+// SIGNAL_JOBS_PER_PLAYER (commit-metrics.js, whose skipped-analysis help text names it): waiting
+// 'signal' jobs per player.
 // analysis.backlog() counts at most this many jobs per tier (one index range scan each).
 const BACKLOG_COUNT_MAX = 100000;
 const INTEGRITY_LEVELS = ['none', 'suspected', 'high_confidence', 'confirmed'];
@@ -224,28 +245,24 @@ export const GAMES_FOR_USER_SQL = `SELECT ${GAME_SUMMARY_COLS} FROM games WHERE 
 export const GAMES_COUNT_FOR_USER_SQL = `SELECT (SELECT count(*) FROM games WHERE white_id = ?1 ${userGamesFilter('?5')})
     + (SELECT count(*) FROM games WHERE black_id = ?1 ${userGamesFilter('?6')}) AS n`;
 
+// analysis.forUser: ?1 the player, ?2 the limit. The done-only filter is written `+a.status` (no
+// index term): SQLite keeps walking the player's games newest first (games_white / games_black, a
+// primary-key probe of analysis_jobs each, stopped at the limit) instead of reading every done job
+// of the server through analysis_jobs_queue and sorting them.
+const analysisForUserSql = (doneOnly) => `SELECT a.game_id, a.status, a.attempts, a.finished_at, a.error, a.features, g.category,
+    g.white_id, g.ended_at, g.ply_count FROM games g JOIN analysis_jobs a ON a.game_id = g.id WHERE g.id IN (
+    SELECT id FROM games WHERE white_id = ?1 UNION SELECT id FROM games WHERE black_id = ?1)
+    ${doneOnly ? "AND +a.status = 'done' " : ''}ORDER BY g.id DESC LIMIT ?2`;
+
+/** analysis.forUser(userId, limit, { doneOnly: true }) (the tests check its query plan). */
+export const ANALYSED_FOR_USER_SQL = analysisForUserSql(true);
+
 // The status a result filter needs on each colour (index 0: as White, 1: as Black).
 const RESULT_STATUS = Object.freeze({
     win: [GameStatus.WhiteWins, GameStatus.BlackWins],
     loss: [GameStatus.BlackWins, GameStatus.WhiteWins],
     draw: [GameStatus.Draw, GameStatus.Draw],
 });
-
-const mBatchMs = metrics.histogram('scacelith_store_commit_batch_ms', 'Duration of one finished-games commit transaction',
-    [1, 2, 5, 10, 25, 50, 100, 250, 1000]);
-const mGames = metrics.counter('scacelith_store_games_committed_total', 'Finished games written to the database');
-const mBusy = metrics.counter('scacelith_store_busy_total', 'Store operations that gave up waiting for the database lock');
-// The same help text is registered by store/writer.js (the shard counts its writer thread's answers).
-const mAnalysisSkipped = metrics.counter('scacelith_anticheat_analysis_skipped_total',
-    'Finished rated games not queued for engine analysis (sample: ANALYSIS_SAMPLE_RATE, backlog: ANALYSIS_QUEUE_MAX reached, player: 20 flagged games of a player already waiting, displaced: a waiting flagged game without an anomaly of its own gave its place to a game with one)', ['reason']);
-
-// Counts the games of finishBatch results left out of the analysis queue, or taken out of it.
-function countSkipped(counter, results) {
-    for (const x of results) {
-        if (x.analysisSkipped) counter.labels(x.analysisSkipped).inc();
-        if (x.analysisDisplaced) counter.labels('displaced').inc(x.analysisDisplaced.length);
-    }
-}
 
 /** Priority of an analysis job: the highest waiting priority is analysed first (DESIGN.md 6.5). */
 export const AnalysisPriority = Object.freeze({ ordinary: 0, signal: 1, report: 2, manual: 3 });
@@ -497,7 +514,6 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         mfaEnabled: (v) => [['mfa_enabled', b01(v)]],
         mfaSecretEnc: (v) => [['mfa_secret_enc', orNull(v)]],
         pendingMfaSecretEnc: (v) => [['mfa_pending_secret_enc', orNull(v)]],
-        mfaPendingSecretEnc: (v) => [['mfa_pending_secret_enc', orNull(v)]],
         mfaLastStep: (v) => [['mfa_last_step', Math.floor(v)]],
         status: (v) => [['status', v]],
         acceptChallenges: (v) => [['accept_challenges', b01(v)]],
@@ -672,6 +688,12 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             return toToken(st(`SELECT id, kind, user_id, data, created_at, expires_at, consumed_at FROM tokens
                 WHERE kind = ? AND token_hash = ?`).get(kind, tokenHash));
         },
+        /** Atomic try counter (one UPDATE): the row with data.tries + 1, or null when not live or at `max` tries. */
+        reserveTry(kind, tokenHash, max, now = Date.now()) {
+            return toToken(st(`UPDATE tokens SET data = json_set(coalesce(data, '{}'), '$.tries', coalesce(json_extract(data, '$.tries'), 0) + 1)
+                WHERE kind = ?1 AND token_hash = ?2 AND consumed_at IS NULL AND expires_at > ?4 AND coalesce(json_extract(data, '$.tries'), 0) < ?3
+                RETURNING id, kind, user_id, data, created_at, expires_at, consumed_at`).get(kind, tokenHash, max, ms(now)));
+        },
         update(kind, tokenHash, data) {
             return Number(st('UPDATE tokens SET data = ? WHERE kind = ? AND token_hash = ?').run(toJson(data), kind, tokenHash).changes) > 0;
         },
@@ -685,6 +707,44 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                 WHERE user_id = ? AND kind = ? AND consumed_at IS NULL AND expires_at > ? ORDER BY created_at DESC, id DESC LIMIT 1`)
                 .get(userId, kind, ms(now))));
         },
+    };
+
+    // ---- pending signups (migration 007) ----------------------------------------------------------
+
+    const SIGNUP_COLS = 'id, username, email, password_hash, token_hash, created_at, expires_at';
+    const toSignup = (r) => (r ? {
+        id: r.id, username: r.username, email: r.email, passwordHash: r.password_hash, tokenHash: r.token_hash,
+        createdAt: r.created_at, expiresAt: r.expires_at,
+    } : null);
+
+    const signups = {
+        /** StoreError 'username_taken' / 'email_taken' when another pending signup has the name or the address. */
+        create({ username, email, passwordHash, tokenHash = null, createdAt = Date.now(), expiresAt }) {
+            requireName(username);
+            try {
+                return Number(st(`INSERT INTO pending_signups (username, username_lower, email, email_normalized, password_hash, token_hash,
+                    created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+                    .run(username, username.toLowerCase(), cleanEmail(email), normalizeEmail(email), passwordHash, orNull(tokenHash),
+                        ms(createdAt), ms(expiresAt)).lastInsertRowid);
+            } catch (e) {
+                throw mapUserError(e);
+            }
+        },
+        byUsername(name) {
+            if (typeof name !== 'string') return null;
+            return toSignup(st(`SELECT ${SIGNUP_COLS} FROM pending_signups WHERE username_lower = ?`).get(name.toLowerCase()));
+        },
+        byEmail(email) {
+            const n = normalizeEmail(email);
+            return n ? toSignup(st(`SELECT ${SIGNUP_COLS} FROM pending_signups WHERE email_normalized = ?`).get(n)) : null;
+        },
+        byTokenHash(hash) { return toSignup(st(`SELECT ${SIGNUP_COLS} FROM pending_signups WHERE token_hash = ?`).get(hash)); },
+        /** A new link (tokenHash, null for none) and expiry; returns true when the signup exists. */
+        renew(id, { tokenHash, expiresAt }) {
+            return Number(guard(() => st('UPDATE pending_signups SET token_hash = ?, expires_at = ? WHERE id = ?')
+                .run(orNull(tokenHash), ms(expiresAt), id)).changes) > 0;
+        },
+        delete(id) { return Number(st('DELETE FROM pending_signups WHERE id = ?').run(id).changes) > 0; },
     };
 
     // ---- single sign-on identities ----------------------------------------------------------------
@@ -720,8 +780,6 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         rated: !!r.rated, countedGames: r.counted_games ?? (r.rated ? r.games : r.unrated_games), unratedGames: r.unrated_games,
         unratedOpponents: r.unrated_opponents, unratedHalfPoints: r.unrated_half_points,
     });
-    // Shown as "1500?": unrated, or fewer than PROVISIONAL_GAMES counted games (K = 40).
-    const provisionalOf = (rec) => !rec.rated || rec.countedGames < provisionalGames;
     function readRating(userId, category) {
         const r = st(`SELECT ${RATING_COLS} FROM ratings WHERE user_id = ? AND category = ?`).get(userId, category);
         return r ? toRating(r) : defaultRating();
@@ -742,7 +800,7 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             return st(`SELECT category, ${RATING_COLS}, updated_at FROM ratings WHERE user_id = ? ORDER BY category`).all(userId)
                 .map((r) => {
                     const rec = toRating(r);
-                    return { category: r.category, ...rec, provisional: provisionalOf(rec), updatedAt: r.updated_at };
+                    return { category: r.category, ...rec, provisional: isProvisional(rec, config), updatedAt: r.updated_at };
                 });
         },
         leaderboard(category, limit = 100, minGames = provisionalGames) {
@@ -815,8 +873,8 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         const w = readRating(row.white_id, row.category);
         const b = readRating(row.black_id, row.category);
         return {
-            white: { before: row.white_before, after: row.white_after, games: w.games, provisional: provisionalOf(w) },
-            black: { before: row.black_before, after: row.black_after, games: b.games, provisional: provisionalOf(b) },
+            white: { before: row.white_before, after: row.white_after, games: w.games, provisional: isProvisional(w, config) },
+            black: { before: row.black_before, after: row.black_after, games: b.games, provisional: isProvisional(b, config) },
         };
     }
 
@@ -899,7 +957,12 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         checkRecord(r);
         const existing = st('SELECT white_id, black_id, category, white_before, white_after, black_before, black_after FROM games WHERE id = ?')
             .get(r.id);
-        if (existing) return { gameId: r.id, duplicate: true, ratings: storedChanges(existing) };
+        if (existing) {
+            if (existing.white_id !== r.whiteId || existing.black_id !== r.blackId) {
+                log.warn('game id already stored for other players: this game is not stored', { gameId: r.id });
+            }
+            return { gameId: r.id, duplicate: true, ratings: storedChanges(existing) };
+        }
         const played = r.status !== GameStatus.Aborted;
         const rate = !!r.rated && played && r.category !== 'custom';
         let changes = null;
@@ -918,9 +981,9 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             writeRating(r.blackId, r.category, bRec, now);
             changes = {
                 white: { before: Math.round(res.white.before ?? w.rating), after: wRec.rating, games: wRec.games,
-                    provisional: provisionalOf(wRec) },
+                    provisional: isProvisional(wRec, config) },
                 black: { before: Math.round(res.black.before ?? b.rating), after: bRec.rating, games: bRec.games,
-                    provisional: provisionalOf(bRec) },
+                    provisional: isProvisional(bRec, config) },
             };
             k = [kOf(res.white), kOf(res.black)];
         }
@@ -991,14 +1054,16 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                 log.security('rating.refund', { cheaterId: f.cheaterId, source: 'auto', sanctionId: f.sanctionId, gameId: f.gameId,
                     refunds: 1, victims: 1, points: f.points });
             }
-            mBatchMs.observe(performance.now() - t0);
-            mGames.inc(out.reduce((n, x) => n + (x.duplicate ? 0 : 1), 0));
-            countSkipped(mAnalysisSkipped, out);
+            countCommit(out, performance.now() - t0);
             return out;
         },
         byId(id) {
             const r = st('SELECT * FROM games WHERE id = ?').get(id);
             return r ? toGame(r, true) : null;
+        },
+        /** The largest game id, 0 without games (a shard's new ids come after it: util/ids.js). */
+        lastId() {
+            return st('SELECT max(id) AS id FROM games').get().id ?? 0;
         },
         /** Newest first; `before` is a game id (exclusive cursor). */
         recentForUser(userId, limit = 20, before = Number.MAX_SAFE_INTEGER) {
@@ -1196,6 +1261,15 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             return Number(st(`UPDATE analysis_jobs SET status = 'done', features = ?, finished_at = ?, error = NULL, worker = NULL
                 WHERE game_id = ?`).run(toJson(features), ms(now), gameId).changes) === 1;
         },
+        /**
+         * Heartbeat of a job being analysed: its claim time moves to `now`, so that next() re-queues
+         * only the jobs of a worker that stopped renewing them (ANALYSIS_STALE_MS), not a long
+         * analysis. Returns true when the job is still running for that worker.
+         */
+        touch(gameId, workerId = null, now = Date.now()) {
+            return Number(st(`UPDATE analysis_jobs SET started_at = ? WHERE game_id = ? AND status = 'running' AND worker IS ?`)
+                .run(ms(now), gameId, workerId === null || workerId === undefined ? null : String(workerId)).changes) === 1;
+        },
         /** Re-queues the job, or marks it failed once it was tried ANALYSIS_MAX_ATTEMPTS times. */
         fail(gameId, error, now = Date.now()) {
             return tx(() => {
@@ -1207,6 +1281,11 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                         status === 'failed' ? ms(now) : null, gameId);
                 return status;
             });
+        },
+        /** The game's job: { status, priority, attempts, queuedAt, finishedAt, error }, null without one. */
+        job(gameId) {
+            const r = st('SELECT status, priority, attempts, queued_at, finished_at, error FROM analysis_jobs WHERE game_id = ?').get(gameId);
+            return r ? { status: r.status, priority: r.priority, attempts: r.attempts, queuedAt: r.queued_at, finishedAt: r.finished_at, error: r.error } : null;
         },
         /** Moderator request: (re-)analyses any stored game, before every other job (priority 'manual'). */
         enqueue(gameId, now = Date.now()) {
@@ -1254,11 +1333,13 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                 AS priority`).get(AnalysisPriority.ordinary, BACKLOG_COUNT_MAX);
             return { ordinary: r.ordinary, priority: r.priority };
         },
-        forUser(userId, limit = 50) {
-            return st(`SELECT a.game_id, a.status, a.attempts, a.finished_at, a.error, a.features, g.category, g.white_id, g.ended_at,
-                g.ply_count FROM games g JOIN analysis_jobs a ON a.game_id = g.id WHERE g.id IN (
-                SELECT id FROM games WHERE white_id = ?1 UNION SELECT id FROM games WHERE black_id = ?1)
-                ORDER BY g.id DESC LIMIT ?2`).all(userId, limit).map((r) => ({
+        /**
+         * The player's jobs, newest game first; with doneOnly, the completed analyses only (the
+         * scoring's window of their latest analysed games, which waiting or failed jobs must not
+         * take places in).
+         */
+        forUser(userId, limit = 50, { doneOnly = false } = {}) {
+            return st(analysisForUserSql(doneOnly)).all(userId, limit).map((r) => ({
                 gameId: r.game_id, status: r.status, attempts: r.attempts, finishedAt: r.finished_at, error: r.error,
                 features: fromJson(r.features), category: r.category, color: r.white_id === userId ? 'white' : 'black',
                 endedAt: r.ended_at, plyCount: r.ply_count,
@@ -1411,6 +1492,24 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             return Number(st(`UPDATE reports SET status = ?, resolved_at = ?, resolved_by = ? WHERE id = ? AND status = 'open'`)
                 .run(outcome, ms(now), by === null || by === undefined ? null : String(by), id).changes) === 1;
         },
+        /** Summed weights of the reports against the player created at `since` or later: all, and those below lowThreshold. */
+        weightSince(reportedId, since, lowThreshold) {
+            const r = st(`SELECT coalesce(sum(weight), 0) AS total, coalesce(sum(CASE WHEN weight < ?3 THEN weight END), 0) AS low
+                FROM reports WHERE reported_id = ?1 AND created_at >= ?2`).get(reportedId, ms(since), +lowThreshold);
+            return { total: r.total, low: r.low };
+        },
+        /** Number of reports against the player, and of those still open. */
+        countFor(reportedId) {
+            const r = st(`SELECT count(*) AS total, count(CASE WHEN status = 'open' THEN 1 END) AS open
+                FROM reports WHERE reported_id = ?`).get(reportedId);
+            return { total: r.total, open: r.open };
+        },
+        /** Resolves every open report of `category` against the player in one statement; returns their ids. */
+        resolveOpenFor(reportedId, category, outcome, by = null, now = Date.now()) {
+            if (outcome !== 'actioned' && outcome !== 'dismissed') throw new StoreError('invalid', "outcome must be 'actioned' or 'dismissed'");
+            return guard(() => st(`UPDATE reports SET status = ?, resolved_at = ?, resolved_by = ? WHERE reported_id = ? AND category = ? AND status = 'open'
+                RETURNING id`).all(outcome, ms(now), by === null || by === undefined ? null : String(by), reportedId, category).map((r) => r.id));
+        },
     };
 
     // ---- rating refunds ----------------------------------------------------------------------------
@@ -1515,6 +1614,9 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             { count: 'sessions', arg: t - REVOKED_SESSION_TTL_MS, sql: `DELETE FROM sessions WHERE id IN (SELECT id FROM sessions
                 WHERE revoked_at IS NOT NULL AND revoked_at <= ?1 LIMIT ?2)` },
             { count: 'tokens', arg: t, sql: 'DELETE FROM tokens WHERE id IN (SELECT id FROM tokens WHERE expires_at <= ?1 LIMIT ?2)' },
+            // Expired pending signups count with the tokens (their link has expired with them).
+            { count: 'tokens', arg: t, sql: `DELETE FROM pending_signups WHERE id IN (SELECT id FROM pending_signups
+                WHERE expires_at <= ?1 LIMIT ?2)` },
             { count: 'securityEvents', arg: securityBefore, sql: SECURITY_DELETE_SQL },
             { count: 'anomalies', arg: securityBefore, sql: `DELETE FROM anomalies WHERE id IN (SELECT id FROM anomalies
                 WHERE severity <> 'certain' AND at < ?1 LIMIT ?2)` },
@@ -1604,7 +1706,7 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
     };
 
     const store = {
-        meta, users, mfa, sessions, tokens, sso, ratings, games, conduct, sanctions, anomalies, security, analysis, integrity,
+        meta, users, mfa, sessions, tokens, signups, sso, ratings, games, conduct, sanctions, anomalies, security, analysis, integrity,
         reports, refunds, retention,
         readonly,
         path: file,

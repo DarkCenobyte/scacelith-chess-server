@@ -52,7 +52,7 @@ configuration file in Git. Secrets can also be read from files with the `_FILE` 
 
 | Port | Default | Open to | Purpose |
 |---|---|---|---|
-| `API_PORT` | 443/tcp | the Internet | HTTPS API (`/api/v1/...`), e-mail and Google sign-in pages, and the game WebSocket (`wss://host/ws`) |
+| `API_PORT` | 443/tcp | the Internet | HTTPS API (`/api/v1/...`), the pages of e-mail links, and the game WebSocket (`wss://host/ws`) |
 | `WS_PORT` | same as `API_PORT` | the Internet | set it only to put the WebSocket on its own port |
 | `METRICS_PORT` | 9464/tcp on 127.0.0.1 | your monitoring only | Prometheus metrics, `/healthz`, `/readyz` |
 
@@ -102,7 +102,7 @@ TLS_MIN_VERSION=TLSv1.2
   works in browsers that fetch missing intermediates but fails in the game.
 - `TLS_KEY_FILE` is the PEM private key (RSA 2048+ or ECDSA P-256/P-384). Keep it readable only by
   the account running the server (`chmod 600`, or `640` with the service group) and outside the
-  Git checkout. `TLS_KEY_FILE_FILE` is not needed: the key is already read from a file.
+  Git checkout. `TLS_KEY_FILE_FILE` is refused: the key is already read from a file.
 - Renewal needs no restart. The server re-reads both files when they change (it also follows
   certbot's symlink swaps) and on `SIGHUP` (`systemctl reload scacelith` with the unit below).
   A broken new certificate is refused and logged; the previous one stays in use.
@@ -201,7 +201,7 @@ EnvironmentFile=/etc/scacelith/scacelith.env
 ExecStart=/usr/bin/node bin/scacelith-server.js start
 ExecReload=/bin/kill -HUP $MAINPID
 KillSignal=SIGTERM
-TimeoutStopSec=30
+TimeoutStopSec=45
 Restart=on-failure
 LimitNOFILE=1048576
 # Port 443 (below 1024) without running as root: this capability only, nothing else.
@@ -220,8 +220,11 @@ With `DATA_DIR=/var/lib/scacelith` in the environment file. `LimitNOFILE` must e
 `MAX_CONNECTIONS`. `AmbientCapabilities=CAP_NET_BIND_SERVICE` lets the `scacelith` account listen
 on 443; `CapabilityBoundingSet` keeps every other capability away from the process, and
 `NoNewPrivileges` still applies (the capability is given at the start, not gained later). Leave
-both lines out when `API_PORT` is 1024 or above. This unit is an example: adapt the paths to your
-installation.
+both lines out when `API_PORT` is 1024 or above. `TimeoutStopSec` must be at least
+`SHUTDOWN_GRACE_MS` + 15 s (what the server gives its workers for their last database writes before
+it kills them) + a few seconds to close the database: 45 s covers the default `SHUTDOWN_GRACE_MS`
+(3 s) with room to spare; raise it with `SHUTDOWN_GRACE_MS`, or systemd kills the server before
+its stop is over. This unit is an example: adapt the paths to your installation.
 
 ### Anti-cheat engine
 
@@ -327,17 +330,38 @@ limit, the better layout for a server that expects to be full.
 ## Accounts, e-mail and Google sign-in
 
 - `REGISTRATION=open|closed`, `REQUIRE_EMAIL_VERIFICATION`, username and password rules: see
-  [docs/CONFIG.md](docs/CONFIG.md).
+  [docs/CONFIG.md](docs/CONFIG.md). With e-mail confirmation (the default) an account is created
+  only when the link sent to its address is used (within 24 h; the username is held meanwhile), so
+  that registering never tells whether an address already has an account; without it the
+  account is created at once.
 - E-mail: `MAIL_TRANSPORT=smtp` with `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` and
   `SMTP_SECURITY` (`starttls` on 587 by default, `tls` for implicit TLS on 465; with `starttls`
   the upgrade is mandatory). `MAIL_TRANSPORT=log` writes the messages
   to the log instead (tests), `none` disables e-mail (then turn e-mail confirmation off).
-- Google sign-in is optional and off by default. Create an OAuth client of type "Web application"
-  in the Google Cloud console, add the redirect URI
-  `https://<SERVER_PUBLIC_HOST>/auth/sso/google/callback` (`https://<SERVER_PUBLIC_HOST>:<port>/...`
-  when the public port is not 443; the value `check-config` prints as `googleRedirectUri`), then set `SSO_GOOGLE_ENABLED=true`, `GOOGLE_CLIENT_ID` and
-  `GOOGLE_CLIENT_SECRET` (or `GOOGLE_CLIENT_SECRET_FILE`). The client secret stays on the server:
-  the game signs in through the system browser with PKCE and never sees it.
+- Google sign-in is optional and off by default. The game opens Google's page in the system
+  browser, and Google sends the browser back to the game itself, on 127.0.0.1 (no page of this
+  server is involved). The client secret stays on the server: the game never sees it. Google
+  sign-in never opens an existing account without its password: when a player's Google address
+  is the address of an account with a password, the game asks that password (and the two-step
+  code when it is on) once, then links Google to the account. To set it up, in the Google Cloud
+  console:
+  1. open Google Auth Platform (create a project first if needed);
+  2. Branding: the application name, a support address and your domain;
+  3. Audience: user type External, then "Publish app" so that its status is In production (in
+     Testing, only the test users listed there can sign in);
+  4. Data access: the scopes `openid`, `.../auth/userinfo.email` and `.../auth/userinfo.profile`
+     only;
+  5. Clients > Create client > application type **Desktop app**. It has no redirect URI to enter:
+     the game's address on 127.0.0.1 is accepted for this type;
+  6. set `SSO_GOOGLE_ENABLED=true`, `GOOGLE_CLIENT_ID` (the client ID) and the client secret in
+     `GOOGLE_CLIENT_SECRET_FILE` (a file of mode 0600; `GOOGLE_CLIENT_SECRET` also works). Remove
+     `GOOGLE_REDIRECT_URI` if an older `.env` has it (`check-config` says so).
+
+  `SERVER_PUBLIC_HOST` must be the name players type when they add the server (with
+  `PUBLIC_API_PORT`, or `API_PORT`): Google sign-in works only for players who added it under
+  exactly that name and port, and the game refuses it under another name or address. A
+  server set up with a "Web application" client before this version: deploy, check that Google
+  sign-in works, then delete the old Web client.
 - Every server is a separate trust boundary: the game keeps one login per server address and
   never sends a server the credentials or tokens of another one.
 - Players manage their account from the game through the HTTPS API (every endpoint:
@@ -513,8 +537,8 @@ exactly: when the proxy is not trusted, every player shares its address, and the
 block would hit them all together.
 
 **Watching it.** The primary logs each block at `warn` level: `ip blocked` with the address
-(truncated as `LOG_IP` says), `scope` (`ip` or `prefix`), `level`, `ttlSec` and `refusals`. On the
-metrics endpoint: `scacelith_http_rate_limited_total{limit}` (`ip`, `ip48`, `inflight`,
+(truncated as `LOG_IP` says), `scope` (`ip` or `prefix`), `blockLevel`, `ttlSec` and `refusals`.
+On the metrics endpoint: `scacelith_http_rate_limited_total{limit}` (`ip`, `ip48`, `inflight`,
 `blocked`), `scacelith_tls_refused_total{reason}` (`blocked`, `conn_rate`, `conn_open`),
 `scacelith_abuse_blocks_total{scope,level}` and `scacelith_abuse_blocked{scope}` in the primary,
 `scacelith_abuse_blocked_keys`, `scacelith_tls_connections_open` and `scacelith_http_inflight`
@@ -530,7 +554,7 @@ Nothing secret is ever committed: `.env`, keys and certificates are in `.gitigno
 
 | Key | What it protects |
 |---|---|
-| `SERVER_SECRET` | session tickets, proof-of-work challenges, recovery codes, address hashing; at least 32 random bytes (`gen-secret`) |
+| `SERVER_SECRET` | proof-of-work challenges, recovery codes, address hashing; at least 32 random bytes (`gen-secret`) |
 | `MFA_ENCRYPTION_KEY` | TOTP secrets at rest (derived from `SERVER_SECRET` when empty; set it so that the secret can change without breaking two-factor logins) |
 | `TLS_KEY_FILE` | the certificate's private key |
 | `SMTP_PASSWORD`, `GOOGLE_CLIENT_SECRET` | mail account and Google OAuth client, used as written |
@@ -557,18 +581,37 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
 - Upgrading: stop the server, update the code, `node bin/scacelith-server.js migrate` (or just
   `start`, which migrates first). Migrations are checksummed: the server refuses to start if an
   applied migration was modified or is unknown to its version (a downgrade).
+- Release note, migration 008 (Google sign-in returns to the game): Google sign-in used to link a
+  Google account to the account with the same e-mail address, without its password. The
+  migration removes the Google links made that way (those created more than 60 s after their
+  password account) and signs out every device of those accounts; their players type their
+  password once in the game the next time they use Google, which links it again while the
+  account's address is the Google address. When it is not (it changed since the link, in the
+  account or at Google), Google sign-in offers a new account instead (or answers that
+  registration is closed): the player should not create it, but sign in with the password,
+  change the account's address to the Google address, then use Google. If you ran the
+  server with `REQUIRE_EMAIL_VERIFICATION=false` and Google sign-in on, review the `sso_linked`
+  security events made before the upgrade (table `security_events`, `kind = 'sso_linked'`):
+  someone could register an account with a player's address, and that player's Google sign-in
+  then opened an account whose password the other person knew. The OAuth client must now be a
+  "Desktop app" client (see [Accounts, e-mail and Google sign-in](#accounts-e-mail-and-google-sign-in)),
+  and `GOOGLE_REDIRECT_URI` is no longer used.
 - A crash loses at most the last journal flush (`JOURNAL_FLUSH_MS`, 50 ms) of moves in progress;
   finished games and rating changes are committed in database transactions.
 - Players come back by themselves after a restart. The game spreads their reconnections over
   about half a minute (players with a game in progress within 8 s, since the side to move's
   clock runs again once the game is restored), so a restart does not turn into a burst of TLS
-  handshakes.
+  handshakes. After a full restart each of them does one full handshake: the TLS session-ticket
+  keys the workers share are drawn at random at the start, replaced every day (UTC) by a one-way
+  step and kept in memory only, so that neither `SERVER_SECRET` nor a later memory dump decrypts
+  recorded sessions of the past days. A restarted worker gets the current keys from the primary.
 - Retention: every `RETENTION_INTERVAL_MS` (one hour; the first run about a minute after the
-  start) the server deletes expired and revoked sessions, expired tokens, security events older
-  than `RETENTION_SECURITY_DAYS` (90), non-certain anomalies of the same age, conduct events and
-  failed analysis jobs older than 30 days, and erases stored IP addresses older than
-  `RETENTION_IP_DAYS` (30). It works in small slices while the server runs, pausing between
-  them so that the workers can write, and logs one `retention purge done` line with the counts.
+  start) the server deletes expired and revoked sessions, expired tokens and pending signups,
+  security events older than `RETENTION_SECURITY_DAYS` (90), non-certain anomalies of the same
+  age, conduct events and failed analysis jobs older than 30 days, and erases stored IP addresses
+  older than `RETENTION_IP_DAYS` (30). It works in small slices while the server runs, pausing
+  between them so that the workers can write, and logs one `retention purge done` line with the
+  counts.
   Games, ratings, analysed games, sanctions and reports are kept. The database overwrites deleted
   and erased data with zeros (`secure_delete`), so it does not stay readable in the file. SQLite
   reuses the freed pages; the file only shrinks after a `VACUUM` (server stopped). The full table
@@ -588,7 +631,9 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
 ## Moderation
 
 `node bin/admin.js` (also `npm exec scacelith-admin`) works on the database directly: user
-lookup, bans, MFA reset, session revocation, the integrity list and evidence, reports. Run it
+lookup, bans, MFA reset, session revocation, the integrity list and evidence, reports, and the
+account of a pending signup whose confirmation mail never arrived (`user verify-email <name>`,
+which does what the link would). Run it
 with the same `.env`. See `node bin/admin.js` for the commands and
 [docs/ANTICHEAT.md](docs/ANTICHEAT.md) for how suspicion levels are computed. Certain cheats
 (a move for someone else's game, out of turn or illegal in a position both sides agree on, a

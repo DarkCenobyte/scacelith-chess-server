@@ -120,7 +120,9 @@ is recorded, the player being `confirmed` and under the automatic ban by then.
 ## 3. Engine analysis
 
 `startAnalysisProcess(config)` (primary) forks `bin/analysis-worker.js` at low CPU priority and
-restarts it with exponential backoff (1 s .. 60 s) if it dies. It does nothing when
+restarts it with exponential backoff (1 s .. 60 s) if it dies. The process runs the configuration
+the primary loaded at its start, asked for over IPC as the shards do, so an edit of `.env` or of a
+secret file reaches it only with a restart of the whole server. It does nothing when
 `ANALYSIS_ENGINE_PATH` is empty or `ANALYSIS_WORKERS=0`; timing and reports still work. The
 worker runs `ANALYSIS_WORKERS` engines (one thread each, `ANALYSIS_HASH_MB` of hash, low
 priority), claims rated games of at least `ANALYSIS_MIN_PLIES` from the queue, and for each game:
@@ -162,7 +164,9 @@ the human stand-ins' ACPL 26 % higher than Stockfish 16 at 10/18, and scores 16 
 the statistics never mix them (section 4).
 
 **Queue policy** (docs/DESIGN.md 6.5). The engine takes the highest priority first, then the
-oldest job: a moderator request, then a game a credible player reported (`cheating` or `other`,
+oldest job: a moderator request (priority `manual`, `scacelith-admin analysis queue <gameId>`,
+which calls `store.analysis.enqueue(gameId)`), then a game a credible player reported (`cheating`
+or `other`,
 stored weight 0.5 or more), then a game with a suspicion signal at its end (either player's
 integrity level above `none`, an open `cheating` or `other` report of weight 0.5 or more against
 either player in the last 30 days, a `suspicious` or `certain` anomaly in that game) or a report
@@ -475,6 +479,7 @@ scacelith-admin integrity confirm <name> --reason TEXT [--hours N] [--refund-sin
 scacelith-admin integrity clear <name> [--reason TEXT] [--dismiss-reports]
 scacelith-admin refunds apply <name> [--since DATE]   # refunds of a confirmed cheater (window: from the latest ban for cheating)
 scacelith-admin refunds list [<name>] [--victim NAME] [--limit N]
+scacelith-admin analysis queue <gameId>      # analysed before every other game, unless running or done
 scacelith-admin reports list | reports resolve <id> actioned|dismissed
 scacelith-admin anomalies <name> | user show|ban|unban|reset-mfa|verify-email|revoke-sessions <name> | stats
 ```
@@ -519,6 +524,14 @@ DATE cannot be in the future. The options are checked before anything is written
 run in their own transaction after the ban, and if they fail (a database error) the ban stands,
 its `moderator_action` records the error, and the command exits with an error that gives the
 `refunds apply` to run.
+
+Pending signups: with `REQUIRE_EMAIL_VERIFICATION` a registration has no account until the link
+mailed to its address is used (the signup holds its username for 24 h). When that mail never
+arrives, `user show <name>` shows the pending signup that holds the name (address, times, whether
+it has a link), and `user verify-email <name>` does what the link would: the account is created,
+its address verified (`moderator_action` `confirm_signup`). A signup without a link (its address
+had an account, whose owner got a notice instead), or one whose username or address another
+account has now, is dropped and nothing is created.
 
 ## 7. False positives: what the model does about them
 
@@ -565,14 +578,30 @@ header of `src/anticheat/index.js`):
   m2 } }`, and `integrity.updatePopulation([{ key: '<profile>|<category>|<bucket>|<metric>',
   value }], now)` sends one observation per metric and game, which the store merges (Welford);
   the analysis process is the only writer;
-* `analysis.forUser(userId, limit)` returns the player's completed analyses, newest first, each
-  row with the `features` given to `complete()`;
-* `reports.forReported(userId)` rows carry `weight` and `at`; the optional
+* `analysis.forUser(userId, limit, { doneOnly: true })` returns the player's completed analyses,
+  newest first, each row with the `features` given to `complete()`;
+* `reports.forReported(userId)` rows carry `weight`, `createdAt` and `status`; the optional
   `reports.forReporter(userId)` (rows with `outcome`) feeds the reporter's track record;
+* `reports.resolveOpenFor(reportedId, 'cheating', outcome, by, now)` resolves every open cheating
+  report of the player and returns their ids; `integrity confirm` (unless `--keep-reports`) and
+  `integrity clear --dismiss-reports` require it (no fallback);
+* the optional `reports.weightSince(reportedId, since, lowThreshold)` (`{ total, low }`) and
+  `reports.countFor(reportedId)` (`{ total, open }`) make the 24-hour cap of a new report, the
+  30-day report weights and the report counts of `bin/admin.js` cover every report; without them
+  they are taken from `forReported`'s rows (the newest 200);
+* `analysis queue` of `bin/admin.js` requires `games.byId(gameId)`, `analysis.job(gameId)` (the
+  game's job with its `status` and `priority`, null without one) and
+  `analysis.enqueue(gameId, now)`;
 * the optional `analysis.request(gameId, 'report' | 'signal', now)` queues a reported game,
   at `report` priority for a credible report and `signal` for a low-credibility one (without it
   a report does not touch the analysis queue);
 * `analysis.next()` returns each job with its `priority` (0 for the ordinary sample, the only
   jobs that feed the population);
+* the optional `analysis.touch(gameId, workerId, now)` renews the claim of a job every minute
+  while it is analysed (without it, a job analysed for more than 10 minutes is taken for the job
+  of a vanished worker and given to another engine);
+* the optional `transaction(fn)` makes each read-modify-write of an integrity record (analysis
+  scoring, automatic sanction, `integrity confirm` / `clear`) one transaction, so that it cannot
+  overwrite what another process wrote in between; without it the writes are made directly;
 * free-form values are passed as objects and retried as JSON text if the store refuses them;
 * the rating refunds use `refunds` when the store has it (a partial store gives none).

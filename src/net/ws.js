@@ -15,24 +15,33 @@
 // (net/ipguard.js, the shard's protection per address), an upgrade request first takes its token
 // of the address's request budget like any HTTP request, before any other check and before the
 // admission IPC to the primary: a blocked address, or one over HTTP_RATE_PER_IP, gets HTTP 429
-// rate_limited with Retry-After (the game waits that long before it reconnects).
+// rate_limited with Retry-After. The game honours Retry-After when /api/v1/info answers 429; on a
+// refused upgrade it retries with its own backoff (reconnectDelayMs). On the dedicated port, a
+// head handleSocket cannot read (400, a 408 timeout, 431 too large) is refused before that check
+// and counts toward a block of the address like malformed HTTP on the API port (hardenHttp),
+// unless the peer is a trusted proxy (`isTrusted`).
 //
 // Hot path (per message): no allocation for complete frames (the payload is unmasked in place and
-// handed out as a view of the socket chunk); a frame split across TCP reads is re-assembled with
-// at most two small copies, bounded by the header size + maxMessageBytes. Outgoing messages are
-// written as header + payload (the payload is never copied); writes made in the same tick are
-// corked and leave in one writev. The kernel send queue is watched: when the bytes queued for a
-// client exceed sendBufferLimit, the connection is closed with 4303 (SlowConsumer).
+// handed out as a view of the socket chunk); a frame split across TCP reads is appended to a
+// private buffer that grows by doubling up to the frame size (linear copying; it holds at most
+// twice the bytes received, or 64, and never more than the header size + maxMessageBytes).
+// Outgoing messages are written as header + payload (the payload is never copied); writes made in
+// the same tick are corked and leave in one writev. The bytes queued in user space for a client
+// are watched (socket.writableLength: bytes the kernel's send buffer has not accepted yet; the
+// kernel buffer comes on top): when a send would take them above sendBufferLimit, the connection
+// is closed with 4303 (SlowConsumer).
 //
-// The payload Buffer given to onMessage is only valid during the call if the consumer mutates
-// nothing; it stays valid afterwards (socket chunks are never reused), but keeping it retains the
-// whole chunk, so consumers that store data copy it.
+// The payload given to onMessage is a view of the received bytes (the socket chunk, a private
+// reassembly buffer, or a copy for fragmented messages). It stays valid after the call because
+// those buffers are never reused, but keeping it retains the whole underlying buffer, so a
+// consumer that stores data copies it.
 
 import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { now as clockNow } from '../game/clock.js';
 import { metrics as defaultRegistry } from '../metrics.js';
 import { CloseCode, WS_SUBPROTOCOL } from '../protocol/index.js';
+import { normalizeIp } from './ip.js';
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const KEY_RE = /^[A-Za-z0-9+/]{21}[AQgw]==$/;          // base64 of exactly 16 bytes
@@ -126,9 +135,14 @@ function onSocketData(chunk) { this._ws._onData(chunk); }
 function onSocketClose() { this._ws._onSocketClose(); }
 function onSocketError() { /* 'close' follows */ }
 function onSocketEnd() {
-    // The peer half-closed: finish our side too (no data can arrive any more).
+    // The peer half-closed: finish our side too (no data can arrive any more). Like every closing
+    // path, destroyed after closeTimeoutMs at the latest: a peer that no longer reads would keep
+    // the end() from finishing, and close() does nothing once _closeSent is set.
     const c = this._ws;
-    if (!c._closeSent) { c._closeSent = true; c._closeCode = c._closeCode || 1006; c.state = 'closing'; }
+    if (!c._closeSent) {
+        c._closeSent = true; c._closeCode = c._closeCode || 1006; c.state = 'closing';
+        setTimeout(destroySocket, c._server.closeTimeoutMs, this).unref();
+    }
     this.end();
 }
 function uncorkConnection(conn) {
@@ -143,11 +157,10 @@ function destroySocket(socket) { socket.destroy(); }
  * in `ctx`.
  */
 export class WsConnection {
-    constructor(server, socket, ip, protocol) {
+    constructor(server, socket, ip) {
         /** @type {number} u32, unique among the open connections of this server */
         this.id = server._allocId();
         this.ip = ip;
-        this.protocol = protocol;
         this.userId = 0;
         this.username = '';
         /** @type {'hello'|'ready'|'closing'|'closed'} */
@@ -164,6 +177,7 @@ export class WsConnection {
         this._server = server;
         this._socket = socket;
         this._rest = null;          // partial frame (copy), at most header + maxMessageBytes
+        this._restLen = 0;          // bytes of it received
         this._restNeed = 0;
         this._frag = null;          // fragments of a message in progress
         this._fragLen = 0;
@@ -187,9 +201,6 @@ export class WsConnection {
 
     /** Bytes queued in user space for this client (not yet handed to the kernel). */
     get bufferedBytes() { return this._socket.writableLength; }
-
-    /** Remote port (diagnostics). */
-    get remotePort() { return this._socket.remotePort; }
 
     /**
      * Sends one binary message. Returns false when the connection is closing/closed, or when the
@@ -281,20 +292,35 @@ export class WsConnection {
         this.lastRecvAt = clockNow();
         this._server._bytesIn.inc(chunk.length);
         while (this._rest !== null && chunk.length > 0) {
-            const rest = this._rest;
-            const take = Math.min(this._restNeed - rest.length, chunk.length);
-            const joined = Buffer.allocUnsafe(rest.length + take);
-            rest.copy(joined, 0);
-            chunk.copy(joined, rest.length, 0, take);
+            // Appended to the partial frame; parsed again only once the header or the frame it
+            // waits for is complete (nothing it checks changes in between). The buffer grows by
+            // doubling, never beyond what is needed, and is never written again once parsed (the
+            // payloads handed out are views of it).
+            let rest = this._rest;
+            const have = this._restLen, need = this._restNeed;
+            const take = Math.min(need - have, chunk.length);
+            if (have + take > rest.length) {
+                const grown = Buffer.allocUnsafe(Math.min(need, Math.max(2 * rest.length, have + take)));
+                rest.copy(grown, 0, 0, have);
+                rest = this._rest = grown;
+            }
+            chunk.copy(rest, have, 0, take);
+            this._restLen = have + take;
             chunk = chunk.subarray(take);
+            if (this._restLen < need) return;
             this._rest = null;
-            if (!this._parse(joined)) return;
+            if (!this._parse(rest.subarray(0, need))) return;
         }
         if (chunk.length > 0) this._parse(chunk);
     }
 
     _saveRest(buf, off, need) {
-        this._rest = Buffer.from(buf.subarray(off));    // copy (bounded: need <= 14 + maxMessageBytes)
+        // Copy (bounded: need <= 14 + maxMessageBytes), with room for what comes next but at most
+        // twice the bytes received: the announced length is not reserved before it arrives.
+        const n = buf.length - off;
+        this._rest = Buffer.allocUnsafe(Math.min(need, Math.max(64, 2 * n)));
+        buf.copy(this._rest, 0, off);
+        this._restLen = n;
         this._restNeed = need;
         return true;
     }
@@ -459,12 +485,15 @@ export class WsServer {
      * @param {object} [o.log] logger
      * @param {object} [o.registry] metrics registry
      * @param {import('./ipguard.js').IpGuard|null} [o.guard] protection per address, checked first
+     * @param {((ip: string) => boolean)|null} [o.isTrusted] trusted proxies (TLS_MODE=proxy): a
+     *        head handleSocket cannot read from one of them is not counted toward a block
      */
     constructor({
         maxMessageBytes = 512, subprotocol = WS_SUBPROTOCOL, allowOrigins = [], path = '/ws',
         sendBufferLimit = 262144, onConnection, admission = null, clientIp = null, messageLabel = null,
         upgradeHeaders = null, log = null, registry = defaultRegistry, handshakeTimeoutMs = 10000,
         maxHeaderBytes = 8192, closeTimeoutMs = 2000, pingRate = 2, pingBurst = 5, guard = null,
+        isTrusted = null,
     } = {}) {
         this.maxMessageBytes = maxMessageBytes;
         this.subprotocol = subprotocol;
@@ -480,6 +509,7 @@ export class WsServer {
         this.onConnection = onConnection;
         this.admission = admission;
         this.guard = guard;
+        this.isTrusted = isTrusted;
         this.clientIp = clientIp || ((req, socket) => socket.remoteAddress || '');
         this.log = log;
         this.handshakeTimeoutMs = handshakeTimeoutMs;
@@ -552,27 +582,50 @@ export class WsServer {
     handleSocket(socket) {
         socket.setNoDelay(true);
         socket.on('error', noop);
-        let buf = null;
+        // The head so far: the first chunk as it is, then a private copy grown by doubling (a head
+        // read a few bytes at a time costs linear copying, not one whole copy per read).
+        let buf = null, len = 0;
         const timer = setTimeout(() => {
             socket.removeListener('data', onData);
-            this._reject(socket, 408, 'timeout', null);
+            this._rejectHead(socket, 408, 'timeout');
         }, this.handshakeTimeoutMs);
         timer.unref();
+        // A client that leaves before the end of its head is no handshake timeout, and the socket
+        // and its partial head are not kept until the timer fires.
+        const onClose = () => { clearTimeout(timer); buf = null; };
+        socket.once('close', onClose);
         const onData = (chunk) => {
-            buf = buf === null ? chunk : Buffer.concat([buf, chunk]);
-            const end = buf.indexOf('\r\n\r\n', Math.max(0, buf.length - chunk.length - 3), 'latin1');
+            if (buf === null) {
+                buf = chunk;
+                len = chunk.length;
+            } else {
+                // Never written into while it is still the socket's chunk: len === buf.length then.
+                if (len + chunk.length > buf.length) {
+                    const grown = Buffer.allocUnsafe(Math.max(2 * len, len + chunk.length, 256));
+                    buf.copy(grown, 0, 0, len);
+                    buf = grown;
+                }
+                chunk.copy(buf, len);
+                len += chunk.length;
+            }
+            const view = buf.subarray(0, len);
+            const end = view.indexOf('\r\n\r\n', Math.max(0, len - chunk.length - 3), 'latin1');
             if (end < 0) {
-                if (buf.length > this.maxHeaderBytes) { clearTimeout(timer); socket.removeListener('data', onData); this._reject(socket, 431, 'headers_too_large', null); }
+                if (len > this.maxHeaderBytes) {
+                    clearTimeout(timer); socket.removeListener('close', onClose); socket.removeListener('data', onData);
+                    this._rejectHead(socket, 431, 'headers_too_large');
+                }
                 return;
             }
             clearTimeout(timer);
+            socket.removeListener('close', onClose);
             socket.removeListener('data', onData);
             socket.pause();
-            if (end + 4 > this.maxHeaderBytes) { this._reject(socket, 431, 'headers_too_large', null); return; }
-            const req = parseRequestHead(buf.subarray(0, end));
-            if (!req) { this._reject(socket, 400, 'bad_request', null); return; }
+            if (end + 4 > this.maxHeaderBytes) { this._rejectHead(socket, 431, 'headers_too_large'); return; }
+            const req = parseRequestHead(view.subarray(0, end));
+            if (!req) { this._rejectHead(socket, 400, 'bad_request'); return; }
             req.socket = socket;
-            this.handleUpgrade(req, socket, buf.subarray(end + 4));
+            this.handleUpgrade(req, socket, view.subarray(end + 4));
         };
         socket.on('data', onData);
     }
@@ -648,7 +701,7 @@ export class WsServer {
         socket.write(
             'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
             `Sec-WebSocket-Accept: ${acceptKey(key)}\r\nSec-WebSocket-Protocol: ${this.subprotocol}\r\n${this._upgradeExtra}\r\n`);
-        const conn = new WsConnection(this, socket, ip, this.subprotocol);
+        const conn = new WsConnection(this, socket, ip);
         conn._admitted = admitted;
         this.connections.set(conn.id, conn);
         this._accepted.inc();
@@ -662,6 +715,15 @@ export class WsServer {
         if (head && head.length) conn._onData(Buffer.from(head));
         socket.resume();
         return conn;
+    }
+
+    // A head handleSocket cannot read counts toward a block of the address, like malformed HTTP on
+    // the API port (hardenHttp): behind a proxy the peer is the proxy, not the client.
+    _rejectHead(socket, status, error) {
+        if (this.guard !== null && !socket.destroyed && !(this.isTrusted !== null && this.isTrusted(socket.remoteAddress))) {
+            this.guard.noteRefusal(this.guard.keysOf(normalizeIp(socket.remoteAddress), socket), 1);
+        }
+        this._reject(socket, status, error, null);
     }
 
     _reject(socket, status, error, extraHeaders, body) {

@@ -7,11 +7,18 @@
 // handler; createShardGuard). Its refusal reports go to the primary ('abuse.report', at most one
 // notification per second); the blocks the primary decides come back as 'abuse.block', at once
 // for a new block and with every running block after this shard's 'shard.ready'.
+//
+// TLS session-ticket keys (native mode): the shard asks the primary for the current state of the
+// keys every worker shares ('tls.ticketKeys', net/ticket-keys.js) before it listens, so that a
+// restarted shard resumes the sessions of the others and they resume its own (worker-main.js asks
+// for them before startShard, which then registers its 'shutdown' handler before any await).
 
 import { metrics as defaultRegistry } from '../metrics.js';
 import { WS_SUBPROTOCOL } from '../protocol/index.js';
+import { ipMatcher } from '../net/ip.js';
 import { IpGuard } from '../net/ipguard.js';
 import { Listeners, makeClientIp } from '../net/listeners.js';
+import { TicketKeys } from '../net/ticket-keys.js';
 import { WsServer } from '../net/ws.js';
 import { Bus, busToken, unixTransport } from './bus.js';
 import { startProcessMetrics } from './proc-metrics.js';
@@ -22,10 +29,10 @@ import { Router, TYPE_NAMES } from './router.js';
  * becomes its message handler in startShard).
  * @param {{ config: object, shard: number, serverId: string, transport?: object, log?: object, registry?: object }} o
  */
-export function createBus({ config, shard, serverId, transport = null, log = null, registry = defaultRegistry }) {
+export function createBus({ config, shard, serverId, busDir = '', transport = null, log = null, registry = defaultRegistry }) {
     return new Bus({
         shard,
-        transport: transport || unixTransport({ runDir: config.runDir, serverId }),
+        transport: transport || unixTransport({ runDir: config.runDir, serverId, fallbackDir: busDir }),
         token: busToken(config.serverSecret, serverId),
         onMessage: () => {},
         log,
@@ -60,9 +67,13 @@ export function createShardGuard({ config, primary, log = null, registry = defau
  * @param {boolean} [o.reusePort]
  * @param {() => (void|Promise<void>)} [o.onStopped] called after a graceful stop (close the store, exit)
  * @param {IpGuard} [o.guard] protection per address (the one given to the API handler); created here when absent
+ * @param {TicketKeys|null} [o.ticketKeys] the session-ticket keys every shard shares (native TLS); asked
+ *        for here when absent
  */
 export async function startShard({ config, shard, serverId, primary, host, auth, anticheat = null, store = null, apiHandler = null,
-    bus = null, log, registry = defaultRegistry, reusePort, onStopped = null, guard = null }) {
+    bus = null, log, registry = defaultRegistry, reusePort, onStopped = null, guard = null, ticketKeys = null }) {
+    // The only await before the 'shutdown' handler below, for a caller that gave no keys (tests).
+    const keys = ticketKeys || (config.tlsMode === 'native' ? TicketKeys.take(await primary.request('tls.ticketKeys')) : null);
     const proc = startProcessMetrics({ registry });
     const theGuard = guard || createShardGuard({ config, primary, log: log.child('guard'), registry });
     const theBus = bus || createBus({ config, shard, serverId, log: log.child('bus'), registry });
@@ -77,11 +88,14 @@ export async function startShard({ config, shard, serverId, primary, host, auth,
         // The /info serverId again, so that a client that reuses an /info answer checks it before Hello.
         upgradeHeaders: serverId ? { 'Scacelith-Server-Id': serverId } : null,
         guard: theGuard,
+        // The heads a dedicated WS_PORT cannot read count toward a block unless a trusted proxy
+        // sent them (the predicate hardenHttp uses on the API port).
+        isTrusted: config.tlsMode === 'proxy' ? ipMatcher(config.trustedProxies || []) : null,
     });
     let ready = false, draining = false, stopping = null;
     const listeners = new Listeners({
         config, apiHandler, wsServer: wss, log: log.child('listen'), ready: () => ready && !draining, reusePort,
-        full: () => router.isFull(), registry, guard: theGuard,
+        full: () => router.isFull(), registry, guard: theGuard, ticketKeys: keys,
     });
 
     router.bindPrimary(primary);

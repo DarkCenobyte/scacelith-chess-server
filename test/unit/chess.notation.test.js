@@ -207,6 +207,51 @@ test('SAN: disambiguation, promotions, captures, checks, mates, castling', () =>
     assert.equal(p.fen(), START);
 });
 
+test('SAN disambiguation matches the legal move list over random games', () => {
+    // san() validates only the other pieces of the same code; the reference filters every legal move.
+    const starts = [
+        START, KIWIPETE,
+        'q3k2q/8/8/8/8/8/1QQQ4/Q3K2Q w - - 0 1',
+        'rn2k1nr/8/8/8/8/8/8/RN2K1NR w KQkq - 0 1',
+        'b3k2b/8/8/8/8/8/8/B3K2B w - - 0 1',
+        'k7/2PPPPPP/8/8/8/8/2pppppp/K7 w - - 0 1',
+    ];
+    let seed = 0x5a17;
+    const rnd = (n) => {
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        return (seed >>> 8) % n;
+    };
+    let checked = 0;
+    for (const fen of starts) {
+        for (let g = 0; g < 4; g++) {
+            const p = pos(fen);
+            for (let ply = 0; ply < 150; ply++) {
+                const legal = p.legalMoves();
+                if (!legal.length) break;
+                for (const m of legal) {
+                    const from = m & 63, to = (m >> 6) & 63, piece = p.pieceAt(from);
+                    if ((piece & 7) === 1 || ((piece & 7) === 6 && Math.abs((to & 7) - (from & 7)) === 2)) continue;
+                    let ambiguous = false, sameFile = false, sameRank = false;
+                    for (const o of legal) {
+                        const of = o & 63;
+                        if (((o >> 6) & 63) !== to || of === from || p.pieceAt(of) !== piece) continue;
+                        ambiguous = true;
+                        if ((of & 7) === (from & 7)) sameFile = true;
+                        if ((of >> 3) === (from >> 3)) sameRank = true;
+                    }
+                    const name = squareName(from);
+                    const dis = !ambiguous ? '' : !sameFile ? name[0] : !sameRank ? name[1] : name;
+                    const want = ' PNBRQK'[piece & 7] + dis + (p.pieceAt(to) ? 'x' : '') + squareName(to);
+                    assert.equal(p.san(m).replace(/[+#]$/, ''), want, `${p.fen()} ${p.uci(m)}`);
+                    checked++;
+                }
+                p.play(legal[rnd(legal.length)]);
+            }
+        }
+    }
+    assert.ok(checked > 10000, `${checked} piece moves checked`);
+});
+
 test('UCI: output and strict parsing', () => {
     const p = Position.start();
     assert.equal(p.uci(mv('e2', 'e4')), 'e2e4');

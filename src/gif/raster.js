@@ -453,7 +453,6 @@ export function rasterize(polygons, rule, width, height, out = new Float32Array(
                     a--;
                     continue;
                 }
-                if (ey0[e] > sy) continue;
                 // Insertion sort by x as the crossings are collected.
                 const x = ex[e] + (sy - ey0[e]) * eslope[e];
                 let j = k++;

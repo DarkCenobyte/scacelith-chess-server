@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { logger } from '../../src/log.js';
 import { base32Decode, totp } from '../../src/security/totp.js';
 import { solvePow } from '../../src/security/pow.js';
 import { capturedLogs, linkIn, startTestServer } from './helpers/auth-fakes.js';
 import { startFakeOidc } from './helpers/auth-oidc.js';
 
 // Runs every flow of the module and checks that no password, token, TOTP secret, recovery code,
-// PKCE verifier or e-mail address reached the logs (which are at debug level in the tests).
+// PKCE verifier, Google code or state, or e-mail address reached the logs (which are at debug level
+// in the tests).
 test('no credential, token, code or e-mail address appears in the logs', async (t) => {
     const secrets = [];
     const keep = (...xs) => {
@@ -15,8 +17,7 @@ test('no credential, token, code or e-mail address appears in the logs', async (
         return xs[0];
     };
     let s = null;
-    const idp = await startFakeOidc({ clientId: 'cid.apps.googleusercontent.com', clientSecret: 'GOCSPX-log-test',
-        redirectUri: 'https://chess.example.org:8443/auth/sso/google/callback', now: () => s.now() });
+    const idp = await startFakeOidc({ clientId: 'cid.apps.googleusercontent.com', clientSecret: 'GOCSPX-log-test', now: () => s.now() });
     s = await startTestServer({
         env: { POW_REGISTER_BITS: '4', POW_LOGIN_BITS: '4', POW_LOGIN_TRIGGER_PER_MIN: '3', SSO_GOOGLE_ENABLED: '1',
             GOOGLE_CLIENT_ID: 'cid.apps.googleusercontent.com', GOOGLE_CLIENT_SECRET: 'GOCSPX-log-test' },
@@ -82,28 +83,63 @@ test('no credential, token, code or e-mail address appears in the logs', async (
     await s.request('GET', '/api/v1/account/me', { token: keep('sct_' + 'Q'.repeat(43)) });
     await s.request('POST', '/api/v1/auth/logout', { token: s2 });
 
-    // Google sign-in, first time.
-    const verifier = keep(crypto.randomBytes(32).toString('base64url'));
-    const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
-    r = await s.request('POST', '/api/v1/auth/sso/google/start', { body: { codeChallenge: challenge } });
-    const attemptId = keep(r.json.attemptId);
-    const q = idp.authorize(r.json.authUrl, { sub: '42', email: 'magnus@gmail.com', email_verified: true });
-    keep(q.code, q.state);
-    await s.request('GET', `/auth/sso/google/callback?${new URLSearchParams(q)}`);
-    r = await s.request('POST', '/api/v1/auth/sso/google/poll', { body: { attemptId, codeVerifier: verifier } });
+    // Google sign-in, first time: start, the redirect to the game's listener, finish, complete.
+    const ssoStart = async () => {
+        const verifier = keep(crypto.randomBytes(32).toString('base64url'));
+        const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+        const a = await s.request('POST', '/api/v1/auth/sso/google/start', { body: { codeChallenge: challenge, redirectPort: 50123 } });
+        keep(a.json.attemptId, a.json.state);
+        return { verifier, ...a.json };
+    };
+    const ssoFinish = (a, q) => s.request('POST', '/api/v1/auth/sso/google/finish',
+        { body: { attemptId: a.attemptId, codeVerifier: a.verifier, state: q.state, code: keep(q.code), iss: q.iss } });
+    let a = await ssoStart();
+    r = await ssoFinish(a, idp.authorize(a.authUrl, { sub: '42', email: 'magnus@gmail.com', email_verified: true }));
     const ticket = keep(r.json.ssoTicket);
     r = await s.request('POST', '/api/v1/auth/sso/complete', { body: { ssoTicket: ticket, username: 'magnus' } });
+    keep(r.json.token);
+    // Google sign-in with the address of alice's account: her password (a wrong one first), then her code.
+    a = await ssoStart();
+    r = await ssoFinish(a, idp.authorize(a.authUrl, { sub: '43', email: 'alice@example.com', email_verified: true }));
+    const linkTicket = keep(r.json.linkTicket);
+    await s.request('POST', '/api/v1/auth/sso/google/link', { body: { linkTicket, password: keep('wrong link guess!') } });
+    r = await s.request('POST', '/api/v1/auth/sso/google/link', { body: { linkTicket, password: 'Third secret pass phrase' } });
+    s.now.advance(30000);
+    r = await s.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: keep(r.json.mfaToken), code: totp(secret, s.now()) } });
     keep(r.json.token);
     for (const call of idp.state.tokenCalls) keep(call.code_verifier);
 
     s.auth.close();
     const logs = capturedLogs.slice(start).join('');
-    assert.ok(logs.includes('"login_failed"') && logs.includes('"mfa_enabled"') && logs.includes('"password_reset"') && logs.includes('"sso_account_created"'),
-        'security events are logged');
+    assert.ok(logs.includes('"login_failed"') && logs.includes('"mfa_enabled"') && logs.includes('"password_reset"') && logs.includes('"sso_account_created"')
+        && logs.includes('"sso_linked"'), 'security events are logged');
     assert.ok(logs.includes('"route":"POST /api/v1/auth/login"'), 'access log at debug level');
     for (const x of secrets) assert.ok(!logs.includes(x), `leaked into the logs: ${x.slice(0, 12)}...`);
     assert.ok(!/127\.0\.0\.1"/.test(logs), 'client addresses are truncated in logs');
     // The persisted security events carry no secret either.
     const stored = JSON.stringify(s.store._raw.securityEvents);
     for (const x of secrets) if (!x.includes('@')) assert.ok(!stored.includes(x), `leaked into security events: ${x.slice(0, 12)}...`);
+});
+
+// Strings longer than the 2000-character cut are masked too (before the cut), and a field named
+// like a key of the record never replaces it.
+test('long strings are masked before they are cut; fields never replace the record keys', () => {
+    const start = capturedLogs.length;
+    const tok = 'sct_' + 'Q'.repeat(43);
+    const log = logger.child('logtest');
+    log.info('long', { detail: 'x ' + tok + ' ' + 'y'.repeat(2100) });
+    log.error('err', { err: new Error('failed for ' + tok + ' ' + 'z'.repeat(2100)) });
+    log.info('edge', { detail: 'w '.repeat(995) + tok });           // the token straddles the cut
+    log.info('shrunk', { detail: (tok + ' ').repeat(100) });        // masking shrinks the window below 2000
+    log.warn('x', { level: 3, msg: 'y', c: 'other', t: 0, n: 1 });
+    const lines = capturedLogs.slice(start).map((l) => JSON.parse(l));
+    assert.equal(lines.length, 5);
+    for (const l of lines.slice(0, 4)) assert.ok(!JSON.stringify(l).includes('sct_QQQQ'), `token leaked: ${l.msg}`);
+    assert.ok(lines[0].detail.includes('sct_[redacted]') && lines[0].detail.endsWith('…') && lines[0].detail.length === 2001);
+    assert.ok(lines[1].err.message.includes('sct_[redacted]'));
+    assert.ok(lines[2].detail.endsWith('sct_[redac…'));
+    assert.ok(lines[3].detail.length < 2000 && lines[3].detail.endsWith('…'), 'a cut string is always marked');
+    const r = lines[4];
+    assert.deepEqual([r.level, r.msg, r.c, typeof r.t, r.n], ['warn', 'x', 'logtest', 'string', 1]);
+    assert.deepEqual(Object.keys(r).slice(0, 4), ['t', 'level', 'c', 'msg'], 'the record keys keep their place');
 });

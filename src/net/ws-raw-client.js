@@ -1,4 +1,4 @@
-// Minimal RFC 6455 client for tests, benchmarks and tools (not used by the server). It can also
+// Minimal RFC 6455 client for the unit tests (not used by the server). It can also
 // send deliberately broken frames (unmasked, RSV bits, text, fragmented, oversized...) to exercise
 // the server's parser.
 

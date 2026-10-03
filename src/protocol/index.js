@@ -5,7 +5,9 @@ export * from './codec.gen.js';
 export function encodeMove(from, to, promo = 0) { return (from & 63) | ((to & 63) << 6) | ((promo & 7) << 12); }
 export function decodeMove(m) { return { from: m & 63, to: (m >> 6) & 63, promo: (m >> 12) & 7 }; }
 
-// FNV-1a 32-bit of an ASCII/UTF-8 string (posHash is fnv1a32 of the first four FEN fields).
+// FNV-1a 32-bit of an ASCII string: it hashes the low byte of each UTF-16 code unit, so it matches
+// the C++ hash of the UTF-8 bytes only for ASCII (FEN is ASCII). posHash is fnv1a32 of the first
+// four FEN fields.
 export function fnv1a32(s) {
     let h = 0x811c9dc5;
     for (let i = 0; i < s.length; i++) {

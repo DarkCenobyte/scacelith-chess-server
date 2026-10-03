@@ -23,11 +23,26 @@
 //     <ratingBucket>') returns { <metric>: { n, mean, m2 } }; the analysis process (the only
 //     writer) sends one { key, value } observation per metric and game, which the store merges
 //     (Welford).
-//   * store.analysis.forUser(userId, limit) must return that player's completed analyses, newest
-//     first, each row carrying the `features` object given to complete() (or being it).
+//   * store.analysis.forUser(userId, limit, { doneOnly: true }) must return that player's completed
+//     analyses, newest first, each row carrying the `features` object given to complete() (or
+//     being it).
 //   * store.reports.forReporter(reporterId) (not in DESIGN) is used when present to weigh a
 //     reporter by the outcomes of their past reports; without it every reporter has a neutral
-//     track record. store.reports.forReported(userId) must return rows with { weight, at }.
+//     track record. store.reports.forReported(userId) must return rows with { weight, createdAt,
+//     status }.
+//   * store.reports.resolveOpenFor(reportedId, 'cheating', outcome, by, now) -> [ids] is required
+//     by bin/admin.js integrity confirm (unless --keep-reports) and integrity clear
+//     --dismiss-reports: it resolves every open cheating report of the player (no fallback).
+//   * store.reports.weightSince(reportedId, since, lowThreshold) -> { total, low } and
+//     store.reports.countFor(reportedId) -> { total, open } are used when present: the 24-hour
+//     cap of a new report, the 30-day report weights and the report counts of bin/admin.js then
+//     cover every report; without them they are taken from forReported's rows (the newest 200).
+//   * store.analysis.touch(gameId, workerId, now) is used when present to renew the claim of a job
+//     every minute while it is analysed; without it, a job analysed for more than 10 minutes is
+//     taken for the job of a vanished worker and given to another engine.
+//   * store.transaction(fn) is used when present (util.js inTx): an integrity record read, changed
+//     and written back (analysis scoring, automatic sanction, integrity confirm / clear) is then
+//     one transaction; without it the writes are made directly.
 //   * store.analysis.request(gameId, 'report' | 'signal', now) is used when present to queue a
 //     reported game for analysis ahead of the ordinary ones ('signal' for a low-credibility report;
 //     reports.js; the queue policy is the store's). store.analysis.next() returns each job with its
@@ -41,10 +56,10 @@
 //     itself (the router's schema format is not specified).
 //   * A 'repeated_desync' anomaly is reported by the caller (the room counts desyncs); a plain
 //     'desync' stays info whatever its number.
-//   * startAnalysisProcess forks bin/analysis-worker.js, which loads its configuration itself
-//     (same environment, same .env) and opens its own store. Its metrics (games analysed, engines
-//     running, network sharing) reach the primary's /metrics through the IPC channel
-//     ('metrics.snapshot', as the shards'), under the shard label 'analysis'.
+//   * startAnalysisProcess forks bin/analysis-worker.js, which runs the configuration the primary
+//     loaded ('config.snapshot', config.js primaryConfig) and opens its own store. Its metrics
+//     (games analysed, engines running, network sharing) reach the primary's /metrics through the
+//     IPC channel ('metrics.snapshot', as the shards'), under the shard label 'analysis'.
 //   * store.refunds (rating refunds, refunds.js) is used when present: a partial store gives none.
 //   * 'sanction.applied' carries `refunds` (the number of victims refunded): the primary then
 //     looks for the refunds to notify at once (refund-notices.js).
@@ -222,6 +237,12 @@ export function createAnticheat({ config, store, primary = null, log = null, now
         const s = { userId, gameId: gameId || 0, kind, at: t };
 
         const done = (r) => {
+            if (r.failed) {
+                // The ban was not stored (logged, nothing else written): a later certain anomaly of
+                // this game tries again.
+                sanctioned.delete(key);
+                return { banUntil: 0, applied: false, refunds: 0 };
+            }
             sanctioned.set(key, r.until);
             if (r.created) {
                 sanctionCounter.labels(kind in ANOMALY_KINDS ? kind : 'unknown').inc();
@@ -265,8 +286,10 @@ export function createAnticheat({ config, store, primary = null, log = null, now
 /**
  * Starts the engine-analysis process (bin/analysis-worker.js) as a low-priority child of the
  * primary, restarting it with exponential backoff when it dies. Disabled (no process) when
- * ANALYSIS_ENGINE_PATH is empty or ANALYSIS_WORKERS is 0.
- * @param {object} config
+ * ANALYSIS_ENGINE_PATH is empty or ANALYSIS_WORKERS is 0. The process runs `config`, which it asks
+ * for at its start ('config.snapshot', config.js primaryConfig), not .env and the secret files as
+ * they are when it restarts.
+ * @param {object} config the primary's (loadConfig)
  * @param {{ log?: object, script?: string, env?: object, minBackoffMs?: number, maxBackoffMs?: number, stableMs?: number }} [o]
  * @returns {{ enabled: boolean, readonly pid: number|null, readonly restarts: number, metricsSnapshot: (timeoutMs?: number) => Promise<object[]|null>, stop: (graceMs?: number) => Promise<void> }}
  *          metricsSnapshot: the process's metrics registry snapshot, null while it is not running or does not answer
@@ -293,6 +316,7 @@ export function startAnalysisProcess(config, { log = null, script = null, env = 
         try { os.setPriority(child.pid, os.constants.priority.PRIORITY_LOW); } catch { /* the worker lowers itself too */ }
         lg.info('analysis process started', { pid: child.pid });
         const me = child, channel = new Ipc(child, { name: 'analysis', log: lg });
+        channel.on('config.snapshot', () => config.rawValues);
         ipc = channel;
         me.on('error', (e) => lg.warn('analysis process error', { err: e }));
         me.on('exit', (code, signal) => {

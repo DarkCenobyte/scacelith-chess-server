@@ -50,7 +50,11 @@ test('the rates of the auth family: keys, windows, /48 ceilings, shared, refusal
 
     const sso = routesOf(registerSso, { config, auth: {} });
     assert.deepEqual(keys(sso['POST /auth/sso/google/start']), ['sso_start:30/600000,48:90,shared']);
+    assert.deepEqual(keys(sso['POST /auth/sso/google/finish']), ['sso_finish:30/60000']);
+    assert.deepEqual(keys(sso['POST /auth/sso/google/link']), ['auth:20/600000,48:100,shared'], 'the password step: the auth bucket');
     assert.deepEqual(keys(sso['POST /auth/sso/complete']), ['auth:20/600000,48:100,shared'], 'the auth bucket, its /48 included');
+    assert.deepEqual(Object.keys(sso).sort(), ['POST /auth/sso/complete', 'POST /auth/sso/google/finish', 'POST /auth/sso/google/link',
+        'POST /auth/sso/google/start'], 'no poll route, no callback page');
 
     const account = routesOf(registerAccount, { config, auth: {} });
     for (const p of ['/account/password', '/account/mfa/totp/setup', '/account/mfa/totp/enable', '/account/mfa/totp/disable',
@@ -208,7 +212,9 @@ test('second factors: AUTH_MFA_PER_ACCOUNT per 15 minutes for the account, whole
     const token = await mfaToken(a);
     r = await a.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: token, recoveryCode: alice.recoveryCodes[0] }, ip: '192.0.2.4' });
     assert.deepEqual([r.status, r.json.error], [429, 'too_many_attempts']);
-    assert.ok(r.json.retryAfter > 0 && r.json.retryAfter <= 900);
+    // The three count in full until the 15 minutes roll over, then decay over the next 15: one
+    // more fits a third of the way in (the primary's sliding window, cluster/limits.js).
+    assert.ok(r.json.retryAfter > 0 && r.json.retryAfter <= 1200);
     assert.equal(a.store.mfa.countRecoveryCodes(alice.u.id), codes, 'no recovery code spent');
     r = await b.request('POST', '/api/v1/auth/login/mfa', { body: { mfaToken: token, code: totp(alice.secret, a.now()) }, ip: '192.0.2.5' });
     assert.deepEqual([r.status, r.json.error], [429, 'too_many_attempts'], 'the other worker too');

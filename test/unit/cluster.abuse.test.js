@@ -40,7 +40,7 @@ describe('AbuseTracker', () => {
         assert.equal(metric(registry, 'scacelith_abuse_blocked', ['ip']), 1);
         assert.equal(warned.length, 1);
         assert.equal(warned[0].msg, 'ip blocked');
-        assert.deepEqual([warned[0].ip, warned[0].scope, warned[0].level, warned[0].ttlSec, warned[0].refusals], ['198.51.100.0/24', 'ip', 1, 60, 100]);
+        assert.deepEqual([warned[0].ip, warned[0].scope, warned[0].blockLevel, warned[0].ttlSec, warned[0].refusals], ['198.51.100.0/24', 'ip', 1, 60, 100]);
     });
 
     it('counts over a sliding minute', () => {
@@ -67,6 +67,17 @@ describe('AbuseTracker', () => {
         now.advance(ABUSE_BLOCK_FORGET_MS + 1);
         t.sweep();
         assert.deepEqual(flood(), [['192.0.2.9', 60000, 1]]);
+    });
+
+    it('after a block the key counts from zero: T new refusals block it again, not a few', () => {
+        const { t, now } = tracker();
+        now.set(1020000 + 1);                     // just after the start of a fixed minute
+        assert.deepEqual(t.report([['192.0.2.7', '2001:db8::/48', 99]]), []);
+        assert.deepEqual(t.report([['192.0.2.7', '2001:db8::/48', 1]]), [['192.0.2.7', 60000, 1]]);
+        now.advance(60000);                       // the block ends; the refusals before it are a minute old
+        assert.ok(!t.isBlocked('192.0.2.7'));
+        assert.deepEqual(t.report([['192.0.2.7', null, 99]]), [], 'T - 1 refusals after the block');
+        assert.deepEqual(t.report([['192.0.2.7', null, 1]]), [['192.0.2.7', 240000, 2]], 'the T-th escalates');
     });
 
     it('ABUSE_BLOCK_BASE_SEC and ABUSE_BLOCK_MAX_SEC shape the ladder', () => {

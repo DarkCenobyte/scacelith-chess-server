@@ -25,10 +25,9 @@
 // countForUser). Deleted accounts never get here: their sessions are gone.
 
 import { enums } from '../../protocol/schema.js';
-import { gameSummary } from './players.js';
+import { ID_RE, gameSummary } from './players.js';
 
 const { GameStatus } = enums;
-const ID_RE = /^[1-9][0-9]{0,15}$/;
 const LIST_MAX = 50;
 const LIST_DEFAULT = 20;
 const RESULTS = ['win', 'loss', 'draw'];

@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testConfig } from '../../src/config.js';
 import { register } from '../../src/http/routes/reports.js';
-import { reporterWeight, cappedWeight, reviewPriority, validateReport, canReport, REPORT_RULES } from '../../src/anticheat/reports.js';
+import { reporterWeight, cappedWeight, reviewPriority, validateReport, canReport, handleReport, REPORT_RULES } from '../../src/anticheat/reports.js';
 import { createFakeStore } from '../../src/anticheat/testing/fake-store.js';
+import { enums } from '../../src/protocol/schema.js';
+import { openStore, migrate, StoreError } from '../../src/store/index.js';
 
 const DAY = 86400000;
 const NOW = 1_800_000_000_000;
@@ -68,6 +70,21 @@ test('the same answer for duplicates, nothing about the reported account leaks',
     store.integrity.set(users.carol.id, { level: 'high_confidence', score: 6, evidence: {} });
     const g2 = game(users.carol, users.alice);
     assert.deepEqual(call(users.alice, { gameId: g2, reported: 'carol', category: 'cheating' }), a);
+});
+
+test('a duplicate that passed the exists() check (a race between shards) gets the same 202, not an error', () => {
+    const { store, call, users, game } = setup();
+    const g = game(users.alice, users.bob);
+    const first = call(users.alice, { gameId: g, reported: 'bob', category: 'cheating' });
+    // Another shard's connection filed it between this one's exists() and create(): the real
+    // store's UNIQUE (reporter, reported, game) index answers StoreError 'duplicate'.
+    store.reports.exists = () => false;
+    store.reports.create = () => { throw new StoreError('duplicate', 'UNIQUE constraint failed: reports.reporter_id, reports.reported_id, reports.game_id'); };
+    assert.deepEqual(call(users.alice, { gameId: g, reported: 'bob', category: 'cheating' }), first);
+    assert.equal(store._.reports.length, 1);
+    // Any other store failure still reaches the route's error handling.
+    store.reports.create = () => { throw new StoreError('busy', 'database is locked'); };
+    assert.throws(() => call(users.alice, { gameId: g, reported: 'bob', category: 'cheating' }), /database is locked/);
 });
 
 test('eligibility: own game, against that opponent, ended within 7 days', () => {
@@ -164,6 +181,30 @@ test('brigading: reports against one player do not add up linearly', () => {
     const g = game(users.alice, users.bob);
     call(users.alice, { gameId: g, reported: 'bob', category: 'cheating' });
     assert.ok(store._.reports[10].weight >= 0.9);
+});
+
+test('real store: the 24-hour cap counts every report received, not only the newest 200', (t) => {
+    const store = openStore(testConfig({ DB_PATH: ':memory:' }));
+    t.after(() => store.close());
+    migrate(store);
+    const config = testConfig();
+    const id = {};
+    for (const n of ['alice', 'bob', 'puppet', 'r0', 'r1', 'r2', 'r3']) id[n] = store.users.create({ username: n, email: `${n}@example.org`, createdAt: NOW - 365 * DAY });
+    const { GameStatus, EndReason } = enums;
+    const plies = 40;
+    store.games.finishBatch([{ id: 5000, category: '5+0', rated: false, baseMs: 300000, incMs: 0, whiteId: id.alice, blackId: id.bob, whiteName: 'alice',
+        blackName: 'bob', startedAt: NOW - 4200000, endedAt: NOW - 3600000, status: GameStatus.WhiteWins, reason: EndReason.Resignation,
+        moves: new Uint16Array(plies), spentMs: new Uint32Array(plies), clockMs: new Uint32Array(plies) }]);
+    // 2.0 already received today (the daily cap), then 200 newer reports the cap brought to 0.
+    for (let i = 0; i < 4; i++) store.reports.create({ reporterId: id[`r${i}`], reportedId: id.bob, gameId: 0, category: 'cheating', weight: 0.5, at: NOW - 20 * 3600000 });
+    for (let i = 0; i < 200; i++) store.reports.create({ reporterId: id.puppet, reportedId: id.bob, gameId: 1 + i, category: 'cheating', weight: 0, at: NOW - 10 * 3600000 + i });
+    assert.deepEqual(store.reports.weightSince(id.bob, NOW - DAY, REPORT_RULES.lowCredibility), { total: 2, low: 0 });
+    assert.equal(cappedWeight(1, store.reports.forReported(id.bob), NOW), 1, 'the newest 200 alone miss the cap');
+    const res = handleReport({ body: { gameId: 5000, reported: 'bob', category: 'cheating' }, user: { id: id.alice }, store, config }, { now: () => NOW });
+    assert.equal(res.status, 202);
+    const filed = store.reports.forReported(id.bob, 1)[0];
+    assert.equal(filed.reporterId, id.alice);
+    assert.equal(filed.weight, 0, 'the daily cap is reached');
 });
 
 test('only a credible report asks for the analysis at report priority; a low-credibility one at signal priority', () => {

@@ -7,11 +7,15 @@
 
 import { LEVELS } from '../util.js';
 
-// AnalysisPriority of src/store/index.js.
+// AnalysisPriority and ANALYSIS_MAX_ATTEMPTS of src/store/index.js.
 const PRIORITY = Object.freeze({ ordinary: 0, signal: 1, report: 2, manual: 3 });
+const MAX_ATTEMPTS = 3;
 
 // The GameStatus a result filter needs as White and as Black (games.listForUser of the real store).
 const RESULT_STATUS = Object.freeze({ win: [1, 2], loss: [2, 1], draw: [3, 3] });
+
+// A report as the real store returns it.
+const asStored = ({ at, outcome, ...r }) => ({ ...r, createdAt: at, status: outcome ?? 'open' });
 
 function gameOf(g, userId, { category = null, rated = null, result = null } = {}) {
     if (g.whiteId !== userId && g.blackId !== userId) return false;
@@ -123,7 +127,15 @@ export function createFakeStore({ textColumns = false } = {}) {
                 return out;
             },
             complete(gameId, features) { bind(features); const j = jobs.get(Number(gameId)) || { gameId }; j.status = 'done'; j.features = features; j.completedAt = Date.now(); jobs.set(Number(gameId), j); },
-            fail(gameId, error) { const j = jobs.get(Number(gameId)); if (j) { j.status = 'failed'; j.error = error; } },
+            // As the real store: re-queued until it was claimed MAX_ATTEMPTS times, then failed;
+            // returns the new status (null for an unknown job).
+            fail(gameId, error) {
+                const j = jobs.get(Number(gameId));
+                if (!j) return null;
+                j.status = (j.attempts ?? 0) >= MAX_ATTEMPTS ? 'failed' : 'queued';
+                j.error = error;
+                return j.status;
+            },
             // Game eligibility (rated, length...) is not modelled: any known game can be requested.
             request(gameId, reason = 'report') {
                 rec('analysis.request', [gameId, reason]);
@@ -133,6 +145,7 @@ export function createFakeStore({ textColumns = false } = {}) {
                 jobs.set(Number(gameId), { ...(j || { gameId: Number(gameId), attempts: 0 }), status: 'queued', reason, priority });
                 return true;
             },
+            // The completed analyses only (forUser(userId, limit, { doneOnly: true }) of the real store).
             forUser(userId, limit = 30) {
                 const out = [];
                 for (const j of jobs.values()) {
@@ -178,8 +191,13 @@ export function createFakeStore({ textColumns = false } = {}) {
             create(r) { const id = seq++; reports.push({ id, outcome: null, resolvedBy: null, resolvedAt: null, ...r }); return id; },
             countByReporterSince(reporterId, since) { return reports.filter((r) => r.reporterId === reporterId && r.at >= since).length; },
             exists(reporterId, reportedId, gameId) { return reports.some((r) => r.reporterId === reporterId && r.reportedId === reportedId && r.gameId === gameId); },
-            listOpen(limit = 100) { return reports.filter((r) => !r.outcome).slice(0, limit); },
-            forReported(userId) { return reports.filter((r) => r.reportedId === userId); },
+            // The rows of listOpen and forReported have the real store's shape: createdAt and status
+            // ('open' until an outcome) in place of `at` and `outcome`.
+            listOpen(limit = 100) { return reports.filter((r) => !r.outcome).slice(0, limit).map(asStored); },
+            // As the real store: the newest `limit` reports.
+            forReported(userId, limit = 200) {
+                return reports.filter((r) => r.reportedId === userId).sort((a, b) => (b.at ?? 0) - (a.at ?? 0) || b.id - a.id).slice(0, limit).map(asStored);
+            },
             // As the real store: newest first, with the reported name, createdAt and status ('open'
             // until an outcome); `outcome` is what the reporter weighting reads.
             forReporter(userId, limit = 500) {
@@ -191,6 +209,15 @@ export function createFakeStore({ textColumns = false } = {}) {
                 if (!r) return false;
                 r.outcome = outcome; r.resolvedBy = by; r.resolvedAt = now;
                 return true;
+            },
+            countFor(reportedId) {
+                const mine = reports.filter((r) => r.reportedId === reportedId);
+                return { total: mine.length, open: mine.filter((r) => !r.outcome).length };
+            },
+            resolveOpenFor(reportedId, category, outcome, by, now) {
+                const open = reports.filter((r) => r.reportedId === reportedId && r.category === category && !r.outcome);
+                for (const r of open) { r.outcome = outcome; r.resolvedBy = by; r.resolvedAt = now; }
+                return open.map((r) => r.id);
             },
         },
         // Same contract as the real store (games as store.games.byId returns them, with whiteK /

@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
@@ -12,7 +11,8 @@ import { testConfig } from '../../src/config.js';
 import { Registry } from '../../src/metrics.js';
 import { ipGroupKey, ipMatcher, normalizeIp, resolveClientIp } from '../../src/net/ip.js';
 import { IpGuard } from '../../src/net/ipguard.js';
-import { Listeners, deriveTicketKeys, makeClientIp } from '../../src/net/listeners.js';
+import { Listeners, makeClientIp } from '../../src/net/listeners.js';
+import { TicketKeys } from '../../src/net/ticket-keys.js';
 import { WsServer } from '../../src/net/ws.js';
 import { connectWs } from '../../src/net/ws-raw-client.js';
 
@@ -127,7 +127,9 @@ describe('listeners (shared port)', () => {
     after(() => { wss.closeAll(); lst.close(); });
 
     it('serves the API and the upgrade on one port', async () => {
-        assert.equal((await get(port, '/api/v1/readyz')).status, 503);
+        const notReady = await get(port, '/api/v1/readyz');
+        assert.equal(notReady.status, 503);
+        assert.deepEqual(JSON.parse(notReady.body), { status: 'not_ready' }, 'the body the API handler answers too (docs/API.md)');
         assert.equal((await get(port, '/api/v1/nothing')).status, 404);
         const c = await connectWs({ port });
         assert.equal(c.protocol, 'scacelith.v1');
@@ -153,7 +155,9 @@ function tlsConnect(port, opts = {}) {
 }
 
 describe('listeners (native TLS)', { skip: !hasOpenssl && 'openssl not available' }, () => {
-    let dir, a, b, lst, lst2, wss, apiPort, wsPort, config;
+    let dir, a, b, lst, lst2, lst3, wss, apiPort, wsPort, config;
+    // The primary's session-ticket keys: each worker starts from their state at its own start.
+    const primaryKeys = TicketKeys.random();
     before(async () => {
         dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-tls-'));
         a = makeCert(dir, 'a', 'first.test');
@@ -167,10 +171,20 @@ describe('listeners (native TLS)', { skip: !hasOpenssl && 'openssl not available
             tlsCertFile: path.join(dir, 'live.crt'), tlsKeyFile: path.join(dir, 'live.key'),
         };
         wss = new WsServer({ registry: new Registry(), onConnection: () => {} });
-        lst = new Listeners({ config, wsServer: wss, apiHandler: null });
+        lst = new Listeners({ config, wsServer: wss, apiHandler: null, ticketKeys: new TicketKeys(primaryKeys.state()) });
         await lst.listen();
     });
-    after(() => { wss.closeAll(); lst.close(); lst2?.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+    after(() => { wss.closeAll(); lst.close(); lst2?.close(); lst3?.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+    // Another worker's listeners (started later, like a restarted shard), started by the first test
+    // that needs them: its WSS port.
+    async function secondWorker() {
+        if (!lst2) {
+            lst2 = new Listeners({ config: { ...config, wsPort: await freePort(), apiPort: await freePort() }, wsServer: wss, apiHandler: null,
+                ticketKeys: new TicketKeys(primaryKeys.state()) });
+            await lst2.listen();
+        }
+        return lst2.addresses().find((x) => x.kind === 'ws').port;
+    }
 
     it('negotiates http/1.1 by ALPN and serves WSS on the dedicated port', async () => {
         const s = await tlsConnect(wsPort);
@@ -186,28 +200,48 @@ describe('listeners (native TLS)', { skip: !hasOpenssl && 'openssl not available
         await assert.rejects(tlsConnect(wsPort, { maxVersion: 'TLSv1.1', minVersion: 'TLSv1' }));
     });
 
-    it('resumes sessions across listeners that share the derived ticket keys (other workers)', async () => {
-        const port2 = await freePort();
-        lst2 = new Listeners({ config: { ...config, wsPort: port2, apiPort: await freePort() }, wsServer: wss, apiHandler: null });
-        await lst2.listen();
+    it('resumes sessions across listeners that share the ticket keys (other workers, a restarted one included)', async () => {
+        const port2 = await secondWorker();
         const s1 = await tlsConnect(wsPort, { maxVersion: 'TLSv1.2' });
         const session = s1.getSession();
         s1.destroy();
         const s2 = await tlsConnect(port2, { maxVersion: 'TLSv1.2', session });
         assert.equal(s2.isSessionReused(), true);
         s2.destroy();
-        assert.deepEqual(deriveTicketKeys(config.serverSecret, 5), deriveTicketKeys(config.serverSecret, 5));
-        assert.notDeepEqual(deriveTicketKeys(config.serverSecret, 5), deriveTicketKeys(config.serverSecret, 6));
-        assert.equal(deriveTicketKeys(crypto.randomBytes(32), 1).length, 48);
+    });
+
+    it('a server started again with the same SERVER_SECRET cannot resume the sessions of the previous run', async () => {
+        lst3 = new Listeners({ config: { ...config, wsPort: await freePort(), apiPort: await freePort() }, wsServer: wss, apiHandler: null,
+            ticketKeys: TicketKeys.random() });
+        await lst3.listen();
+        const s1 = await tlsConnect(wsPort, { maxVersion: 'TLSv1.2' });
+        const session = s1.getSession();
+        s1.destroy();
+        const s2 = await tlsConnect(lst3.addresses().find((x) => x.kind === 'ws').port, { maxVersion: 'TLSv1.2', session });
+        assert.equal(s2.isSessionReused(), false, 'the ticket keys do not come from SERVER_SECRET');
+        s2.destroy();
+        assert.notDeepEqual(lst3._tlsServers[0].getTicketKeys(), lst._tlsServers[0].getTicketKeys());
     });
 
     it('reloads the certificate without a restart and keeps it when the new one is broken', async () => {
+        const port2 = await secondWorker();
         fs.copyFileSync(b.cert, config.tlsCertFile);
         fs.copyFileSync(b.key, config.tlsKeyFile);
         assert.equal(lst.reloadCertificates(), true);
-        const s = await tlsConnect(apiPort);
+        const s = await tlsConnect(apiPort, { maxVersion: 'TLSv1.2' });
         assert.match(s.getPeerCertificate().subject.CN, /second\.test/);
+        const session = s.getSession();
         s.destroy();
+        // The new contexts keep the day's shared ticket keys (setSecureContext alone installs
+        // random ones): a session still resumes on the other port and on the other worker.
+        const keys = primaryKeys.ticketKeys();
+        for (const server of lst._tlsServers) assert.deepEqual(server.getTicketKeys(), keys);
+        const r1 = await tlsConnect(wsPort, { maxVersion: 'TLSv1.2', session });
+        assert.equal(r1.isSessionReused(), true, 'resumed on the WSS port');
+        r1.destroy();
+        const r2 = await tlsConnect(port2, { maxVersion: 'TLSv1.2', session });
+        assert.equal(r2.isSessionReused(), true, 'resumed by another worker');
+        r2.destroy();
         fs.copyFileSync(a.key, config.tlsKeyFile);               // key no longer matches the certificate
         assert.equal(lst.reloadCertificates(), false);
         const s2 = await tlsConnect(apiPort);
@@ -411,24 +445,67 @@ describe('listeners: protection per address and slow clients', () => {
     });
 
     it('slowloris: a header line every 300 ms is cut within headersTimeout + 1 s, and counted', async () => {
-        const { port, guard, registry, close } = await setup({}, { listeners: { headersTimeoutMs: 1000 } });
+        let handled = 0;
+        const { port, guard, registry, lst, close } = await setup({}, {
+            apiHandler: (req, res) => { handled++; res.writeHead(404); res.end('{}'); },
+            listeners: { headersTimeoutMs: 1000 },
+        });
+        const server = lst.servers[0].server;
+        const connections = () => new Promise((resolve) => server.getConnections((e, n) => resolve(e ? -1 : n)));
+        let s = null, timer = null;
         try {
-            const s = net.connect(port, '127.0.0.1');
+            // A client that keeps its side open and goes on sending after the 408 and the server's
+            // FIN: the server closes the socket itself, so the server's side is watched.
+            s = net.connect({ port, host: '127.0.0.1', allowHalfOpen: true });
             s.on('error', () => {});
-            s.write('GET /healthz HTTP/1.1\r\nHost: x\r\n');
+            s.write('GET /api/v1/slow HTTP/1.1\r\nHost: x\r\n');
             const t0 = Date.now();
-            const timer = setInterval(() => { if (!s.destroyed) s.write(`X-Slow-${Date.now()}: 1\r\n`); }, 300);
+            timer = setInterval(() => { if (!s.destroyed) s.write(`X-Slow-${Date.now()}: 1\r\n`); }, 300);
             let answer = '';
             s.on('data', (d) => { answer += d; });
-            const closed = await closedWithin(s, 4000);
-            clearInterval(timer);
+            while ((await connections()) !== 1) await new Promise((r) => setTimeout(r, 5));
+            while ((await connections()) !== 0) {
+                await new Promise((r) => setTimeout(r, 20));
+                assert.ok(Date.now() - t0 < 4000, 'closed by the server');
+            }
             const ms = Date.now() - t0;
-            assert.ok(closed && ms >= 900 && ms < 2600, `closed after ${ms} ms`);
+            clearInterval(timer);
+            assert.ok(ms >= 900 && ms < 2600, `closed by the server after ${ms} ms`);
+            if (!s.destroyed) s.write('\r\n');                  // completes the request, too late
+            await new Promise((r) => setTimeout(r, 200));
+            assert.equal(handled, 0, 'the request never reaches the API handler');
             assert.match(answer, /^HTTP\/1\.1 408/);
             const m = registry.metrics.get('scacelith_http_client_errors_total');
             assert.equal([...m.children.values()].find((c) => c.labelValues[0] === 'timeout').value, 1);
             assert.deepEqual(guard.flushReports(), [['127.0.0.1', null, 1]], 'counted toward a block of the address');
-        } finally { close(); }
+        } finally { clearInterval(timer); s?.destroy(); close(); }
+    });
+
+    it('a client that ends its side in the middle of a request is not counted; a malformed request followed by more bytes counts once', async () => {
+        const { port, guard, registry, close } = await setup();
+        const errors = (reason) => {
+            const m = registry.metrics.get('scacelith_http_client_errors_total');
+            return [...m.children.values()].find((c) => c.labelValues[0] === reason)?.value ?? 0;
+        };
+        let s = null, m = null;
+        try {
+            s = net.connect(port, '127.0.0.1');
+            s.on('error', () => {});
+            s.end('GET /api/v1/x HTTP/1.1\r\nHost: x\r\n');     // FIN before the end of the head
+            assert.ok(await closedWithin(s, 2000));
+            assert.equal(errors('malformed'), 0, 'an aborted request is no malformed request');
+            assert.deepEqual(guard.flushReports(), []);
+            m = net.connect({ port, host: '127.0.0.1', allowHalfOpen: true });
+            m.on('error', () => {});
+            m.write('BLAH\r\n\r\n');
+            for (let i = 0; i < 3; i++) {
+                await new Promise((r) => setTimeout(r, 50));
+                if (!m.destroyed) m.write('more\r\n');
+            }
+            await new Promise((r) => setTimeout(r, 100));
+            assert.equal(errors('malformed'), 1);
+            assert.deepEqual(guard.flushReports(), [['127.0.0.1', null, 1]]);
+        } finally { s?.destroy(); m?.destroy(); close(); }
     });
 
     it('a client that stops reading a large answer is cut by the inactivity timeout; a slow reader by the send deadline', async () => {

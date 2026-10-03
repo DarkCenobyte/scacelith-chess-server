@@ -7,7 +7,9 @@ import crypto from 'node:crypto';
 import { testConfig } from '../../src/config.js';
 import { runAdmin, parseArgs, COMMANDS } from '../../src/anticheat/admin.js';
 import { createFakeStore } from '../../src/anticheat/testing/fake-store.js';
-import { openStore, migrate } from '../../src/store/index.js';
+import { reviewPriority } from '../../src/anticheat/reports.js';
+import { openStore, migrate, AnalysisPriority } from '../../src/store/index.js';
+import { enums } from '../../src/protocol/index.js';
 import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -47,6 +49,13 @@ test('usage and unknown commands', async () => {
     const r = await run(store, ['nope']);
     assert.equal(r.code, 2);
     assert.match(r.err, /Usage/);
+    // Names inherited from Object.prototype are not commands either.
+    for (const name of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+        const x = await run(store, [name]);
+        assert.equal(x.code, 2, name);
+        assert.match(x.err, /Usage/);
+        assert.equal((await run(store, [name, '--help'])).code, 2, `${name} --help`);
+    }
     const e = await run(store, ['user', 'show', 'nobody']);
     assert.equal(e.code, 1);
     assert.match(e.err, /no user named "nobody"/);
@@ -63,6 +72,14 @@ test('user show hides secrets', async () => {
     assert.ok(!JSON.stringify(r.json).includes('"enc"'));
     const t = await run(store, ['user', 'show', 'bob']);
     assert.match(t.out, /integrity none/);
+});
+
+test('user show counts the sessions that are neither expired nor idle-expired', async () => {
+    const { store, eve } = world();
+    store.sessions.create({ userId: eve, tokenHash: 'idle', createdAt: NOW - 40 * 86400000, expiresAt: NOW + 1e9, idleExpiresAt: NOW - 1 });
+    store.sessions.create({ userId: eve, tokenHash: 'old', createdAt: NOW - 100 * 86400000, expiresAt: NOW - 1, idleExpiresAt: NOW + 1e9 });
+    const r = await run(store, ['user', 'show', 'eve', '--json']);
+    assert.equal(r.json.activeSessions, 2, 'the two live sessions of world()');
 });
 
 test('user ban / unban are audited', async () => {
@@ -102,6 +119,55 @@ test('user reset-mfa, verify-email, revoke-sessions', async () => {
     const r = await run(store, ['user', 'revoke-sessions', 'eve', '--json']);
     assert.equal(r.json.revokedSessions, 1);
     assert.deepEqual(moderatorEvents(store).map((e) => e.detail.action), ['reset_mfa', 'verify_email', 'revoke_sessions']);
+});
+
+test('user show / verify-email reach the pending signup that holds a name (its confirmation mail never arrived)', async (t) => {
+    const store = openStore(testConfig({ DB_PATH: ':memory:' }));
+    t.after(() => store.close());
+    migrate(store);
+    const signup = (username, email, over = {}) => store.signups.create({ username, email, passwordHash: `scrypt$${username}`,
+        tokenHash: `link-${username}`, createdAt: NOW - 3600000, expiresAt: NOW + 3600000, ...over });
+    signup('Alice_1', 'alice@example.org');
+    const show = await run(store, ['user', 'show', 'alice_1', '--json']);
+    assert.equal(show.code, 0, show.err);
+    assert.deepEqual(show.json, { pendingSignup: { username: 'Alice_1', email: 'alice@example.org', createdAt: NOW - 3600000,
+        expiresAt: NOW + 3600000, link: true } });
+    assert.ok(!show.out.includes('scrypt$'));
+    assert.match((await run(store, ['user', 'show', 'alice_1'])).out, /^Pending signup Alice_1 \(no account yet\)\n {2}e-mail alice@example\.org, link stored/);
+
+    // The account is created as the link would: its address verified, the signup's password, the signup gone.
+    const r = await run(store, ['user', 'verify-email', 'alice_1', '--by', 'mod-ben']);
+    assert.equal(r.code, 0, r.err);
+    const u = store.users.byUsername('alice_1');
+    assert.deepEqual([u.username, u.email, u.emailVerified, u.passwordHash, u.createdAt], ['Alice_1', 'alice@example.org', true, 'scrypt$Alice_1', NOW]);
+    assert.match(r.out, new RegExp(`Account Alice_1 \\(#${u.id}\\) created`));
+    assert.equal(store.signups.byUsername('alice_1'), null);
+    const events = store.security.forUser(u.id).map((e) => [e.kind, e.detail?.action ?? null, e.detail?.moderator ?? null]);
+    assert.deepEqual(events.sort(), [['moderator_action', 'confirm_signup', 'mod-ben'], ['register', null, null]]);
+    // Then the account itself, as before.
+    assert.match((await run(store, ['user', 'verify-email', 'alice_1'])).out, /E-mail address of Alice_1 marked verified/);
+    assert.equal((await run(store, ['user', 'show', 'alice_1', '--json'])).json.user.id, u.id);
+
+    // A signup whose address has an account (no link) or another account took meanwhile: dropped, nothing created.
+    signup('Bob_2', 'Alice@Example.org', { tokenHash: null });
+    assert.match((await run(store, ['user', 'show', 'bob_2'])).out, /no link: the address had an account/);
+    const taken = await run(store, ['user', 'verify-email', 'bob_2', '--json']);
+    assert.deepEqual([taken.code, taken.json], [0, { status: 'taken' }]);
+    assert.equal(store.users.byUsername('bob_2'), null);
+    assert.equal(store.signups.byUsername('bob_2'), null, 'the name is free again');
+    // Without a link even once that account is gone: its link could never confirm it either.
+    signup('Dan_4', 'dan@example.org', { tokenHash: null });
+    assert.deepEqual((await run(store, ['user', 'verify-email', 'dan_4', '--json'])).json, { status: 'taken' });
+    assert.equal(store.users.byUsername('dan_4'), null);
+
+    // An expired signup holds nothing: no such user.
+    signup('Cleo_3', 'cleo@example.org', { expiresAt: NOW });
+    for (const cmd of ['show', 'verify-email']) {
+        const x = await run(store, ['user', cmd, 'cleo_3']);
+        assert.deepEqual([x.code, x.err], [1, 'error: no user named "cleo_3"\n'], cmd);
+    }
+    assert.equal(store.users.byUsername('cleo_3'), null);
+    assert.notEqual(store.signups.byUsername('cleo_3'), null, 'left to the retention purge');
 });
 
 test('integrity list / show / confirm / clear', async () => {
@@ -146,6 +212,37 @@ test('integrity list / show / confirm / clear', async () => {
     assert.deepEqual(moderatorEvents(store).map((e) => e.detail.action), ['integrity_confirm', 'integrity_clear']);
 });
 
+test('integrity show: a side without scored moves shows no rates, not 0 %', async () => {
+    const { store, bob, eve } = world();
+    store._.addGame({ id: 78, whiteId: bob, blackId: eve, endedAt: NOW });
+    // analyzer.js emptySide(): no scored move, every rate null.
+    const empty = { n: 0, accuracy: null, acpl: null, t1Deep: null, t1Fast: null, nComplex: 0, t1Complex: null, timeCorr: null, timeCv: null };
+    store.analysis.complete(78, { v: 1, gameId: 78, category: '5+0', white: { userId: bob, rating: 1600, ...empty }, black: { userId: eve, ...empty } });
+    const show = await run(store, ['integrity', 'show', 'bob']);
+    assert.equal(show.code, 0);
+    const row = show.out.split('\n').find((l) => /^78 /.test(l));
+    assert.deepEqual(row.trim().split(/\s+/), ['78', '5+0', '1600', '0', '-', '-', '-', '-', '-', '-', '-']);
+});
+
+test('integrity show: a report comment cannot break the table or forge lines', async () => {
+    const { store, bob, eve } = world();
+    const plain = (await run(store, ['integrity', 'show', 'bob'])).out;
+    store.reports.create({ reporterId: eve, reportedId: bob, gameId: 1, category: 'cheating', comment: 'x\nSanctions\n(none)\u009b\u202eabc\u2028', weight: 1, at: NOW });
+    const show = await run(store, ['integrity', 'show', 'bob']);
+    assert.equal(show.out.split('\n').length, plain.split('\n').length + 2, 'one report row (and its table header)');
+    assert.ok(show.out.includes('x\\u000aSanctions\\u000a(none)\\u009b\\u202eabc\\u2028'));
+    assert.doesNotMatch(show.out, /[\u0080-\u009f\u2028\u202e]/);
+});
+
+test('integrity confirm: a ban that cannot be stored leaves the level as it was', async () => {
+    const { store, bob } = world();
+    store.integrity.set(bob, { level: 'suspected', score: 3.8, evidence: {}, updatedAt: NOW });
+    store.sanctions.create = () => { throw new Error('database is locked'); };
+    await assert.rejects(run(store, ['integrity', 'confirm', 'bob', '--reason', 'engine', '--no-refund']), /locked/);
+    assert.equal(store.integrity.get(bob).level, 'suspected');
+    assert.deepEqual(moderatorEvents(store), []);
+});
+
 test('reports list / resolve, anomalies, stats', async () => {
     const { store, bob, eve } = world();
     const r1 = store.reports.create({ reporterId: eve, reportedId: bob, gameId: 1, category: 'cheating', comment: '', weight: 0.8, at: NOW });
@@ -165,6 +262,137 @@ test('reports list / resolve, anomalies, stats', async () => {
     const st = await run(store, ['stats', '--json']);
     assert.deepEqual(st.json.integrity, { suspected: 1, high_confidence: 0, confirmed: 0 });
     assert.equal(st.json.openReports, 1);
+});
+
+test('integrity show / reports list on the real store: report dates and outcomes', async (t) => {
+    const store = openStore(testConfig({ DB_PATH: ':memory:' }));
+    t.after(() => store.close());
+    migrate(store);
+    const bob = store.users.create({ username: 'bob', email: 'bob@example.org' });
+    const eve = store.users.create({ username: 'eve', email: 'eve@example.org' });
+    const ann = store.users.create({ username: 'ann', email: 'ann@example.org' });
+    const r1 = store.reports.create({ reporterId: eve, reportedId: bob, gameId: 0, category: 'cheating', comment: 'first', weight: 1, at: NOW - 7200000 });
+    const r2 = store.reports.create({ reporterId: ann, reportedId: bob, gameId: 0, category: 'cheating', comment: 'second', weight: 0.5, at: NOW - 3600000 });
+    store.reports.resolve(r1, 'dismissed', 'mod', NOW - 60000);
+    const show = await run(store, ['integrity', 'show', 'bob']);
+    assert.equal(show.code, 0, show.err);
+    const row = (id) => show.out.split('\n').find((l) => l.startsWith(`${id} `)).trim().split(/\s+/);
+    assert.deepEqual([row(r1)[1], row(r1)[5]], [new Date(NOW - 7200000).toISOString().replace('.000Z', 'Z'), 'dismissed']);
+    assert.deepEqual([row(r2)[1], row(r2)[5]], [new Date(NOW - 3600000).toISOString().replace('.000Z', 'Z'), 'open']);
+    const list = await run(store, ['reports', 'list', '--json']);
+    assert.deepEqual(list.json.map((r) => [r.username, r.ids, r.latest]), [['bob', [r2], NOW - 3600000]]);
+});
+
+test('integrity confirm / clear resolve every open cheating report, not only those among the newest 200', async (t) => {
+    const store = openStore(testConfig({ DB_PATH: ':memory:' }));
+    t.after(() => store.close());
+    migrate(store);
+    const bob = store.users.create({ username: 'bob', email: 'bob@example.org' });
+    const eve = store.users.create({ username: 'eve', email: 'eve@example.org' });
+    const ann = store.users.create({ username: 'ann', email: 'ann@example.org' });
+    // Per reported player: 20 old open cheating reports, then 200 newer ones, resolved or about abuse.
+    const file = (reportedId, game, category, at) => store.reports.create({ reporterId: ann, reportedId, gameId: game, category, comment: '', weight: 0.1, at });
+    for (const target of [bob, eve]) {
+        for (let i = 0; i < 20; i++) file(target, 1000 + i, 'cheating', NOW - 10 * 86400000 + i);
+        for (let i = 0; i < 200; i++) {
+            const id = file(target, 2000 + i, i % 2 ? 'abuse' : 'cheating', NOW - 86400000 + i);
+            store.reports.resolve(id, 'dismissed', 'mod', NOW - 86400000 + i);
+        }
+    }
+    const open = (userId) => store.reports.listOpen(1000).filter((r) => r.reportedId === userId);
+    assert.equal(open(eve).length, 20);
+    const clr = await run(store, ['integrity', 'clear', 'eve', '--dismiss-reports', '--json']);
+    assert.equal(clr.code, 0, clr.err);
+    assert.equal(clr.json.reportsDismissed, 20);
+    assert.deepEqual(open(eve), []);
+    assert.equal(store.reports.forReporter(ann, 1000).filter((r) => r.reportedId === eve && r.outcome === 'dismissed' && r.resolvedBy === 'mod-anna').length, 20);
+    const conf = await run(store, ['integrity', 'confirm', 'bob', '--reason', 'engine', '--no-refund', '--json']);
+    assert.equal(conf.code, 0, conf.err);
+    assert.equal(conf.json.reportsActioned, 20);
+    assert.deepEqual(open(bob), []);
+    assert.equal(store.reports.forReporter(ann, 1000).filter((r) => r.reportedId === bob && r.outcome === 'actioned').length, 20);
+});
+
+test('user show, integrity list / show and reports list count and weigh every report, not only the newest 200', async (t) => {
+    const store = openStore(testConfig({ DB_PATH: ':memory:' }));
+    t.after(() => store.close());
+    migrate(store);
+    const bob = store.users.create({ username: 'bob', email: 'bob@example.org' });
+    const ann = store.users.create({ username: 'ann', email: 'ann@example.org' });
+    store.integrity.set(bob, { level: 'suspected', score: 2, evidence: {}, updatedAt: NOW });
+    // One open report older than 30 days, then 250 of weight 0.1 (25 in all): the 30 oldest open.
+    store.reports.create({ reporterId: ann, reportedId: bob, gameId: 1, category: 'cheating', comment: '', weight: 1, at: NOW - 40 * 86400000 });
+    for (let i = 0; i < 250; i++) {
+        const id = store.reports.create({ reporterId: ann, reportedId: bob, gameId: 100 + i, category: 'cheating', comment: '', weight: 0.1, at: NOW - 20 * 86400000 + i * 60000 });
+        if (i >= 30) store.reports.resolve(id, 'dismissed', 'mod', NOW);
+    }
+    const priority = reviewPriority({ level: 'suspected', score: 2, reportWeight: 25 });
+    const user = await run(store, ['user', 'show', 'bob', '--json']);
+    assert.equal(user.code, 0, user.err);
+    assert.deepEqual(user.json.reports, { total: 251, open: 31, weight30d: 25 });
+    assert.match((await run(store, ['user', 'show', 'bob'])).out, /reports received: 251 \(31 open\)/);
+    const list = await run(store, ['integrity', 'list', '--json']);
+    assert.deepEqual(list.json.map((r) => [r.username, r.reports30d, r.priority]), [['bob', 25, priority]]);
+    assert.equal((await run(store, ['integrity', 'show', 'bob', '--json'])).json.priority, priority);
+    const open = await run(store, ['reports', 'list', '--json']);
+    assert.deepEqual(open.json.map((r) => [r.username, r.open, r.weight, r.priority]), [['bob', 31, 4, priority]]);
+});
+
+test('analysis queue: the game is analysed before every other one; a game being or already analysed is left alone', async (t) => {
+    const keep = (r) => ({ before: r.rating, after: r.rating });
+    const store = openStore(testConfig({ DB_PATH: ':memory:' }), { applyGame: (w, b) => ({ white: keep(w), black: keep(b) }) });
+    t.after(() => store.close());
+    migrate(store);
+    const [ann, ben] = ['ann', 'ben'].map((n) => store.users.create({ username: n, email: `${n}@example.org` }));
+    let lastId = 5_000_000_000_000;
+    const game = (extra = {}) => ({
+        id: ++lastId, category: '5+0', rated: true, baseMs: 300000, incMs: 0, whiteId: ann, blackId: ben, whiteName: 'ann', blackName: 'ben',
+        startedAt: NOW - 600000, endedAt: NOW, status: enums.GameStatus.WhiteWins, reason: enums.EndReason.Resignation,
+        moves: new Uint16Array(40), spentMs: new Uint32Array(40), clockMs: new Uint32Array(40), ...extra,
+    });
+    // Rated games are queued at the ordinary priority; the casual and the short one are left out.
+    const [running, done, failed, ordinary, reported, casual, short] = [game(), game(), game(), game(), game(), game({ rated: false }),
+        game({ moves: new Uint16Array(8), spentMs: new Uint32Array(8), clockMs: new Uint32Array(8) })];
+    store.games.finishBatch([running, done, failed, ordinary, reported, casual, short]);
+    assert.deepEqual(store.analysis.next(3, 'w', NOW).map((j) => j.gameId), [running.id, done.id, failed.id]);
+    store.analysis.complete(done.id, { gameId: done.id }, NOW);
+    for (let i = 0; i < 3; i++) {
+        if (store.analysis.fail(failed.id, 'engine crashed', NOW) === 'queued') assert.equal(store.analysis.next(1, 'w', NOW)[0].gameId, failed.id);
+    }
+    assert.equal(store.analysis.request(reported.id, 'report', NOW), true);
+    const job = (g) => { const j = store.analysis.job(g.id); return [j.status, j.priority]; };
+    assert.deepEqual([running, done, failed, ordinary, reported].map(job),
+        [['running', 0], ['done', 0], ['failed', 0], ['queued', AnalysisPriority.ordinary], ['queued', AnalysisPriority.report]]);
+    assert.deepEqual([store.analysis.job(casual.id), store.analysis.job(short.id)], [null, null]);
+
+    for (const bad of [[], ['abc'], ['0'], ['-3'], ['1.5']]) {
+        const r = await run(store, ['analysis', 'queue', ...bad]);
+        assert.equal(r.code, 1, bad.join());
+        assert.match(r.err, /analysis queue <gameId>/);
+    }
+    const missing = await run(store, ['analysis', 'queue', '424242']);
+    assert.equal(missing.code, 1);
+    assert.match(missing.err, /no game #424242/);
+
+    const first = await run(store, ['analysis', 'queue', String(casual.id), '--json']);
+    assert.equal(first.code, 0, first.err);
+    assert.deepEqual(first.json, { gameId: casual.id, queued: true, previous: null });
+    assert.deepEqual(first.security, [['moderator.action', { userId: null, action: 'analysis_queue', moderator: 'mod-anna', gameId: casual.id, previousStatus: null }]]);
+    assert.match((await run(store, ['analysis', 'queue', String(short.id)])).out, /queued .* it was not in the queue \(a casual or short game/);
+    assert.match((await run(store, ['analysis', 'queue', String(ordinary.id)])).out, /queued .* it was waiting at priority ordinary/);
+    assert.match((await run(store, ['analysis', 'queue', String(failed.id)])).out, /its analysis had failed \(engine crashed\)/);
+    assert.equal(store.analysis.job(failed.id).attempts, 0);
+    for (const [g, said] of [[running, /is being analysed now/], [done, /was already analysed/], [casual, /is already queued before every other game/]]) {
+        const r = await run(store, ['analysis', 'queue', String(g.id)]);
+        assert.equal(r.code, 0, r.err);
+        assert.match(r.out, said);
+        assert.deepEqual(r.security, [], 'nothing changed, nothing audited');
+    }
+    assert.deepEqual([running, done, casual, short, ordinary, failed].map(job), [['running', 0], ['done', 0],
+        ['queued', AnalysisPriority.manual], ['queued', AnalysisPriority.manual], ['queued', AnalysisPriority.manual], ['queued', AnalysisPriority.manual]]);
+    // The engine takes the four requested games before the reported one.
+    assert.deepEqual(store.analysis.next(4, 'w', NOW).map((j) => j.gameId).sort(), [ordinary.id, failed.id, casual.id, short.id].sort());
+    assert.deepEqual(job(reported), ['queued', AnalysisPriority.report]);
 });
 
 test('bench-accounts: refused without the test-server flag; creates verified accounts with sessions', async (t) => {
@@ -190,14 +418,67 @@ test('bench-accounts: refused without the test-server flag; creates verified acc
     assert.equal(sess.length, 1);
     assert.equal(sess[0].tokenHash, hashToken(tokens[1]));
     assert.ok(sess[0].expiresAt > NOW);
-    // Running again reuses the accounts and adds sessions.
+    // Running again reuses the accounts and adds sessions; an existing file is made 600 too.
+    if (process.platform !== 'win32') fs.chmodSync(out, 0o644);
     const again = await run(store, ['bench-accounts', '--count', '3', '--out', out, '--format', 'tsv', '--i-know-this-is-a-test-server']);
     assert.equal(again.json, null);
     assert.match(again.out, /0 created, 3 reused/);
     assert.match(fs.readFileSync(out, 'utf8'), /^bench0001\tsct_/);
+    assert.equal(fs.readFileSync(out, 'utf8').trim().split('\n').length, 3);
+    if (process.platform !== 'win32') assert.equal(fs.statSync(out).mode & 0o777, 0o600);
     // A real account with a matching name is never taken over.
     store._.addUser('bench0004');
     assert.equal((await run(store, ['bench-accounts', '--count', '4', '--out', out, '--i-know-this-is-a-test-server'])).code, 1);
+});
+
+test('bench-accounts: a pipe keeps its mode; another user\'s file is refused before any account is created', { skip: process.platform === 'win32' }, async (t) => {
+    const { store } = world();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bench-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    // A FIFO stands for a pipe or /dev/null: written to, never chmod'ed.
+    const fifo = path.join(dir, 'tokens.fifo');
+    assert.equal(spawnSync('mkfifo', ['-m', '644', fifo]).status, 0);
+    const reader = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    t.after(() => fs.closeSync(reader));
+    const r = await run(store, ['bench-accounts', '--count', '2', '--out', fifo, '--i-know-this-is-a-test-server']);
+    assert.equal(r.code, 0, r.err);
+    const buf = Buffer.alloc(4096);
+    const tokens = buf.subarray(0, fs.readSync(reader, buf)).toString().trim().split('\n');
+    assert.equal(tokens.length, 2);
+    for (const tok of tokens) assert.match(tok, /^sct_[A-Za-z0-9_-]{43}$/);
+    assert.equal(fs.statSync(fifo).mode & 0o777, 0o644);
+
+    // A regular file of another owner cannot be made 600: refused up front.
+    const out = path.join(dir, 'theirs.txt');
+    fs.writeFileSync(out, 'kept\n');
+    t.mock.method(process, 'geteuid', () => fs.statSync(out).uid + 1);
+    const refused = await run(store, ['bench-accounts', '--count', '3', '--prefix', 'other', '--out', out, '--i-know-this-is-a-test-server']);
+    assert.equal(refused.code, 1);
+    assert.match(refused.err, /belongs to another user/);
+    assert.equal(store.users.byUsername('other0001'), null);
+    assert.equal(fs.readFileSync(out, 'utf8'), 'kept\n');
+});
+
+test('bench-accounts: a symbolic link as --out is refused before any account is created', { skip: process.platform === 'win32' }, async (t) => {
+    const { store } = world();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bench-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const target = path.join(dir, 'elsewhere.txt');
+    fs.writeFileSync(target, 'kept\n', { mode: 0o644 });
+    const link = path.join(dir, 'tokens.txt');
+    fs.symlinkSync(target, link);
+    const refused = await run(store, ['bench-accounts', '--count', '2', '--out', link, '--i-know-this-is-a-test-server']);
+    assert.equal(refused.code, 1);
+    assert.match(refused.err, /is a symbolic link/);
+    assert.equal(store.users.byUsername('bench0001'), null);
+    assert.equal(fs.readFileSync(target, 'utf8'), 'kept\n');
+    assert.equal(fs.statSync(target).mode & 0o777, 0o644);
+    // A dangling link (the tokens would create the file it names) is refused the same way.
+    fs.rmSync(target);
+    const dangling = await run(store, ['bench-accounts', '--count', '2', '--out', link, '--i-know-this-is-a-test-server']);
+    assert.equal(dangling.code, 1);
+    assert.match(dangling.err, /is a symbolic link/);
+    assert.equal(fs.existsSync(target), false);
 });
 
 test('backup refuses a source that is not a Scacelith database, and creates nothing', async (t) => {
@@ -244,6 +525,14 @@ test('bin/admin.js refuses to run on a missing database instead of creating an e
         assert.match(r.stderr, /no Scacelith database at .*data\/scacelith\.db/);
     }
     assert.deepEqual(fs.readdirSync(dir), [], 'no data directory, no database, no backup');
+});
+
+test('bin/admin.js does not print the node:sqlite ExperimentalWarning the store filters', () => {
+    const bin = fileURLToPath(new URL('../../bin/admin.js', import.meta.url));
+    const r = spawnSync(process.execPath, [bin, '--help'], { env: { PATH: process.env.PATH }, encoding: 'utf8', timeout: 30000 });
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /Usage/);
+    assert.equal(r.stderr, '');
 });
 
 test('backup: consistent copy with VACUUM INTO, mode 600, never overwrites', async (t) => {

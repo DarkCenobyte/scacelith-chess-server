@@ -160,7 +160,13 @@ transaction, its disk writes or the write lock it takes. The anti-cheat writes t
 thread (the anomaly rows, the automatic sanction of a certain cheat and its rating refunds), and
 the thread handles its messages one at a time in the order they were sent: the anomalies flushed
 right before a commit are written before it, without the event loop waiting for either. After
-the commit it sends `RatingUpdate` and tells the primary `game.ended`.
+the commit it sends `RatingUpdate` and tells the primary `game.ended`. At a stop the shard closes
+the thread last: it waits up to 7 s for the requests already sent (the last anomaly batch, a
+sanction), longer than `busy_timeout` (5 s), so that one wait for another process's write lock
+does not lose them, and rejects the ones still unanswered then (logged; finished games stay in
+the journal). The primary kills a worker `SHUTDOWN_GRACE_MS` + 15 s after its `shutdown`: with
+one such lock wait, during the final commits or during the close, the stop ends about 6 s after
+the drain. Only a lock held through several waits lets the kill come first.
 
 When the journal's writes keep failing (a full disk, a read-only or failing `JOURNAL_DIR`
 volume, too many open files), waiting for the journal would keep every finished game out of the
@@ -219,7 +225,8 @@ counts `Welcome.heartbeatMs` as 60 s at most.
   `.security(event, fields)`. Redaction is automatic; pass IPs through `ipForLog(ip)`.
 * `metrics` in `src/metrics.js`: `counter / gauge / gaugeFn / histogram`, pre-bound `labels()`.
   Metric names are `scacelith_<area>_<what>[_unit][_total]`.
-* `GameIdAllocator(shard).next()`, `shardOfGameId(id)` in `src/util/ids.js`.
+* `GameIdAllocator(shard).next()`, `.seed(id)` (the next ids come after `id`), `shardOfGameId(id)` in
+  `src/util/ids.js`.
 
 ## 5. Contracts
 
@@ -229,36 +236,38 @@ JavaScript (`src/protocol/index.js` re-exports `codec.gen.js`):
 
 ```js
 import { MSG, encode, decode, ProtocolError, PROTOCOL_VERSION, PROTOCOL_MIN, SCHEMA_HASH,
-         WS_SUBPROTOCOL, enums, MoveFlag, CloseCode, isClientType } from '../protocol/index.js';
+         WS_SUBPROTOCOL, enums, MoveFlag, GestureFlag, CloseCode, isClientType,
+         messageName } from '../protocol/index.js';
 MSG.Move === 0x20; MSG.S_Ping === 0x82; MSG.C_Ping === 0x02;   // names shared by both directions get C_/S_ prefixes
 const buf = encode.MoveMade({ game, gseq, ply, move, flags, spentMs, whiteMs, blackMs, serverTime, drawOffer, firstMoveMs }); // Buffer, exact size
-const msg = decode(buf);   // { type: 0x20, seq, game, ply, ... } ; throws ProtocolError{reason} when malformed
+const msg = decode(buf);   // { type: 0xA1, game, gseq, ply, move, ... } ; throws ProtocolError{reason} when malformed
 decode(buf, { dir: 'c2s' });  // refuses server->client types (server side uses this)
 ```
 `encode.<Name>` exists for every message; the direction-shared names are `encode.C_Ping`,
-`encode.S_Ping`, `encode.C_Pong`, `encode.S_Pong`. Decoded objects use the schema field names;
-`enum:` fields are numbers; `struct:` fields are nested objects; lists are arrays. `id53` decodes
-to a number. Encoding validates ranges too (a server bug must not produce a frame the client
-refuses). Helpers in `src/protocol/index.js` (hand-written, protocol owner): `encodeMove(from,
-to, promo)`, `decodeMove(u16) -> {from, to, promo}`, `fnv1a32(string)`.
+`encode.S_Ping`, `encode.C_Pong`, `encode.S_Pong`, `encode.C_Gesture`, `encode.S_Gesture`.
+Decoded objects use the schema field names; `enum:` fields are numbers; `struct:` fields are
+nested objects; lists are arrays. `id53` decodes to a number. Encoding validates ranges too (a
+server bug must not produce a frame the client refuses). Helpers in `src/protocol/index.js`
+(hand-written, protocol owner): `encodeMove(from, to, promo)`, `decodeMove(u16) -> {from, to,
+promo}`, `fnv1a32(string)`.
 
 C++ (`src/net/protocol_gen.h`, namespace `net::proto`): one struct per message with the same
 field names (camelCase), types `uint8_t/uint16_t/uint32_t/int32_t/double/uint64_t(id53)/bool/
 std::string/std::vector<T>`, enums as `enum class` with the schema values, and:
 ```cpp
-constexpr uint16_t kProtocolVersion = 1; constexpr uint16_t kProtocolMin = 1; constexpr uint32_t kSchemaHash = 0x........;
+constexpr uint16_t kProtocolVersion = 3; constexpr uint16_t kProtocolMin = 3; constexpr uint32_t kSchemaHash = 0x........;
 constexpr const char* kWsSubprotocol = "scacelith.v1";
 enum class MsgType : uint8_t { Hello = 0x01, ..., C_Ping = 0x02, S_Ping = 0x82, ... };
 void encode(const Move& m, std::vector<uint8_t>& out);          // appends
 bool decode(const uint8_t* p, size_t n, MoveMade& out);         // false when malformed
 bool peekType(const uint8_t* p, size_t n, MsgType& t);
 ```
-Struct names are the message names, with `C_`/`S_` prefixes for Ping/Pong. `SCHEMA_HASH` is the
-first 4 bytes (big-endian u32) of SHA-256 of the canonical JSON of `{version, enums, structs,
-messages}` (object keys sorted, `doc` fields excluded): `computeSchemaHash()` in
-`src/protocol/schema-hash.js`, used by both generators. Golden vectors
-(`test/fixtures/protocol-vectors.json`: message object + hex encoding) are checked by the JS
-tests and by `tests/net_tests.cpp`.
+Struct names are the message names, with `C_`/`S_` prefixes for the names of both directions
+(Ping, Pong, Gesture). `SCHEMA_HASH` is the first 4 bytes (big-endian u32) of SHA-256 of the
+canonical JSON of `{version, enums, structs, messages}` (object keys sorted, `doc` fields
+excluded): `computeSchemaHash()` in `src/protocol/schema-hash.js`, used by both generators.
+Golden vectors (`test/fixtures/protocol-vectors.json`: message object + hex encoding) are checked
+by the JS tests and by `tests/net_tests.cpp`.
 
 ### 5.2 Chess rules (`src/chess/index.js`)
 
@@ -321,11 +330,11 @@ room.isOver; room.result          // { status, reason, whiteMs, blackMs, endedAt
 room.record() -> finished game record for store.games.finishBatch (section 5.5)
 room.journalState() / GameRoom.fromJournal(records)   // see 5.6
 ```
-`Outcome = { broadcast: [Buffer], toWhite: [Buffer], toBlack: [Buffer], reply: [Buffer] (to the
-sender), anomaly: null | { color, kind, detail, posMatched }, ended: bool, journal: [records],
-clockStarted: colour | 2 }`. Buffers are already encoded with the codec; the host sends them as
-they are. `clockStarted` names a clock held since a recovery that has just started (6.4): the host
-then sends the other player a new `GameSnapshot`, unless the outcome holds a move or the end.
+`Outcome = { broadcast: [Buffer], reply: [Buffer] (to the sender), anomaly: null | { color, kind,
+detail, posMatched }, ended: bool, journal: [records], clockStarted: colour | 2 }`. Buffers are
+already encoded with the codec; the host sends them as they are. `clockStarted` names a clock held
+since a recovery that has just started (6.4): the host then sends the other player a new
+`GameSnapshot`, unless the outcome holds a move or the end.
 
 `GameHost` (one per shard):
 ```js
@@ -361,12 +370,15 @@ new Matchmaker({ config, now })
 mm.join({ userId, username, category, rated, rating, provisional, shard, connId, colorBalance, joinedAt }) -> { ok } | { error: ErrorCode }
 mm.leave(userId) -> bool ; mm.has(userId) ; mm.statusOf(userId, now) -> QueueStatus fields
 mm.tick(now) -> [{ category, rated, white: entry, black: entry }]
-mm.recordPairing(a, b, now)  // repeat limit bookkeeping (done by tick itself)
+mm.recordPairing(a, b, now)  // repeat limit bookkeeping (the primary, once a rated game exists: queue, challenge, private code, rematch)
+mm.repeatLimited(a, b, now) -> bool  // MATCH_REPEAT_LIMIT reached: the primary refuses their rated challenges, private games and rematches
+mm.holdPair(a, b, until)     // a and b are not paired together before `until` (the primary, after their game could not be created)
 // challenges.js (primary)
 new Challenges({ config, now })
 ch.create({ from: {userId, username, rating, provisional, shard, connId}, target /* username | '' */, baseSec, incSec, rated, color }) -> { ok, challenge } | { error }
 ch.accept(id, by /* player */) -> { ok, challenge } | { error } ; ch.decline(id, userId) ; ch.cancel(id, userId)
-ch.joinCode(code, by) -> { ok, challenge } | { error } ; ch.expire(now) -> [challenge] ; ch.forUser(userId)
+ch.joinCode(code, by) -> { ok, challenge } | { error } ; ch.getCode(code) -> challenge | null  // the code stays usable
+ch.expire(now) -> [challenge] ; ch.forUser(userId)
 // conduct.js (primary; persistent counters in store.conduct)
 conduct.record(userId, kind /* 'abandon'|'abort'|'noshow' */, now) ; conduct.cooldownUntil(userId, now) -> ms | 0
 ```
@@ -376,7 +388,8 @@ Official categories come from `cfg.categories`; `categoryOf(baseMs, incMs)` retu
 ### 5.5 Store (`src/store/index.js`)
 
 `openStore(config, { readonly = false, applyGame }) -> Store` (`applyGame` is
-`match/elo.js`'s, passed in by the bootstrap so the store does not import the match module). Synchronous (`node:sqlite`). WAL,
+`match/elo.js`'s, passed in by the bootstrap; the store imports only elo.js's `isProvisional`, the
+rule of the provisional mark). Synchronous (`node:sqlite`). WAL,
 `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`. Prepared statements cached. All
 times are epoch ms integers. `migrate(store)` applies `migrations/NNN_*.sql` in order inside
 transactions, recorded in `schema_migrations`.
@@ -394,6 +407,9 @@ store.sessions.create({ userId, tokenHash, createdAt, expiresAt, idleExpiresAt, 
 store.sessions.byTokenHash(hash) -> { id, userId, createdAt, lastSeenAt, expiresAt, idleExpiresAt, revokedAt } | null
 store.sessions.touch(id, now, idleExpiresAt) ; revoke(id) ; revokeAllForUser(userId, exceptId?) -> [tokenHash] ; listForUser(userId) ; enforceLimit(userId, max)
 store.tokens.create({ kind, tokenHash, userId, data, expiresAt }) ; consume(kind, tokenHash, now) -> row | null (atomic single use) ; get(kind, tokenHash) ; update(kind, tokenHash, data)
+store.tokens.reserveTry(kind, tokenHash, max, now) -> row | null   // atomic: data.tries + 1 on a live row while below max
+store.signups.create({ username, email, passwordHash, tokenHash, createdAt, expiresAt }) -> id ; byUsername(name) / byEmail(email) / byTokenHash(hash) ; renew(id, { tokenHash, expiresAt }) ; delete(id)
+  // pending signups (section 8): no account before the link is used
 store.sso.find(provider, subject) -> { userId } | null ; link(userId, provider, subject, email)
 store.ratings.get(userId, category) -> { rating, games, wins, draws, losses, peak, reachedSenior, rated, countedGames, unratedGames,
   unratedOpponents, unratedHalfPoints }  // defaults when absent: unrated at INITIAL_RATING
@@ -411,7 +427,7 @@ store.games.finishBatch(records) -> [{ gameId, ratings: null | { white: RatingCh
   //           rematchOf, flags }
   // flags: 1 rated requested, 2 recovered after a restart, 4 forfeit, 8 manual clock press (autoPress
   // false; records of older builds never have it)
-store.games.byId(id) ; recentForUser(userId, limit, before?) ; countBetween(a, b, since)
+store.games.byId(id) ; lastId() ; recentForUser(userId, limit, before?) ; countBetween(a, b, since)
 store.conduct.record(userId, kind, at) ; store.conduct.countSince(userId, since) -> { abandon, abort, noshow } ; store.conduct.cooldown(userId) / setCooldown(userId, until, level)
 store.sanctions.create({ userId, kind /* 'ban'|'mm_block'|'warning' */, reason, source /* 'auto'|'moderator' */, gameId, startsAt, endsAt, createdBy }) -> id
   // a ban for cheating: source 'auto' and reason 'certain_cheat:<kind>', or source 'moderator' and reason
@@ -426,6 +442,7 @@ store.analysis.next(limit, workerId, now) -> [job] ; complete(gameId, features) 
 store.analysis.enqueue(gameId, now) ; request(gameId, 'report' | 'signal', now) -> bool ; backlog() -> { ordinary, priority }
   // enqueue: moderator re-analysis (priority manual); request: a reported game, 'signal' for a low-credibility
   // report (section 6.5); backlog counts each tier up to 100,000
+store.analysis.job(gameId) -> { status, priority, attempts, queuedAt, finishedAt, error } | null
 store.integrity.get(userId) -> { level /* 'none'|'suspected'|'high_confidence'|'confirmed' */, score, evidence, updatedAt, reviewedBy }
 store.integrity.set(userId, fields) ; listFlagged(minLevel, limit) ; populationStats(ratingBucket) / updatePopulation(...)
 store.reports.create({ reporterId, reportedId, gameId, category, comment, weight, at }) -> id
@@ -532,7 +549,9 @@ Shard -> primary:
 
 | type | payload | reply |
 |---|---|---|
-| `presence.claim` | `{ userId, username, shard, connId, ip }` | `{ ok, activeGame: id or 0, kicked: bool }` or `{ error }` (ServerFull, Banned) |
+| `config.snapshot` | - | the text of every configuration key the primary loaded at its start (`*_FILE` contents included): the worker's configuration, so that a restarted shard keeps the primary's settings (the analysis process asks for it too) |
+| `tls.ticketKeys` | - | `{ key, day }` (native TLS only, before the shard listens): the current state of the session-ticket keys every worker shares, drawn at random by the primary at its start and moved forward one way each UTC day (`src/net/ticket-keys.js`), so that a restarted shard resumes the others' sessions; the shard overwrites the key it received once copied; `null` in the other TLS modes |
+| `presence.claim` | `{ userId, username, shard, connId }` | `{ ok, activeGame: id or 0, kicked: bool }` or `{ error }` (ServerFull, Banned) |
 | `presence.release` | `{ userId, connId }` | - |
 | `conn.ipAcquire` / `conn.ipRelease` | `{ ip }` | `{ ok }` or `{ ok: false, reason }` (`per_ip`: `MAX_CONNECTIONS_PER_IP`; `global`: `MAX_CONNECTIONS` plus `max(16, 2 %)`) |
 | `mm.join` | `{ userId, username, category, rated, rating, provisional, shard, connId }` | `{ ok }` / `{ error }` (`Banned`: a ban found in the database, enforced as `sanction.applied`, 6.6) |
@@ -545,7 +564,7 @@ Shard -> primary:
 | `ratelimit.refund` | `{ key, windowMs, cost, ageMs }` | `{ refunded }` (gives back a take granted `ageMs` ago, in the window that counted it) |
 | `once.consume` | `{ key, ttlMs }` | `{ fresh }` |
 | `sanction.applied` | `{ userId, until, reason, refunds }` | - (primary kicks the user everywhere; `refunds`: victims refunded, whose notices it looks for at once) |
-| `session.revoked` | `{ userId, tokenHashes }` | - (broadcast to every shard's auth cache) |
+| `session.revoked` | `{ userId, tokenHashes }` | - (broadcast to every shard as `auth.invalidate`; `tokenHashes`: the revoked sessions, `null` when every session of the user was revoked, `[]` to refresh the cache only) |
 | `abuse.report` | `{ entries: [[key64, key48 or null, weight]] }` | - (notification: the refusals counted toward a block since the last report, at most one report per second per worker and 512 entries, the largest first; section 8) |
 
 Primary -> shard:
@@ -553,10 +572,11 @@ Primary -> shard:
 | type | payload | effect |
 |---|---|---|
 | `game.create` | `{ spec }` | host creates the room, replies `{ ok, gameId }` |
+| `game.cancel` | `{ gameId }` | ends a game whose `game.create` reply came after the primary's timeout (ServerAborted, no conduct incident) |
 | `game.attach` | `{ gameId, userId, connId }` | the shard binds that connection to the game (local or via bus) |
-| `conn.send` | `{ connId, frames: [Buffer] }` | writes encoded S2C frames (QueueStatus, Challenge*, Notice); as a request (refund notices) it replies `{ ok }`, false when the connection is gone or has not had its Welcome yet |
-| `conn.kick` | `{ connId, code, closeCode, frames }` | sends then closes |
-| `auth.invalidate` | `{ userId, tokenHashes }` | drops cached sessions |
+| `conn.send` | `{ connId, frames: [Buffer] }` | writes encoded S2C frames (QueueStatus, Challenge*, Notice); as a request (refund notices) it replies `{ ok }`, false when the connection is gone or closes before its Welcome (the frames for a connection whose `presence.claim` is under way are written right after its Welcome) |
+| `conn.kick` | `{ connId, closeCode, frames }` | sends then closes |
+| `auth.invalidate` | `{ userId, tokenHashes }` | drops the listed sessions from the auth cache and closes the connection opened with one of them; `null` (every session of the user revoked) drops every cached session of the user and closes the user's connection; `[]` drops them and closes nothing |
 | `metrics.snapshot` | - | replies `registry.snapshot()` |
 | `shutdown` | `{ graceMs }` | drain: Notice{ServerShutdown}, stop accepting, flush |
 | `abuse.block` | `{ blocks: [[key, ttlMs, level]] }` | the shard blocks these addresses (IPv4, IPv6 /64 or /48) for `ttlMs` on its monotonic clock; sent to every shard with the new blocks of each `abuse.report`, and to one shard at its `shard.ready` with every running block (section 8) |
@@ -733,17 +753,18 @@ Endpoints (prefix `/api/v1`):
 | Method and path | Owner | Notes |
 |---|---|---|
 | `GET /info` | auth | `{ name, serverId, motd, protocol: {min, max, schema, subprotocol}, wsPort, wsPath: '/ws', registration, emailVerification, sso: { google }, mfa: true, pow: { register }, categories: [{id, baseSec, incSec}], limits }` |
-| `POST /auth/register` | auth | `{ username, email, password, pow? }` -> 202 `{ status: 'verification_sent' }` (same answer when the e-mail exists); without `REQUIRE_EMAIL_VERIFICATION`: 201 `{ status: 'ready' }`, or 409 `email_taken`. Rates `auth`, then `auth_register` (`AUTH_REGISTER_PER_HOUR` 10 per hour per client, 3x per /48, shared) |
+| `POST /auth/register` | auth | `{ username, email, password, pow? }` -> 202 `{ status: 'verification_sent' }` (same answer when the e-mail exists; the account is created when the link is used, section 8); without `REQUIRE_EMAIL_VERIFICATION`: 201 `{ status: 'ready' }`, or 409 `email_taken`. Rates `auth`, then `auth_register` (`AUTH_REGISTER_PER_HOUR` 10 per hour per client, 3x per /48, shared) |
 | `POST /auth/login` | auth | `{ login, password, clientLabel?, pow? }` -> `{ token, expiresAt, user }` or `{ mfaRequired: true, mfaToken }` |
 | `POST /auth/login/mfa` | auth | `{ mfaToken, code? , recoveryCode? }` (401 `invalid_mfa_token` once the step expired or was used, or when the password was reset or changed since the first step). Every code checked here or in a re-authentication first takes `mfa:u<id>` from the primary (`AUTH_MFA_PER_ACCOUNT` 10 per 15 minutes per account, any address): beyond it 429 `too_many_attempts` before the check, a recovery code not spent |
 | `POST /auth/logout`, `POST /auth/logout-all` | auth | bearer |
 | `GET /auth/sessions`, `DELETE /auth/sessions/:id` | auth | |
-| `POST /auth/verify-email/resend` | auth | `{ email }` -> 202 always. Rates `auth`, `auth_mail` (`AUTH_MAIL_PER_HOUR` 10 per hour per client, 3x per /48, shared) |
+| `POST /auth/verify-email/resend` | auth | `{ email }` -> 202 always (a pending signup gets its 24 h again, with a new link when the address has no account; an unconfirmed account gets a new link). Rates `auth`, `auth_mail` (`AUTH_MAIL_PER_HOUR` 10 per hour per client, 3x per /48, shared) |
 | `POST /auth/password/forgot` | auth | `{ email }` -> 202 always (a refusal is a 429, which says nothing about the address). Rates `auth`, `auth_forgot` (`AUTH_FORGOT_PER_HOUR` 3 per hour) and `auth_forgot_day` (`AUTH_FORGOT_PER_DAY` 10 per 24 h), per client, 3x per /48, shared; plus one mail per address every 5 minutes |
 | `POST /auth/password/reset` | auth | `{ token, newPassword }` (also the HTML form at `/reset-password`). Rates `auth`, `auth_reset` (`AUTH_RESET_PER_HOUR` 10 per hour per client, 3x per /48, shared, the form included) |
-| `POST /auth/sso/google/start` | auth | `{ codeChallenge }` -> `{ attemptId, authUrl, pollMs, expiresIn }`. Rate `sso_start` 30 per 10 min per client, 90 per /48, shared |
-| `POST /auth/sso/google/poll` | auth | `{ attemptId, codeVerifier }` -> `{ status: 'pending' }` / login answer / `{ needsUsername, ssoTicket }` |
-| `POST /auth/sso/complete` | auth | `{ ssoTicket, username }`. Rate `auth`, its /48 count included |
+| `POST /auth/sso/google/start` | auth | `{ codeChallenge, redirectPort }` -> `{ attemptId, authUrl, state, expiresIn }`; the redirect URI is `http://127.0.0.1:<redirectPort>/oauth2/google/<origin tag>` (the game's listener). Rate `sso_start` 30 per 10 min per client, 90 per /48, shared |
+| `POST /auth/sso/google/finish` | auth | `{ attemptId, codeVerifier, state, code, iss?, clientLabel? }` -> login answer / `{ needsUsername, ssoTicket, suggestedUsername }` / `{ needsPassword, linkTicket, username, expiresIn }`. Rate `sso_finish` 30 per min per client |
+| `POST /auth/sso/google/link` | auth | `{ linkTicket, password, clientLabel?, pow? }` -> login answer; the Google link is stored after the password, or after the code of `POST /auth/login/mfa` when MFA is on. 5 tries per ticket (a refusal of the hash queue takes one too), the login's failure counter and proof of work; the account's address gets a notice (mail) once the link is stored. Rate `auth` |
+| `POST /auth/sso/complete` | auth | `{ ssoTicket, username }`; the address gets a notice (mail) that Google sign-in created the account. Rate `auth`, its /48 count included |
 | `GET /account/me` | auth | `{ user, ratings, sanctions (active), ban }`; `user`: `{ id, username, email, emailVerified, mfaEnabled, googleLinked, hasPassword, acceptChallenges: 'all'\|'none', createdAt, lastLoginAt, pendingEmail }` (`pendingEmail`: the address of an e-mail change waiting for its link, or null; the login answers carry the same `user`); the integrity level is NOT exposed |
 | `POST /account/password` | auth | `{ currentPassword, newPassword }`: the current password only, never a second factor (by design, even with MFA on); revokes the other sessions |
 | `POST /account/mfa/totp/setup` | auth | `{ password }` -> `{ secret, uri, algorithm, digits, period }` (409 when MFA is already on) |
@@ -763,10 +784,12 @@ Endpoints (prefix `/api/v1`):
 | `POST /reports` | anticheat | `{ gameId, reported, category: 'cheating'|'abuse'|'other', comment }`. Rate `reports` 30 per hour per account (`by: 'user'`) |
 | `GET /healthz`, `GET /readyz` | net | also on the metrics port |
 
-HTML pages outside `/api`: `GET/POST /verify-email?token=`, `GET/POST /reset-password?token=`,
-`GET/POST /confirm-email-change?token=` (POST: 200, 400 for an invalid link, 409 when another
-account took the address meanwhile), `GET /auth/sso/google/callback` (auth owner). GET only shows
-a confirmation button; the state change happens on POST (link scanners must not consume tokens).
+HTML pages outside `/api`: `GET/POST /verify-email?token=` (POST: 200, 400 for an invalid link,
+409 when another account took the username or the address of a pending signup meanwhile),
+`GET/POST /reset-password?token=`, `GET/POST /confirm-email-change?token=` (POST: 200, 400 for
+an invalid link, 409 when another account took the address meanwhile). GET only shows a
+confirmation button; the state change happens on POST (link scanners must not consume tokens).
+Google sign-in has no page: Google sends the browser back to the game's 127.0.0.1 listener.
 
 ## 6. Game policies
 
@@ -855,8 +878,8 @@ rules before sending, so steps 6 and 7 only happen with a modified client.
 * `Resign` at any time while the game runs. `Abort` only before the sender's own first move
   (conduct counter `abort`).
 * `Rematch` within 60 s after the end: both accept -> the primary creates a new game (colours
-  swapped, same time control and rated flag, conduct and bans checked). It expires when either
-  player leaves (disconnects or joins a queue).
+  swapped, same time control and rated flag, conduct, bans and `MATCH_REPEAT_LIMIT` checked). It
+  expires when either player leaves (disconnects or joins a queue).
 
 ### 6.4 Disconnections, abandonment, rage quit, server restart
 
@@ -944,7 +967,8 @@ weighted by the reporter's credibility, never the level itself.
 is bounded and prioritized instead of growing without end. Every job has a priority and the engine
 takes the highest first, then the oldest:
 
-1. `manual`: a moderator asked for the (re-)analysis of a game (`store.analysis.enqueue`);
+1. `manual`: a moderator asked for the (re-)analysis of a game (`store.analysis.enqueue`, through
+   `scacelith-admin analysis queue <gameId>`, which leaves a game being or already analysed alone);
 2. `report`: a credible player reported the game (category `cheating` or `other`, stored weight
    at least 0.5); the report queues it even if the policy had left it out, and re-queues it if
    its analysis had failed. A report of lower weight (a new account, or one beyond the daily cap
@@ -1074,7 +1098,7 @@ the reasons an unban takes nothing back: docs/ANTICHEAT.md, rating refunds.
 | Games in progress (moves, clocks, offers) | memory of the host shard + journal | journal flushed every `JOURNAL_FLUSH_MS` | replayed; at most `JOURNAL_FLUSH_MS` of moves lost (clients resend: stale ply / resync); both players get `RECOVERY_GRACE_MS` to come back, and the clock of the side to move waits for its player (`RECOVERY_CLOCK_HOLD_MS` at most, 6.4) |
 | Sanctions, anomalies (certain), integrity levels, reports | SQLite | sanctions immediately; anomalies batched (1 s) | kept (a batch in flight may be lost for `info` anomalies) |
 | Rating refunds (6.6) | SQLite | with the ban that triggers them (their own transaction), or with a game recorded during the ban; `notified_at` once the notice is written | kept; the notices not marked are sent again after a restart |
-| Presence, queues, challenges, private codes, rate-limit counters | primary memory | - | lost: clients reconnect and re-queue |
+| Presence, queues, challenges, private codes, rate-limit counters, repeat-limit counts | primary memory | - | lost: clients reconnect and re-queue |
 | Security events (failed logins...) | SQLite | batched (1 s) | kept, purged after `RETENTION_SECURITY_DAYS` |
 
 **Retention purge.** Personal data is not kept longer than it is needed. The primary runs
@@ -1084,7 +1108,7 @@ minute after the start):
 | Data | Deleted or erased |
 |---|---|
 | Sessions | as soon as they expire (absolute or idle limit); revoked ones a day after the revocation; the IP address of a live session `RETENTION_IP_DAYS` (30) after the login, the row stays |
-| Single-use tokens (some carry the e-mail address) | once expired (24 hours at most) |
+| Single-use tokens (some carry the e-mail address), pending signups | once expired (tokens: 24 hours at most; a pending signup 24 hours after the signup or its last resend, and it frees its username at once) |
 | Security events | after `RETENTION_SECURITY_DAYS` (90); their IP address after `RETENTION_IP_DAYS`, the row stays |
 | Anomalies | `info` and `suspicious` ones after `RETENTION_SECURITY_DAYS`; `certain` ones (the evidence of an automatic sanction) are kept |
 | Conduct events | after 30 days (the conduct rules look back 3 days at most) |
@@ -1158,8 +1182,9 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   and hashes the new one within it. A request beyond the queue, or whose budget ran out, is
   answered HTTP 503 `{ "error": "server_busy", "retryAfter": s }` with a `Retry-After` header (a
   random 5-15 s, so that the refused clients do not come back together) before anything changed:
-  no failed login is counted and a reset link stays valid. Once the queue is at least half full,
-  one client source (an IPv4 address or an IPv6 /48) may have at most
+  no failed login is counted (except the password step of a Google link, whose try of the ticket
+  and failure of the account are taken before the hash) and a reset link stays valid. Once the
+  queue is at least half full, one client source (an IPv4 address or an IPv6 /48) may have at most
   `PASSWORD_HASH_WAITERS_PER_SOURCE` (2) hashes waiting; its next request is answered 429
   `rate_limited` the same way and gets back the tokens it took from the auth rate limits (the
   local bucket, and the primary's window through `ratelimit.refund`). So one network cannot hold
@@ -1182,17 +1207,20 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   `invalid_mfa_token` when the stored hash is no longer that one. So a password reset always wins
   against a login (both of its steps), a rehash or a password change that was in flight, and no
   session is opened with a password the reset has replaced.
-* **Tokens**: 32 random bytes, only their SHA-256 is stored; e-mail verification (24 h),
+* **Tokens**: 32 random bytes, only their SHA-256 is stored; e-mail verification (24 h; the link
+  of a pending signup is kept with the signup, `pending_signups.token_hash`),
   password reset (1 h, revokes all sessions; it works only while the account still has the
-  address it was mailed to), e-mail change (24 h, sent to the new address, at most one link per
+  address it was mailed to, and a password reset or change ends the account's other reset
+  links), e-mail change (24 h, sent to the new address, at most one link per
   new address every 5 minutes whoever asks; a new request replaces it, a password change or reset
   cancels it, and a request that one of them overtakes gets 403 `invalid_password`: its write is a
-  compare-and-set on the password hash it checked), MFA login challenge (5 min), SSO attempt
-  (10 min), all single-use. The confirmation of an e-mail change (the link used, the new address,
+  compare-and-set on the password hash it checked), MFA login challenge (5 min), SSO attempt,
+  SSO ticket and SSO link ticket (10 min each; a link ticket allows 5 password tries), all
+  single-use. The confirmation of an e-mail change (the link used, the new address,
   the end of the reset and verification links of the former address) and a password reset (the
-  link used, the new password, the pending e-mail change cancelled) are each one transaction; a
-  store that stays locked answers 503 `server_busy` with `retryAfter: 1`, nothing changed and
-  the link still valid.
+  link used, the new password, the pending e-mail change and the other reset links cancelled) are
+  each one transaction; a store that stays locked answers 503 `server_busy` with
+  `retryAfter: 1`, nothing changed and the link still valid.
 * **TOTP**: RFC 6238 (SHA-1, 6 digits, 30 s, +-1 step), secret 20 bytes, AES-256-GCM at rest with
   a key derived from SERVER_SECRET (or MFA_ENCRYPTION_KEY), replay refused (last used step
   stored). 10 recovery codes (`xxxx-xxxx-xx`, 50 bits) stored as HMAC-SHA256 with a derived
@@ -1202,8 +1230,28 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   e-mail change (`POST /account/email` answers 202 and shows the address as pending whether or not
   another account uses it; the owner of a taken address gets a notice, never a link); login errors
   are the same for an unknown account and a wrong password; usernames are public anyway (the
-  "taken" answer is rate limited). Without `REQUIRE_EMAIL_VERIFICATION`, register and the e-mail
-  change answer 409 `email_taken` (no link would confirm the address).
+  "taken" answer is rate limited). Registration creates no account before its link is used: the
+  signup waits in `pending_signups` (migration 007) for the 24 h of the link and holds its
+  username, whether or not the address has an account (then without a link, the owner gets a
+  notice), so that a second signup with the username (409 `username_taken` in both cases), a
+  sign-in with it (401 `invalid_credentials`, no account), the public profile (404) and every
+  other answer are the same in both cases; the request does the same work in both (one password
+  hash, one throttle call to the primary, one transaction). A resend for the address gives the
+  signup its 24 h again in both cases too (one transaction, 202 even when the store is busy; a
+  new link only when the address has no account), so the username is held as long. A new signup
+  with the same address replaces the waiting one; using the link creates the account, its address
+  confirmed, and drops the signup in one transaction (another account took the username or the
+  address meanwhile: the page says so, nothing is created). An expired signup frees its username
+  at once and the retention purge deletes it. A Google sign-in creating an account
+  (`POST /auth/sso/complete`) refuses a username held by the signup of another address like a
+  taken one; an address that only has a pending signup has no account to link. Google sign-in
+  names an existing account (`needsPassword`, with its username) only to whoever proved its
+  address to Google, and links Google to it only after its password (and second factor) in the
+  game, never by the address alone. Accounts created
+  unconfirmed before this design keep their `email_verify` links and the 403 `email_unverified`
+  sign-in answer. Without `REQUIRE_EMAIL_VERIFICATION` there is no link: the account is created at
+  once, as before, and register and the e-mail change answer 409 `email_taken` (no link would
+  confirm the address).
 * **Account data export** (`POST /account/export`, password and second factor, 5 per hour): the
   player's own data only; never a password hash, TOTP secret, recovery code, token or token hash,
   the anti-cheat's data (integrity level, anomalies, analysis features, report weights), the reports
@@ -1285,17 +1333,18 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
     shares the address with an abuser (a school, a mobile operator's CGNAT) keeps the game in
     progress; a player whose connection drops can only come back when the block ends, which is
     why the first one is short. At most 20,000 blocks run at once (the oldest end first); the
-    primary logs each one (`ip blocked`, with `ipForLog`, the scope, level, duration and
-    refusals).
+    primary logs each one (`ip blocked`, with `ipForLog`, the scope, level (`blockLevel`),
+    duration and refusals).
   * `ABUSE_EXEMPT` (addresses and CIDR subnets: a school or club network, monitoring, a load
     generator) skips all of the above. Login, registration, the other route limits and the
     per-account quotas still apply.
   * Cost (measured on the development container, `test/unit/net.ipguard.test.js`): about 0.15-0.25
     µs per IPv4 request (budget and in-flight place), 0.5-0.7 µs per IPv6 request, 0.02 µs for the
     request of a blocked address, 0.5 µs for a new connection and its close; the keys of an
-    address are computed once per connection (0.8 µs for IPv6). Memory is bounded: 50,000 buckets
-    per limiter (an evicted bucket comes back full, which only makes the limit more lenient),
-    counters for open connections and requests in progress only, 20,000 blocks.
+    address are computed once per socket (0.8 µs for IPv6; twice per connection with native TLS:
+    the raw socket at admission, the TLS socket at its first request). Memory is bounded: 50,000
+    buckets per limiter (an evicted bucket comes back full, which only makes the limit more
+    lenient), counters for open connections and requests in progress only, 20,000 blocks.
   * Metrics: `scacelith_http_rate_limited_total{limit}` (`ip`, `ip48`, `inflight`, `blocked`),
     `scacelith_tls_refused_total{reason}` (`blocked`, `conn_rate`, `conn_open`),
     `scacelith_tls_connections_open`, `scacelith_http_inflight`, `scacelith_abuse_blocked_keys`
@@ -1336,7 +1385,8 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
 * Windows: WinHTTP for HTTPS and WebSocket (TLS by the OS, certificate validation by the OS
   trust store; optional per-server pinned SHA-256 fingerprint for self-signed community
   servers), DPAPI (`CryptProtectData`) for stored tokens, BCrypt for SHA-256 / random / PoW,
-  `ShellExecuteW` for the SSO browser. Linux test builds: OpenSSL.
+  `ShellExecuteW` for the SSO browser (it opens Google's page; Google returns to the game's
+  127.0.0.1 listener). Linux test builds: OpenSSL.
 * The client validates moves with `chess::Position` before sending (the same rules as the
   server), sends the intent when the destination is chosen, keeps the robots' physical
   animations, never flies the camera between seats online, shows the ping discreetly at the top

@@ -41,12 +41,7 @@
 //          still works)
 
 import * as emailPages from '../pages/email-change.js';
-import { AUTH_ABUSE_WEIGHT, authRateOf } from './auth.js';
-
-const PASSWORD = { type: 'string', min: 1, max: 1024 };
-const CODE = { type: 'string', min: 1, max: 32 };
-const EMAIL = { type: 'string', min: 1, max: 254 };
-const LINK_TOKEN = { type: 'string', min: 1, max: 128 };
+import { AUTH_ABUSE_WEIGHT, CODE_FIELD, EMAIL_FIELD, LINK_TOKEN_FIELD, PAGE_RATE, PASSWORD_FIELD, authRateOf } from './auth.js';
 
 /**
  * The limits of a route that asks for the password: `reauth` per address and IPv6 /48, then
@@ -72,40 +67,39 @@ export function register(router, { config, auth }) {
     router.get('/account/me', (ctx) => ({ body: auth.me(ctx.user.userId) }), { auth: 'required', rate: readRate });
 
     router.post('/account/password', async (ctx) => ({ body: await auth.changePassword(ctx.user, ctx.session.id, { ...ctx.body, ip: ctx.ip }) }),
-        opts({ currentPassword: PASSWORD, newPassword: PASSWORD }));
+        opts({ currentPassword: PASSWORD_FIELD, newPassword: PASSWORD_FIELD }));
 
     router.post('/account/mfa/totp/setup', async (ctx) => ({ body: await auth.mfaSetup(ctx.user, { ...ctx.body, ip: ctx.ip }) }),
-        opts({ password: PASSWORD }));
+        opts({ password: PASSWORD_FIELD }));
     router.post('/account/mfa/totp/enable', (ctx) => ({ body: auth.mfaEnable(ctx.user, { ...ctx.body, ip: ctx.ip }) }),
         opts({ code: { type: 'string', min: 6, max: 6, pattern: /^[0-9]{6}$/ } }));
     router.post('/account/mfa/totp/disable', async (ctx) => ({ body: await auth.mfaDisable(ctx.user, { ...ctx.body, ip: ctx.ip }) }),
-        opts({ password: PASSWORD, code: { ...CODE, optional: true }, recoveryCode: { ...CODE, optional: true } }));
+        opts({ password: PASSWORD_FIELD, code: { ...CODE_FIELD, optional: true }, recoveryCode: { ...CODE_FIELD, optional: true } }));
     router.post('/account/mfa/recovery-codes', async (ctx) => ({ body: await auth.regenerateRecoveryCodes(ctx.user, { ...ctx.body, ip: ctx.ip }) }),
-        opts({ password: PASSWORD, code: CODE }));
+        opts({ password: PASSWORD_FIELD, code: CODE_FIELD }));
 
     router.post('/account/delete', async (ctx) => ({ body: await auth.deleteAccount(ctx.user, { ...ctx.body, ip: ctx.ip }) }),
-        opts({ password: PASSWORD, code: { ...CODE, optional: true }, recoveryCode: { ...CODE, optional: true } }));
+        opts({ password: PASSWORD_FIELD, code: { ...CODE_FIELD, optional: true }, recoveryCode: { ...CODE_FIELD, optional: true } }));
 
     router.post('/account/email', async (ctx) => auth.changeEmail(ctx.user, { ...ctx.body, ip: ctx.ip }),
-        opts({ newEmail: EMAIL, password: PASSWORD, code: { ...CODE, optional: true }, recoveryCode: { ...CODE, optional: true } }));
+        opts({ newEmail: EMAIL_FIELD, password: PASSWORD_FIELD, code: { ...CODE_FIELD, optional: true }, recoveryCode: { ...CODE_FIELD, optional: true } }));
 
     router.put('/account/preferences', (ctx) => ({ body: auth.setPreferences(ctx.user, ctx.body) }),
         opts({ acceptChallenges: { type: 'enum', values: ['all', 'none'] } }, readRate));
 
     // ---- the e-mail change link (GET shows a button, POST acts) ----
     const serverName = config.serverName;
-    const pageRate = { key: 'page', limit: 60, windowMs: 60000 };
     const linkRate = authRateOf(config);
     router.page('GET', '/confirm-email-change', (ctx) => {
         const token = ctx.query.token;
         const pending = auth.peekEmailChange(token);
         if (!pending) return { status: 400, html: emailPages.emailChangeInvalid({ serverName }) };
         return { html: emailPages.emailChangeForm({ serverName, token, email: pending.email, username: pending.username }) };
-    }, { rate: pageRate });
+    }, { rate: PAGE_RATE });
     router.page('POST', '/confirm-email-change', (ctx) => {
         const r = auth.confirmEmailChange(ctx.body.token, ctx.ip);
         if (r.status === 'changed') return { html: emailPages.emailChangeDone({ serverName, email: r.email }) };
         if (r.status === 'taken') return { status: 409, html: emailPages.emailChangeTaken({ serverName }) };
         return { status: 400, html: emailPages.emailChangeInvalid({ serverName }) };
-    }, { rate: linkRate, body: { token: LINK_TOKEN } });
+    }, { rate: linkRate, body: { token: LINK_TOKEN_FIELD } });
 }

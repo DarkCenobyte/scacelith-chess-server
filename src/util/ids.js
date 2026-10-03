@@ -6,7 +6,10 @@
 // The shard that hosts a game is part of its id, so any process can route a message to the
 // game's host without a lookup table, including after a restart (the journal replays the game
 // on the same shard). A multi-instance deployment gives each instance its own shard range
-// (SHARD_BASE). Ids are unique as long as a shard number is used by one process at a time.
+// (SHARD_BASE). Ids are unique as long as a shard number is used by one process at a time: a
+// new process seeds its allocator with the ids already used (its journal's games and the
+// database's largest id), so a restart while the wall clock is behind the previous run's ids
+// does not give them again.
 
 export const ID_EPOCH_MS = Date.UTC(2026, 0, 1);
 const SHARD_MUL = 64;          // 2^6
@@ -28,8 +31,13 @@ export class GameIdAllocator {
         this.lastMs = t;
         return t * TIME_MUL + this.shard * SHARD_MUL + this.seq;
     }
+    /** Marks every id up to the end of the millisecond of `id` (a game id already given, by any shard) used. */
+    seed(id) {
+        if (!isGameId(id)) return;
+        const t = Math.floor(id / TIME_MUL);
+        if (t >= this.lastMs) { this.lastMs = t; this.seq = 63; }
+    }
 }
 
 export function shardOfGameId(id) { return Math.floor(id / SHARD_MUL) % 64; }
-export function timeOfGameId(id) { return Math.floor(id / TIME_MUL) + ID_EPOCH_MS; }
 export function isGameId(id) { return Number.isSafeInteger(id) && id > 0; }

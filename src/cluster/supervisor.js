@@ -1,7 +1,8 @@
 // Shard supervisor (primary): forks one worker per shard, gives each an Ipc endpoint, restarts a
 // crashed shard under the same shard number (its journal is replayed by the new process) with a
-// backoff (250 ms, 1 s, 5 s, 15 s, then 30 s; reset after 60 s of uptime), and stops them all
-// gracefully. It also is the "shards directory" the control plane talks to.
+// backoff (250 ms, 1 s, 5 s, 15 s, then 30 s; reset after 60 s of uptime; a fork that fails counts
+// as a crash), and stops them all gracefully. It also is the "shards directory" the control plane
+// talks to.
 
 import { Ipc } from './ipc.js';
 
@@ -41,13 +42,14 @@ export class ShardSupervisor {
             worker = this.fork(shard);
         } catch (e) {
             this.log?.error?.('fork failed', { shard, err: e });
-            this._scheduleRestart(shard, attempts);
+            this._scheduleRestart(shard, attempts + 1);
             return;
         }
         const ipc = new Ipc(worker, { ...this.ipcOptions, name: `shard${shard}`, log: this.log });
         const entry = { worker, ipc, startedAt: Date.now(), attempts, timer: null, exited: false };
         this.workers.set(shard, entry);
-        worker.on('exit', (code, signal) => {
+        const down = (code, signal) => {
+            if (entry.exited) return;
             entry.exited = true;
             ipc.close('worker exited');
             if (this.workers.get(shard) === entry) this.workers.delete(shard);
@@ -58,8 +60,14 @@ export class ShardSupervisor {
                 const ranLong = Date.now() - entry.startedAt > 60000;
                 this._scheduleRestart(shard, ranLong ? 0 : attempts + 1);
             }
+        };
+        worker.on('exit', down);
+        worker.on('error', (e) => {
+            this.log?.warn?.('worker channel error', { shard, err: e });
+            // A spawn that failed (EAGAIN, EMFILE, ENOENT...) is reported here only, with no
+            // process and no 'exit': the shard is down all the same.
+            if ((worker.process ? worker.process.pid : worker.pid) === undefined) down(null, null);
         });
-        worker.on('error', (e) => this.log?.warn?.('worker channel error', { shard, err: e }));
         try { this.onUp?.(shard, ipc); } catch (e) { this.log?.error?.('onUp failed', { err: e }); }
     }
 
@@ -110,7 +118,10 @@ export class ShardSupervisor {
 
     /**
      * Graceful stop: 'shutdown' to every worker, then waits for them to exit (killing the ones
-     * still running after graceMs + timeoutMs).
+     * still running after graceMs + timeoutMs). timeoutMs is what a worker has after its drain:
+     * its final commits, then its store writer's close, which waits up to 7 s
+     * (store/writer.js) so that one busy_timeout wait (5 s) for the write lock still fits; a
+     * worker still starting has no drain, but the rest of its journal replay counts.
      */
     async stop(graceMs, timeoutMs = 15000) {
         this.stopping = true;

@@ -92,8 +92,25 @@ function createAccounts(env, count, scratch) {
  * @param {string} [o.cpuProfDir] write V8 CPU profiles of the server processes there
  * @param {(s: string) => void} [o.log]
  */
-export async function startServer({ workers, reusePort = false, accounts = 0, env = {}, dataDir = null, keep = false, cpuProfDir = null, log = () => {} }) {
-    const dir = dataDir ? path.resolve(dataDir) : fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-bench-'));
+export async function startServer(o) {
+    const dir = o.dataDir ? path.resolve(o.dataDir) : fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-bench-'));
+    const started = { child: null };
+    try {
+        return await launch(o, dir, started);
+    } catch (e) {
+        // The caller gets no srv to stop: kill the server processes (the workers are listed before
+        // the primary is killed, as they are reparented once it is gone) and remove the directory.
+        if (started.child) {
+            const pids = descendants(started.child.pid);
+            started.child.kill('SIGKILL');
+            for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+        }
+        if (!o.keep && !o.dataDir) fs.rmSync(dir, { recursive: true, force: true });
+        throw e;
+    }
+}
+
+async function launch({ workers, reusePort = false, accounts = 0, env = {}, dataDir = null, keep = false, cpuProfDir = null, log = () => {} }, dir, started) {
     fs.mkdirSync(dir, { recursive: true });
     const tlsFiles = makeCertificate(dir);
     const [apiPort, wsPort, metricsPort] = [await freePort(), await freePort(), await freePort()];
@@ -129,6 +146,10 @@ export async function startServer({ workers, reusePort = false, accounts = 0, en
         AUTH_MFA_PER_ACCOUNT: '1000000',
         AUTH_REAUTH_PER_USER: '1000000',
         USER_RATE_PER_MIN: '1000000',
+        CHALLENGE_UNPLAYED_PER_MIN: '1000000',
+        PRIVATE_CODE_FAILURES_PER_MIN: '1000000',
+        // A pair of accounts plays one rated game after the other.
+        MATCH_REPEAT_LIMIT: '1000000',
         MAX_CONNECTIONS: '1000000',
         MAX_CONNECTIONS_PER_IP: '1000000',
         // The load processes share the loopback address: outside the protection per address
@@ -171,6 +192,7 @@ export async function startServer({ workers, reusePort = false, accounts = 0, en
     // when it exits (graceful stop).
     const runEnv = cpuProfDir ? { ...baseEnv, NODE_OPTIONS: `--cpu-prof --cpu-prof-dir=${path.resolve(cpuProfDir)}` } : baseEnv;
     const child = spawn(cmd, args, { cwd: ROOT, env: runEnv, stdio: ['ignore', logFd, logFd] });
+    started.child = child;
     fs.closeSync(logFd);
     let exited = null;
     child.on('exit', (code, signal) => { exited = { code, signal }; });
@@ -185,7 +207,7 @@ export async function startServer({ workers, reusePort = false, accounts = 0, en
             const r = await api.info();
             if (r.status === 200) { info = r.body; break; }
         } catch { /* not yet */ }
-        if (Date.now() > deadline) { child.kill('SIGKILL'); throw new Error(`server did not answer /api/v1/info within 60 s:\n${tail(logFile)}`); }
+        if (Date.now() > deadline) throw new Error(`server did not answer /api/v1/info within 60 s:\n${tail(logFile)}`);
         await sleep(200);
     }
     // Every shard ready.

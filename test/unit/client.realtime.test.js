@@ -306,6 +306,30 @@ describe('WsClient', () => {
         await srv.close();
     });
 
+    test('a close reason over 123 bytes is cut on a UTF-8 character boundary', async () => {
+        for (const [reason, bytes] of [['\u00e9'.repeat(80), 122], ['a' + '\u00e9'.repeat(70), 123], ['\u{1f600}'.repeat(40), 120], ['x'.repeat(200), 123]]) {
+            const { srv, ws, peer } = await openPair();
+            await ws.close(1000, reason);
+            await srv.close();
+            const payload = peer.frames.find((f) => f.op === 8).payload;
+            assert.equal(payload.length - 2, bytes);
+            assert.ok(reason.startsWith(new TextDecoder('utf-8', { fatal: true }).decode(payload.subarray(2))));
+        }
+    });
+
+    test('close() during the handshake resolves once the socket is closed', async () => {
+        const silent = await startWsServer({ handshake: () => ({ skip: true }) });
+        const ws = new WsClient({ port: silent.port, insecure: true });
+        const connecting = ws.connect();
+        connecting.catch(() => {});
+        await new Promise((r) => setTimeout(r, 50));
+        await ws.close();
+        assert.equal(ws.readyState, CLOSED);
+        assert.equal(ws._ls?.close?.length ?? 0, 0, 'no close listener left');
+        await assert.rejects(connecting, /closed by the client/);
+        await silent.close();
+    });
+
     test('connection lost without a close frame: 1006', async () => {
         const { srv, ws, peer } = await openPair();
         const closed = closeEvent(ws);
@@ -494,12 +518,30 @@ describe('ScacelithClient', () => {
         // No answer at all.
         const fake3 = await fakeServer({ hello: () => {} });
         await assert.rejects(new ScacelithClient().connect({ port: fake3.port, insecure: true, token: TOKEN, timeoutMs: 300 }), /no Welcome in time/);
+        // No answer to the upgrade: the same rejection, and no unhandled one (the process survives).
+        const stalled = await startWsServer({ handshake: () => ({ skip: true }) });
+        const sc = new ScacelithClient();
+        await assert.rejects(sc.connect({ port: stalled.port, insecure: true, token: TOKEN, timeoutMs: 300 }), /no Welcome in time/);
+        assert.equal(sc.state, 'closed');
         // Upgrade refused.
         const refused = await startWsServer({ handshake: () => ({ status: 429 }) });
         await assert.rejects(new ScacelithClient().connect({ port: refused.port, insecure: true, token: TOKEN }), (e) => e.status === 429);
         // A Hello that cannot be encoded fails before connecting.
         await assert.rejects(new ScacelithClient().connect({ port: fake.port, insecure: true, token: '' }), /invalid Hello \(token bad length\)/);
-        for (const f of [fake, fake2, fake3, refused]) await f.close();
+        for (const f of [fake, fake2, fake3, stalled, refused]) await f.close();
+    });
+
+    test('close() while connecting resolves, and connect() rejects', async () => {
+        const silent = await startWsServer({ handshake: () => ({ skip: true }) });
+        const c = new ScacelithClient();
+        const connecting = c.connect({ port: silent.port, insecure: true, token: TOKEN });
+        connecting.catch(() => {});
+        await new Promise((r) => setTimeout(r, 50));
+        assert.equal(c.state, 'connecting');
+        await c.close();
+        assert.equal(c.state, 'closed');
+        await assert.rejects(connecting, /closed by the client/);
+        await silent.close();
     });
 
     test('server Ping is answered with Pong at once; seq numbers every client message', async () => {
@@ -538,6 +580,21 @@ describe('ScacelithClient', () => {
         await s.peer.until(() => s.peer.messages.length === 2 + seqs.length + 1);
         assert.deepEqual([...s.peer.messages.at(-1).data], [0x11, 0, 0, 0, 0]);
         assert.equal(c.seq, before);
+        await c.close();
+        await fake.close();
+    });
+
+    test('a message the encoder refuses uses no seq: the next one follows without a gap', async () => {
+        const { fake, c, s } = await connected();
+        const before = c.seq;
+        assert.throws(() => c.move(GAME, 0, 70000, 0xdeadbeef), /move out of range/);
+        assert.throws(() => c.joinCode('x'.repeat(300)), /code bad length/);
+        assert.throws(() => c.send('NoSuch', {}), /unknown message/);
+        assert.equal(c.seq, before);
+        assert.equal(c.resign(GAME), before + 1);
+        await s.peer.until(() => s.received.length === 2);
+        assert.equal(s.received[1].seq, before + 1);
+        assert.equal(s.badSeq, 0);
         await c.close();
         await fake.close();
     });

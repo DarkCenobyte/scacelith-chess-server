@@ -14,7 +14,8 @@
 // the reserve) makes a worker shed new TLS connections (Router.isFull): at MAX_CONNECTIONS itself
 // each newcomer completes the handshake and the upgrade and gets ServerFull at Hello.
 //
-// All operations are O(1).
+// All operations are O(1) except dropShard (once per shard exit), which is O(online users +
+// address groups of that shard).
 
 import { ipGroupKey } from '../net/ip.js';
 
@@ -28,15 +29,14 @@ export function upgradeReserve(maxConnections) {
 
 export class Presence {
     /**
-     * @param {{ maxConnections?: number, maxPerIp?: number, now?: () => number }} [o]
+     * @param {{ maxConnections?: number, maxPerIp?: number }} [o]
      */
-    constructor({ maxConnections = 200000, maxPerIp = 16, now = Date.now } = {}) {
+    constructor({ maxConnections = 200000, maxPerIp = 16 } = {}) {
         this.maxConnections = maxConnections;
         /** Connections counted at the upgrade: MAX_CONNECTIONS plus the reserve (see above). */
         this.upgradeCap = maxConnections + upgradeReserve(maxConnections);
         this.maxPerIp = maxPerIp;
-        this.now = now;
-        /** @type {Map<number, {userId:number, username:string, shard:number, connId:number, ip:string, since:number}>} */
+        /** @type {Map<number, {userId:number, username:string, shard:number, connId:number}>} */
         this.users = new Map();
         /** @type {Map<string, number>} lower-case username -> userId */
         this.byName = new Map();
@@ -44,8 +44,6 @@ export class Presence {
         this.ipCounts = new Map();
         /** @type {Map<number, Map<string, number>>} shard -> ip group -> open connections */
         this.shardIps = new Map();
-        /** @type {Map<number, number>} shard -> open connections */
-        this.shardCounts = new Map();
         this.connections = 0;
     }
 
@@ -65,7 +63,6 @@ export class Presence {
         let m = this.shardIps.get(shard);
         if (!m) { m = new Map(); this.shardIps.set(shard, m); }
         m.set(key, (m.get(key) || 0) + 1);
-        this.shardCounts.set(shard, (this.shardCounts.get(shard) || 0) + 1);
         this.connections++;
         return { ok: true };
     }
@@ -83,7 +80,6 @@ export class Presence {
         if (s === 1) m.delete(key); else m.set(key, s - 1);
         const n = this.ipCounts.get(key) || 0;
         if (n <= 1) this.ipCounts.delete(key); else this.ipCounts.set(key, n - 1);
-        this.shardCounts.set(shard, Math.max(0, (this.shardCounts.get(shard) || 0) - 1));
         this.connections--;
         return true;
     }
@@ -95,10 +91,10 @@ export class Presence {
      * Makes (shard, connId) the live connection of the user.
      * @returns {{ previous: null | {shard:number, connId:number} }} the connection it replaces
      */
-    claim({ userId, username = '', shard, connId, ip = '' }) {
+    claim({ userId, username = '', shard, connId }) {
         const prev = this.users.get(userId) || null;
         if (prev && prev.username) this.byName.delete(prev.username.toLowerCase());
-        this.users.set(userId, { userId, username, shard, connId, ip, since: this.now() });
+        this.users.set(userId, { userId, username, shard, connId });
         if (username) this.byName.set(username.toLowerCase(), userId);
         if (prev && prev.shard === shard && prev.connId === connId) return { previous: null };
         return { previous: prev ? { shard: prev.shard, connId: prev.connId } : null };
@@ -146,11 +142,7 @@ export class Presence {
             }
             this.shardIps.delete(shard);
         }
-        this.shardCounts.delete(shard);
         if (this.connections < 0) this.connections = 0;
         return gone;
     }
-
-    /** Connections counted per shard. */
-    shardConnections(shard) { return this.shardCounts.get(shard) || 0; }
 }

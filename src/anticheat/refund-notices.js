@@ -8,10 +8,11 @@
 //     resumes a game: then after that game ends.
 // One notice carries every refund of the victim not notified yet (the total of their points).
 // A refund is marked notified (store.refunds.markNotified) only once the shard reports the notice
-// written on the victim's connection ('conn.send' answered { ok: true }). A connection that is not
-// ready yet (the claim is answered before Welcome is written), or one closed as a slow consumer
-// instead of taking the notice, answers { ok: false }: the notice is tried again RETRY_MS later,
-// RETRIES times, and then at each poll while the victim can get it.
+// written on the victim's connection ('conn.send' answered { ok: true }; on a connection whose
+// claim is under way, the notice is written right after its Welcome). A connection that closes
+// before its Welcome, or one closed as a slow consumer instead of taking the notice, answers
+// { ok: false }: the notice is tried again RETRY_MS later, RETRIES times, and then at each poll
+// while the victim can get it.
 
 import { encode, enums } from '../protocol/index.js';
 
@@ -133,7 +134,9 @@ export class RefundNotices {
     _retry(userId) {
         const r = this.retries.get(userId) || { left: RETRIES, timer: null };
         if (r.timer) return;
-        if (r.left <= 0) { this.retries.delete(userId); return; }
+        // An exhausted budget is kept (until the notice is written or the victim connects again):
+        // the polls then try once each, they do not start a new series of RETRIES.
+        if (r.left <= 0) return;
         r.left--;
         r.timer = setTimeout(() => {
             r.timer = null;

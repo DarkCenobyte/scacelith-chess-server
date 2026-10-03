@@ -46,6 +46,7 @@
 
 import { historySummary } from './account-games.js';
 import { reauthRatesOf } from './account.js';
+import { CODE_FIELD, PASSWORD_FIELD } from './auth.js';
 
 export const EXPORT_FORMAT = 'scacelith-account-export';
 export const EXPORT_VERSION = 1;
@@ -57,7 +58,7 @@ const ROWS_MAX = 100000;
 export const DETAIL_FIELDS = Object.freeze({
     login: ['method'],
     sso_login: ['provider'],
-    sso_linked: ['provider'],
+    sso_linked: ['provider', 'method'],
     sso_account_created: ['provider'],
     login_failed: ['failures'],
     login_lockout: ['retryAfterMs'],
@@ -80,7 +81,7 @@ export const MODERATOR_ACTIONS = Object.freeze(['ban', 'unban', 'reset_mfa', 've
  * account's address: their IP may be another person's).
  */
 export const IP_KINDS = Object.freeze([
-    'register', 'email_verified', 'login', 'sso_login', 'sso_account_created', 'recovery_code_used', 'password_reset',
+    'register', 'email_verified', 'login', 'sso_login', 'sso_linked', 'sso_account_created', 'recovery_code_used', 'password_reset',
     'password_changed', 'reauth_failed', 'mfa_setup_started', 'mfa_enabled', 'mfa_disabled', 'recovery_codes_regenerated',
     'session_revoked', 'sessions_revoked_all', 'email_change_requested', 'email_changed', 'email_change_refused', 'account_exported',
 ]);
@@ -162,7 +163,7 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
  */
 export async function buildAccountExport({ store, config, user, account, now }) {
     const id = user.id;
-    const google = (typeof store.sso.forUser === 'function' ? store.sso.forUser(id) || [] : []).find((l) => l.provider === 'google') || null;
+    const google = (store.sso.forUser(id) || []).find((l) => l.provider === 'google') || null;
 
     const list = [];
     for (let before = null; ;) {
@@ -213,9 +214,6 @@ export function exportFileName(username) {
     return `scacelith-account-${String(username).replace(/[^A-Za-z0-9_.-]/g, '_')}.json`;
 }
 
-const PASSWORD = { type: 'string', min: 1, max: 1024 };
-const CODE = { type: 'string', min: 1, max: 32 };
-
 /**
  * Registers POST /api/v1/account/export.
  * @param {import('../router.js').Router} router
@@ -239,6 +237,6 @@ export function register(router, { config, store, auth, log, now = Date.now }) {
         return { body: doc, headers: { 'Content-Disposition': `attachment; filename="${exportFileName(doc.account.username)}"` } };
     }, {
         auth: 'required', rate: [exportRate, ...reauthRatesOf(config)], timeoutMs: 60000,
-        body: { password: PASSWORD, code: { ...CODE, optional: true }, recoveryCode: { ...CODE, optional: true } },
+        body: { password: PASSWORD_FIELD, code: { ...CODE_FIELD, optional: true }, recoveryCode: { ...CODE_FIELD, optional: true } },
     });
 }

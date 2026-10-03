@@ -29,15 +29,17 @@ const copy = (o) => (o ? structuredClone(o) : null);
 const RESULT_STATUS = { win: [1, 2], loss: [2, 1], draw: [3, 3] };
 
 /**
- * In-memory Store (users, mfa, sessions, tokens, sso, security, sanctions, ratings, meta, and the
- * account API's reads: games.listForUser / countForUser, conduct.forUser, reports.forReporter,
- * refunds.list; `_raw.games`, `_raw.conduct`, `_raw.reports`, `_raw.refunds` hold their rows).
+ * In-memory Store (users, mfa, sessions, tokens, pending signups, sso, security, sanctions, ratings,
+ * meta, and the account API's reads: games.listForUser / countForUser, conduct.forUser,
+ * reports.forReporter, refunds.list; `_raw.games`, `_raw.conduct`, `_raw.reports`, `_raw.refunds`
+ * hold their rows).
  */
 export function createFakeStore({ now = Date.now } = {}) {
     const users = new Map();
     const codes = new Map();
     const sessions = new Map();
     const tokens = new Map();
+    const signups = new Map();
     const links = [];
     const securityEvents = [];
     const sanctions = [];
@@ -47,7 +49,7 @@ export function createFakeStore({ now = Date.now } = {}) {
     const reports = [];
     const refunds = [];
     const calls = { touch: 0 };
-    let userSeq = 0, sessionSeq = 0, sanctionSeq = 0;
+    let userSeq = 0, sessionSeq = 0, sanctionSeq = 0, signupSeq = 0;
     const gameMatches = (g, userId, { category = null, rated = null, result = null } = {}) => {
         if (g.whiteId !== userId && g.blackId !== userId) return false;
         if (category !== null && g.category !== category) return false;
@@ -114,7 +116,14 @@ export function createFakeStore({ now = Date.now } = {}) {
             create(row) { const id = ++sessionSeq; sessions.set(id, { id, lastSeenAt: row.createdAt, revokedAt: null, ...row }); return id; },
             byTokenHash(h) { for (const s of sessions.values()) if (s.tokenHash === h) return copy(s); return null; },
             touch(id, t, idle) { calls.touch++; const s = sessions.get(id); if (s) { s.lastSeenAt = t; s.idleExpiresAt = idle; } },
-            revoke(id) { const s = sessions.get(id); if (s && !s.revokedAt) s.revokedAt = now(); },
+            // Like the real store: the revoked session's token hash, or null (unknown, already
+            // revoked, or not the session of `userId` when given).
+            revoke(id, userId) {
+                const s = sessions.get(id);
+                if (!s || s.revokedAt || (userId != null && s.userId !== userId)) return null;
+                s.revokedAt = now();
+                return s.tokenHash;
+            },
             revokeAllForUser(userId, exceptId) {
                 const out = [];
                 for (const s of sessions.values()) {
@@ -122,7 +131,12 @@ export function createFakeStore({ now = Date.now } = {}) {
                 }
                 return out;
             },
-            listForUser(userId) { return [...sessions.values()].filter((s) => s.userId === userId).map(copy); },
+            // Like the real store: the non-revoked sessions, without their token hash.
+            listForUser(userId) {
+                return [...sessions.values()].filter((s) => s.userId === userId && !s.revokedAt)
+                    .map((s) => ({ id: s.id, createdAt: s.createdAt, lastSeenAt: s.lastSeenAt, expiresAt: s.expiresAt,
+                        idleExpiresAt: s.idleExpiresAt, clientLabel: s.clientLabel ?? null, ip: s.ip ?? null }));
+            },
             allForUser(userId) {
                 return [...sessions.values()].filter((s) => s.userId === userId).sort((a, b) => b.createdAt - a.createdAt || b.id - a.id)
                     .map((s) => ({ id: s.id, createdAt: s.createdAt, lastSeenAt: s.lastSeenAt, expiresAt: s.expiresAt,
@@ -148,6 +162,15 @@ export function createFakeStore({ now = Date.now } = {}) {
                 return copy(r);
             },
             get: (kind, tokenHash) => copy(tokens.get(`${kind}:${tokenHash}`)),
+            // Like the real store: one more try on a live token while it has fewer than `max`.
+            reserveTry(kind, tokenHash, max, t) {
+                const r = tokens.get(`${kind}:${tokenHash}`);
+                if (!r || r.usedAt || r.expiresAt <= t) return null;
+                const data = JSON.parse(r.data) || {};
+                if ((data.tries ?? 0) >= max) return null;
+                r.data = JSON.stringify({ ...data, tries: (data.tries ?? 0) + 1 });
+                return copy(r);
+            },
             update(kind, tokenHash, data) { const r = tokens.get(`${kind}:${tokenHash}`); if (r) r.data = JSON.stringify(data); },
             deleteForUser(userId, kind) {
                 let n = 0;
@@ -158,6 +181,29 @@ export function createFakeStore({ now = Date.now } = {}) {
                 const live = [...tokens.values()].filter((r) => r.userId === userId && r.kind === kind && !r.usedAt && r.expiresAt > t);
                 return copy(live.sort((a, b) => b.createdAt - a.createdAt).at(0) || null);
             },
+        },
+        // Like the real store: a name or an address of another pending signup is refused; nothing
+        // is checked against the accounts.
+        signups: {
+            create({ username, email, passwordHash, tokenHash = null, createdAt = now(), expiresAt }) {
+                for (const p of signups.values()) {
+                    if (lc(p.username) === lc(username)) throw new StoreError('username_taken');
+                    if (lc(p.email) === lc(email)) throw new StoreError('email_taken');
+                }
+                const id = ++signupSeq;
+                signups.set(id, { id, username, email, passwordHash, tokenHash, createdAt, expiresAt });
+                return id;
+            },
+            byUsername: (n) => copy([...signups.values()].find((p) => lc(p.username) === lc(n)) || null),
+            byEmail: (e) => copy([...signups.values()].find((p) => lc(p.email) === lc(e)) || null),
+            byTokenHash: (h) => copy([...signups.values()].find((p) => p.tokenHash !== null && p.tokenHash === h) || null),
+            renew(id, { tokenHash, expiresAt }) {
+                const p = signups.get(id);
+                if (!p) return false;
+                Object.assign(p, { tokenHash: tokenHash ?? null, expiresAt });
+                return true;
+            },
+            delete: (id) => signups.delete(id),
         },
         sso: {
             find: (provider, subject) => { const l = links.find((x) => x.provider === provider && x.subject === subject); return l ? { userId: l.userId } : null; },
@@ -200,7 +246,7 @@ export function createFakeStore({ now = Date.now } = {}) {
             forUser: (userId) => (ratings.get(userId) || []).map(copy),
             _set(userId, list) { ratings.set(userId, list); },
         },
-        _raw: { users, sessions, tokens, links, securityEvents, sanctions, codes, calls, games, conduct, reports, refunds },
+        _raw: { users, sessions, tokens, signups, links, securityEvents, sanctions, codes, calls, games, conduct, reports, refunds },
     };
     return store;
 }
@@ -268,18 +314,19 @@ export const TEST_DEFAULTS = Object.freeze({
 /**
  * Starts the real API handler on 127.0.0.1 with fakes. The client address of a request is the
  * X-Test-Ip header when given (as the proxy layer would set req.clientIp). Two servers given the
- * same `primary`, `store` and `now` stand for two workers of one server.
+ * same `primary`, `store` and `now` stand for two workers of one server. `mailer(config, log)`
+ * makes the mailer (default: createCaptureMailer).
  * @param {{ env?: object, scryptLogN?: number, hasher?: object, oidc?: object, oidcEndpoints?: object,
- *           handlerOptions?: object, primary?: object|null, store?: object, now?: Function }} [opts]
+ *           handlerOptions?: object, primary?: object|null, store?: object, now?: Function, mailer?: Function }} [opts]
  */
 export async function startTestServer({ env = {}, scryptLogN = 10, hasher, oidc, oidcEndpoints, handlerOptions = {}, primary: givenPrimary,
-    store: givenStore, now: givenNow } = {}) {
+    store: givenStore, now: givenNow, mailer: makeMailer = createCaptureMailer } = {}) {
     const config = testConfig({ ...TEST_DEFAULTS, ...env });
     const now = givenNow || createClock();
     const store = givenStore || createFakeStore({ now });
     const primary = givenPrimary === undefined ? createFakePrimary({ now }) : givenPrimary;
     const log = logger.child('test');
-    const mailer = createCaptureMailer(config, log);
+    const mailer = makeMailer(config, log);
     const passwordHasher = hasher || createPasswordHasher({ scrypt: { logN: scryptLogN }, argon2: false });
     const auth = createAuth({
         config, store, primary, log, now, mailer, passwordHasher, oidc,

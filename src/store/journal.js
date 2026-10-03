@@ -275,6 +275,8 @@ class Journal {
                     snapshotFiles.add(file);
                 } else if (kind === JournalKind.Committed) {
                     committed.add(gameId);
+                    // Never recovered: its records need not stay in memory until the scan ends.
+                    perGame.delete(gameId);
                     this.markCommitted(gameId, seq);
                 }
             });
@@ -426,6 +428,11 @@ class Journal {
      */
     recover() {
         return this.recovered;
+    }
+
+    /** Lets the records of recover() go once the games are rebuilt; recover() is empty afterwards. */
+    releaseRecovered() {
+        this.recovered = new Map();
     }
 
     /** Numbers for metrics and tests. */

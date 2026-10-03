@@ -180,6 +180,7 @@ test('moderator: integrity confirm refunds the window, --refund-since widens it,
     // --no-refund: a ban without refunds; --refund-since and --no-refund exclude each other.
     assert.equal((await admin(store, config, ['integrity', 'confirm', 'Cheat', '--reason', 'r', '--no-refund', '--refund-since', '2026-01-01'])).code, 1);
     assert.equal((await admin(store, config, ['integrity', 'confirm', 'Cheat', '--reason', 'r', '--refund-since', '2099-01-01'])).code, 1);
+    assert.equal((await admin(store, config, ['integrity', 'confirm', 'Cheat', '--reason', 'r', '--refund-since', '2026-02-29'])).code, 1, 'no such day');
     assert.equal(store.integrity.get(id.Cheat).level, 'none', 'a refused command writes nothing');
     assert.equal(store.sanctions.activeBan(id.Cheat, NOW), null);
     const noRefund = await admin(store, config, ['integrity', 'confirm', 'Cheat', '--reason', 'engine', '--no-refund', '--json']);
@@ -192,6 +193,12 @@ test('moderator: integrity confirm refunds the window, --refund-since widens it,
     assert.equal((await admin(store, config, ['refunds', 'apply', 'Vic'])).code, 1, 'Vic is not a confirmed cheater');
     assert.equal((await admin(store, config, ['refunds', 'apply', 'Cheat', '--since', '2099-01-01'])).code, 1, 'a date in the future');
     assert.equal((await admin(store, config, ['refunds', 'apply', 'Cheat', '--since', 'yesterday'])).code, 1);
+    // An impossible calendar date is refused, not rolled over into the next month.
+    for (const typo of ['2026-02-31', '2026-04-31T10:00Z', '2026-00-10', '2026-06-00']) {
+        const r = await admin(store, config, ['refunds', 'apply', 'Cheat', '--since', typo]);
+        assert.equal(r.code, 1, typo);
+        assert.match(r.err, /expects a date/);
+    }
     const apply = await admin(store, config, ['refunds', 'apply', 'Cheat', '--json'], NOW + 3 * DAY);
     assert.equal(apply.code, 0, apply.err);
     assert.equal(apply.json.since, NOW - 60 * DAY, 'RATING_REFUND_DAYS before the ban, not before the command');

@@ -89,6 +89,8 @@ test('the generator refuses other schemas it cannot encode', () => {
         [(s) => { s.structs.Loop = [['self', 'struct:Loop']]; }, /recursive/],
         [(s) => { s.messages.push({ id: 0xb0, name: 'Ping', dir: 's2c', fields: [] }); }, /two s2c messages have this name|shared by one c2s and one s2c message only/],
         [(s) => { s.PROTOCOL_MIN = s.PROTOCOL_VERSION + 1; }, /PROTOCOL_MIN is above PROTOCOL_VERSION/],
+        [(s) => { s.WS_SUBPROTOCOL = 'scacelith"v1'; }, /WS_SUBPROTOCOL must be an RFC 7230 token/],
+        [(s) => { s.WS_SUBPROTOCOL = 'scacelith\\v1'; }, /WS_SUBPROTOCOL must be an RFC 7230 token/],
     ];
     for (const [change, re] of cases) assert.throws(() => generateCodec(variant(change)), re);
 });

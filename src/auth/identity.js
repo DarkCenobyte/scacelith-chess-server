@@ -76,7 +76,7 @@ export function isValidEmail(email) {
  * @returns {string}
  */
 export function suggestUsername(source, config) {
-    let s = String(source || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, '_').replace(/[^A-Za-z0-9_-]/g, '');
+    let s = String(source || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, '_').replace(/[^A-Za-z0-9_-]/g, '');
     s = s.replace(/^[_-]+/, '').slice(0, config.usernameMax);
     return checkUsername(s, config) ? '' : s;
 }

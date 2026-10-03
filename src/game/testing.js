@@ -1,6 +1,6 @@
-// Test doubles for the game module and for modules that embed a GameHost (net, integration,
-// bench): a scripted ChessGame (the rules do not matter), an in-memory journal, a store, an
-// anti-cheat, a primary and endpoints. Not used by the server itself.
+// Test doubles for the unit tests of the game module and of modules that embed a GameHost: a
+// scripted ChessGame (the rules do not matter), an in-memory journal, a store, an anti-cheat, a
+// primary and endpoints. Not used by the server itself.
 
 import { decode, enums, MoveFlag } from '../protocol/index.js';
 

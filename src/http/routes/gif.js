@@ -52,8 +52,9 @@ import { createGifPool } from '../../gif/pool.js';
 import { DELAY, MAX_PLIES, SIZES } from '../../gif/render.js';
 import { endReasonText, readPgn, PgnError } from '../../chess/index.js';
 import { normalizeResult } from '../../chess/pgn.js';
-import { enums } from '../../protocol/schema.js';
 import { metrics } from '../../metrics.js';
+import { randomRetryAfter } from '../../security/ratelimit.js';
+import { ID_RE, RESULT } from './players.js';
 
 /** The thread module of the pool: src/gif/worker.js at the lowest priority (routes/gif-thread.js). */
 export const GIF_THREAD_URL = new URL('./gif-thread.js', import.meta.url);
@@ -62,11 +63,9 @@ export const GIF_THREAD_URL = new URL('./gif-thread.js', import.meta.url);
 export const GIF_PGN_MAX_BYTES = 65536;
 export const GIF_CONTENT_TYPE = 'image/gif';
 
-const ID_RE = /^[1-9][0-9]{0,15}$/;
 const SIZE_NAMES = Object.keys(SIZES);
 const ORIENTATIONS = ['white', 'black'];
 const BODY_FIELDS = new Set(['pgn', 'size', 'orientation', 'delayMs', 'coords']);
-const RESULT = { [enums.GameStatus.WhiteWins]: '1-0', [enums.GameStatus.BlackWins]: '0-1', [enums.GameStatus.Draw]: '1/2-1/2' };
 /** Retry-After of a 503 server_busy, seconds (drawn at random, so that refused clients spread out). */
 export const GIF_BUSY_RETRY_SEC = Object.freeze({ min: 3, max: 10 });
 
@@ -252,7 +251,7 @@ export function gifOptions({ size, orientation, delay, coords }, from = 'query')
 /** A player's name from a PGN tag: printable ASCII (accents dropped, anything else '?'), at most 48 characters. */
 export function tagText(v, max = 48) {
     if (typeof v !== 'string') return '';
-    const s = v.normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^\x20-\x7e]/g, '?').replace(/\s+/g, ' ').trim();
+    const s = v.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\x20-\x7e]/g, '?').replace(/\s+/g, ' ').trim();
     return s.length > max ? s.slice(0, max) : s;
 }
 
@@ -331,7 +330,7 @@ export function register(router, deps) {
             }
         } catch (err) {
             if (err && err.code === 'busy' && !err.expose) {
-                const s = GIF_BUSY_RETRY_SEC.min + Math.floor(Math.random() * (GIF_BUSY_RETRY_SEC.max - GIF_BUSY_RETRY_SEC.min + 1));
+                const s = randomRetryAfter(GIF_BUSY_RETRY_SEC);
                 return { ...error(503, 'server_busy', 'The server is busy making other GIFs; try again in a few seconds.', { retryAfter: s }),
                     headers: { 'Retry-After': String(s) }, refundRate: true };
             }

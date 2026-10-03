@@ -2,6 +2,8 @@
 // extra JSON fields) with the same shape as http/router.js HttpError, so the HTTP layer answers
 // them as they are: { "error": code, "message": ..., ...extra }.
 
+import { randomRetryAfter } from '../security/ratelimit.js';
+
 export class AuthError extends Error {
     /**
      * @param {number} status HTTP status
@@ -34,7 +36,7 @@ export const BUSY_RETRY_AFTER_SEC = Object.freeze({ min: 5, max: 15 });
  * one burst do not all come back together.
  * @param {number} [retryAfterSec]
  */
-export function serverBusy(retryAfterSec = BUSY_RETRY_AFTER_SEC.min + Math.floor(Math.random() * (BUSY_RETRY_AFTER_SEC.max - BUSY_RETRY_AFTER_SEC.min + 1))) {
+export function serverBusy(retryAfterSec = randomRetryAfter(BUSY_RETRY_AFTER_SEC)) {
     return new AuthError(503, 'server_busy', 'The server is busy; try again in a few seconds.', { retryAfter: retryAfterSec });
 }
 
@@ -46,7 +48,7 @@ export function serverBusy(retryAfterSec = BUSY_RETRY_AFTER_SEC.min + Math.floor
  * nothing was hashed, and the refused player of a busy school network keeps its attempts.
  * @param {number} [retryAfterSec]
  */
-export function hashRateLimited(retryAfterSec = BUSY_RETRY_AFTER_SEC.min + Math.floor(Math.random() * (BUSY_RETRY_AFTER_SEC.max - BUSY_RETRY_AFTER_SEC.min + 1))) {
+export function hashRateLimited(retryAfterSec = randomRetryAfter(BUSY_RETRY_AFTER_SEC)) {
     const err = new AuthError(429, 'rate_limited', 'Too many requests; try again later.', { retryAfter: retryAfterSec });
     err.refundRate = true;
     return err;
