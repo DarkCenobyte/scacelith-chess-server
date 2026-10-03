@@ -104,8 +104,10 @@ pub trait HostEvents: Send + Sync + 'static {
 
 /// Where anomalies go (the anti-cheat service).
 pub trait AnomalySink: Send + Sync + 'static {
-    /// Records an anomaly. The write is enqueued on the store writer before this returns, so it
-    /// commits before any later write of the caller (a game batch that queues the analysis).
+    /// Records an anomaly. The first anomaly of a (user, game, kind) in each second is enqueued on
+    /// the store writer before this returns, so it commits before any later write of the caller
+    /// (a game batch that queues the analysis); repeats within that second are merged into the
+    /// same row and written up to one second later.
     fn record(&self, anomaly: Anomaly);
 
     /// A certain cheat (forged message type, ...) when `AUTO_SANCTION_CERTAIN_CHEATS` is on:
