@@ -36,8 +36,6 @@ pub(crate) enum CreateMode {
     Ok,
     /// This error.
     Fail(ErrorCode),
-    /// Never answers.
-    Hang,
     /// Answers with a new game id once the gate is opened.
     Late(Arc<tokio::sync::Notify>),
 }
@@ -51,7 +49,6 @@ pub(crate) struct FakeHosts {
     /// Endpoints attached, for the tests that write as a host.
     endpoints: Mutex<HashMap<(GameId, UserId), Endpoint>>,
     stalled: AtomicBool,
-    alive: AtomicBool,
 }
 
 impl FakeHosts {
@@ -63,7 +60,6 @@ impl FakeHosts {
             mode: Mutex::new(CreateMode::Ok),
             endpoints: Mutex::new(HashMap::new()),
             stalled: AtomicBool::new(false),
-            alive: AtomicBool::new(true),
         })
     }
 
@@ -75,16 +71,8 @@ impl FakeHosts {
         self.stalled.store(stalled, Ordering::SeqCst);
     }
 
-    pub(crate) fn set_alive(&self, alive: bool) {
-        self.alive.store(alive, Ordering::SeqCst);
-    }
-
     pub(crate) fn calls(&self) -> Vec<HostCall> {
         self.calls.lock().clone()
-    }
-
-    pub(crate) fn clear(&self) {
-        self.calls.lock().clear();
     }
 
     /// The games created, in order.
@@ -168,7 +156,6 @@ impl GameHosts for FakeHosts {
                 Box::pin(async move { Ok(id) })
             }
             CreateMode::Fail(code) => Box::pin(async move { Err(code) }),
-            CreateMode::Hang => Box::pin(std::future::pending()),
             CreateMode::Late(gate) => {
                 let id = self.next_id(preferred.unwrap_or(0));
                 Box::pin(async move {
@@ -188,8 +175,7 @@ impl GameHosts for FakeHosts {
     }
 
     fn ping(&self) -> BoxFuture<bool> {
-        let alive = self.alive.load(Ordering::SeqCst);
-        Box::pin(async move { alive })
+        Box::pin(async { true })
     }
 }
 
@@ -198,8 +184,6 @@ impl GameHosts for FakeHosts {
 pub(crate) struct FakeTokens {
     sessions: Mutex<HashMap<String, Session>>,
     fail: AtomicBool,
-    /// Tokens validated, in order.
-    seen: Mutex<Vec<String>>,
     /// Validations left for a token, after which it is unknown.
     left: Mutex<HashMap<String, u32>>,
     /// The next validation waits for this gate to open.
@@ -223,10 +207,6 @@ impl FakeTokens {
         self.sessions.lock().insert(token.to_string(), session);
     }
 
-    pub(crate) fn revoke(&self, token: &str) {
-        self.sessions.lock().remove(token);
-    }
-
     /// The token is valid for `n` more validations only (a revocation during the Hello).
     pub(crate) fn valid_times(&self, token: &str, n: u32) {
         self.left.lock().insert(token.to_string(), n);
@@ -240,15 +220,10 @@ impl FakeTokens {
     pub(crate) fn set_failing(&self, fail: bool) {
         self.fail.store(fail, Ordering::SeqCst);
     }
-
-    pub(crate) fn seen(&self) -> Vec<String> {
-        self.seen.lock().clone()
-    }
 }
 
 impl TokenValidator for FakeTokens {
     fn validate(&self, token: String) -> BoxFuture<Result<Option<Session>, ValidateError>> {
-        self.seen.lock().push(token.clone());
         let expired = match self.left.lock().get_mut(&token) {
             Some(0) => true,
             Some(n) => {

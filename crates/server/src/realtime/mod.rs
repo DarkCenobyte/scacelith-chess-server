@@ -104,15 +104,16 @@ impl Realtime {
     }
 
     /// Drains the connections: every player gets `Notice{ServerShutdown, arg = grace}` and new
-    /// connections are refused; after `grace` every connection gets a fatal
-    /// `Error{ShuttingDown}` and closes with 4008. Returns once they all ended (their games
-    /// detached, their presence released), or after the close timeout and a second more.
-    pub async fn drain(&self, grace: Duration) {
+    /// connections are refused; after `grace` (sooner once every connection has ended) every
+    /// connection gets a fatal `Error{ShuttingDown}` and closes with 4008. Returns whether they
+    /// all ended (their games detached, their presence released) within the close timeout and a
+    /// second more.
+    pub async fn drain(&self, grace: Duration) -> bool {
         let drain = &self.ctx.drain;
         let grace_ms = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX);
         drain.set(DrainPhase::Grace { grace_ms });
-        tokio::time::sleep(grace).await;
+        drain.wait_idle(grace).await;
         drain.set(DrainPhase::Closing);
-        drain.wait_idle(self.ctx.settings.close_timeout + Duration::from_secs(1)).await;
+        drain.wait_idle(self.ctx.settings.close_timeout + Duration::from_secs(1)).await
     }
 }

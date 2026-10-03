@@ -10,6 +10,7 @@ use bytes::Bytes;
 use scacelith_protocol::{ClientMsg, ErrorCode};
 
 use super::endpoint::Endpoint;
+use crate::auth::{Auth, SessionInfo};
 use crate::events::NewGame;
 use crate::game::{HostHandle, Hosts};
 use crate::ids::{self, ConnId, GameId, UserId};
@@ -79,8 +80,33 @@ pub trait TokenValidator: Send + Sync + 'static {
     fn validate(&self, token: String) -> BoxFuture<Result<Option<Session>, ValidateError>>;
 }
 
-/// A token validator that knows no token: every Hello ends with `Unauthorized`. Used until the
-/// auth service is wired.
+impl From<SessionInfo> for Session {
+    fn from(s: SessionInfo) -> Session {
+        Session {
+            user_id: s.user_id,
+            username: s.username,
+            session_id: s.session_id,
+            email_verified: s.email_verified,
+            token_hash: s.token_hash,
+        }
+    }
+}
+
+/// The server's sessions: [`Auth::validate_token`] (answers cached for 30 s at most; revocations
+/// made through the auth service apply at once).
+impl TokenValidator for Auth {
+    fn validate(&self, token: String) -> BoxFuture<Result<Option<Session>, ValidateError>> {
+        let auth = self.clone();
+        Box::pin(async move {
+            match auth.validate_token(&token).await {
+                Ok(session) => Ok(session.map(Session::from)),
+                Err(e) => Err(Box::new(e) as ValidateError),
+            }
+        })
+    }
+}
+
+/// A token validator that knows no token: every Hello ends with `Unauthorized`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoTokens;
 

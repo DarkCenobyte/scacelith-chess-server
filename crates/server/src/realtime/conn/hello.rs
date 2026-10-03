@@ -158,7 +158,7 @@ pub(crate) async fn run(
     }
     let welcome = Welcome {
         proto: PROTOCOL_VERSION,
-        minor: hello.minor.min(MINOR),
+        minor: negotiated_minor(hello.minor),
         caps: hello.caps & CAPS,
         server_time: ctx.clock.mono_ms(),
         user_id: link.user_id(),
@@ -188,6 +188,12 @@ pub(crate) async fn run(
     m.hello.with(&["ok"]).inc();
     m.hello_ms.observe(ctx.clock.mono_ms() - opened);
     Some(Welcomed { link, out, cmds, claim, active_game, pending })
+}
+
+/// The minor version of the session: the lower of the client's and the server's.
+#[allow(clippy::unnecessary_min_or_max, reason = "the server's MINOR is 0 for now; later minors negotiate")]
+fn negotiated_minor(client: u16) -> u16 {
+    client.min(MINOR)
 }
 
 /// The checks of the Hello's bytes, in the order of PROTOCOL.md.
