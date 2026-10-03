@@ -11,6 +11,7 @@
 //! implement on their connection, and every result they must persist is returned as data
 //! ([`scoring::Observation`], [`integrity::LevelUpdate`]).
 
+pub mod admin;
 pub mod analysis;
 pub mod integrity;
 pub mod notices;
