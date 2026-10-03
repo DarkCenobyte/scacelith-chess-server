@@ -8,23 +8,22 @@ This server separates three things that are often mixed up:
 | **Statistical suspicion** | Engine analysis of finished rated games says a player's moves and timing look like engine assistance. | **Never.** The integrity level and the evidence are written for a moderator. No ban, no matchmaking change. A moderator who confirms it bans the player, which refunds the victims too. |
 | **Reports** | Players report opponents of their recent games. | **Never.** They raise the review priority, weighted by the reporter's credibility. |
 
-Code: `src/anticheat/` (`index.js` anomalies and sanctions, `sanction.js` the database side of
-an automatic ban, `refunds.js` + `refund-notices.js` rating refunds, `analysis/` engine and
-features, `scoring.js` + `priors.js` model, `reports.js`, `admin.js`),
-`src/http/routes/reports.js`, `bin/analysis-worker.js`, `bin/admin.js`.
+The code is in `crates/server/src/anticheat/` ([section 9](#9-code-map)); moderators use
+`scacelith-server admin` ([section 6](#6-for-moderators-scacelith-server-admin)).
 
 ## 1. Anomalies (protocol)
 
-The router and the game host report anomalies with `ac.recordAnomaly({ userId, gameId, kind,
-detail, posMatched })`. Severities (DESIGN 6.5):
+The connection tasks and the game hosts report anomalies to the anti-cheat service
+(`AnomalySink::record` with an `Anomaly { user, game, kind, detail, pos_matched }`). Severities
+(DESIGN 6.5):
 
 | kind | severity | when | notes |
 |---|---|---|---|
 | `forged_type` | certain | a server->client message type sent by a client | |
 | `foreign_game` | certain | game message for a game the player does not play | |
-| `out_of_turn` | certain | move in a synchronised position while it is not the player's turn | downgraded to suspicious if reported with `posMatched: false` |
+| `out_of_turn` | certain | move in a synchronised position while it is not the player's turn | downgraded to suspicious when reported with `pos_matched: false` (the client's position hash did not match) |
 | `illegal_move` | certain | illegal move in a synchronised position | same |
-| `malformed` | suspicious | undecodable frame after Hello (connection closed 4300) | |
+| `malformed` | suspicious | undecodable frame after Hello (connection closed 4001) | |
 | `bad_seq` | suspicious | seq not last+1 | |
 | `flood` | suspicious | rate limit exceeded repeatedly (connection closed 4301) | |
 | `repeated_desync` | suspicious | 3+ desyncs in one game (the room counts them) | |
@@ -32,24 +31,24 @@ detail, posMatched })`. Severities (DESIGN 6.5):
 | `stale_ply`, `desync`, `nothing_to_claim` | info | honest races and bugs | not security-logged |
 | anything else | info | caller bug | recorded as `unknown` with the original kind in the detail |
 
-Storage: certain anomalies are written at once; the others are buffered and written in one
-`insertBatch` per second, repeats of the same kind in the same game coalesced into one row with
-`count` and `lastAt` (a flooding client cannot flood the database). When the buffer holds a
-suspicious anomaly, a shard also writes it right before it commits finished games, so that the
-analysis queue policy of the commit sees it. In a shard these writes, like the automatic
-sanctions, go through the store writer thread that commits the finished games
-(`src/store/writer.js`, its own SQLite connection): the event loop never waits for the disk or
-the database lock, and the thread writes its messages in the order they were sent (anomalies
-flushed before a commit are written before it, a certain anomaly before the ban it causes). A
-batch the thread could not write is counted as lost like any other. The buffer is bounded (5000
-rows; info rows are dropped first) and losses are counted in
-`scacelith_anticheat_anomalies_dropped_total`. Metrics: `scacelith_anticheat_anomalies_total{kind,severity}`.
-Suspicious and certain anomalies are logged with `log.security('anomaly', ...)`.
+Storage: recording never waits, and every write goes through the store's single writer thread,
+which runs its jobs in the order they were submitted. A certain anomaly gets a job of its own.
+The first anomaly of a kind by a player in a game is handed to the writer at once, so a commit of
+finished games queued after it sees it (the analysis queue policy of the commit reads it), and a
+certain anomaly is written before the ban it causes. Its repeats within a second of the last
+write of that row are coalesced into that row (`count`, `lastAt`) and written together when the
+second ends: a flooding client costs about one row per second for each kind, player and game,
+not one per message. The buffer is bounded (5000 distinct rows, after which `info` rows are
+dropped; twice as many for the others), losses are counted in
+`scacelith_anticheat_anomalies_dropped_total`, and the buffer is written out at the shutdown,
+before the store closes. Metrics: `scacelith_anticheat_anomalies_total{kind,severity}`.
+Suspicious and certain anomalies are logged as `anomaly` security records.
 
 ## 2. Automatic sanctions
 
-With `AUTO_SANCTION_CERTAIN_CHEATS=true` the host ends the game (`Forfeit`) and calls
-`ac.sanctionCertain({ userId, gameId, kind })`, which:
+With `AUTO_SANCTION_CERTAIN_CHEATS=true` the host ends the game (`Forfeit`) and asks the
+anti-cheat service to sanction the player (`AnomalySink::sanction_certain`, which runs
+`Anticheat::sanction`: one job on the store writer thread), which:
 
 * creates a ban of `BAN_DURATION_HOURS` (`source: 'auto'`, reason `certain_cheat:<kind>`, the game id),
   unless an active ban for cheating that refunds (automatic, or `integrity confirm` without
@@ -57,13 +56,13 @@ With `AUTO_SANCTION_CERTAIN_CHEATS=true` the host ends the game (`Forfeit`) and 
   `integrity confirm --no-refund` gets a ban of their own, which refunds (below);
 * sets the integrity level to `confirmed` and appends `{ kind, gameId, at, banUntil }` to
   `evidence.certain` (existing statistical evidence is kept);
-* writes a `sanction_auto` security event and asks the primary to kick the player everywhere
-  (`sanction.applied`);
+* writes a `sanction_auto` security event and tells the lobby (`SanctionEvents`), which closes
+  the player's connection (`Notice{Banned}`, then a fatal `Error{Banned}`, close 4004), forfeits
+  a game they still play and removes them from the queue and their challenges;
 * refunds the player's victims (below).
 
-It is idempotent within a game: several certain anomalies of the same game (even reported by
-different shards) produce one ban. Another game is another offence and gets its own ban. In a
-shard the database work runs on the store writer thread (section 1).
+It is idempotent within a game: several certain anomalies of the same game produce one ban.
+Another game is another offence and gets its own ban.
 
 The ban holds from the moment the cheat is detected, before it is written: the sanction first
 tells the lobby (`SanctionEvents::sanction_pending`, with the end of the ban being written),
@@ -77,18 +76,18 @@ write failed, or a ban stood already, which the next `Hello` reads) ends after 6
 ### Rating refunds
 
 When a player is banned as a cheater, the rating points their opponents lost to them are given
-back (`refunds.js`, the store's `refunds`, table `rating_refunds`):
+back (`anticheat::refunds`, the store's `refunds`, table `rating_refunds`):
 
 * **When**: an automatic ban for a certain cheat (also when the player was already banned: the
   refunds are idempotent), and a moderator's `integrity confirm` (unless `--no-refund`). A game
   that is not in the database yet when such a ban is given (still in progress, or ended and
   waiting for its commit) is refunded in the transaction that records it, as long as the player
-  is `confirmed` and that ban lasts (the store's `games.finishBatch`; not with
+  is `confirmed` and that ban lasts (the store's `finish_batch`; not with
   `RATING_REFUND_DAYS=0`). A `user ban` is not about cheating and refunds nothing, even for a
   player confirmed earlier; `--no-refund` refunds no game at all, the one in progress at the
   confirm included.
-* **Which bans**: a ban tells by its source and reason what it was given for (`refunds.js`
-  `banRefunds`): an automatic ban has the source `auto` and the reason `certain_cheat:<kind>`;
+* **Which bans**: a ban tells by its source and reason what it was given for
+  (`refunds::ban_refunds`): an automatic ban has the source `auto` and the reason `certain_cheat:<kind>`;
   `integrity confirm` writes the reason `confirmed: <reason>`, or `confirmed, no refund: <reason>`
   with `--no-refund`; `user ban` refuses a reason that starts like either.
 * **Which games**: the cheater's rated games that ended within `RATING_REFUND_DAYS` (default 60;
@@ -100,8 +99,8 @@ back (`refunds.js`, the store's `refunds`, table `rating_refunds`):
   cheater) is refunded like a loss; a win is left alone; the cheater's own rating is not touched
   (a `confirmed` player is off the leaderboard). Only a change of the K formula is refunded: the
   game that gave a player their first rating moved them from a working rating, which was no
-  rating to lose (the K factor of each game is stored since migration 004; the games finished
-  before it were all K-formula changes and are refunded when they cost points).
+  rating to lose (each game stores the K factor of both changes, 0 when the K formula did not
+  apply).
 * **Once**: one refund per game and victim at most (`UNIQUE (game_id, victim_id)`): a second
   ban, a retry or a moderator's `refunds apply` only gives the refunds still missing.
 * **Audit trail**: every refund is a row (game, victim, cheater, category, points, time, the ban
@@ -112,9 +111,10 @@ back (`refunds.js`, the store's `refunds`, table `rating_refunds`):
   not told yet), out of a game only: at once when they are connected and neither playing nor
   starting a game; otherwise right after their current game ends; otherwise at their next
   connection, right after `Welcome`, unless that connection resumes a game (then after it ends).
-  The primary finds the refunds of an automatic ban at once (`sanction.applied` carries their
-  number) and those of an admin command within 5 s. A refund is marked notified only once the
-  shard reports the notice written on the victim's connection.
+  The lobby finds the refunds of an automatic ban at once (the sanction event carries their
+  number) and those of an administration command, another process, within 5 s (it polls the
+  database). A refund is marked notified only once the notice is queued on the victim's
+  connection after its `Welcome`.
 * **An unban takes nothing back**, nor does `integrity clear`. The points were lost in games
   against a player found cheating; lifting the ban (its end, leniency, an appeal) does not make
   those games fair. Taking the points back later would hit the victims, who did nothing wrong,
@@ -122,19 +122,18 @@ back (`refunds.js`, the store's `refunds`, table `rating_refunds`):
   A mistaken confirmation costs at most the points its victims had lost in the window, which is
   the lesser harm. `refunds list` shows what was given.
 
-A game that ended on another shard in the last few tens of milliseconds before an automatic ban
-may not be in the database yet (its commit waits up to `DB_COMMIT_MS`): it is refunded when it
-is recorded, the player being `confirmed` and under the automatic ban by then.
+A game that ended in the last few tens of milliseconds before an automatic ban may not be in
+the database yet (its commit waits up to `DB_COMMIT_MS`): it is refunded when it is recorded,
+the player being `confirmed` and under the automatic ban by then.
 
 ## 3. Engine analysis
 
-`startAnalysisProcess(config)` (primary) forks `bin/analysis-worker.js` at low CPU priority and
-restarts it with exponential backoff (1 s .. 60 s) if it dies. The process runs the configuration
-the primary loaded at its start, asked for over IPC as the shards do, so an edit of `.env` or of a
-secret file reaches it only with a restart of the whole server. It does nothing when
-`ANALYSIS_ENGINE_PATH` is empty or `ANALYSIS_WORKERS=0`; timing and reports still work. The
-worker runs `ANALYSIS_WORKERS` engines (one thread each, `ANALYSIS_HASH_MB` of hash, low
-priority), claims rated games of at least `ANALYSIS_MIN_PLIES` from the queue, and for each game:
+The analysis pool (`anticheat::worker`) runs inside the server process: `ANALYSIS_WORKERS`
+loops, each driving one engine, a child process started from `ANALYSIS_ENGINE_PATH` (never
+through a shell) at nice 19, with one search thread and `ANALYSIS_HASH_MB` of hash. It does
+nothing when `ANALYSIS_ENGINE_PATH` is empty or `ANALYSIS_WORKERS=0`; timing and reports still
+work. Each loop claims rated games of at least `ANALYSIS_MIN_PLIES` from the queue (an idle loop
+looks again every `ANALYSIS_POLL_MS`), and for each game:
 
 1. **Deep pass**: every position from ply 16 to the end at `ANALYSIS_DEPTH_DEEP`, MultiPV 3, in
    game order with the hash kept between positions. A search is stopped at 25 million nodes and
@@ -173,8 +172,8 @@ the human stand-ins' ACPL 26 % higher than Stockfish 16 at 10/18, and scores 16 
 the statistics never mix them (section 4).
 
 **Queue policy** (docs/DESIGN.md 6.5). The engine takes the highest priority first, then the
-oldest job: a moderator request (priority `manual`, `scacelith-admin analysis queue <gameId>`,
-which calls `store.analysis.enqueue(gameId)`), then a game a credible player reported (`cheating`
+oldest job: a moderator request (priority `manual`, `scacelith-server admin analysis queue <gameId>`,
+which the store's `analysis().enqueue` writes), then a game a credible player reported (`cheating`
 or `other`,
 stored weight 0.5 or more), then a game with a suspicion signal at its end (either player's
 integrity level above `none`, an open `cheating` or `other` report of weight 0.5 or more against
@@ -212,13 +211,15 @@ analyse a smaller, steadier share of them; lower depths are cheaper too, but res
 statistics (below). A deep search stopped by the node limit (rare: 4 positions, in the 3
 calibration games that had failed at 9/15) costs up to 25 million nodes more, about 50 s of an
 OVH vCore (inferred). A job whose engine times out (`ANALYSIS_POSITION_TIMEOUT_MS`) or crashes
-is marked failed and the engine restarted; an engine that cannot start makes the worker wait
-(5 s .. 5 min) without claiming jobs.
+is marked failed; a search that times out is first asked to stop, and an engine that does not
+answer within 2 s is killed and started again for the next job. A loop never claims a job
+without a working engine: an engine that cannot start, or dies, is started again after 1 s,
+doubling up to 60 s, and back to 1 s once it ran for 60 s.
 
 ### Engine
 
 **Use Stockfish 19**, the official release: it is the engine the anti-cheat is calibrated for.
-The priors' accuracy relation, the synthetic engine profile of `testing/synthetic.js`, the
+The priors' accuracy relation, the synthetic engine profile of `anticheat/synthetic.rs`, the
 calibration of section 4 and the default depths were all measured with it. Its engines share one
 copy of their network (below), and at the default depths it analyses a position for less CPU
 than Stockfish 16 did at its former defaults (cost, above). Stockfish 16 or any other UCI engine
@@ -254,9 +255,10 @@ SIGKILL, and one stopped until its position timed out, came back attached to the
 socket a killed engine leaves behind is removed by the next engine that finds it dead). An
 engine that cannot use `/tmp/stockfish-<uid>` (a read-only `/tmp`, or a directory of that name
 owned by another user or open to others) loads a copy of its own and says why. So `/tmp` must be
-writable and the same for all the engines: the README's systemd unit gives the service a private
-writable `/tmp` (`PrivateTmp=true`, which `ProtectSystem=strict` leaves writable); with
-`ProtectSystem=strict` and no `PrivateTmp`, add `ReadWritePaths=/tmp`. Memory per engine, with
+writable and the same for all the engines: the example unit of `deploy/systemd/` gives the
+service a private writable `/tmp` (`PrivateTmp=yes`, which `ProtectSystem=strict` leaves
+writable) shared by the server and its engines; with `ProtectSystem=strict` and no `PrivateTmp`,
+add `ReadWritePaths=/tmp`. Memory per engine, with
 and without sharing: [SIZING.md](SIZING.md) (about 273 MB for the first engine, then 67 MB per
 engine shared and 177 MB unshared).
 
@@ -285,11 +287,11 @@ population of the new profile starts from the priors, and every player is scored
 of the new profile only, keeping the level they had until five of them are analysed. Plan such a
 change; going back to an earlier profile finds its statistics as they were.
 
-## 4. Statistical model (`scoring.js`, `priors.js`)
+## 4. Statistical model (`anticheat::scoring`, `anticheat::priors`)
 
 ### Population statistics
 
-For every (analysis profile, category, 100-point rating bucket) the analysis process keeps
+For every (analysis profile, category, 100-point rating bucket) the analysis pool keeps
 Welford statistics (n, mean, M2) of each per-game metric of rated games. Until a bucket has its
 own data, **priors** stand in: hard-coded means and per-game standard deviations by rating
 (accuracy, ACPL, T1 by rating from published human data: lichess accuracy/ACPL statistics and
@@ -313,9 +315,7 @@ profile's population: games analysed by another engine, network, depths or hash 
 same statistics or the same score. After a change of profile the new population starts from the
 priors, and a player whose recent games are of the earlier profile keeps their level until five
 games of the new one can be judged (`integrity show` marks the games of another profile). The
-statistics of an earlier profile stay in the database, unused; the migration that introduced
-the profiles (`analysis_profiles`) deleted those written before them, since nothing tells which
-engine produced them.
+statistics of an earlier profile stay in the database, unused.
 
 ### Scores
 
@@ -373,7 +373,7 @@ rows, where `integrity show` reads them.
 ### Calibration and validation
 
 * **Stockfish 19 against Stockfish 16, per setting.** A synthetic calibration (the model of
-  `src/anticheat/testing/synthetic.js`: honest players drawn from the population with personal
+  `crates/server/src/anticheat/synthetic.rs`: honest players drawn from the population with personal
   offsets, 1 % strongly underrated, personal timing styles) was made for each analysis setting from
   the same games analysed by each: 16 games of a player assisted by Stockfish 19 at depth 20,
   deeper than any analysis (set C), the same games assisted by Stockfish 16 (set C16), and the 38
@@ -414,7 +414,7 @@ rows, where `integrity show` reads them.
   and costs less than Stockfish 16 at 10/18 (section 3). A second draw of the random numbers moved
   the difference between 9/15 and Stockfish 16 by up to 1.2 games in a cell (2000 blitz: 0.8 game
   earlier, then 0.4 later).
-* Real engine (`test/unit/anticheat.engine.test.js` with `SCACELITH_TEST_ENGINE` set to the
+* Real engine (`anticheat/worker/tests/real_engine.rs` with `SCACELITH_TEST_ENGINE` set to the
   official Stockfish 19 binary or its `x86-64-bmi2` build, which give the same numbers; analysis
   at 6/10): an assisted player (depth 12 best move, relayed with 2-5 s delays) against human
   stand-ins (random plausible moves among the top 4 at low depth, thinking longer on harder
@@ -471,26 +471,29 @@ player receives in 24 hours sum to at most 2.0, and low-credibility reports (< 0
 0.5: ten sock puppets weigh as much as half a credible report. Every report is still kept for
 moderators.
 
-Review priority (computed when listing, `reports.js: reviewPriority`): level base (suspected 40,
+Review priority (computed when listing, `anticheat::reports`): level base (suspected 40,
 high confidence 70) + min(20, 4 x score) + 15 log2(1 + report weight of the last 30 days).
 
-## 6. For moderators (`bin/admin.js`)
+## 6. For moderators (`scacelith-server admin`)
 
-Run on the server host (same `.env`); every action is recorded (`moderator_action` security
-event with the moderator's name: `--by NAME`, `SCACELITH_MODERATOR`, `SUDO_USER` or the OS user;
-plus `reviewed_by` / `created_by`).
+Run on the server host, as the server's account and with its configuration (docs/DEPLOY.md,
+section 3); the commands work on the database directly and may run while the server runs.
+`scacelith-server admin --help` lists them. Every action is recorded (`moderator_action`
+security event with the moderator's name: `--by NAME`, `SCACELITH_MODERATOR`, `SUDO_USER` or the
+OS user; plus `reviewed_by` / `created_by`); `--json` prints machine-readable output.
 
 ```
-scacelith-admin integrity list [--level suspected|high_confidence|confirmed]   # by review priority
-scacelith-admin integrity show <name>        # evidence, per-game features, anomalies, reports
-scacelith-admin integrity confirm <name> --reason TEXT [--hours N] [--refund-since DATE | --no-refund]
-                                             # confirmed + ban + rating refunds, cheating reports -> actioned
-scacelith-admin integrity clear <name> [--reason TEXT] [--dismiss-reports]
-scacelith-admin refunds apply <name> [--since DATE]   # refunds of a confirmed cheater (window: from the latest ban for cheating)
-scacelith-admin refunds list [<name>] [--victim NAME] [--limit N]
-scacelith-admin analysis queue <gameId>      # analysed before every other game, unless running or done
-scacelith-admin reports list | reports resolve <id> actioned|dismissed
-scacelith-admin anomalies <name> | user show|ban|unban|reset-mfa|verify-email|revoke-sessions <name> | stats
+scacelith-server admin integrity list [--level suspected|high_confidence|confirmed] [--limit N]   # by review priority
+scacelith-server admin integrity show <name>        # evidence, per-game features, anomalies, reports
+scacelith-server admin integrity confirm <name> --reason TEXT [--hours N] [--keep-reports] [--refund-since DATE | --no-refund]
+                                                    # confirmed + ban + rating refunds, cheating reports -> actioned
+scacelith-server admin integrity clear <name> [--reason TEXT] [--dismiss-reports]
+scacelith-server admin refunds apply <name> [--since DATE]   # refunds of a confirmed cheater (window: from the latest ban for cheating)
+scacelith-server admin refunds list [<name>] [--victim NAME] [--limit N]
+scacelith-server admin analysis queue <gameId>      # analysed before every other game, unless running or done
+scacelith-server admin reports list [--limit N] | reports resolve <id> actioned|dismissed
+scacelith-server admin anomalies <name> [--limit N] | stats
+scacelith-server admin user show|ban|unban|reset-mfa|verify-email|revoke-sessions <name>
 ```
 
 What to look at in `integrity show`:
@@ -511,14 +514,14 @@ What to look at in `integrity show`:
    over-the-board style. `clear` records your review: the automatic
    model does not re-flag on the same evidence.
 
-A ban from the CLI is written to the database only (the CLI has no network access to the
+A ban from the command line is written to the database only (the command does not talk to the
 running server): the server applies it (disconnection, close 4004) when the player next connects
 or tries to start a game (queue, challenge, private code, rematch), so a banned player starts no
 game; a game in progress at the ban plays on, and after an `integrity confirm` without
 `--no-refund` the points its opponent loses in it are refunded when it is recorded (never after a
-`user ban`, which is not about cheating). `--revoke-sessions` also logs them out
-(shards drop cached sessions within 30 s). Its rating refunds are in the database at once; the
-running server tells the victims within 5 s (or later, out of a game).
+`user ban`, which is not about cheating). `--revoke-sessions` also logs them out (the server's
+session cache drops the revoked sessions within 30 s). Its rating refunds are in the database at
+once; the running server tells the victims within 5 s (or later, out of a game).
 
 Refunds: `integrity confirm` refunds the games of the last `RATING_REFUND_DAYS` by default;
 `--refund-since DATE` (`YYYY-MM-DD`, UTC, or an ISO 8601 time with its offset) sets another
@@ -565,52 +568,33 @@ account has now, is dropped and nothing is created.
 
 | Data | Where | Retention |
 |---|---|---|
-| Anomalies (kind, severity, game, detail, time) | `store.anomalies` | `info` and `suspicious` ones deleted after `RETENTION_SECURITY_DAYS` by the hourly retention purge; `certain` ones kept |
-| Sanctions (ban, reason, source, game, moderator, lift) | `store.sanctions` | kept |
-| Integrity level, score, evidence (statistics, peak, certain cheats, reviews) | `store.integrity` | kept while the account exists |
-| Per-game features of analysed games (numbers, compact per-move table; no positions beyond the game's own moves) | `store.analysis` | kept with the game (the scoring and `integrity show` read a player's latest analysed games, however old) |
-| Failed analysis jobs (no features, an error message) | `store.analysis` | deleted 30 days after the failure by the retention purge |
-| Population statistics (n, mean, M2 per metric, analysis profile, category and rating bucket; no personal data) | `store.integrity` population | kept, those of an earlier analysis profile too (unused) |
-| Reports (reporter, reported, game, category, comment, weight, outcome, moderator) | `store.reports` | kept; comments are only shown to moderators |
-| Moderator actions | `store.security` (`moderator_action`) | security retention |
-| Rating refunds (game, victim, cheater, category, points, time, ban or moderator, notified) | `rating_refunds` | kept |
-| Refund events | `store.security` (`rating_refund`) | security retention |
+| Anomalies (kind, severity, game, detail, time) | table `anomalies` | `info` and `suspicious` ones deleted after `RETENTION_SECURITY_DAYS` by the retention purge (hourly by default); `certain` ones kept |
+| Sanctions (ban, reason, source, game, moderator, lift) | table `sanctions` | kept |
+| Integrity level, score, evidence (statistics, peak, certain cheats, reviews) | table `player_integrity` | kept while the account exists |
+| Per-game features of analysed games (numbers, compact per-move table; no positions beyond the game's own moves) | table `analysis_jobs` | kept with the game (the scoring and `integrity show` read a player's latest analysed games, however old) |
+| Failed analysis jobs (no features, an error message) | table `analysis_jobs` | deleted 30 days after the failure by the retention purge |
+| Population statistics (n, mean, M2 per metric, analysis profile, category and rating bucket; no personal data) | table `population_stats` | kept, those of an earlier analysis profile too (unused) |
+| Reports (reporter, reported, game, category, comment, weight, outcome, moderator) | table `reports` | kept; comments are only shown to moderators |
+| Moderator actions | table `security_events` (`moderator_action`) | security retention |
+| Rating refunds (game, victim, cheater, category, points, time, ban or moderator, notified) | table `rating_refunds` | kept |
+| Refund events | table `security_events` (`rating_refund`) | security retention |
 
 No IP address is stored by this module (reports and moderator events carry `ip: null`).
 
-## 9. Store contract assumptions
+## 9. Code map
 
-DESIGN.md names some Store methods without their exact arguments; this module assumes (see the
-header of `src/anticheat/index.js`):
+| Module (`crates/server/src/`) | Content |
+|---|---|
+| `anticheat/service.rs` | anomaly classification and recording, the automatic sanction of a certain cheat (`Anticheat`, the `AnomalySink` of the hosts and the connections) |
+| `anticheat/sanction.rs` | the database side of an automatic ban (one store write job) |
+| `anticheat/refunds.rs`, `anticheat/notices.rs` | rating refunds, and their `Notice{RatingRestored}` sent by the lobby |
+| `anticheat/analysis/` | the UCI engine driver (`engine.rs`) and the analysis of one game into per-player features (`analyzer.rs`) |
+| `anticheat/worker.rs` | the analysis pool: one loop per engine, claims, results, integrity and population updates |
+| `anticheat/priors.rs`, `anticheat/scoring.rs`, `anticheat/integrity.rs`, `anticheat/players.rs` | the statistical model of section 4 and the memory rules of the levels |
+| `anticheat/reports.rs`, `http/routes/reports.rs` | reports: eligibility, credibility, weight caps, review priority, and `POST /api/v1/reports` |
+| `anticheat/admin/` | `scacelith-server admin` |
+| `store/analysis.rs`, `store/integrity.rs`, `store/reports.rs`, `store/refunds.rs`, `store/moderation.rs` | the tables of this module and their queries (the analysis queue policy runs in the game commit, `store/commit.rs`) |
 
-* `integrity.populationStats('<profile>|<category>|<bucket>')` returns `{ <metric>: { n, mean,
-  m2 } }`, and `integrity.updatePopulation([{ key: '<profile>|<category>|<bucket>|<metric>',
-  value }], now)` sends one observation per metric and game, which the store merges (Welford);
-  the analysis process is the only writer;
-* `analysis.forUser(userId, limit, { doneOnly: true })` returns the player's completed analyses,
-  newest first, each row with the `features` given to `complete()`;
-* `reports.forReported(userId)` rows carry `weight`, `createdAt` and `status`; the optional
-  `reports.forReporter(userId)` (rows with `outcome`) feeds the reporter's track record;
-* `reports.resolveOpenFor(reportedId, 'cheating', outcome, by, now)` resolves every open cheating
-  report of the player and returns their ids; `integrity confirm` (unless `--keep-reports`) and
-  `integrity clear --dismiss-reports` require it (no fallback);
-* the optional `reports.weightSince(reportedId, since, lowThreshold)` (`{ total, low }`) and
-  `reports.countFor(reportedId)` (`{ total, open }`) make the 24-hour cap of a new report, the
-  30-day report weights and the report counts of `bin/admin.js` cover every report; without them
-  they are taken from `forReported`'s rows (the newest 200);
-* `analysis queue` of `bin/admin.js` requires `games.byId(gameId)`, `analysis.job(gameId)` (the
-  game's job with its `status` and `priority`, null without one) and
-  `analysis.enqueue(gameId, now)`;
-* the optional `analysis.request(gameId, 'report' | 'signal', now)` queues a reported game,
-  at `report` priority for a credible report and `signal` for a low-credibility one (without it
-  a report does not touch the analysis queue);
-* `analysis.next()` returns each job with its `priority` (0 for the ordinary sample, the only
-  jobs that feed the population);
-* the optional `analysis.touch(gameId, workerId, now)` renews the claim of a job every minute
-  while it is analysed (without it, a job analysed for more than 10 minutes is taken for the job
-  of a vanished worker and given to another engine);
-* the optional `transaction(fn)` makes each read-modify-write of an integrity record (analysis
-  scoring, automatic sanction, `integrity confirm` / `clear`) one transaction, so that it cannot
-  overwrite what another process wrote in between; without it the writes are made directly;
-* free-form values are passed as objects and retried as JSON text if the store refuses them;
-* the rating refunds use `refunds` when the store has it (a partial store gives none).
+The pure parts (engine driver, analyzer, priors, scoring, integrity rules) hold no store and no
+socket; the store-side services run them inside their store jobs, so a read-modify-write of an
+integrity record is one transaction on the writer thread.

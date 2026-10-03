@@ -392,7 +392,8 @@ published ranges; the experimental ranges are never published, and a published p
 * **Messages.** Each connection has a token bucket of `Welcome.maxMsgPerSec` messages per second
   (`WS_MSG_RATE`, 20) holding `Welcome.msgBurst` tokens (`WS_MSG_BURST`, 40). A message beyond it
   is dropped and answered with `Error{RateLimited}` (at most one such error per second); repeated
-  excess is a fatal `Flood`. Gestures use their own bucket (above).
+  excess is a fatal `Flood` (the reference server: more than max(10, `msgBurst`) messages dropped
+  within 10 s). Gestures use their own bucket (above).
 * **Client pings** beyond one per 950 ms get no `Pong`.
 * **Connections.** The server limits simultaneous WebSocket connections per address
   (`MAX_CONNECTIONS_PER_IP`, HTTP 429 at the upgrade) and players on the whole server
@@ -468,8 +469,8 @@ published ranges; the experimental ranges are never published, and a published p
 
 ## Messages
 
-The S2C messages a client receives, and every message's fields, offsets (while they are fixed)
-and bounds. Sizes include the type byte.
+Every message of both directions, then the fields of each one with their offsets (while they are
+fixed) and bounds. Sizes include the type byte.
 
 <!-- protogen:begin messages -->
 

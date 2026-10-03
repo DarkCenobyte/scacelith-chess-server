@@ -1,6 +1,6 @@
 //! The network server: binds the ports of the configuration and serves them until the shutdown.
 //!
-//! Topology (DESIGN 5.6, the Node listeners):
+//! Topology (DESIGN 5.7):
 //!
 //! * `TLS_MODE=native`: every new TCP connection goes through the [`TlsGate`] (per-address limits,
 //!   ClientHello waiting room, handshake slots), then the rustls handshake. With

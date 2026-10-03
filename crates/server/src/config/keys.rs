@@ -241,8 +241,8 @@ pub static KEYS: &[KeySpec] = &[
         Server,
         Port,
         "HTTPS API port (TCP). 443, the HTTPS port: firewalls and proxies let it through; any free port works \
-         for a community server. A port below 1024 needs the CAP_NET_BIND_SERVICE capability (README, systemd \
-         unit) unless the server runs as root.",
+         for a community server. A port below 1024 needs the CAP_NET_BIND_SERVICE capability (docs/DEPLOY.md) \
+         unless the server runs as root.",
     )
     .default("443"),
     key(
@@ -337,8 +337,13 @@ pub static KEYS: &[KeySpec] = &[
     )
     .default("false"),
     // ---- Storage ----------------------------------------------------------------------------
-    key("DATA_DIR", Storage, Path, "Directory for the database, the game journal and runtime files.")
-        .default("./data"),
+    key(
+        "DATA_DIR",
+        Storage,
+        Path,
+        "Directory of the database and the game journal (created at start when missing).",
+    )
+    .default("./data"),
     key(
         "DB_PATH",
         Storage,
@@ -874,7 +879,7 @@ pub static KEYS: &[KeySpec] = &[
         Int,
         "Password hashes and verifications (login, registration, password change and reset, account changes \
          that ask for the password) that the server runs at once, each on a thread of its own. Each costs \
-         about 0.5 s of CPU and 64-128 MiB. Empty (the default) = WORKERS. check-config warns when it is above \
+         about 0.5 s of CPU and 64 MiB (Argon2id). Empty (the default) = WORKERS. check-config warns when it is above \
          the number of CPU cores, as the hashes would then slow the games down.",
     )
     .range(1, 64),
@@ -1314,8 +1319,9 @@ pub static KEYS: &[KeySpec] = &[
         "LOG_FORMAT",
         Observability,
         Enum(&["json", "pretty"]),
-        "JSON lines (for log collectors) or readable text, on stdout. Under systemd each line starts with its \
-         journald priority (<6> info, <5> security, <4> warn, <3> error).",
+        "JSON lines (for log collectors) or readable text, on stdout (stderr for migrate). When that stream is \
+         the journal (JOURNAL_STREAM, set by systemd), each line starts with its syslog priority (<7> debug, \
+         <6> info, <5> security, <4> warn, <3> error).",
     )
     .default("json"),
     key(

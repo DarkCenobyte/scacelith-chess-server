@@ -6,7 +6,7 @@
 //! The command line ([`crate::cli`]) loads and checks the configuration, then calls these entry
 //! points; each returns the process exit code (0 success, 1 failure, 2 usage).
 //!
-//! # Start-up ([`Instance::launch`])
+//! # Start-up (`Instance::launch`)
 //!
 //! `STATUS=starting`, then in order: the checks of the shard range and of `ABUSE_EXEMPT`, the
 //! process metrics, the open file limit, the data directory, the store (opened with the Elo rules
@@ -22,14 +22,14 @@
 //! starts. A stop signal received during the start-up stops the server once it is started,
 //! before `READY=1`; a second one exits at once with 1.
 //!
-//! # Signals ([`run`])
+//! # Signals (`run`)
 //!
 //! * SIGHUP: `RELOADING=1`, the certificate and key files are read again (a failure is logged
 //!   and the current certificate kept), then `READY=1`, whatever the outcome.
-//! * SIGTERM / SIGINT: [`Instance::shutdown`], then exit 0; a second signal during the shutdown
+//! * SIGTERM / SIGINT: `Instance::shutdown`, then exit 0; a second signal during the shutdown
 //!   exits at once with 1.
 //!
-//! # Shutdown ([`Instance::shutdown`])
+//! # Shutdown (`Instance::shutdown`)
 //!
 //! `STOPPING=1` and `STATUS=draining`; the listeners stop accepting (`/readyz` 503, upgrades 503,
 //! the HTTP requests in progress finish), the lobby's periodic work stops, the engine analysis and

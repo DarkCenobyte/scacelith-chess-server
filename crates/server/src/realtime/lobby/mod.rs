@@ -29,7 +29,7 @@
 //! player (one indexed read, a rare request).
 //!
 //! The inbox is unbounded; what can be in it is bounded by its sources: one claim and one release
-//! per connection, [`MAX_LOBBY_IN_FLIGHT`](super::link::MAX_LOBBY_IN_FLIGHT) requests per
+//! per connection, `MAX_LOBBY_IN_FLIGHT` (8) requests per
 //! connection, one creation, rematch or conduct result per game, and the rare auth and anti-cheat
 //! events.
 

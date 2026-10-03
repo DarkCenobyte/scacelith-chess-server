@@ -1,7 +1,7 @@
-//! HTTP/1.1 connections of the API port, on hyper (DESIGN 5.6 and 8; the Node listener's
-//! hardening).
+//! HTTP/1.1 connections of the API port, on hyper (DESIGN 5.7 and 8; the hardening of the former
+//! Node listener).
 //!
-//! Each connection runs hyper's HTTP/1 server over a [`GuardedIo`] that owns the timers and the
+//! Each connection runs hyper's HTTP/1 server over a `GuardedIo` that owns the timers and the
 //! answers hyper cannot give the Node way:
 //!
 //! * a request head must arrive within 10 s (from the connection's start, or from the first byte

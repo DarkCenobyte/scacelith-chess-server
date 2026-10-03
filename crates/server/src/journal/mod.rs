@@ -3,7 +3,7 @@
 //! docs/RUST-PORT.md (6.3) and DESIGN.md (5.6).
 //!
 //! Crash safety of the games in progress without a database write per move. One journal per
-//! shard, `JOURNAL_DIR/shard-<n>/segment-<seq>.log`, in the native format of [`format`]
+//! shard, `JOURNAL_DIR/shard-<n>/segment-<seq>.log`, in the native format of [`mod@format`]
 //! (CRC-32C per record).
 //!
 //! # Writing

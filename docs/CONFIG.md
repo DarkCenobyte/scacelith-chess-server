@@ -42,7 +42,7 @@ Sections:
 | `SERVER_PUBLIC_HOST` | text | `localhost` | Public DNS name of the server, used in e-mail links, and Google sign-in works only for players who added the server under exactly this name and PUBLIC_API_PORT. |
 | `SERVER_MOTD` | text (at most 200 characters) | (empty) | Short message of the day shown in the online menu. |
 | `BIND_ADDRESS` | text | `0.0.0.0` | Address the API and WebSocket listeners bind to. |
-| `API_PORT` | port (0-65535) | `443` | HTTPS API port (TCP). 443, the HTTPS port: firewalls and proxies let it through; any free port works for a community server. A port below 1024 needs the CAP_NET_BIND_SERVICE capability (README, systemd unit) unless the server runs as root. |
+| `API_PORT` | port (0-65535) | `443` | HTTPS API port (TCP). 443, the HTTPS port: firewalls and proxies let it through; any free port works for a community server. A port below 1024 needs the CAP_NET_BIND_SERVICE capability (docs/DEPLOY.md) unless the server runs as root. |
 | `WS_PORT` | port (0-65535) | (empty) | WSS (game WebSocket) port. Empty (the default) = the same port as API_PORT: one TLS listener serves the API under /api/v1 and the WebSocket upgrade on /ws. Set another port to split them. |
 | `PUBLIC_API_PORT` | port (0-65535) | `0` | API port as seen by clients when a proxy/NAT maps ports (0 = API_PORT). |
 | `PUBLIC_WS_PORT` | port (0-65535) | `0` | WSS port as seen by clients (0 = WS_PORT). |
@@ -68,7 +68,7 @@ Sections:
 
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
-| `DATA_DIR` | path (relative to the working directory) | `./data` | Directory for the database, the game journal and runtime files. |
+| `DATA_DIR` | path (relative to the working directory) | `./data` | Directory of the database and the game journal (created at start when missing). |
 | `DB_PATH` | path (relative to the working directory) | (empty) | SQLite database file (default: DATA_DIR/scacelith.db; :memory: keeps it in memory, for tests). |
 | `JOURNAL_DIR` | path (relative to the working directory) | (empty) | Append-only journal of the games in progress, replayed after a crash (default: DATA_DIR/journal). |
 | `JOURNAL_FLUSH_MS` | integer (5-1000) | `50` | Longest time a game event waits in memory before being written to the journal (group commit). |
@@ -166,7 +166,7 @@ Sections:
 | `POW_REGISTER_BITS` | integer (0-26) | `18` | Proof-of-work difficulty (leading zero bits of SHA-256) required to register; 0 disables it. |
 | `POW_LOGIN_BITS` | integer (0-26) | `18` | Proof-of-work difficulty required to log in while the server sees a credential-stuffing wave; 0 disables it. |
 | `POW_LOGIN_TRIGGER_PER_MIN` | integer (&gt;= 1) | `30` | Failed logins per minute (whole server) that turn on the login proof-of-work. Every failed login costs a password hash (about 0.5 s of CPU), so 30 per minute already keeps a quarter of a core busy, and a few hundred would need several cores: with PASSWORD_HASH_CONCURRENCY at one per core, a small server could never reach such a trigger. Raise it only on a large server where honest typos alone come near it. |
-| `PASSWORD_HASH_CONCURRENCY` | integer (1-64) | (empty) | Password hashes and verifications (login, registration, password change and reset, account changes that ask for the password) that the server runs at once, each on a thread of its own. Each costs about 0.5 s of CPU and 64-128 MiB. Empty (the default) = WORKERS. check-config warns when it is above the number of CPU cores, as the hashes would then slow the games down. |
+| `PASSWORD_HASH_CONCURRENCY` | integer (1-64) | (empty) | Password hashes and verifications (login, registration, password change and reset, account changes that ask for the password) that the server runs at once, each on a thread of its own. Each costs about 0.5 s of CPU and 64 MiB (Argon2id). Empty (the default) = WORKERS. check-config warns when it is above the number of CPU cores, as the hashes would then slow the games down. |
 | `PASSWORD_HASH_QUEUE_MAX` | integer (&gt;= 0) | (empty) | Password hashes that may wait for a free slot, whole server; one more is refused at once with 503 server_busy and a Retry-After of 5 to 15 s (0: no waiting at all). Empty (the default) = 32 x WORKERS. Once half of them wait, one client (an IPv4 address, or an IPv6 /48) may have at most PASSWORD_HASH_WAITERS_PER_SOURCE of them waiting; its next one is refused with 429 rate_limited. |
 | `PASSWORD_HASH_WAITERS_PER_SOURCE` | integer (&gt;= 1) | (empty) | Password hashes one client (an IPv4 address, or an IPv6 /48) may have waiting once PASSWORD_HASH_QUEUE_MAX is at least half full, whole server; its next request is then refused with 429 rate_limited and a Retry-After of 5 to 15 s, and that refused attempt does not count against AUTH_RATE_PER_IP. Empty (the default) = 2 x WORKERS. While less than half of the queue waits, one client may queue more, so that players who log in together behind one address (a school or a company network) are served when the server is not busy, and, as long as PASSWORD_HASH_WAITERS_PER_SOURCE is at most half of PASSWORD_HASH_QUEUE_MAX, one client never holds more than half of the queue. Raise it for such a site if its players log in while the server is busy, together with MAX_PENDING_HANDSHAKES_PER_IP and AUTH_RATE_PER_IP. |
 | `PASSWORD_HASH_QUEUE_TIMEOUT_MS` | integer (100-13000) | `10000` | Longest wait for a password hash slot, for all the hashes of one request together (a password change hashes twice); the request is then refused with 503 server_busy. At most 13000: the game gives up after 15 s, and the hash itself takes a second or two, so that the player sees the "busy" answer rather than a timeout. |
@@ -252,7 +252,7 @@ Sections:
 | `METRICS_BIND` | text | `127.0.0.1` | Keep it private: 127.0.0.1 or an internal address. |
 | `METRICS_TOKEN`<br>`METRICS_TOKEN_FILE` | secret text (used as written) | (empty) | Optional bearer token required to read the metrics: /metrics then needs the header "Authorization: Bearer &lt;token&gt;" with this exact text (no spaces). |
 | `LOG_LEVEL` | one of debug, info, warn, error | `info` | Log verbosity. |
-| `LOG_FORMAT` | one of json, pretty | `json` | JSON lines (for log collectors) or readable text, on stdout. Under systemd each line starts with its journald priority (&lt;6&gt; info, &lt;5&gt; security, &lt;4&gt; warn, &lt;3&gt; error). |
+| `LOG_FORMAT` | one of json, pretty | `json` | JSON lines (for log collectors) or readable text, on stdout (stderr for migrate). When that stream is the journal (JOURNAL_STREAM, set by systemd), each line starts with its syslog priority (&lt;7&gt; debug, &lt;6&gt; info, &lt;5&gt; security, &lt;4&gt; warn, &lt;3&gt; error). |
 | `LOG_IP` | one of truncated, full, hashed | `truncated` | How client addresses appear in the logs: truncated (IPv4 /24, IPv6 /48), full, or hashed (keyed HMAC, rotated daily). |
 | `RETENTION_SECURITY_DAYS` | integer (&gt;= 1) | `90` | Security events (failed logins, anomalies without sanction) are deleted after this many days. |
 | `RETENTION_IP_DAYS` | integer (&gt;= 1) | `30` | Stored IP addresses (sessions, security events) are erased after this many days. |
