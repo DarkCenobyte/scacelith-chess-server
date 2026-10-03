@@ -34,10 +34,21 @@
 //! `Connection: keep-alive` and `Keep-Alive`, or `Connection: close` (the 1000th request of a
 //! connection, a request asking for it, a draining server).
 //!
-//! Known differences with Node's llhttp: header lines ending in a bare LF are accepted (httparse
-//! is lenient there), and pipelined requests are answered one after the other (the
-//! `Content-Length` lines of a request whose head came in with the previous request are not
-//! counted).
+//! Known differences with Node's listener, corner cases where hyper's behaviour is kept
+//! (RUST-PORT.md section 1; `tools/rest-diff` shows each one):
+//!
+//! * header lines ending in a bare LF are accepted (httparse is lenient there);
+//! * pipelined requests are answered one after the other (the `Content-Length` lines of a
+//!   request whose head came in with the previous request are not counted);
+//! * the answer to an HTTP/1.0 request has an `HTTP/1.0` status line (Node: `HTTP/1.1`);
+//! * header names are written in title case, `Www-Authenticate` for Node's `WWW-Authenticate`;
+//! * a `#fragment` in the target is dropped (Node routes it as part of the path: `404`);
+//! * a target with a character the http crate refuses, such as `"`, gets the raw `400`;
+//! * a request line without a version (HTTP/0.9) gets the raw `400` (Node answers it as
+//!   HTTP/1.1), the HTTP/2 preface is closed without an answer (Node: the raw `400`);
+//! * a body the route does not read, still on its way when the answer is sent, ends the
+//!   connection after the answer (hyper closes it; Node reads and discards it and keeps the
+//!   connection).
 
 use std::convert::Infallible;
 use std::future::Future;
