@@ -4,7 +4,7 @@
 use scacelith_protocol::{EndReason as ER, GameEventKind as EV, GameStatus as GS, Move, MsgType, PlayerInfo};
 
 use super::journal::{
-    CHECKPOINT_BYTES, ENDED_REC_BYTES, EVENT_REC_BYTES, MOVE_REC_BYTES, RECOVERED_REC_BYTES, kind,
+    CHECKPOINT_BYTES, ENDED_REC_BYTES, EVENT_REC_BYTES, MOVE_REC_BYTES, RECOVERED_REC_BYTES,
 };
 use super::tests::{B, W, decode, game_event, player};
 use super::*;
@@ -100,7 +100,7 @@ pub(super) struct State {
     result: Option<GameResult>,
     end_gseq: u32,
     culprit: Option<Side>,
-    flags: u32,
+    flags: i64,
     next_deadline: Option<i64>,
     digest: u32,
     snapshot_w: GameSnapshot,
@@ -177,7 +177,7 @@ pub(super) fn busy_game() -> (Journaled, i64) {
     (j, t)
 }
 
-fn records(out: &Outcome) -> Vec<(u8, i64, Vec<u8>)> {
+fn records(out: &Outcome) -> Vec<(RecordKind, i64, Vec<u8>)> {
     out.journal.iter().map(|r| (r.kind, r.at, r.payload.clone())).collect()
 }
 
@@ -187,10 +187,10 @@ fn replaying_the_journal_rebuilds_an_identical_room() {
     let copy = j.replay();
     assert_eq!(state(&copy, t + 10), state(&j.room, t + 10));
     // Every record kind was exercised.
-    let mut kinds: Vec<u8> = j.log.iter().map(|r| r.kind).collect();
+    let mut kinds: Vec<u8> = j.log.iter().map(|r| r.kind.as_u8()).collect();
     kinds.sort_unstable();
     kinds.dedup();
-    assert_eq!(kinds, [kind::CREATED, kind::MOVE, kind::EVENT]);
+    assert_eq!(kinds, [RecordKind::Created, RecordKind::Move, RecordKind::Event].map(RecordKind::as_u8));
 }
 
 #[test]
@@ -271,7 +271,7 @@ fn a_finished_game_replays_to_the_same_result_and_record() {
         j.mv(Side::to_move(i), t);
     }
     assert!(j.room.is_over());
-    assert_eq!(j.log.last().map(|r| r.kind), Some(kind::ENDED));
+    assert_eq!(j.log.last().map(|r| r.kind), Some(RecordKind::Ended));
     let copy = j.replay();
     assert_eq!(copy.result(), j.room.result());
     assert_eq!(copy.gseq(), j.room.gseq());
@@ -282,7 +282,7 @@ fn a_finished_game_replays_to_the_same_result_and_record() {
 fn journal_state_is_a_compact_journal_that_rebuilds_the_same_room() {
     let (mut j, t) = busy_game();
     let compact = j.room.journal_state();
-    assert_eq!(compact.iter().filter(|r| r.kind == kind::EVENT).count(), 1, "one checkpoint");
+    assert_eq!(compact.iter().filter(|r| r.kind == RecordKind::Event).count(), 1, "one checkpoint");
     let copy = replay(&compact, &Script::default());
     assert_eq!(state(&copy, t + 10), state(&j.room, t + 10));
     j.room.on_resign(W, 0, t + 20);
@@ -295,11 +295,11 @@ fn journal_state_is_a_compact_journal_that_rebuilds_the_same_room() {
 fn journal_snapshot_is_journal_state_in_one_record_and_a_replay_starts_from_the_latest() {
     let (mut j, t) = busy_game();
     let snap = j.room.journal_snapshot(t + 5);
-    assert_eq!((snap.kind, snap.at), (kind::SNAPSHOT, t + 5));
+    assert_eq!((snap.kind, snap.at), (RecordKind::Snapshot, t + 5));
     let copy = replay(std::slice::from_ref(&snap), &Script::default());
     assert_eq!(state(&copy, t + 10), state(&j.room, t + 10));
     // Records after the snapshot apply on top of it; the ones before it are ignored.
-    let mut log = vec![JournalRecord { kind: kind::MOVE, at: 0, payload: vec![0xff; 3] }, snap];
+    let mut log = vec![JournalRecord { kind: RecordKind::Move, at: 0, payload: vec![0xff; 3] }, snap];
     let o = j.room.on_resign(B, 0, t + 20);
     log.extend(o.journal);
     let copy = replay(&log, &Script::default());
@@ -311,7 +311,7 @@ fn journal_snapshot_is_journal_state_in_one_record_and_a_replay_starts_from_the_
     bad.payload.pop();
     let r =
         GameRoom::from_journal(&[bad], RoomSettings::default(), FakeRules::boxed(Script::default()), true);
-    assert!(matches!(r, Err(RoomError::Journal(_))));
+    assert!(matches!(r, Err(RoomError::Replay(_))));
 }
 
 #[test]
@@ -352,7 +352,7 @@ fn recover_marks_both_players_away_with_the_recovery_grace_charges_no_downtime_a
     assert_eq!(released.clock_started, Some(B));
     assert_eq!(
         released.journal.iter().map(|r| (r.kind, r.payload[0])).collect::<Vec<_>>(),
-        [(kind::EVENT, EventKind::Checkpoint as u8)]
+        [(RecordKind::Event, EventKind::Checkpoint as u8)]
     );
     assert!(!copy.clock_held);
     let s2 = copy.snapshot(W, restart_at + HOLD + 1000);
@@ -391,14 +391,14 @@ fn recover_ends_a_game_whose_ended_record_was_torn_off() {
         t += 1000;
         j.mv(Side::to_move(i), t);
     }
-    let torn: Vec<JournalRecord> = j.log.iter().filter(|r| r.kind != kind::ENDED).cloned().collect();
+    let torn: Vec<JournalRecord> = j.log.iter().filter(|r| r.kind != RecordKind::Ended).cloned().collect();
     let mut copy = replay(&torn, &script);
     assert!(!copy.is_over());
     let out = copy.recover(t + 99999);
     assert!(out.ended);
     let r = copy.result().expect("over");
     assert_eq!((r.status, r.reason, r.ended_at), (GS::WhiteWins, ER::Checkmate, t));
-    assert_eq!(out.journal[0].kind, kind::ENDED);
+    assert_eq!(out.journal[0].kind, RecordKind::Ended);
     assert!(!copy.rematch_open());
 }
 
@@ -413,7 +413,7 @@ fn recover_ends_a_game_at_the_ply_limit_whose_ended_record_was_torn_off_as_live_
     }
     assert_eq!(j.room.ply(), MAX_PLIES);
     let ended = j.log.last().cloned().expect("records");
-    assert_eq!(ended.kind, kind::ENDED);
+    assert_eq!(ended.kind, RecordKind::Ended);
     let mut copy = replay(&j.log[..j.log.len() - 1], &Script::default());
     assert!(!copy.is_over());
     let out = copy.recover(t + 99999);
@@ -429,21 +429,21 @@ fn recover_ends_a_game_at_the_ply_limit_whose_ended_record_was_torn_off_as_live_
 fn bad_journals_fail_a_strict_replay_and_stop_a_lenient_one_at_the_bad_record() {
     let (j, _) = busy_game();
     let mut bad = j.log.clone();
-    let i = bad.iter().enumerate().position(|(k, r)| k > 3 && r.kind == kind::MOVE).expect("a move");
+    let i = bad.iter().enumerate().position(|(k, r)| k > 3 && r.kind == RecordKind::Move).expect("a move");
     bad[i].payload[0..2].copy_from_slice(&999u16.to_le_bytes()); // wrong ply
     let strict =
         GameRoom::from_journal(&bad, RoomSettings::default(), FakeRules::boxed(Script::default()), true);
-    assert!(matches!(strict, Err(RoomError::Journal(_))));
+    assert!(matches!(strict, Err(RoomError::Replay(_))));
     let partial =
         GameRoom::from_journal(&bad, RoomSettings::default(), FakeRules::boxed(Script::default()), false)
             .expect("lenient");
     assert!(partial.replay_error().is_some());
-    assert_eq!(partial.ply(), bad[..i].iter().filter(|r| r.kind == kind::MOVE).count());
-    let garbage = [JournalRecord { kind: kind::CREATED, at: 0, payload: b"{oops".to_vec() }];
+    assert_eq!(partial.ply(), bad[..i].iter().filter(|r| r.kind == RecordKind::Move).count());
+    let garbage = [JournalRecord { kind: RecordKind::Created, at: 0, payload: b"{oops".to_vec() }];
     for log in [&garbage[..], &[], &j.log[1..]] {
         let r =
             GameRoom::from_journal(log, RoomSettings::default(), FakeRules::boxed(Script::default()), false);
-        assert!(matches!(r, Err(RoomError::Journal(_))), "{r:?}");
+        assert!(matches!(r, Err(RoomError::Replay(_))), "{r:?}");
     }
     // A second created record, a short record, an unknown event kind, a bad ended status.
     let mut log = j.log.clone();
@@ -453,27 +453,26 @@ fn bad_journals_fail_a_strict_replay_and_stop_a_lenient_one_at_the_bad_record() 
             .is_err()
     );
     let mut log = j.log.clone();
-    log.push(JournalRecord { kind: kind::EVENT, at: T0, payload: vec![9; EVENT_REC_BYTES] });
+    log.push(JournalRecord { kind: RecordKind::Event, at: T0, payload: vec![9; EVENT_REC_BYTES] });
     assert!(
         GameRoom::from_journal(&log, RoomSettings::default(), FakeRules::boxed(Script::default()), true)
             .is_err()
     );
     let mut log = j.log.clone();
-    log.push(JournalRecord { kind: kind::ENDED, at: T0, payload: vec![0; ENDED_REC_BYTES] });
+    log.push(JournalRecord { kind: RecordKind::Ended, at: T0, payload: vec![0; ENDED_REC_BYTES] });
     assert!(
         GameRoom::from_journal(&log, RoomSettings::default(), FakeRules::boxed(Script::default()), true)
             .is_err()
     );
     let mut log = j.log.clone();
-    log.push(JournalRecord { kind: kind::MOVE, at: T0, payload: vec![0; MOVE_REC_BYTES - 1] });
+    log.push(JournalRecord { kind: RecordKind::Move, at: T0, payload: vec![0; MOVE_REC_BYTES - 1] });
     assert!(
         GameRoom::from_journal(&log, RoomSettings::default(), FakeRules::boxed(Script::default()), true)
             .is_err()
     );
-    // `committed` and unknown kinds carry no room state.
+    // `committed` records carry no room state.
     let mut log = j.log.clone();
-    log.push(JournalRecord { kind: kind::COMMITTED, at: T0, payload: Vec::new() });
-    log.push(JournalRecord { kind: 200, at: T0, payload: vec![1, 2, 3] });
+    log.push(JournalRecord { kind: RecordKind::Committed, at: T0, payload: Vec::new() });
     assert_eq!(replay(&log, &Script::default()).ply(), j.room.ply());
 }
 
@@ -481,12 +480,12 @@ fn bad_journals_fail_a_strict_replay_and_stop_a_lenient_one_at_the_bad_record() 
 fn journal_payload_formats() {
     let mut j = Journaled::new(Script::default());
     let created = &j.log[0];
-    assert_eq!((created.kind, created.at), (kind::CREATED, T0));
+    assert_eq!((created.kind, created.at), (RecordKind::Created, T0));
     assert_eq!(created.payload[0], 1, "format");
     assert_eq!(created.payload[1], 1 | 2, "rated, autoPress");
     j.mv(W, T0 + 1000);
     let mv_rec = j.log[1].clone();
-    assert_eq!(mv_rec.kind, kind::MOVE);
+    assert_eq!(mv_rec.kind, RecordKind::Move);
     assert_eq!(mv_rec.payload.len(), MOVE_REC_BYTES);
     assert_eq!(mv_rec.at, T0 + 1000);
     assert_eq!(u16::from_le_bytes([mv_rec.payload[2], mv_rec.payload[3]]), fake_move(0, 0));
@@ -504,7 +503,7 @@ fn journal_payload_formats() {
     assert_eq!(recovered.len(), RECOVERED_REC_BYTES);
     assert_eq!(recovered[..4], [EventKind::Recovered as u8, 2, 1, 0]);
     let presence = |r: &GameRoom| {
-        let cp = r.journal_state().into_iter().find(|r| r.kind == kind::EVENT).expect("checkpoint");
+        let cp = r.journal_state().into_iter().find(|r| r.kind == RecordKind::Event).expect("checkpoint");
         assert_eq!(cp.payload.len(), CHECKPOINT_BYTES);
         cp.payload[2]
     };
@@ -514,7 +513,7 @@ fn journal_payload_formats() {
     let o = j.room.on_resign(W, 0, T0 + 2000);
     j.run(o);
     let end = &j.log[3];
-    assert_eq!(end.kind, kind::ENDED);
+    assert_eq!(end.kind, RecordKind::Ended);
     assert_eq!(end.payload.len(), ENDED_REC_BYTES);
     assert_eq!(end.payload[..3], [GS::BlackWins.to_u8(), ER::Resignation.to_u8(), 0]);
     // A MoveMade resent from the stored data is byte-identical to the original.

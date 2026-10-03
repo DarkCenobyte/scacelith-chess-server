@@ -9,7 +9,6 @@
 
 use scacelith_protocol::{Color, EndReason as ER, GameEventKind as EV, GameStatus as GS, Move};
 
-use super::journal::kind;
 use super::journal_tests::{Journaled, state};
 use super::tests::{B, W, game_event, player, settings};
 use super::*;
@@ -194,7 +193,7 @@ fn the_recovery_record_keeps_the_grace_and_checkpoints_carry_it() {
     let r = t + 7000;
     let mut first = restart(&j.log, r, custom);
     let rec = &first.out.journal[0];
-    assert_eq!(rec.kind, kind::EVENT);
+    assert_eq!(rec.kind, RecordKind::Event);
     assert_eq!(u32_at(&rec.payload, 8), 40000);
     // Replayed with another configuration: the journaled grace wins (a replay rebuilds the room).
     let again = rebuild(&first.log, RoomSettings::default());
@@ -295,7 +294,7 @@ fn the_hold_ends_without_its_player_the_clock_runs_a_checkpoint_is_journaled_and
     assert_eq!(o.clock_started, Some(W));
     assert_eq!(
         o.journal.iter().map(|r| (r.kind, r.at, r.payload[0], r.payload.len())).collect::<Vec<_>>(),
-        [(kind::EVENT, r + HOLD, EventKind::Checkpoint as u8, 68)]
+        [(RecordKind::Event, r + HOLD, EventKind::Checkpoint as u8, 68)]
     );
     assert!(!s.room.clock_held);
     let sn = s.room.snapshot(B, r + HOLD + 1000);
@@ -354,7 +353,7 @@ fn recovery_clock_hold_0_restarts_the_clock_at_once_and_a_short_recovered_record
     let mut short = r0.log.clone();
     short.last_mut().expect("records").payload.truncate(12);
     let e = GameRoom::from_journal(&short, none, FakeRules::boxed(Script::default()), true);
-    assert!(matches!(e, Err(RoomError::Journal(_))));
+    assert!(matches!(e, Err(RoomError::Replay(_))));
 }
 
 #[test]
@@ -516,7 +515,7 @@ fn the_first_move_restart_survives_journal_state_a_journal_snapshot_and_a_replay
     let st = g.room.journal_state();
     let cp = st
         .iter()
-        .find(|r| r.kind == kind::EVENT && r.payload[0] == EventKind::Checkpoint as u8)
+        .find(|r| r.kind == RecordKind::Event && r.payload[0] == EventKind::Checkpoint as u8)
         .expect("checkpoint");
     assert_eq!(cp.payload[2] & 0x18, 16, "Black's away bit in the checkpoint presence byte");
     for (label, records) in
@@ -540,7 +539,7 @@ fn the_first_move_restart_survives_journal_state_a_journal_snapshot_and_a_replay
     let zcp = rebuild(std::slice::from_ref(&zs), RoomSettings::default())
         .journal_state()
         .into_iter()
-        .find(|r| r.kind == kind::EVENT)
+        .find(|r| r.kind == RecordKind::Event)
         .expect("checkpoint");
     assert_eq!(zcp.payload[2] & 0x18, 0x18);
     let mut zc = rebuild(std::slice::from_ref(&zs), RoomSettings::default());
@@ -579,7 +578,7 @@ fn without_the_restart_flag_or_the_away_bits_a_journal_replays_without_the_first
     s.run(o);
     let o = s.room.on_reconnect(B, back);
     s.run(o);
-    let is_event = |r: &JournalRecord, k: EventKind| r.kind == kind::EVENT && r.payload[0] == k as u8;
+    let is_event = |r: &JournalRecord, k: EventKind| r.kind == RecordKind::Event && r.payload[0] == k as u8;
     let edit = |records: &[JournalRecord], flag: bool, bits: bool| -> Vec<JournalRecord> {
         records
             .iter()

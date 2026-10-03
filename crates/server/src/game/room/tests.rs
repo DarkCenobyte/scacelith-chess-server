@@ -847,8 +847,8 @@ fn record_matches_the_finished_game_record_of_design_5_5() {
     mv_with(&mut room, W, T0 + 4000, |m| m.think_ms = 2000);
     room.on_resign(B, 0, T0 + 5000);
     let r = room.record().expect("over");
-    assert_eq!(r.spent_ms, [0, 0, 2000]);
-    assert_eq!(r.clock_ms, [180000, 180000, 180000]);
+    assert_eq!(r.spent_ms.as_deref(), Some(&[0, 0, 2000][..]));
+    assert_eq!(r.clock_ms.as_deref(), Some(&[180000, 180000, 180000][..]));
     assert_eq!(
         r,
         GameRecord {
@@ -861,17 +861,17 @@ fn record_matches_the_finished_game_record_of_design_5_5() {
             black_id: 22,
             white_name: "alice".to_owned(),
             black_name: "bob".to_owned(),
-            white_rating: 1500,
-            black_rating: 1612,
-            started_at: T0,
-            ended_at: T0 + 5000,
-            status: GS::WhiteWins,
-            reason: ER::Resignation,
-            moves: room.moves(),
-            spent_ms: vec![0, 0, 2000],
-            clock_ms: vec![180000, 180000, 180000],
-            rematch_of: 0,
+            white_rating: Some(1500),
+            black_rating: Some(1612),
+            started_at: Some(T0),
+            ended_at: Some(T0 + 5000),
+            status: crate::store::status::WHITE_WINS,
+            reason: ER::Resignation.to_u8(),
+            rematch_of: None,
             flags: record_flag::RATED_REQUESTED,
+            moves: room.moves(),
+            spent_ms: Some(vec![0, 0, 2000]),
+            clock_ms: Some(vec![180000, 180000, 180000]),
         }
     );
     assert_eq!(mk().record(), None);
@@ -883,13 +883,13 @@ fn auto_press_in_the_snapshot_and_the_rematch_and_manual_press_in_the_record_fla
     assert!(room.auto_press());
     assert!(room.snapshot(W, T0 + 3000).auto_press);
     room.on_resign(B, 0, T0 + 5000);
-    assert_eq!(room.record().expect("over").flags & record_flag::MANUAL_PRESS, 0);
+    assert_eq!(room.record().expect("over").flags & record_flag::MANUAL_CLOCK, 0);
 
     let mut room = Mk { auto_press: false, ..Mk::default() }.opened();
     assert!(!room.snapshot(B, T0 + 3000).auto_press);
     assert!(!snapshot_of(&room.snapshot_frame(W, T0 + 3000)).auto_press);
     room.on_resign(B, 0, T0 + 5000);
-    assert_eq!(room.record().expect("over").flags, record_flag::RATED_REQUESTED | record_flag::MANUAL_PRESS);
+    assert_eq!(room.record().expect("over").flags, record_flag::RATED_REQUESTED | record_flag::MANUAL_CLOCK);
     room.on_rematch(W, true, 0, T0 + 6000);
     let o = room.on_rematch(B, true, 0, T0 + 7000);
     assert!(!o.rematch.expect("agreed").auto_press, "a rematch keeps the finished game's setting");

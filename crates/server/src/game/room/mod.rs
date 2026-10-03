@@ -65,7 +65,9 @@ use crate::ids::{self, GameId, UserId};
 use super::clock::{ClockPolicy, GameClock, GracePolicy, IMPLAUSIBLE_MARGIN_MS};
 use super::rules::{Rules, Side, color_of, win_for};
 
-pub use self::journal::{JournalError, JournalRecord};
+pub use self::journal::{JournalEntry, JournalRecord, ReplayError};
+pub use crate::journal::RecordKind;
+pub use crate::store::{GameRecord, flags as record_flag};
 
 /// A rematch can be agreed during this long after the end.
 pub const REMATCH_WINDOW_MS: i64 = 60000;
@@ -83,18 +85,6 @@ pub const CERTAIN_KINDS: [&str; 3] = ["foreign_game", "out_of_turn", "illegal_mo
 
 /// No deadline (also "no stall" for [`Timing::stalled_since`]).
 pub const NEVER: i64 = i64::MAX;
-
-/// Bits of [`GameRecord::flags`] (finished game record, DESIGN 5.5).
-pub mod record_flag {
-    /// The game was created rated.
-    pub const RATED_REQUESTED: u32 = 1;
-    /// The game was restored from the journal after a restart.
-    pub const RECOVERED: u32 = 2;
-    /// A player forfeited (certain cheat).
-    pub const FORFEIT: u32 = 4;
-    /// The players pressed the clock themselves (`autoPress` false).
-    pub const MANUAL_PRESS: u32 = 8;
-}
 
 // Bits of a move record: a draw offer made with the move, the move declined the opponent's offer.
 const MB_OFFER: u8 = 1;
@@ -197,23 +187,23 @@ pub enum RoomError {
     /// The game id is zero or not below 2^53.
     InvalidGameId(GameId),
     /// The journal records cannot be replayed.
-    Journal(JournalError),
+    Replay(ReplayError),
 }
 
 impl std::fmt::Display for RoomError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RoomError::InvalidGameId(id) => write!(f, "invalid game id {id}"),
-            RoomError::Journal(e) => e.fmt(f),
+            RoomError::Replay(e) => e.fmt(f),
         }
     }
 }
 
 impl std::error::Error for RoomError {}
 
-impl From<JournalError> for RoomError {
-    fn from(e: JournalError) -> Self {
-        RoomError::Journal(e)
+impl From<ReplayError> for RoomError {
+    fn from(e: ReplayError) -> Self {
+        RoomError::Replay(e)
     }
 }
 
@@ -295,51 +285,6 @@ pub struct GameResult {
     pub black_ms: u32,
     /// When the game ended.
     pub ended_at: i64,
-}
-
-/// The finished game record committed to the database (DESIGN 5.5).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GameRecord {
-    /// Game id.
-    pub id: GameId,
-    /// Category id or `"custom"`.
-    pub category: String,
-    /// Rated: created rated and not aborted.
-    pub rated: bool,
-    /// Base time.
-    pub base_ms: u32,
-    /// Increment.
-    pub inc_ms: u32,
-    /// White's user id.
-    pub white_id: UserId,
-    /// Black's user id.
-    pub black_id: UserId,
-    /// White's name at the start.
-    pub white_name: String,
-    /// Black's name at the start.
-    pub black_name: String,
-    /// White's rating at the start.
-    pub white_rating: u16,
-    /// Black's rating at the start.
-    pub black_rating: u16,
-    /// Start of the game (epoch ms).
-    pub started_at: i64,
-    /// End of the game (epoch ms).
-    pub ended_at: i64,
-    /// Final status.
-    pub status: GameStatus,
-    /// End reason.
-    pub reason: EndReason,
-    /// Packed moves.
-    pub moves: Vec<u16>,
-    /// Time charged per move.
-    pub spent_ms: Vec<u32>,
-    /// Mover's remaining time after each move, increment included.
-    pub clock_ms: Vec<u32>,
-    /// The game this one is a rematch of (0: none).
-    pub rematch_of: GameId,
-    /// [`record_flag`] bits.
-    pub flags: u32,
 }
 
 /// One played move and the clock values it produced (one journal move record).
@@ -474,9 +419,10 @@ pub struct GameRoom {
     culprit: Option<Side>,
     rematch_by: Option<Side>,
     rematch: RematchState,
-    flags: u32,
+    /// [`record_flag`] bits.
+    flags: i64,
     /// Set by a lenient replay that stopped early.
-    replay_error: Option<JournalError>,
+    replay_error: Option<ReplayError>,
 }
 
 impl std::fmt::Debug for GameRoom {
@@ -640,7 +586,7 @@ impl GameRoom {
 
     /// The error of a lenient replay that stopped early.
     #[must_use]
-    pub fn replay_error(&self) -> Option<&JournalError> {
+    pub fn replay_error(&self) -> Option<&ReplayError> {
         self.replay_error.as_ref()
     }
 
@@ -1131,23 +1077,23 @@ impl GameRoom {
             id: self.id,
             category: self.category.clone(),
             rated: self.rated && r.status != GameStatus::Aborted,
-            base_ms: self.base_ms,
-            inc_ms: self.inc_ms,
+            base_ms: i64::from(self.base_ms),
+            inc_ms: i64::from(self.inc_ms),
             white_id: white.user_id,
             black_id: black.user_id,
             white_name: white.name.clone(),
             black_name: black.name.clone(),
-            white_rating: white.rating,
-            black_rating: black.rating,
-            started_at: self.created_at,
-            ended_at: r.ended_at,
-            status: r.status,
-            reason: r.reason,
+            white_rating: Some(i64::from(white.rating)),
+            black_rating: Some(i64::from(black.rating)),
+            started_at: Some(self.created_at),
+            ended_at: Some(r.ended_at),
+            status: r.status.to_u8(),
+            reason: r.reason.to_u8(),
+            rematch_of: (self.rematch_of != 0).then_some(self.rematch_of),
+            flags: self.flags | if self.auto_press { 0 } else { record_flag::MANUAL_CLOCK },
             moves: self.moves(),
-            spent_ms: self.plies.iter().map(|p| p.spent).collect(),
-            clock_ms: self.plies.iter().map(|p| p.clock_after).collect(),
-            rematch_of: self.rematch_of,
-            flags: self.flags | if self.auto_press { 0 } else { record_flag::MANUAL_PRESS },
+            spent_ms: Some(self.plies.iter().map(|p| p.spent).collect()),
+            clock_ms: Some(self.plies.iter().map(|p| p.clock_after).collect()),
         })
     }
 

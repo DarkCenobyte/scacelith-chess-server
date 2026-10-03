@@ -23,41 +23,66 @@ use super::{
     EventKind, GameResult, GameRoom, PlyRecord, REC_FIRST_MOVE_RESTART, RoomError, RoomSettings, RoomSpec,
 };
 use crate::game::rules::{Rules, Side};
+use crate::journal::{Record, RecordKind};
 
-/// Journal record kinds of a game.
-pub mod kind {
-    /// The game was created.
-    pub const CREATED: u8 = 1;
-    /// A move was played.
-    pub const MOVE: u8 = 2;
-    /// Offers, presence, desyncs, recovery, checkpoints.
-    pub const EVENT: u8 = 3;
-    /// The game ended.
-    pub const ENDED: u8 = 4;
-    /// The game's result is in the database (written by the host, ignored by a replay).
-    pub const COMMITTED: u8 = 5;
-    /// The whole room in one record (compaction).
-    pub const SNAPSHOT: u8 = 6;
-}
-
-/// One journal record of a game.
+/// One journal record of a game, as the room produces it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JournalRecord {
-    /// [`kind`] of the record.
-    pub kind: u8,
+    /// Kind of the record.
+    pub kind: RecordKind,
     /// Time of the record (epoch ms).
     pub at: i64,
     /// Payload.
     pub payload: Vec<u8>,
 }
 
+/// A journal record a room can be replayed from: the room's own [`JournalRecord`], or a
+/// [`Record`] read back from the shard journal (whose times are the integers the host appended).
+pub trait JournalEntry {
+    /// Kind of the record.
+    fn kind(&self) -> RecordKind;
+    /// Time of the record (epoch ms).
+    fn at_ms(&self) -> i64;
+    /// Payload.
+    fn payload(&self) -> &[u8];
+}
+
+impl JournalEntry for JournalRecord {
+    fn kind(&self) -> RecordKind {
+        self.kind
+    }
+
+    fn at_ms(&self) -> i64 {
+        self.at
+    }
+
+    fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
+impl JournalEntry for Record {
+    fn kind(&self) -> RecordKind {
+        self.kind
+    }
+
+    fn at_ms(&self) -> i64 {
+        // The host appends integer times; `as` saturates on anything else.
+        self.at as i64
+    }
+
+    fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
 /// A journal that cannot be replayed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct JournalError(String);
+pub struct ReplayError(String);
 
-impl JournalError {
+impl ReplayError {
     fn new(message: impl Into<String>) -> Self {
-        JournalError(message.into())
+        ReplayError(message.into())
     }
 
     /// What is wrong.
@@ -67,13 +92,13 @@ impl JournalError {
     }
 }
 
-impl std::fmt::Display for JournalError {
+impl std::fmt::Display for ReplayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "journal: {}", self.0)
     }
 }
 
-impl std::error::Error for JournalError {}
+impl std::error::Error for ReplayError {}
 
 const CREATED_FORMAT: u8 = 1;
 const CREATED_RATED: u8 = 1;
@@ -94,10 +119,11 @@ const CP_CLOCK_HELD: u8 = 4;
 const CP_WHITE_RECOVERY_AWAY: u8 = 8;
 const CP_BLACK_RECOVERY_AWAY: u8 = 16;
 
-/// A record borrowed from a journal or from a snapshot payload.
+/// A record borrowed from a journal or from a snapshot payload (`kind` is `None` for a kind
+/// this build does not know, found inside a snapshot).
 #[derive(Clone, Copy, Debug)]
 struct RecordView<'a> {
-    kind: u8,
+    kind: Option<RecordKind>,
     at: i64,
     payload: &'a [u8],
 }
@@ -114,51 +140,51 @@ impl<'a> Reader<'a> {
         Reader { b, o: 0, what }
     }
 
-    fn take(&mut self, n: usize) -> Result<&'a [u8], JournalError> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], ReplayError> {
         let end = self.o.checked_add(n).filter(|&e| e <= self.b.len());
         let Some(end) = end else {
-            return Err(JournalError::new(format!("short {} record", self.what)));
+            return Err(ReplayError::new(format!("short {} record", self.what)));
         };
         let s = &self.b[self.o..end];
         self.o = end;
         Ok(s)
     }
 
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], JournalError> {
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], ReplayError> {
         let mut a = [0; N];
         a.copy_from_slice(self.take(N)?);
         Ok(a)
     }
 
-    fn u8(&mut self) -> Result<u8, JournalError> {
+    fn u8(&mut self) -> Result<u8, ReplayError> {
         Ok(self.take(1)?[0])
     }
 
-    fn u16(&mut self) -> Result<u16, JournalError> {
+    fn u16(&mut self) -> Result<u16, ReplayError> {
         Ok(u16::from_le_bytes(self.array()?))
     }
 
-    fn u32(&mut self) -> Result<u32, JournalError> {
+    fn u32(&mut self) -> Result<u32, ReplayError> {
         Ok(u32::from_le_bytes(self.array()?))
     }
 
-    fn i32(&mut self) -> Result<i32, JournalError> {
+    fn i32(&mut self) -> Result<i32, ReplayError> {
         Ok(i32::from_le_bytes(self.array()?))
     }
 
-    fn u64(&mut self) -> Result<u64, JournalError> {
+    fn u64(&mut self) -> Result<u64, ReplayError> {
         Ok(u64::from_le_bytes(self.array()?))
     }
 
-    fn i64(&mut self) -> Result<i64, JournalError> {
+    fn i64(&mut self) -> Result<i64, ReplayError> {
         Ok(i64::from_le_bytes(self.array()?))
     }
 
-    fn str8(&mut self) -> Result<String, JournalError> {
+    fn str8(&mut self) -> Result<String, ReplayError> {
         let n = usize::from(self.u8()?);
         let s = self.take(n)?;
         String::from_utf8(s.to_vec())
-            .map_err(|_| JournalError::new(format!("bad text in the {} record", self.what)))
+            .map_err(|_| ReplayError::new(format!("bad text in the {} record", self.what)))
     }
 }
 
@@ -176,7 +202,7 @@ fn put_player(b: &mut Vec<u8>, p: &PlayerInfo) {
     put_str8(b, &p.name);
 }
 
-fn read_player(r: &mut Reader<'_>) -> Result<PlayerInfo, JournalError> {
+fn read_player(r: &mut Reader<'_>) -> Result<PlayerInfo, ReplayError> {
     Ok(PlayerInfo { user_id: r.u32()?, rating: r.u16()?, provisional: r.u8()? != 0, name: r.str8()? })
 }
 
@@ -186,8 +212,8 @@ fn u32_field(v: i64) -> u32 {
 }
 
 /// Writes the header of one record inside a snapshot payload.
-fn put_snapshot_header(b: &mut Vec<u8>, kind: u8, at: i64, len: usize) {
-    b.push(kind);
+fn put_snapshot_header(b: &mut Vec<u8>, kind: RecordKind, at: i64, len: usize) {
+    b.push(kind.as_u8());
     b.extend_from_slice(&u32::try_from(len).unwrap_or(u32::MAX).to_le_bytes());
     b.extend_from_slice(&at.to_le_bytes());
 }
@@ -198,22 +224,22 @@ fn put_snapshot_record(b: &mut Vec<u8>, rec: &JournalRecord) {
     b.extend_from_slice(&rec.payload);
 }
 
-fn decode_snapshot(payload: &[u8]) -> Result<Vec<RecordView<'_>>, JournalError> {
+fn decode_snapshot(payload: &[u8]) -> Result<Vec<RecordView<'_>>, ReplayError> {
     let mut r = Reader::new(payload, "snapshot");
     if payload.len() < SNAPSHOT_HEADER || r.u8()? != SNAPSHOT_FORMAT {
-        return Err(JournalError::new("bad snapshot record"));
+        return Err(ReplayError::new("bad snapshot record"));
     }
     r.u8()?;
     let n = usize::from(r.u16()?);
     let mut records = Vec::with_capacity(n);
     for _ in 0..n {
-        let kind = r.u8()?;
+        let kind = RecordKind::from_u8(r.u8()?);
         let len = r.u32()? as usize;
         let at = r.i64()?;
         records.push(RecordView { kind, at, payload: r.take(len)? });
     }
     if r.o != payload.len() {
-        return Err(JournalError::new("bad snapshot record length"));
+        return Err(ReplayError::new("bad snapshot record length"));
     }
     Ok(records)
 }
@@ -235,7 +261,7 @@ impl GameRoom {
         put_player(&mut b, &self.players[0]);
         put_player(&mut b, &self.players[1]);
         put_str8(&mut b, &self.category);
-        JournalRecord { kind: kind::CREATED, at: self.created_at, payload: b }
+        JournalRecord { kind: RecordKind::Created, at: self.created_at, payload: b }
     }
 
     /// The room as a compact list of journal records (created, moves, one checkpoint, ended):
@@ -275,7 +301,7 @@ impl GameRoom {
         b.extend_from_slice(&(count as u16).to_le_bytes());
         put_snapshot_record(&mut b, &created);
         for (i, p) in self.plies.iter().enumerate() {
-            put_snapshot_header(&mut b, kind::MOVE, p.at, MOVE_REC_BYTES);
+            put_snapshot_header(&mut b, RecordKind::Move, p.at, MOVE_REC_BYTES);
             self.write_move(&mut b, i);
         }
         put_snapshot_record(&mut b, &check);
@@ -283,7 +309,7 @@ impl GameRoom {
             put_snapshot_record(&mut b, e);
         }
         debug_assert_eq!(b.len(), size);
-        JournalRecord { kind: kind::SNAPSHOT, at: now, payload: b }
+        JournalRecord { kind: RecordKind::Snapshot, at: now, payload: b }
     }
 
     /// Rebuilds a room from its journal records, in order. A replay starts from the latest
@@ -293,17 +319,19 @@ impl GameRoom {
     ///
     /// # Errors
     ///
-    /// [`RoomError::Journal`] when the records cannot be replayed (no `created` record, a bad
+    /// [`RoomError::Replay`] when the records cannot be replayed (no `created` record, a bad
     /// record when strict...), [`RoomError::InvalidGameId`] for a bad id in the `created` record.
-    pub fn from_journal(
-        records: &[JournalRecord],
+    pub fn from_journal<R: JournalEntry>(
+        records: &[R],
         settings: RoomSettings,
         rules: Box<dyn Rules>,
         strict: bool,
     ) -> Result<GameRoom, RoomError> {
-        let views: Vec<RecordView<'_>> =
-            records.iter().map(|r| RecordView { kind: r.kind, at: r.at, payload: &r.payload }).collect();
-        let views = match views.iter().rposition(|r| r.kind == kind::SNAPSHOT) {
+        let views: Vec<RecordView<'_>> = records
+            .iter()
+            .map(|r| RecordView { kind: Some(r.kind()), at: r.at_ms(), payload: r.payload() })
+            .collect();
+        let views = match views.iter().rposition(|r| r.kind == Some(RecordKind::Snapshot)) {
             Some(base) => {
                 let mut v = decode_snapshot(views[base].payload)?;
                 v.extend_from_slice(&views[base + 1..]);
@@ -312,21 +340,21 @@ impl GameRoom {
             None => views,
         };
         let Some(first) = views.first() else {
-            return Err(JournalError::new("no record").into());
+            return Err(ReplayError::new("no record").into());
         };
-        if first.kind != kind::CREATED {
-            return Err(JournalError::new("the first record is not `created`").into());
+        if first.kind != Some(RecordKind::Created) {
+            return Err(ReplayError::new("the first record is not `created`").into());
         }
         let mut room = GameRoom::new(Self::read_created(first.payload)?, settings, rules)?;
         for rec in &views[1..] {
             let applied = match rec.kind {
-                kind::MOVE => room.replay_move(rec.payload),
-                kind::EVENT => room.replay_event(rec.payload, rec.at),
-                kind::ENDED => room.replay_ended(rec.payload),
-                kind::CREATED => Err(JournalError::new("second created record")),
-                kind::SNAPSHOT => Err(JournalError::new("snapshot inside a snapshot")),
+                Some(RecordKind::Move) => room.replay_move(rec.payload),
+                Some(RecordKind::Event) => room.replay_event(rec.payload, rec.at),
+                Some(RecordKind::Ended) => room.replay_ended(rec.payload),
+                Some(RecordKind::Created) => Err(ReplayError::new("second created record")),
+                Some(RecordKind::Snapshot) => Err(ReplayError::new("snapshot inside a snapshot")),
                 // `committed` and unknown kinds carry no room state.
-                _ => Ok(()),
+                Some(RecordKind::Committed) | None => Ok(()),
             };
             if let Err(e) = applied {
                 if strict {
@@ -339,10 +367,10 @@ impl GameRoom {
         Ok(room)
     }
 
-    fn read_created(payload: &[u8]) -> Result<RoomSpec, JournalError> {
+    fn read_created(payload: &[u8]) -> Result<RoomSpec, ReplayError> {
         let mut r = Reader::new(payload, "created");
         if r.u8()? != CREATED_FORMAT {
-            return Err(JournalError::new("bad created record format"));
+            return Err(ReplayError::new("bad created record format"));
         }
         let flags = r.u8()?;
         Ok(RoomSpec {
@@ -363,7 +391,7 @@ impl GameRoom {
     pub(crate) fn move_record(&self, i: usize) -> JournalRecord {
         let mut b = Vec::with_capacity(MOVE_REC_BYTES);
         self.write_move(&mut b, i);
-        JournalRecord { kind: kind::MOVE, at: self.plies[i].at, payload: b }
+        JournalRecord { kind: RecordKind::Move, at: self.plies[i].at, payload: b }
     }
 
     fn write_move(&self, b: &mut Vec<u8>, i: usize) {
@@ -393,7 +421,7 @@ impl GameRoom {
         b.extend_from_slice(&[kind as u8, Side::code(side), 0, 0]);
         b.extend_from_slice(&self.gseq.to_le_bytes());
         b.extend_from_slice(&u32_field(arg).to_le_bytes());
-        JournalRecord { kind: kind::EVENT, at, payload: b }
+        JournalRecord { kind: RecordKind::Event, at, payload: b }
     }
 
     /// The `recovered` event record (16 bytes) with the current gseq.
@@ -403,7 +431,7 @@ impl GameRoom {
         b.extend_from_slice(&self.gseq.to_le_bytes());
         b.extend_from_slice(&u32_field(grace).to_le_bytes());
         b.extend_from_slice(&u32_field(hold).to_le_bytes());
-        JournalRecord { kind: kind::EVENT, at, payload: b }
+        JournalRecord { kind: RecordKind::Event, at, payload: b }
     }
 
     /// The `ended` record.
@@ -415,7 +443,7 @@ impl GameRoom {
         b.extend_from_slice(&r.black_ms.to_le_bytes());
         b.extend_from_slice(&self.end_gseq.to_le_bytes());
         b.extend_from_slice(&r.ended_at.to_le_bytes());
-        JournalRecord { kind: kind::ENDED, at: r.ended_at, payload: b }
+        JournalRecord { kind: RecordKind::Ended, at: r.ended_at, payload: b }
     }
 
     /// Every counter the move records do not carry (68 bytes), at `at` (the turn start in
@@ -442,7 +470,7 @@ impl GameRoom {
         for v in self.desyncs {
             b.extend_from_slice(&v.to_le_bytes());
         }
-        b.extend_from_slice(&self.flags.to_le_bytes());
+        b.extend_from_slice(&u32_field(self.flags).to_le_bytes());
         for v in self.disconnected_at {
             b.extend_from_slice(&v.to_le_bytes());
         }
@@ -454,12 +482,12 @@ impl GameRoom {
             b.extend_from_slice(&u32_field(v).to_le_bytes());
         }
         debug_assert_eq!(b.len(), CHECKPOINT_BYTES);
-        JournalRecord { kind: kind::EVENT, at, payload: b }
+        JournalRecord { kind: RecordKind::Event, at, payload: b }
     }
 
-    fn replay_move(&mut self, b: &[u8]) -> Result<(), JournalError> {
+    fn replay_move(&mut self, b: &[u8]) -> Result<(), ReplayError> {
         if self.is_over() {
-            return Err(JournalError::new("move after the end"));
+            return Err(ReplayError::new("move after the end"));
         }
         let mut r = Reader::new(b, "move");
         let ply = usize::from(r.u16()?);
@@ -478,17 +506,17 @@ impl GameRoom {
             at: r.i64()?,
         };
         if ply != self.ply() {
-            return Err(JournalError::new(format!("move for ply {ply} at ply {}", self.ply())));
+            return Err(ReplayError::new(format!("move for ply {ply} at ply {}", self.ply())));
         }
         if self.rules.play(mv).is_none() {
-            return Err(JournalError::new(format!("move {mv} refused by the rules at ply {ply}")));
+            return Err(ReplayError::new(format!("move {mv} refused by the rules at ply {ply}")));
         }
         self.apply_move(rec);
         self.gseq = rec.gseq.wrapping_add(u32::from(bits & super::MB_DECLINED != 0));
         Ok(())
     }
 
-    fn replay_event(&mut self, b: &[u8], at: i64) -> Result<(), JournalError> {
+    fn replay_event(&mut self, b: &[u8], at: i64) -> Result<(), ReplayError> {
         let mut r = Reader::new(b, "event");
         let kind = r.u8()?;
         if kind == EventKind::Checkpoint as u8 {
@@ -503,24 +531,24 @@ impl GameRoom {
             // Nothing is journaled after the end; ignored defensively.
             return Ok(());
         }
-        let kind = EventKind::from_u8(kind)
-            .ok_or_else(|| JournalError::new(format!("unknown event kind {kind}")))?;
+        let kind =
+            EventKind::from_u8(kind).ok_or_else(|| ReplayError::new(format!("unknown event kind {kind}")))?;
         if kind == EventKind::Recovered {
             let hold = i64::from(r.u32()?);
             self.apply_event(kind, None, arg, at, hold, rec_flags & REC_FIRST_MOVE_RESTART);
         } else {
             let side =
-                Side::from_code(color).ok_or_else(|| JournalError::new(format!("bad colour {color}")))?;
+                Side::from_code(color).ok_or_else(|| ReplayError::new(format!("bad colour {color}")))?;
             self.apply_event(kind, Some(side), arg, at, 0, 0);
         }
         self.gseq = gseq;
         Ok(())
     }
 
-    fn replay_checkpoint(&mut self, b: &[u8]) -> Result<(), JournalError> {
+    fn replay_checkpoint(&mut self, b: &[u8]) -> Result<(), ReplayError> {
         let mut r = Reader::new(b, "checkpoint");
         if b.len() < CHECKPOINT_BYTES {
-            return Err(JournalError::new("short checkpoint record"));
+            return Err(ReplayError::new("short checkpoint record"));
         }
         r.u8()?;
         let draw_offer = Side::from_code(r.u8()?);
@@ -535,7 +563,7 @@ impl GameRoom {
         self.draw_offers_used = [r.u16()?, r.u16()?];
         self.draw_declined_at = [r.i32()?, r.i32()?];
         self.desyncs = [r.u16()?, r.u16()?];
-        self.flags = r.u32()?;
+        self.flags = i64::from(r.u32()?);
         self.disconnected_at = [r.i64()?, r.i64()?];
         self.clock.restart(r.i64()?);
         for s in Side::BOTH {
@@ -545,9 +573,9 @@ impl GameRoom {
         Ok(())
     }
 
-    fn replay_ended(&mut self, b: &[u8]) -> Result<(), JournalError> {
+    fn replay_ended(&mut self, b: &[u8]) -> Result<(), ReplayError> {
         if self.is_over() {
-            return Err(JournalError::new("second ended record"));
+            return Err(ReplayError::new("second ended record"));
         }
         let mut r = Reader::new(b, "ended");
         let status = r.u8()?;
@@ -557,10 +585,10 @@ impl GameRoom {
         let (white_ms, black_ms, end_gseq, ended_at) = (r.u32()?, r.u32()?, r.u32()?, r.i64()?);
         let status = GameStatus::from_u8(status)
             .filter(|&s| s != GameStatus::Ongoing)
-            .ok_or_else(|| JournalError::new(format!("bad status {status}")))?;
+            .ok_or_else(|| ReplayError::new(format!("bad status {status}")))?;
         let reason = Some(EndReason::from_u8(reason))
             .filter(|r| r.is_known())
-            .ok_or_else(|| JournalError::new(format!("bad end reason {reason}")))?;
+            .ok_or_else(|| ReplayError::new(format!("bad end reason {reason}")))?;
         self.apply_end(GameResult { status, reason, white_ms, black_ms, ended_at }, culprit);
         self.end_gseq = end_gseq;
         self.gseq = end_gseq;
