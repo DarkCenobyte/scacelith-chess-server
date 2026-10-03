@@ -254,3 +254,22 @@ async fn a_closed_store_refuses_every_call_with_closed() {
     closed(clone.users().by_id(1).await.unwrap_err());
     clone.close().await;
 }
+
+#[tokio::test]
+async fn db_cache_mb_is_shared_by_the_writer_and_the_readers() {
+    fn cache_size(db: &crate::store::Db<'_>) -> Result<i64, StoreError> {
+        db.connection().query_row("PRAGMA cache_size", [], |r| r.get::<_, i64>(0)).map_err(StoreError::from)
+    }
+    let mut c = config();
+    c.db_cache_mb = 100;
+    // The writer and the 4 readers of a file store: 20 MiB each (cache_size in KiB, negative).
+    let dir = TempDir::new("cache");
+    let store = file_store_with(&dir, &c, options(None)).await;
+    assert_eq!(store.read(cache_size).await.unwrap(), -20 * 1024);
+    assert_eq!(store.write(cache_size).await.unwrap(), -20 * 1024);
+    store.close().await;
+    // An in-memory store has its writer only.
+    let memory = store_with(&c, options(None)).await;
+    assert_eq!(memory.read(cache_size).await.unwrap(), -100 * 1024);
+    memory.close().await;
+}

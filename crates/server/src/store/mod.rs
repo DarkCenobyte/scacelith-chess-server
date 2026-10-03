@@ -199,9 +199,13 @@ impl Store {
             refund_window_ms: config.rating_refund_days.max(0) * 86_400_000,
             claims: AtomicU64::new(0),
         });
-        let tuning = Tuning { cache_mb: config.db_cache_mb, mmap_mb: config.db_mmap_mb };
         let readonly = options.readonly;
-        let n_readers = options.readers.unwrap_or(4);
+        let n_readers = options.readers.unwrap_or(4).clamp(1, 64);
+        // DB_CACHE_MB is the page cache of the whole server, shared evenly by its connections:
+        // the writer (unless read-only) and the readers (none for an in-memory database).
+        let conns = usize::from(!readonly) + if path == DbPath::Memory { 0 } else { n_readers };
+        let cache_mb = config.db_cache_mb / i64::try_from(conns.max(1)).unwrap_or(1);
+        let tuning = Tuning { cache_mb, mmap_mb: config.db_mmap_mb };
         let (c, p) = (ctx.clone(), path.clone());
         let (writer, readers) =
             tokio::task::spawn_blocking(move || -> Result<(Option<Writer>, Option<Arc<Readers>>)> {
