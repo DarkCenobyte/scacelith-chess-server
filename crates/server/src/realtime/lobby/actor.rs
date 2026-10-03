@@ -955,7 +955,8 @@ impl LobbyActor {
 
     /// Creates a game on a host and attaches both players' live connections. The players count
     /// as busy from now on; the stored bans and the ratings to read again are looked up in the
-    /// creation task, and the result comes back as [`Done::Created`].
+    /// creation task, and the result comes back as [`Done::Created`] (a game created for a player
+    /// banned meanwhile is cancelled).
     fn create_game(&mut self, order: Order, preferred: Option<u32>, source: Source, after: After) {
         let (white, black) = (order.white.info.user_id, order.black.info.user_id);
         let creation = Creation { white, black, rated: order.rated, source, after };
@@ -1002,6 +1003,16 @@ impl LobbyActor {
                 self.finish_creation(creation, Err(code), &[]);
             }
             CreateResult::Created(game) => {
+                // A player banned while the game was being created: the ban found no game to
+                // forfeit, so the game is called off as if the ban had come first.
+                let banned: Vec<UserId> = [creation.white, creation.black]
+                    .into_iter()
+                    .filter(|u| self.bans.get(u).is_some_and(|&until| until > now))
+                    .collect();
+                if !banned.is_empty() {
+                    self.hosts.cancel(game);
+                    return self.finish_creation(creation, Err(ErrorCode::UserUnavailable), &banned);
+                }
                 metrics::lobby().created.with(&[creation.source.as_str()]).inc();
                 if creation.rated {
                     self.mm.record_pairing(creation.white, creation.black, now);

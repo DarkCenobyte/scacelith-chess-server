@@ -752,7 +752,7 @@ fn check_config_prints_every_key_in_table_order_then_the_derived_values() {
     let mut want: Vec<String> = KEYS.iter().map(|k| camel_case(k.name)).collect();
     want.extend(["runDir", "ssoOrigin", "ssoRedirectTag", "categories"].map(String::from));
     assert_eq!(keys, want);
-    assert_eq!(keys.len(), 159);
+    assert_eq!(keys.len(), 158);
     assert_eq!(d["serverSecret"], "<set>");
     assert_eq!(d["mfaEncryptionKey"], "<unset>");
     assert_eq!(d["smtpPassword"], "<set>");

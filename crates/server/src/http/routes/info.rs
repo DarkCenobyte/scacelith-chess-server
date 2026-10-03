@@ -67,7 +67,7 @@ pub fn info_document(config: &Config) -> Value {
             "passwordMaxBytes": PASSWORD_MAX_BYTES,
             "customTimeControls": config.allow_custom_time_controls,
             "reportsPerDay": config.reports_per_day,
-            "wsMaxMessageBytes": config.ws_max_message_bytes,
+            "wsMaxMessageBytes": scacelith_protocol::MAX_CLIENT_MESSAGE,
         },
     })
 }
