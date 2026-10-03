@@ -133,7 +133,7 @@ test('user show / verify-email reach the pending signup that holds a name (its c
     assert.deepEqual(show.json, { pendingSignup: { username: 'Alice_1', email: 'alice@example.org', createdAt: NOW - 3600000,
         expiresAt: NOW + 3600000, link: true } });
     assert.ok(!show.out.includes('scrypt$'));
-    assert.match((await run(store, ['user', 'show', 'alice_1'])).out, /^Pending signup Alice_1: no account until its link is used/);
+    assert.match((await run(store, ['user', 'show', 'alice_1'])).out, /^Pending signup Alice_1 \(no account yet\)\n {2}e-mail alice@example\.org, link stored/);
 
     // The account is created as the link would: its address verified, the signup's password, the signup gone.
     const r = await run(store, ['user', 'verify-email', 'alice_1', '--by', 'mod-ben']);
@@ -150,11 +150,15 @@ test('user show / verify-email reach the pending signup that holds a name (its c
 
     // A signup whose address has an account (no link) or another account took meanwhile: dropped, nothing created.
     signup('Bob_2', 'Alice@Example.org', { tokenHash: null });
-    assert.match((await run(store, ['user', 'show', 'bob_2'])).out, /no link \(the address had an account/);
+    assert.match((await run(store, ['user', 'show', 'bob_2'])).out, /no link: the address had an account/);
     const taken = await run(store, ['user', 'verify-email', 'bob_2', '--json']);
     assert.deepEqual([taken.code, taken.json], [0, { status: 'taken' }]);
     assert.equal(store.users.byUsername('bob_2'), null);
     assert.equal(store.signups.byUsername('bob_2'), null, 'the name is free again');
+    // Without a link even once that account is gone: its link could never confirm it either.
+    signup('Dan_4', 'dan@example.org', { tokenHash: null });
+    assert.deepEqual((await run(store, ['user', 'verify-email', 'dan_4', '--json'])).json, { status: 'taken' });
+    assert.equal(store.users.byUsername('dan_4'), null);
 
     // An expired signup holds nothing: no such user.
     signup('Cleo_3', 'cleo@example.org', { expiresAt: NOW });

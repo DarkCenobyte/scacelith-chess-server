@@ -529,9 +529,9 @@ Pending signups: with `REQUIRE_EMAIL_VERIFICATION` a registration has no account
 mailed to its address is used (the signup holds its username for 24 h). When that mail never
 arrives, `user show <name>` shows the pending signup that holds the name (address, times, whether
 it has a link), and `user verify-email <name>` does what the link would: the account is created,
-its address verified (`moderator_action` `confirm_signup`). When another account has the username
-or the address (always so for a signup without a link: its address already had an account), the
-signup is dropped and nothing is created.
+its address verified (`moderator_action` `confirm_signup`). A signup without a link (its address
+had an account, whose owner got a notice instead), or one whose username or address another
+account has now, is dropped and nothing is created.
 
 ## 7. False positives: what the model does about them
 

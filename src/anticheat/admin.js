@@ -218,8 +218,9 @@ function userShow(ctx) {
     if (p) {
         const signup = { username: p.username, email: p.email, createdAt: p.createdAt, expiresAt: p.expiresAt, link: !!p.tokenHash };
         return { data: { pendingSignup: signup },
-            text: `Pending signup ${p.username}: no account until its link is used (or user verify-email)\n`
-                + `  e-mail ${p.email}, ${p.tokenHash ? 'link stored' : 'no link (the address had an account: its owner got a notice)'}\n`
+            text: `Pending signup ${p.username} (no account yet)\n`
+                + `  e-mail ${p.email}, ${p.tokenHash ? 'link stored (user verify-email creates the account, as the link would)'
+                    : 'no link: the address had an account, whose owner got a notice'}\n`
                 + `  signed up ${iso(p.createdAt)}, holds the name until ${iso(p.expiresAt)}\n` };
     }
     const u = requireUser(ctx, ctx.args.positional[2]);
@@ -301,16 +302,16 @@ function userVerifyEmail(ctx) {
 }
 
 // What the link of the pending signup holding `name` does (auth/accounts.js confirmSignup): its
-// account is created, its address verified, and the signup deleted, in one transaction; when
-// another account has the username or the address (always so for a signup without a link), the
-// signup is dropped and nothing is created. null: the signup is gone (its link was just used).
+// account is created, its address verified, and the signup deleted, in one transaction. A signup
+// without a link (its address had an account), or one whose username or address another account
+// has now, is dropped and nothing is created. null: the signup is gone (its link was just used).
 function confirmSignup(ctx, name) {
     const s = ctx.store;
     const r = inTx(s, () => {
         const p = signupInstead(ctx, name);
         if (!p) return null;
         s.signups.delete(p.id);
-        if (s.users.byEmail(p.email)) return { p, id: null };
+        if (!p.tokenHash || s.users.byEmail(p.email)) return { p, id: null };
         try {
             return { p, id: s.users.create({ username: p.username, email: p.email, passwordHash: p.passwordHash, emailVerified: true, createdAt: ctx.now() }) };
         } catch (err) {
@@ -323,7 +324,7 @@ function confirmSignup(ctx, name) {
     if (!id) {
         audit(ctx, 'confirm_signup', null, { username: p.username, status: 'taken' });
         return { data: { status: 'taken' },
-            text: `Pending signup ${p.username} dropped, no account created: another account has its username or its e-mail address.\n` };
+            text: `Pending signup ${p.username} dropped, no account created: its e-mail address had an account, or another account has its username or its address now.\n` };
     }
     ctx.log?.security?.('register', { userId: id });
     writeStructured((rows) => s.security.insertBatch(rows), [{ kind: 'register', userId: id, ip: null, detail: null, at: ctx.now() }], ['detail']);

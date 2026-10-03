@@ -356,7 +356,7 @@ test('a confirmation mail that never arrives: the operator creates the account (
     let out = '';
     const admin = (cmd) => runAdmin(['user', cmd, 'alice_1'], { store: s.store, now: s.now, out: { write: (x) => { out += x; } }, err: { write: (x) => { out += x; } } });
     assert.equal(await admin('show'), 0);
-    assert.match(out, /Pending signup Alice_1: .*\n {2}e-mail alice@example\.com, link stored/);
+    assert.match(out, /Pending signup Alice_1 \(no account yet\)\n {2}e-mail alice@example\.com, link stored/);
     assert.equal(await admin('verify-email'), 0, out);
     assert.equal(s.store.signups.byUsername('alice_1'), null);
     const ok = await s.login('alice_1', 'ivory rook takes e5');
