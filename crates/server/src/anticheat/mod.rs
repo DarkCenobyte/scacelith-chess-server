@@ -14,8 +14,16 @@
 pub mod analysis;
 pub mod integrity;
 pub mod num;
+pub mod players;
 pub mod priors;
+pub mod refunds;
+pub mod sanction;
 pub mod scoring;
+pub mod service;
+
+pub use service::{Anticheat, Classification, SanctionResult, classify};
 
 #[cfg(test)]
 mod synthetic;
+#[cfg(test)]
+pub(crate) mod testing;
