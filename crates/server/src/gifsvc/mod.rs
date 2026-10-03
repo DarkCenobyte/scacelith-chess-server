@@ -47,7 +47,6 @@ use tokio::sync::watch;
 
 pub use cache::GifCache;
 pub use job::{GameRenderer, GifJob, JobPlayer};
-pub use rules::ChessRules;
 pub use pool::{GIF_THREAD_NICE, GifError, IDLE_STOP, PoolSettings, PoolStats, RenderPool, Renderer};
 pub use request::{
     GIF_BODY_FIELDS, GIF_BODY_LIMIT_BYTES, GIF_BUSY_RETRY_SEC, GIF_CONTENT_TYPE, GIF_DISABLED_MESSAGE,
@@ -55,6 +54,7 @@ pub use request::{
     SERVER_BUSY_MESSAGE, busy_retry_after_secs, game_too_long_message, handler_timeout_ms, max_plies,
     options_from_body, options_from_query, render_quotas, tag_ending, tag_rating, tag_text,
 };
+pub use rules::ChessRules;
 
 use crate::config::Config;
 use crate::metrics::{self, Counter, Histogram};
