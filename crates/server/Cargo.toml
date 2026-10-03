@@ -47,6 +47,8 @@ argon2.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+rcgen.workspace = true
 
 [lints]
 workspace = true
