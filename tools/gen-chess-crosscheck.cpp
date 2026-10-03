@@ -1,6 +1,7 @@
 // Generates dedicated-server/test/fixtures/chess-crosscheck.json with the GAME's own rules
-// (src/chess/position.cpp + game.cpp), so that the server's JavaScript rules (src/chess/*.js)
-// can be checked against them move for move (test/unit/chess.crosscheck.test.js).
+// (src/chess/position.cpp + game.cpp), so that the server's Rust rules (the scacelith-chess
+// crate, dedicated-server/crates/chess) can be checked against them move for move
+// (crates/chess/tests/crosscheck.rs: cargo test -p scacelith-chess --test crosscheck).
 //
 // Build and run: dedicated-server/tools/gen-chess-crosscheck.sh (from anywhere).
 // Usage: gen-chess-crosscheck <assets/i18n/en.lang> <output.json>

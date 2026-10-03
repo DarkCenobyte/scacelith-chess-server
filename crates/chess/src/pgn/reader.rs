@@ -10,7 +10,9 @@
 //!  * movetext: move numbers ("12.", "12...", "12…"), comments `{ ... }` and `;` to the end of
 //!    the line, `%` escape lines, NAGs (`$1`), suffix glyphs (`! ? !! ?? !? ?!`), text evaluations
 //!    (`+- = -/+ ±`), variations `( ... )` skipped (nesting capped), "e.p." dropped; the moves in
-//!    lenient SAN ([`crate::parse_san`]);
+//!    lenient SAN ([`crate::parse_san`]), promotions as e8=Q, e8Q or e8/Q in movetext
+//!    (`parse_san` also reads e8(Q), but in movetext its '(' opens a variation, as in the game's
+//!    reader);
 //!  * the end of the first game: its termination marker, a tag pair after its movetext (the next
 //!    game), or the end of the text.
 //!
