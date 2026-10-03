@@ -16,7 +16,9 @@
 //!   requests llhttp would refuse but hyper accepts (unknown or lower-case methods, a head over
 //!   8192 bytes counted as URL + header names + values, more than 64 header lines,
 //!   `Content-Length` given twice or with `Transfer-Encoding`, a target with bytes outside ASCII)
-//!   get the same raw answers. These
+//!   get the same raw answers, as does a chunked body hyper cannot decode once the handler that
+//!   read it is done (Node answers when the bad bytes come in, also for a route that does not
+//!   read its body). These
 //!   client errors count in `scacelith_http_client_errors_total{reason}` and 1 toward a block of
 //!   the peer (unless it is a trusted proxy);
 //! * a connection the server closes after an answer keeps reading (and discarding) for 2 s, 1 s
@@ -784,6 +786,46 @@ impl Body for ResponseBody {
     }
 }
 
+/// A request body on its way to the API: notes a chunked encoding hyper cannot decode.
+struct WatchedBody {
+    inner: Incoming,
+    malformed: Arc<AtomicBool>,
+}
+
+impl Body for WatchedBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let frame = ready!(Pin::new(&mut self.inner).poll_frame(cx));
+        if let Some(Err(e)) = &frame
+            && is_bad_encoding(e)
+        {
+            self.malformed.store(true, Ordering::Relaxed);
+        }
+        Poll::Ready(frame)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Whether a body error is a chunked encoding hyper's decoder refused (its errors of kind
+/// `InvalidData` / `InvalidInput`), not a connection that broke off.
+fn is_bad_encoding(e: &hyper::Error) -> bool {
+    std::error::Error::source(e)
+        .and_then(|cause| cause.downcast_ref::<io::Error>())
+        .is_some_and(|io| matches!(io.kind(), io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput))
+}
+
 impl Drop for ResponseBody {
     fn drop(&mut self) {
         self.finish();
@@ -1147,11 +1189,16 @@ impl HttpListener {
             }
         }
         let api = self.api.clone();
+        let malformed = Arc::new(AtomicBool::new(false));
+        let req = req.map(|inner| WatchedBody { inner, malformed: malformed.clone() });
         let handled = tokio::spawn(async move {
             let res = api.handle(req, keys).await;
             (res, slot)
         })
         .await;
+        if malformed.load(Ordering::Relaxed) {
+            return Ok(self.raw_error(&st, ClientError::Malformed));
+        }
         Ok(match handled {
             Ok((res, slot)) => self.finish(&st, res, keep_alive, head, slot),
             Err(_) => {
