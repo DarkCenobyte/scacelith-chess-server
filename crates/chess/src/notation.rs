@@ -2,7 +2,9 @@
 //! `chess::Position::toSAN`, `parseUCI` and `parseSAN`).
 
 use crate::position::Position;
-use crate::tables::{F_CAPTURE, F_CASTLE_K, F_CASTLE_Q, F_PROMO, KING, KNIGHT, PAWN, QUEEN, piece_of_ascii, s88};
+use crate::tables::{
+    F_CAPTURE, F_CASTLE_K, F_CASTLE_Q, F_PROMO, KING, KNIGHT, PAWN, QUEEN, piece_of_ascii, s88,
+};
 use crate::types::{encode_move, move_from, move_promotion, move_to, square_name};
 
 /// The SAN letters of piece types 1..=6 (index 0 unused).
@@ -52,7 +54,9 @@ impl Position {
             // instead of generating every legal move.
             let (mut ambiguous, mut same_file, mut same_rank) = (false, false, false);
             for other in 0..64u8 {
-                if other == from || self.board[s88(other)] != piece || self.validate(encode_move(other, to, 0)).is_none()
+                if other == from
+                    || self.board[s88(other)] != piece
+                    || self.validate(encode_move(other, to, 0)).is_none()
                 {
                     continue;
                 }
@@ -179,7 +183,9 @@ fn parse_san_strict(pos: &Position, s: &str, legal: &[u32]) -> Option<u16> {
     if king_side || castle == "O-O-O" || castle == "OOO" {
         return legal.iter().map(|&im| im as u16).find(|&m| {
             let (from, to) = (move_from(m), move_to(m));
-            pos.board[s88(from)] & 7 == KING && (to & 7).abs_diff(from & 7) == 2 && ((to & 7) > (from & 7)) == king_side
+            pos.board[s88(from)] & 7 == KING
+                && (to & 7).abs_diff(from & 7) == 2
+                && ((to & 7) > (from & 7)) == king_side
         });
     }
     let mut body = s;

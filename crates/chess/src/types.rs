@@ -198,7 +198,11 @@ pub fn parse_square(s: &str) -> Option<u8> {
     match s.as_bytes() {
         &[f, r] => {
             let f = f.to_ascii_lowercase();
-            if (b'a'..=b'h').contains(&f) && (b'1'..=b'8').contains(&r) { Some((r - b'1') * 8 + (f - b'a')) } else { None }
+            if (b'a'..=b'h').contains(&f) && (b'1'..=b'8').contains(&r) {
+                Some((r - b'1') * 8 + (f - b'a'))
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -593,7 +597,12 @@ mod tests {
             assert_eq!(f.bits(), 1 << i);
         }
         assert_eq!(
-            [castling::WHITE_KING_SIDE, castling::WHITE_QUEEN_SIDE, castling::BLACK_KING_SIDE, castling::BLACK_QUEEN_SIDE],
+            [
+                castling::WHITE_KING_SIDE,
+                castling::WHITE_QUEEN_SIDE,
+                castling::BLACK_KING_SIDE,
+                castling::BLACK_QUEEN_SIDE
+            ],
             [1, 2, 4, 8]
         );
     }

@@ -13,10 +13,10 @@ use std::fmt;
 use std::sync::LazyLock;
 
 use crate::tables::{
-    B_BISHOP, B_KNIGHT, B_PAWN, B_QUEEN, B_ROOK, BISHOP, CASTLE_MASK, CR_BK, CR_BQ, CR_WK, CR_WQ, DIAG_STEPS, DIR,
-    F_CAPTURE, F_CASTLE_K, F_CASTLE_Q, F_CHECK, F_DOUBLE, F_EP, F_MATE, F_PROMO, KING, KING_STEPS, KNIGHT,
-    KNIGHT_STEPS, ORTH_STEPS, PAWN, PIECE_ASCII, QUEEN, QUEEN_STEPS, ROOK, STEP, W_BISHOP, W_KNIGHT, W_PAWN,
-    W_QUEEN, W_ROOK, ZOBRIST, delta_index, on_board, s64, s88, step,
+    B_BISHOP, B_KNIGHT, B_PAWN, B_QUEEN, B_ROOK, BISHOP, CASTLE_MASK, CR_BK, CR_BQ, CR_WK, CR_WQ, DIAG_STEPS,
+    DIR, F_CAPTURE, F_CASTLE_K, F_CASTLE_Q, F_CHECK, F_DOUBLE, F_EP, F_MATE, F_PROMO, KING, KING_STEPS,
+    KNIGHT, KNIGHT_STEPS, ORTH_STEPS, PAWN, PIECE_ASCII, QUEEN, QUEEN_STEPS, ROOK, STEP, W_BISHOP, W_KNIGHT,
+    W_PAWN, W_QUEEN, W_ROOK, ZOBRIST, delta_index, on_board, s64, s88, step,
 };
 use crate::types::{Color, FNV_OFFSET, MoveFlags, Piece, fnv_step};
 
@@ -304,7 +304,9 @@ impl Position {
     pub fn has_insufficient_material(&self) -> bool {
         let c = &self.counts;
         let count = |code: u8| c[usize::from(code)];
-        if count(W_PAWN) | count(B_PAWN) | count(W_ROOK) | count(B_ROOK) | count(W_QUEEN) | count(B_QUEEN) != 0 {
+        if count(W_PAWN) | count(B_PAWN) | count(W_ROOK) | count(B_ROOK) | count(W_QUEEN) | count(B_QUEEN)
+            != 0
+        {
             return false;
         }
         let knights = count(W_KNIGHT) + count(B_KNIGHT);
@@ -344,7 +346,9 @@ impl Position {
         if n == 0 {
             return false;
         }
-        !(n == 1 && u32::from(c[mine | KNIGHT as usize]) + u32::from(c[mine | BISHOP as usize]) == 1 && t == 0)
+        !(n == 1
+            && u32::from(c[mine | KNIGHT as usize]) + u32::from(c[mine | BISHOP as usize]) == 1
+            && t == 0)
     }
 
     /// The protocol `posHash`: FNV-1a 32 of the first four FEN fields

@@ -70,7 +70,8 @@ fn push_escaped(out: &mut String, value: &str) {
 /// A word of a comment: braces (a '}' would end the comment) and control characters dropped,
 /// then trimmed.
 fn comment_word(w: &str) -> String {
-    let kept: String = w.chars().filter(|c| !matches!(c, '{' | '}' | '\u{0}'..='\u{1f}' | '\u{7f}')).collect();
+    let kept: String =
+        w.chars().filter(|c| !matches!(c, '{' | '}' | '\u{0}'..='\u{1f}' | '\u{7f}')).collect();
     js_trim(&kept).to_owned()
 }
 

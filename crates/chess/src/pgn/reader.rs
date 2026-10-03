@@ -432,8 +432,11 @@ impl<'a> Lexer<'a> {
     }
 
     fn brace_comment(&mut self, line: u32, column: u32) -> Token {
-        let unterminated =
-            || Token { tok: Tok::Bad { message: "unterminated comment".to_owned(), tag_like: false }, line, column };
+        let unterminated = || Token {
+            tok: Tok::Bad { message: "unterminated comment".to_owned(), tag_like: false },
+            line,
+            column,
+        };
         self.advance(); // '{'
         loop {
             match self.at(self.p) {
@@ -490,7 +493,10 @@ impl<'a> Lexer<'a> {
                 }
                 continue;
             }
-            if !(c.is_ascii_alphanumeric() || !c.is_ascii() || matches!(c, '_' | '+' | '#' | '=' | ':' | '-' | '/')) {
+            if !(c.is_ascii_alphanumeric()
+                || !c.is_ascii()
+                || matches!(c, '_' | '+' | '#' | '=' | ':' | '-' | '/'))
+            {
                 break;
             }
             let room = self.lim.max_token.saturating_sub(units);
@@ -521,7 +527,10 @@ fn is_chess960(variant: &str) -> bool {
 
 /// The start position from the tags (first tag of each name): the position, and its FEN when it
 /// is not the standard start.
-fn start_position(tags: &[(String, String)], at: &[(u32, u32)]) -> Result<(Position, Option<String>), PgnError> {
+fn start_position(
+    tags: &[(String, String)],
+    at: &[(u32, u32)],
+) -> Result<(Position, Option<String>), PgnError> {
     let index = |name: &str| tags.iter().position(|(n, _)| n == name);
     let error_at = |i: usize, message: &str| {
         let (line, column) = at.get(i).copied().unwrap_or((1, 1));
@@ -547,7 +556,8 @@ fn start_position(tags: &[(String, String)], at: &[(u32, u32)]) -> Result<(Posit
     };
     let fen = js_trim(&tags[fi].1);
     let Some(pos) = Position::from_fen(fen) else {
-        let message = if chess960.is_some() { "Chess960 castling rights are not supported" } else { "invalid FEN" };
+        let message =
+            if chess960.is_some() { "Chess960 castling rights are not supported" } else { "invalid FEN" };
         return Err(error_at(fi, message));
     };
     if chess960.is_some() {
