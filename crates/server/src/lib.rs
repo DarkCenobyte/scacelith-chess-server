@@ -36,3 +36,5 @@ pub mod realtime;
 
 pub mod app;
 pub mod cli;
+#[doc(hidden)]
+pub mod embedded;
