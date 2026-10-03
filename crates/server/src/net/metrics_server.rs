@@ -32,6 +32,9 @@ use crate::log_error;
 
 /// Time a client has to send a request head (Node's `headersTimeout` of this server).
 pub const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
+/// Time the requests in progress have to finish at the shutdown before their connections are
+/// dropped (Node closed them all at once).
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 /// Content type of the plain answers.
 const TEXT: &str = "text/plain; charset=utf-8";
 /// Content type of `/metrics`.
@@ -152,7 +155,8 @@ impl MetricsEndpoint {
     }
 
     /// Serves the endpoint on `listener` until `shutdown` turns true, then lets the requests in
-    /// progress finish and returns.
+    /// progress finish (at most [`DRAIN_TIMEOUT`], then their connections are dropped) and
+    /// returns.
     pub async fn serve(self: Arc<Self>, listener: TcpListener, mut shutdown: watch::Receiver<bool>) {
         let mut acceptor = Acceptor::new(listener, self.log.clone());
         let mut conns = JoinSet::new();
@@ -185,7 +189,10 @@ impl MetricsEndpoint {
             });
         }
         drop(acceptor);
-        while conns.join_next().await.is_some() {}
+        let drain = async { while conns.join_next().await.is_some() {} };
+        if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_err() {
+            conns.shutdown().await;
+        }
     }
 }
 
@@ -372,5 +379,21 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), server).await.expect("stopped").expect("no panic");
         assert_eq!(idle.read(&mut buf).await.expect("eof"), 0, "the idle connection is closed");
         assert!(TcpStream::connect(at).await.is_err(), "no longer listening");
+    }
+
+    #[tokio::test]
+    async fn a_client_that_does_not_read_does_not_hold_the_shutdown() {
+        let listener = listener::bind(IpAddr::from([127, 0, 0, 1]), 0, 16).expect("bound");
+        let at = listener.local_addr().expect("address");
+        let (stop, rx) = watch::channel(false);
+        let big = endpoint(None).render_with(|| "#".repeat(4 << 20));
+        let server = tokio::spawn(Arc::new(big).serve(listener, rx));
+        let mut stuck = TcpStream::connect(at).await.expect("connected");
+        stuck.write_all(&b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n".repeat(8)).await.expect("write");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        stop.send_replace(true);
+        let stopped = tokio::time::timeout(Duration::from_secs(5), server).await;
+        assert!(stopped.is_ok(), "the endpoint stops even though the answers are never read");
+        drop(stuck);
     }
 }
