@@ -81,16 +81,28 @@ password inline only to stay short.
   10 seconds (408 `request_timeout`). After either error the server closes the connection.
 - **Strict schemas.** A field that the endpoint does not know is refused, a field without "optional"
   in this reference is required, and types and lengths are checked. Any of these failures answers
-  400 `invalid_request`, with `field` naming the field. Strings may not contain control
-  characters. Lengths are counted in characters. Invalid JSON answers 400 `invalid_json`.
-  `POST /reports` checks its body itself ([section 13](#13-reports)).
+  400 `invalid_request`, with `field` naming the field (a body that is valid JSON but not an
+  object answers it without `field`). Strings may not contain control
+  characters. Lengths are counted in UTF-16 code units, as JavaScript counts them: a character
+  outside the Basic Multilingual Plane, such as most emoji, counts 2. Invalid JSON answers 400
+  `invalid_json`. `POST /reports` checks its body itself: it ignores unknown fields, counts the
+  length of its `comment` in code points, and its `invalid_request` has no `field`
+  ([section 13](#13-reports)).
 - **Query strings.** The first occurrence of a parameter counts, and unknown parameters are
   ignored. A `+` decodes to a space: the endpoints that take a time-control category accept both
   `3%2B2` and `3+2`.
 - **Methods.** `HEAD` is `GET` without the body. `OPTIONS` on an existing path answers 204 with an
   `Allow` header. Any other method that the path does not have answers 405 `method_not_allowed`
-  with `Allow`.
+  with `Allow`. The health endpoints are the exception: every method but `GET` and `HEAD`,
+  `OPTIONS` included, answers 405 `method_not_allowed` with `Allow: GET, HEAD`.
 - The request target may not exceed 4096 characters (414 `uri_too_long`).
+- **Unreadable requests.** A request that the server cannot parse gets an empty answer, with
+  `Connection: close` and no JSON body, and the connection closes: 400 (a malformed request line,
+  header or chunked body, an unknown method, `Content-Length` given twice or with
+  `Transfer-Encoding`, a request target with bytes outside ASCII), 431 (a request head over 8192
+  bytes, counted as the target plus the header names and values, more than 64 header lines, or
+  chunk extensions or trailers that are too large) or 408 (a request head that did not arrive
+  within 10 s).
 - **No CORS.** The API serves the game, not web pages. No `Access-Control-*` header is ever sent,
   so a web page cannot read an answer. Because only JSON bodies are taken, a cross-site write
   would need a preflight, and that preflight fails.
@@ -101,11 +113,18 @@ password inline only to stay short.
   GIFs (`image/gif`, section 11) and the HTML pages. Times are milliseconds since 1970-01-01
   UTC. Ids are integers. Game ids have up to 16 digits but stay below 2^53, so a JSON number (a
   double) holds them exactly.
-- Every answer carries `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
+- Every answer of the API carries `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
   `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`,
   `Cross-Origin-Resource-Policy: same-origin` and a `Content-Security-Policy`
   (`default-src 'none'; frame-ancestors 'none'` for the API). With `TLS_MODE=native` it also
-  carries `Strict-Transport-Security: max-age=31536000`.
+  carries `Strict-Transport-Security: max-age=31536000`. Its JSON answers have
+  `Content-Type: application/json; charset=utf-8`.
+- The answers that the listener writes itself, before the API, are different: the health
+  endpoints' `GET` and `HEAD` (section 15), the 429 `rate_limited` of the per-address layer
+  (section 1.5) and a 500 `internal_error` when the API fails outright. They carry the same
+  headers except `Cross-Origin-Resource-Policy`, and their `Content-Type` is `application/json`
+  without a charset. The empty answers to unreadable requests (section 1.2) carry none of these
+  headers.
 - An answer must be read within 60 s of the moment the server has it ready, which only matters
   for the large ones (a GIF, the data export, a long PGN): the server closes the connection of a
   client that has not taken it all by then. The time the server takes to prepare an answer (a GIF
@@ -140,6 +159,7 @@ Errors that any endpoint can give:
 | 415 | `unsupported_media_type` | The body is not `application/json`, or its charset is not UTF-8. |
 | 429 | `rate_limited` | A rate limit (section 1.5): `retryAfter` plus a `Retry-After` header. |
 | 500 | `internal_error` | An unexpected failure. The server logs it. |
+| 503 | `server_busy` | The database stayed locked while the session token was checked (`retryAfter: 1`, section 1.4). |
 | 503 | `timeout` | The server did not answer within 30 s (60 s for the export, 45 s for the GIFs with the default settings). |
 
 The read endpoints (sections 10 to 12) and the export answer 503 `busy` with `retryAfter: 1`
@@ -176,6 +196,9 @@ Authorization: Bearer sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8
 
   Every one of them answers `{ token, expiresAt, user }`. The server stores only a SHA-256 of the
   token.
+- **The header.** The value must start with exactly `Bearer ` (that case, one space), followed by
+  a token of 1 to 512 printable ASCII characters without spaces. Any other value is an invalid
+  token (401 `invalid_token`). A header with an empty value counts as missing.
 - **Where the session is required**, a missing header answers 401 `unauthorized` with
   `WWW-Authenticate: Bearer realm="scacelith"`. An invalid token answers 401 `invalid_token` with
   `WWW-Authenticate: Bearer realm="scacelith", error="invalid_token"`. A client should forget a
@@ -183,6 +206,9 @@ Authorization: Bearer sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8
 - **Optional session.** On some endpoints the session is optional (`GET /games/:id`,
   `GET /games/:id/pgn`). Without the header they answer the public view. If a header is sent, its
   token must be valid.
+- **Busy store.** When the database stays locked while a token is checked, an endpoint that
+  requires or accepts a session answers 503 `server_busy` with `retryAfter: 1` (and
+  `Retry-After`). The token was not judged: keep it and send the request again.
 - **Lifetime.** A session ends at the first of these:
   - `SESSION_MAX_DAYS` (90) after the sign-in: this is `expiresAt`;
   - `SESSION_IDLE_DAYS` (30) without use. Each use pushes the idle limit back; the server writes
@@ -443,7 +469,7 @@ curl -sS "$API/info"
   "name": "Scacelith",
   "serverId": "07dd26af-672a-43af-a8af-34011c7e977b",
   "motd": "",
-  "protocol": { "min": 3, "max": 3, "schema": 4152513065, "subprotocol": "scacelith.v1" },
+  "protocol": { "min": 1, "max": 1, "schema": 97842216, "subprotocol": "scacelith.rt1" },
   "wsPort": 443,
   "wsPath": "/ws",
   "registration": "open",
@@ -462,7 +488,10 @@ curl -sS "$API/info"
 
 - `serverId`: a UUID that the database gets on its first start. It stays the same across
   restarts. It is `null` when the database cannot give it.
-- `protocol`: the WebSocket protocol versions, schema hash and subprotocol (PROTOCOL.md).
+- `protocol`: the WebSocket protocol versions that the server speaks (`min` to `max`), the
+  schema fingerprint `schema` (the first 4 bytes, big-endian, of the SHA-256 of the canonical
+  schema, as an unsigned integer: `0x05d4f428`; informational, never compared) and the
+  subprotocol (PROTOCOL.md).
 - `wsPort`: the WebSocket port that players use: `PUBLIC_WS_PORT`, else `WS_PORT`, else
   `API_PORT`. Behind a proxy that publishes 443, set `PUBLIC_WS_PORT` as well as
   `PUBLIC_API_PORT`.
@@ -621,19 +650,25 @@ curl -sS -X POST "$API/auth/logout" -H "Authorization: Bearer $TOKEN"
 
 Sends the e-mail confirmation link again. **Auth** none. **Limits** `auth` and `auth_mail` (10
 per hour per client). Body: `{ "email": string 1-254 }`. Answer:
-**202 `{ "status": "accepted" }`**, always, even when the store is busy. A request acts at most
-once every 5 minutes per address. A signup waiting with that address gets its 24 h again,
-whether or not another account uses the address, so that its username stays held as long in
-both cases. A link is sent only for that signup when the address has no account (a new link,
-valid 24 h, replaces the previous one), or for an active, unconfirmed account with that address.
+**202 `{ "status": "accepted" }`**, whatever the address. A request acts at most once every 5
+minutes per address. A signup waiting with that address gets its 24 h again, whether or not
+another account uses the address, so that its username stays held as long in both cases. A link
+is sent only for that signup when the address has no account (a new link, valid 24 h, replaces
+the previous one), or for an active, unconfirmed account with that address. The renewal of the
+signup and its new link are best effort: a busy store skips them, and the answer is still 202.
+Error: 503 `server_busy` with `retryAfter: 1` when the database stayed locked while the account
+was looked up or the link of an unconfirmed account was stored. The address's 5 minutes start
+all the same: a new request within them does nothing.
 
 ### POST /auth/password/forgot
 
 Sends a password reset link, valid for one hour, which opens the page `/reset-password` (section
 14). **Auth** none. **Limits** `auth`, `auth_forgot` and `auth_forgot_day`. Body:
-`{ "email": string 1-254 }`. Answer: **202 `{ "status": "accepted" }`**, always. A link goes only
-to an active account, at most once every 5 minutes per address. A Google-only account sets its
-first password this way.
+`{ "email": string 1-254 }`. Answer: **202 `{ "status": "accepted" }`**, whatever the address.
+A link goes only to an active account, at most once every 5 minutes per address. A Google-only
+account sets its first password this way. Error: 503 `server_busy` with `retryAfter: 1` when the
+database stayed locked while the account was looked up or the link was stored. The address's 5
+minutes start all the same: a new request within them sends no link.
 
 Password recovery has the strictest limits of the API, all counted for the whole server:
 
@@ -1659,8 +1694,8 @@ curl -sS "$API/players/alice/games?limit=1"
 
 The summaries are those of section 10 without `baseMs`, `incMs` and `outcome`; `color` is the
 side of this player. `next` is the last game's id whenever the page is full, so the next page may
-be empty. Errors: 400 `invalid_username`, `invalid_cursor` or `invalid_limit`; 404 `not_found`;
-503 `busy`.
+be empty. Errors: 400 `invalid_username`, `invalid_cursor` or `invalid_limit` (unlike
+`GET /account/games`, without `field`); 404 `not_found`; 503 `busy`.
 
 ### GET /leaderboard
 
@@ -1699,13 +1734,16 @@ and, except for `abuse`, it asks for the engine analysis of the game
 | `gameId` | integer, or a string of digits | The game. |
 | `reported` | string, max 24 | The opponent's user name, as in the game record or as it is now, without regard to case. |
 | `category` | `cheating`, `abuse` or `other` | |
-| `comment` | string, optional | At most 500 characters once control characters are removed. |
+| `comment` | string or `null`, optional | `null` counts as absent. Control characters other than tab and line feed are removed and the text is trimmed; it may then hold at most 500 characters, counted in code points (not UTF-16 code units). |
+
+The route checks the body itself, not with the strict schemas of section 1.2: unknown fields are
+ignored, and its `invalid_request` has no `field`.
 
 Answer: **202 `{ "status": "received" }`**. A report of the same opponent for the same game gets
 the same answer and changes nothing; the answer never tells anything about the reported account.
 Errors:
 
-- 400 `invalid_request`;
+- 400 `invalid_request`, without `field`;
 - 429 `report_limit` (`retryAfter: 3600`, with a `Retry-After` header);
 - 403 `report_not_allowed`: not the opponent of the reporter in a game that ended within the last
   7 days.
@@ -1728,7 +1766,8 @@ Pages for a browser, opened from the links of e-mails. Their links point to
   frame-ancestors 'none'; base-uri 'none'`.
 - A GET only shows a button or a form, so that a mail scanner opening the link does not use it up.
   The change happens on POST: a form sent as `application/x-www-form-urlencoded`, with the link's
-  token in a hidden field.
+  token in a hidden field. A JSON body (`application/json`) with the same fields is accepted
+  too. A form field given twice answers 400.
 - Errors (rate limits, invalid fields) are HTML pages too.
 
 | Page | Answers |
@@ -1750,6 +1789,10 @@ Both paths work for each endpoint:
 |---|---|
 | `GET` or `HEAD /healthz`, `/api/v1/healthz` | 200 `{ "status": "ok" }` while the process runs. |
 | `GET` or `HEAD /readyz`, `/api/v1/readyz` | 200 `{ "status": "ready" }` when the server accepts players; 503 `{ "status": "not_ready" }` while it starts or stops. |
+
+Any other method, `OPTIONS` included, answers 405 `method_not_allowed` with `Allow: GET, HEAD`.
+The `GET` and `HEAD` answers come from the listener: `Content-Type: application/json` without a
+charset, and no `Cross-Origin-Resource-Policy` (section 1.3).
 
 On the metrics port (`METRICS_PORT`, 9464 on `METRICS_BIND`, 127.0.0.1 by default; plain HTTP,
 keep it private):
