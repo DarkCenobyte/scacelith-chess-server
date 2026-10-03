@@ -607,17 +607,31 @@ pub(crate) async fn run(
     if reader_done {
         out.close(CLOSE_NORMAL, "");
     }
-    match out.close_request() {
-        Some(close) if close.code == CLOSE_SLOW_CONSUMER => info.close(close.code, &close.reason),
-        Some(close) => {
-            if tokio::time::timeout(ctx.settings.close_timeout, &mut writer_task).await.is_err() {
-                info.close(close.code, &close.reason);
-            }
+    // The writer task is never aborted: a write cut short would leave half a frame before the
+    // close frame. When it is stuck on a client that does not read, this task starts the close,
+    // which fails the pending write once the socket is dropped (the close timeout later).
+    let writer_done = match out.close_request() {
+        Some(close) if close.code == CLOSE_SLOW_CONSUMER => {
+            info.close(close.code, &close.reason);
+            false
         }
-        None => info.close(CLOSE_INTERNAL, ""),
-    }
+        Some(close) => match tokio::time::timeout(ctx.settings.close_timeout, &mut writer_task).await {
+            Ok(_) => true,
+            Err(_) => {
+                info.close(close.code, &close.reason);
+                false
+            }
+        },
+        None => {
+            out.close(CLOSE_INTERNAL, "");
+            info.close(CLOSE_INTERNAL, "");
+            false
+        }
+    };
     if !reader_done {
         super::linger(&mut reader).await;
     }
-    writer_task.abort();
+    if !writer_done {
+        let _ = writer_task.await;
+    }
 }

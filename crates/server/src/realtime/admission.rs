@@ -15,12 +15,14 @@
 //! start it: a server at `MAX_CONNECTIONS` itself does not shed, so that a returning player does
 //! not compete with newcomers for the handshake slots.
 //!
-//! Every operation is O(1) under one short lock; a count is released when the connection's
-//! [`AdmissionPermit`] is dropped.
+//! Every count is O(1) under one short lock; a count is released when the connection's
+//! [`AdmissionPermit`] is dropped. The server-full signal takes no lock: the TLS gate calls it
+//! under its own mutex, so it reads atomics written under the count lock.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 
@@ -49,17 +51,31 @@ pub enum Refusal {
     Global,
 }
 
-#[derive(Debug, Default)]
-struct Counts {
-    by_key: HashMap<AddrKey, u32>,
-    connections: usize,
-    /// Monotonic time of the last global refusal and of the last admitted upgrade.
-    full_at: Option<f64>,
-    admit_at: Option<f64>,
+/// A monotonic time in milliseconds read without a lock; minus infinity until first set.
+struct Stamp(AtomicU64);
+
+impl Stamp {
+    fn never() -> Stamp {
+        Stamp(AtomicU64::new(f64::NEG_INFINITY.to_bits()))
+    }
+
+    fn set(&self, ms: f64) {
+        self.0.store(ms.to_bits(), Ordering::Relaxed);
+    }
+
+    fn get(&self) -> f64 {
+        f64::from_bits(self.0.load(Ordering::Relaxed))
+    }
 }
 
 struct Inner {
-    counts: Mutex<Counts>,
+    /// Connections per address group. Its lock also orders the writes of the three atomics
+    /// below, which the server-full signal reads without it.
+    by_key: Mutex<HashMap<AddrKey, u32>>,
+    connections: AtomicUsize,
+    /// The last global refusal and the last admitted upgrade.
+    full_at: Stamp,
+    admit_at: Stamp,
     max_per_ip: u32,
     upgrade_cap: usize,
     shed_at: usize,
@@ -93,7 +109,10 @@ impl Admissions {
     pub fn new(max_connections: usize, max_per_ip: u32, clock: SharedClock) -> Admissions {
         Admissions {
             inner: Arc::new(Inner {
-                counts: Mutex::new(Counts::default()),
+                by_key: Mutex::new(HashMap::new()),
+                connections: AtomicUsize::new(0),
+                full_at: Stamp::never(),
+                admit_at: Stamp::never(),
                 max_per_ip,
                 upgrade_cap: max_connections + upgrade_reserve(max_connections),
                 shed_at: (max_connections * 6).div_ceil(5),
@@ -109,12 +128,12 @@ impl Admissions {
 
     /// Open connections counted.
     pub fn connections(&self) -> usize {
-        self.inner.counts.lock().connections
+        self.inner.connections.load(Ordering::Relaxed)
     }
 
     /// Open connections counted for the group of `ip`.
     pub fn count_of(&self, ip: IpAddr) -> u32 {
-        self.inner.counts.lock().by_key.get(&AddrKey::of(ip)).copied().unwrap_or(0)
+        self.inner.by_key.lock().get(&AddrKey::of(ip)).copied().unwrap_or(0)
     }
 
     /// Counts a new connection from `ip` unless a limit is reached (the global one first). The
@@ -122,50 +141,50 @@ impl Admissions {
     pub fn try_acquire(&self, ip: IpAddr) -> Result<Slot, Refusal> {
         let now = self.inner.clock.mono_ms();
         let key = AddrKey::of(ip);
-        let mut c = self.inner.counts.lock();
-        if c.connections >= self.inner.upgrade_cap {
-            c.full_at = Some(now);
+        let inner = &*self.inner;
+        let mut by_key = inner.by_key.lock();
+        let connections = inner.connections.load(Ordering::Relaxed);
+        if connections >= inner.upgrade_cap {
+            inner.full_at.set(now);
             return Err(Refusal::Global);
         }
-        let n = c.by_key.entry(key).or_insert(0);
-        if *n >= self.inner.max_per_ip {
+        let n = by_key.entry(key).or_insert(0);
+        if *n >= inner.max_per_ip {
             if *n == 0 {
-                c.by_key.remove(&key);
+                by_key.remove(&key);
             }
             return Err(Refusal::PerIp);
         }
         *n += 1;
-        c.connections += 1;
-        c.admit_at = Some(now);
-        metrics::lobby().connections.set(c.connections as f64);
+        inner.connections.store(connections + 1, Ordering::Relaxed);
+        inner.admit_at.set(now);
+        metrics::lobby().connections.set((connections + 1) as f64);
         Ok(Slot { owner: self.clone(), key })
     }
 
     fn release(&self, key: AddrKey) {
-        let mut c = self.inner.counts.lock();
-        if let Some(n) = c.by_key.get_mut(&key) {
+        let inner = &*self.inner;
+        let mut by_key = inner.by_key.lock();
+        if let Some(n) = by_key.get_mut(&key) {
             *n -= 1;
             if *n == 0 {
-                c.by_key.remove(&key);
+                by_key.remove(&key);
             }
-            c.connections = c.connections.saturating_sub(1);
-            metrics::lobby().connections.set(c.connections as f64);
+            let connections = inner.connections.load(Ordering::Relaxed).saturating_sub(1);
+            inner.connections.store(connections, Ordering::Relaxed);
+            metrics::lobby().connections.set(connections as f64);
         }
     }
 
     /// Whether new connections should be shed before the TLS handshake (module documentation).
+    /// Lock-free: three atomic reads and the clock.
     pub fn is_full(&self) -> bool {
-        let now = self.inner.clock.mono_ms();
-        let c = self.inner.counts.lock();
-        if c.connections >= self.inner.shed_at {
+        let inner = &*self.inner;
+        if inner.connections.load(Ordering::Relaxed) >= inner.shed_at {
             return true;
         }
-        match (c.full_at, c.admit_at) {
-            (Some(full), admit) => {
-                admit.is_none_or(|a| full > a) && (0.0..FULL_HOLD_MS).contains(&(now - full))
-            }
-            (None, _) => false,
-        }
+        let full = inner.full_at.get();
+        full > inner.admit_at.get() && (0.0..FULL_HOLD_MS).contains(&(inner.clock.mono_ms() - full))
     }
 
     /// [`Admissions::is_full`] as the gate's signal.

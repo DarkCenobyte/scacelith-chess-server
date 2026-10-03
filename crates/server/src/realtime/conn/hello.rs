@@ -149,11 +149,9 @@ pub(crate) async fn run(
     if !out.is_open() {
         let batch = out.take_kick();
         metrics::conn().hello.with(&["kicked"]).inc();
-        write_direct(ctx, writer, &batch.frames).await;
-        match batch.close {
-            Some(close) => writer.close(close.code, &close.reason),
-            None => writer.close(CLOSE_INTERNAL, ""),
-        }
+        let (code, reason) = batch.close.map_or((CLOSE_INTERNAL, String::new()), |c| (c.code, c.reason));
+        write_direct(ctx, writer, &batch.frames, code, &reason).await;
+        writer.close(code, &reason);
         return None;
     }
     let welcome = Welcome {
@@ -180,7 +178,7 @@ pub(crate) async fn run(
             return None;
         }
     };
-    if !write_direct(ctx, writer, &[welcome]).await {
+    if !write_direct(ctx, writer, &[welcome], CLOSE_GOING_AWAY, "timeout").await {
         return None;
     }
     link.set_welcomed();
@@ -270,14 +268,30 @@ async fn authenticate(ctx: &ConnContext, conn: ConnId, hello: &Hello) -> Result<
     }
 }
 
-/// Writes frames straight to the socket (before the writer task exists). False when the
-/// connection is closing or the client does not read them within the close timeout.
-async fn write_direct(ctx: &ConnContext, writer: &mut WsWriter, frames: &[Bytes]) -> bool {
+/// Writes frames straight to the socket (before the writer task exists). The write is never
+/// cancelled, since one cut short would leave half a frame before the close frame: when the
+/// client has not taken the frames within the close timeout, the connection starts closing with
+/// `code` while the write stays pending, and the write then fails once the socket is dropped.
+/// False when the frames were not written.
+async fn write_direct(
+    ctx: &ConnContext,
+    writer: &mut WsWriter,
+    frames: &[Bytes],
+    code: u16,
+    reason: &str,
+) -> bool {
     if frames.is_empty() {
         return true;
     }
+    let info = writer.info();
     let refs: Vec<&[u8]> = frames.iter().map(|f| &f[..]).collect();
-    matches!(tokio::time::timeout(ctx.settings.close_timeout, writer.send_batch(&refs)).await, Ok(Ok(())))
+    let send = writer.send_batch(&refs);
+    tokio::pin!(send);
+    tokio::select! {
+        sent = &mut send => return sent.is_ok(),
+        () = tokio::time::sleep(ctx.settings.close_timeout) => info.close(code, reason),
+    }
+    send.await.is_ok()
 }
 
 /// Refuses the connection: its `Notice` if any, the fatal `Error`, then the close code of the
@@ -286,8 +300,8 @@ pub(crate) async fn refuse(ctx: &ConnContext, writer: &mut WsWriter, refusal: Re
     metrics::conn().hello.with(&[refusal.label]).inc();
     let mut out: Vec<Bytes> = refusal.notice.into_iter().collect();
     out.push(frames::error(refusal.r#ref, refusal.code, true, 0));
-    write_direct(ctx, writer, &out).await;
     let code = close_code_for(refusal.code).unwrap_or(CLOSE_INTERNAL);
     let reason = if refusal.code == ErrorCode::ShuttingDown { "server shutting down" } else { "" };
+    write_direct(ctx, writer, &out, code, reason).await;
     writer.close(code, reason);
 }
