@@ -38,6 +38,7 @@ mod rules;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Weak};
 use std::time::Instant;
 
@@ -123,6 +124,38 @@ pub struct ServiceStats {
     pub cached: usize,
     /// Bytes of the GIFs in the cache.
     pub cache_bytes: usize,
+    /// Requests served without a render of their own (cached, or joined to a render in flight).
+    pub hits: u64,
+    /// Requests that claimed a render.
+    pub misses: u64,
+    /// Renders that produced a GIF.
+    pub rendered: u64,
+    /// Renders refused as busy (full queue, wait timeout, closed).
+    pub busy: u64,
+    /// Renders that failed.
+    pub failed: u64,
+}
+
+/// What happened to a request or a render, counted in the process metrics and in the service's
+/// own [`ServiceStats`] (the metrics are shared by every service of the process; the stats are
+/// not).
+#[derive(Clone, Copy)]
+enum Event {
+    Hit,
+    Miss,
+    Rendered,
+    Busy,
+    Failed,
+}
+
+/// The per-service counters behind [`ServiceStats`].
+#[derive(Default)]
+struct Tally {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    rendered: AtomicU64,
+    busy: AtomicU64,
+    failed: AtomicU64,
 }
 
 /// Why [`GifService::render_with_quotas`] answered no GIF.
@@ -182,6 +215,7 @@ struct Inner {
     renderer: Arc<dyn Renderer>,
     store: Mutex<Store>,
     life: Mutex<Lifecycle>,
+    tally: Tally,
 }
 
 impl Inner {
@@ -205,7 +239,25 @@ impl Inner {
             live: pool.live,
             cached: store.cache.len(),
             cache_bytes: store.cache.bytes(),
+            hits: self.tally.hits.load(Ordering::Relaxed),
+            misses: self.tally.misses.load(Ordering::Relaxed),
+            rendered: self.tally.rendered.load(Ordering::Relaxed),
+            busy: self.tally.busy.load(Ordering::Relaxed),
+            failed: self.tally.failed.load(Ordering::Relaxed),
         }
+    }
+
+    fn count(&self, event: Event) {
+        let m = &*METRICS;
+        let (metric, own) = match event {
+            Event::Hit => (&m.hit, &self.tally.hits),
+            Event::Miss => (&m.miss, &self.tally.misses),
+            Event::Rendered => (&m.ok, &self.tally.rendered),
+            Event::Busy => (&m.busy, &self.tally.busy),
+            Event::Failed => (&m.failed, &self.tally.failed),
+        };
+        metric.inc();
+        own.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -245,14 +297,13 @@ impl Claim {
                 Some(pool) => pool.render(job).await,
                 None => Err(GifError::closed()),
             };
-            let m = &*METRICS;
             match &result {
                 Ok(_) => {
-                    m.ok.inc();
-                    m.duration.observe(t0.elapsed().as_secs_f64() * 1000.0);
+                    inner.count(Event::Rendered);
+                    METRICS.duration.observe(t0.elapsed().as_secs_f64() * 1000.0);
                 }
-                Err(GifError::Busy(_)) => m.busy.inc(),
-                Err(GifError::RenderFailed(_)) => m.failed.inc(),
+                Err(GifError::Busy(_)) => inner.count(Event::Busy),
+                Err(GifError::RenderFailed(_)) => inner.count(Event::Failed),
             }
             {
                 let mut store = inner.store.lock();
@@ -311,6 +362,7 @@ impl GifService {
             renderer,
             store: Mutex::new(Store { cache: GifCache::new(cache_bytes), ..Store::default() }),
             life: Mutex::new(Lifecycle::default()),
+            tally: Tally::default(),
         });
         let mut live = LIVE.lock();
         live.retain(|w| w.strong_count() > 0);
@@ -353,19 +405,19 @@ impl GifService {
         loop {
             match self.lookup_or_claim(&key) {
                 Lookup::Cached(gif) => {
-                    METRICS.hit.inc();
+                    self.inner.count(Event::Hit);
                     return Ok(gif);
                 }
                 Lookup::Joined(rx) => match wait(rx).await {
                     Flight::Done(Ok(gif)) => {
-                        METRICS.hit.inc();
+                        self.inner.count(Event::Hit);
                         return Ok(gif);
                     }
                     Flight::Done(Err(e)) => return Err(DeliverError::Gif(e)),
                     Flight::Pending | Flight::Cancelled => {}
                 },
                 Lookup::Claimed(claim) => {
-                    METRICS.miss.inc();
+                    self.inner.count(Event::Miss);
                     if let Err(e) = take_quotas().await {
                         drop(claim);
                         return Err(DeliverError::Quota(e));
@@ -428,7 +480,7 @@ mod tests {
     use super::pool::tests::{FakeRenderer, job};
     use scacelith_gif::{Options, Orientation, Size};
 
-    /// The tests share the process metrics: they run one at a time.
+    /// The tests depend on timing: they run one at a time.
     static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// The fake renderer, counting its renders and numbering its GIFs.
@@ -458,13 +510,14 @@ mod tests {
         (GifService::with_settings(settings, cache_bytes, renderer.clone()), renderer)
     }
 
-    fn counts() -> [u64; 5] {
-        let m = &*METRICS;
-        [m.hit.get(), m.miss.get(), m.ok.get(), m.busy.get(), m.failed.get()]
+    /// The service's own counters: hit, miss, rendered, busy, failed.
+    fn counts(gifs: &GifService) -> [u64; 5] {
+        let s = gifs.stats();
+        [s.hits, s.misses, s.rendered, s.busy, s.failed]
     }
 
-    fn delta(before: [u64; 5]) -> [u64; 5] {
-        let now = counts();
+    fn delta(gifs: &GifService, before: [u64; 5]) -> [u64; 5] {
+        let now = counts(gifs);
         std::array::from_fn(|i| now[i] - before[i])
     }
 
@@ -482,7 +535,7 @@ mod tests {
             counter.fetch_add(1, Ordering::SeqCst);
             Ok::<(), ()>(())
         };
-        let before = counts();
+        let before = counts(&gifs);
         assert!(!gifs.started());
         let a = gifs.render_with_quotas(job(""), take).await.unwrap();
         let b = gifs.render_with_quotas(job(""), take).await.unwrap();
@@ -490,7 +543,7 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(renderer.renders.load(Ordering::SeqCst), 1);
         assert_eq!(quotas.load(Ordering::SeqCst), 1, "the second request took no render quota");
-        assert_eq!(delta(before), [1, 1, 1, 0, 0]);
+        assert_eq!(delta(&gifs, before), [1, 1, 1, 0, 0]);
         let black =
             GifJob { options: Options { orientation: Orientation::Black, ..Options::default() }, ..job("") };
         gifs.render(black).await.unwrap();
@@ -522,13 +575,13 @@ mod tests {
                 .await
             })
         };
-        let before = counts();
+        let before = counts(&gifs);
         let (r1, r2) = (request("sleep:100"), request("sleep:100"));
         let (r1, r2) = (r1.await.unwrap().unwrap(), r2.await.unwrap().unwrap());
         assert_eq!(r1, r2);
         assert_eq!(renderer.renders.load(Ordering::SeqCst), 1, "one render");
         assert_eq!(quotas.load(Ordering::SeqCst), 1, "one render quota");
-        assert_eq!(delta(before), [1, 1, 1, 0, 0], "the second is a hit");
+        assert_eq!(delta(&gifs, before), [1, 1, 1, 0, 0], "the second is a hit");
         gifs.close();
     }
 
@@ -575,13 +628,13 @@ mod tests {
     async fn the_error_of_a_render_goes_to_every_request_waiting_for_it_and_nothing_is_cached() {
         let _serial = SERIAL.lock().await;
         let (gifs, renderer) = service(1, 0, 1 << 20);
-        let before = counts();
+        let before = counts(&gifs);
         let fail = with_delay("sleep:100|fail:illegal move at ply 3", 600);
         let (a, b) = (gifs.render(fail.clone()), gifs.render(fail.clone()));
         let (a, b) = tokio::join!(a, b);
         assert_eq!(a, Err(GifError::RenderFailed("GIF render failed: illegal move at ply 3".into())));
         assert_eq!(a, b);
-        assert_eq!(delta(before), [0, 1, 0, 0, 1]);
+        assert_eq!(delta(&gifs, before), [0, 1, 0, 0, 1]);
         // Busy: the only thread renders something else and no job may wait.
         let long = tokio::spawn({
             let gifs = gifs.clone();
@@ -592,7 +645,7 @@ mod tests {
         assert_eq!(busy, Err(GifError::Busy("GIF renderer busy (queue full)".into())));
         assert_eq!(busy.unwrap_err().code(), "busy");
         long.await.unwrap().unwrap();
-        assert_eq!(delta(before), [0, 3, 1, 1, 1]);
+        assert_eq!(delta(&gifs, before), [0, 3, 1, 1, 1]);
         // Nothing failed was cached: the same jobs render again.
         assert_eq!(gifs.render(fail).await.unwrap_err().code(), "render_failed");
         gifs.render(job("")).await.unwrap();
