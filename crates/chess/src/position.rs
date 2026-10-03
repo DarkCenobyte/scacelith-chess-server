@@ -274,6 +274,10 @@ impl Position {
 
     /// Applies a legal move and returns its flags (with `CHECK` / `MATE`). The position is
     /// unchanged when the move is illegal.
+    ///
+    /// # Errors
+    ///
+    /// [`IllegalMove`] when the move is not legal here.
     pub fn play(&mut self, m: u16) -> Result<MoveFlags, IllegalMove> {
         let im = self.validate(m).ok_or(IllegalMove { mv: m })?;
         Ok(MoveFlags::from_bits(self.play_validated(im) as u8))
@@ -375,6 +379,10 @@ impl Position {
 
     /// Number of leaf nodes of the legal move tree of `depth` plies (bulk counting at the last
     /// ply). Depth 0 is 1.
+    ///
+    /// # Errors
+    ///
+    /// [`PerftDepthError`] for a depth over [`MAX_PERFT_DEPTH`].
     pub fn perft(&self, depth: u32) -> Result<u64, PerftDepthError> {
         match depth {
             0 => Ok(1),

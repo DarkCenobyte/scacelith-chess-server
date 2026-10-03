@@ -135,6 +135,11 @@ pub fn normalize_result(s: &str) -> Option<&'static str> {
 }
 
 /// Reads the first game of a PGN text (see the module documentation).
+///
+/// # Errors
+///
+/// A [`PgnError`] (line, column, message) for a text over the caps, without a game, or with a
+/// malformed tag pair, an illegal move, an unsupported variant...
 pub fn read_pgn(text: &str, limits: &PgnLimits) -> Result<PgnGame, PgnError> {
     if text.len() > limits.max_bytes {
         return Err(too_large(limits));
@@ -144,6 +149,10 @@ pub fn read_pgn(text: &str, limits: &PgnLimits) -> Result<PgnGame, PgnError> {
 
 /// Reads the first game of a PGN file: UTF-8 (a byte order mark is skipped), or Latin-1 when
 /// the bytes are not valid UTF-8.
+///
+/// # Errors
+///
+/// As [`read_pgn`].
 pub fn read_pgn_bytes(bytes: &[u8], limits: &PgnLimits) -> Result<PgnGame, PgnError> {
     if bytes.len() > limits.max_bytes {
         return Err(too_large(limits));

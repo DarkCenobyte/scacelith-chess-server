@@ -94,6 +94,10 @@ impl ChessGame {
     /// A game from the standard start (`None`) or from a FEN (normalised like
     /// [`Position::from_fen`]; "" is invalid). A game can be over from its start (checkmate,
     /// stalemate, dead position, halfmove clock at 150).
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidFen`] when the FEN is refused.
     pub fn new(start_fen: Option<&str>) -> Result<ChessGame, InvalidFen> {
         match start_fen {
             None => Ok(ChessGame::default()),
@@ -187,6 +191,11 @@ impl ChessGame {
 
     /// Plays a move; the outcome carries the move's flags and the status after it. Nothing
     /// changes when the game is over or the move is illegal.
+    ///
+    /// # Errors
+    ///
+    /// [`PlayError::GameOver`] when the game is over, [`PlayError::IllegalMove`] when the move is
+    /// not legal in the current position.
     pub fn play(&mut self, m: u16) -> Result<PlayResult, PlayError> {
         if self.is_over() {
             return Err(PlayError::GameOver);
@@ -258,6 +267,10 @@ impl ChessGame {
     /// Ends the game with any result (online endings: abandonment, abort, forfeit...). An error
     /// for `GameStatus::Ongoing` (checked even when the game is over); otherwise `Ok(true)` when
     /// the game ended now, `Ok(false)` when it was already over.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidEnd`] when `status` is [`GameStatus::Ongoing`].
     pub fn end(&mut self, status: GameStatus, reason: EndReason) -> Result<bool, InvalidEnd> {
         if status == GameStatus::Ongoing {
             return Err(InvalidEnd(status));
