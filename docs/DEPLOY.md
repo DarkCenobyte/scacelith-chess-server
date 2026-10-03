@@ -22,7 +22,7 @@ This guide installs the server as a systemd service on a Linux host, from the ex
 Requirements: x86-64 Linux with systemd 253 or later (Debian 13, Ubuntu 24.04, Fedora 38 and
 later); for systemd 252 (Debian 12, RHEL 9) see [Older systemd](#older-systemd). Optional: the
 Stockfish 19 binary for the anti-cheat analysis (see the [README](../README.md) and
-[ANTICHEAT.md](ANTICHEAT.md)), an SMTP account for e-mail, and the `sqlite3` command for backups.
+[ANTICHEAT.md](ANTICHEAT.md)) and an SMTP account for e-mail.
 
 ## 1. Build and install the binary
 
@@ -314,19 +314,24 @@ notice, reconnect by themselves, and their games in progress resume.
 
 The database is one SQLite file in WAL mode, `/var/lib/scacelith/scacelith.db`, with its `-wal`
 and `-shm` files while the server runs: copying the files of a running server does not give a
-consistent database. This version's command line has no backup command; use the `sqlite3`
-command (SQLite 3.27 or later) and `VACUUM INTO`, which writes a consistent snapshot in one pass
-through a read-only connection while the server keeps writing (its WAL grows until the copy
-ends; take it at a quiet hour). Do not use the `.backup` command of `sqlite3`: it starts over
-whenever another process writes to the database, and may never finish on a busy server
-([SIZING.md](SIZING.md#backups)).
+consistent database. Take copies with the administration command, as `scacelith` and with the
+environment file (the `scs` function of [section 3](#3-configuration)):
 
 ```sh
 sudo install -d -m 0700 -o scacelith -g scacelith /var/lib/scacelith/backup
-f=/var/lib/scacelith/backup/scacelith-$(date -u +%Y%m%dT%H%M%SZ).db
-sudo -u scacelith sqlite3 -readonly -cmd '.timeout 10000' /var/lib/scacelith/scacelith.db "VACUUM INTO '$f'"
-sudo -u scacelith sqlite3 -readonly "$f" 'PRAGMA quick_check'     # prints: ok
+scs admin backup /var/lib/scacelith/backup/scacelith-$(date -u +%Y%m%dT%H%M%SZ).db --verify
+# Backup written to /var/lib/scacelith/backup/scacelith-20261003T043000Z.db (35.2 MB in 412 ms, quick_check ok).
 ```
+
+`admin backup <file>` writes a consistent snapshot of the database in one pass with SQLite's
+`VACUUM INTO`, while the server keeps running and writing (the server's WAL grows until the copy
+ends: take it at a quiet hour). The file must not exist yet; it is created with mode 0600, and a
+relative path is resolved from the current directory. `--verify` then runs `PRAGMA quick_check`
+on the copy, and the command fails when the check does not answer `ok`; `--json` prints the
+result as JSON (`file`, `bytes`, `ms`, `verified`). The command refuses to copy anything when
+`DB_PATH` is not an existing Scacelith database (no such file, or no applied migration), so a
+backup run with the wrong configuration fails instead of copying an empty database. Exit codes:
+0 written, 1 refused or failed (`error: ...` or `admin: ...` on standard error), 2 usage.
 
 The copy is a single file. It holds e-mail addresses and the IP addresses of the last
 `RETENTION_IP_DAYS`: encrypt it, move it off the machine, and delete the local copy. Back up
@@ -348,12 +353,13 @@ User=scacelith
 Group=scacelith
 UMask=0077
 Nice=10
+Environment=SCACELITH_ENV_FILE=/etc/scacelith/scacelith-server.env
 ProtectSystem=strict
 ReadWritePaths=/var/lib/scacelith
 PrivateTmp=yes
 NoNewPrivileges=yes
 ExecStartPre=rm -f /var/lib/scacelith/backup/scacelith.db.new
-ExecStart=sqlite3 -readonly -cmd ".timeout 10000" /var/lib/scacelith/scacelith.db "VACUUM INTO '/var/lib/scacelith/backup/scacelith.db.new'"
+ExecStart=/usr/local/bin/scacelith-server admin backup /var/lib/scacelith/backup/scacelith.db.new --verify
 ExecStartPost=mv -f /var/lib/scacelith/backup/scacelith.db.new /var/lib/scacelith/backup/scacelith.db
 
 # /etc/systemd/system/scacelith-server-backup.timer
@@ -369,11 +375,24 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-Enable it with `sudo systemctl enable --now scacelith-server-backup.timer`.
+Enable it with `sudo systemctl enable --now scacelith-server-backup.timer`; a failed snapshot
+leaves the unit failed (`systemctl status scacelith-server-backup`) and keeps the previous copy.
 
-To restore a copy, stop the server, move the current database and the journal aside (the journal
-holds the games that were in progress against the database you replace; they are lost with it),
-install the copy, and start:
+The `sqlite3` command (SQLite 3.27 or later) can make the same snapshot through a read-only
+connection, without the checks of the command above:
+
+```sh
+sudo -u scacelith sqlite3 -readonly -cmd '.timeout 10000' /var/lib/scacelith/scacelith.db \
+  "VACUUM INTO '/var/lib/scacelith/backup/scacelith-manual.db'"
+sudo -u scacelith sqlite3 -readonly /var/lib/scacelith/backup/scacelith-manual.db 'PRAGMA quick_check'   # prints: ok
+```
+
+Do not use the `.backup` command of `sqlite3` on a running server: it copies the database a few
+pages at a time and starts over whenever the server writes, so on a busy server it may never
+finish.
+
+**Restoring a copy.** Stop the server, move the current database (with its `-wal` and `-shm`
+files) **and the game journal** aside, install the copy, and start:
 
 ```sh
 sudo systemctl stop scacelith-server
@@ -381,6 +400,20 @@ sudo -u scacelith sh -c 'cd /var/lib/scacelith && mkdir before-restore && mv sca
 sudo install -m 0600 -o scacelith -g scacelith scacelith-20261003T043000Z.db /var/lib/scacelith/scacelith.db
 sudo systemctl start scacelith-server
 ```
+
+The journal must not be replayed against an older copy. It holds the games that were in progress
+when the server stopped, and the server replays each of them at the start without looking at the
+database, then commits it to the database when it ends. A game whose player registered after the
+copy was made can never be committed (the copy has no such account): its commit fails and is
+retried for ever, at least every 10 seconds and with an error in the log each time; the other
+finished games of its shard can wait up to 10 seconds for their own commit; its other player
+stays "in a game" for matchmaking and challenges until the next restart; and the journal keeps
+it, so every later start replays it again. The journal cannot bring back the games that ended between the copy and the
+stop either: once they are in the database, the journal forgets them. So the games in progress at
+the stop are lost with a restore, and their players find no game when they reconnect. Keep the
+journal only with a copy made after the server stopped (it then matches the journal exactly), for
+example when moving the server to another machine: stop it, take the copy, and move the copy and
+`journal/` together.
 
 ## 11. Several instances
 
