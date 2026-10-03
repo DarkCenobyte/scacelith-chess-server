@@ -21,7 +21,7 @@ The connection tasks and the game hosts report anomalies to the anti-cheat servi
 |---|---|---|---|
 | `forged_type` | certain | a server->client message type sent by a client | |
 | `foreign_game` | certain | game message for a game the player does not play | |
-| `out_of_turn` | certain | move in a synchronised position while it is not the player's turn | downgraded to suspicious when reported with `pos_matched: Some(false)` (the client's position hash did not match) |
+| `out_of_turn` | certain | move in a synchronised position while it is not the player's turn | downgraded to suspicious when reported with `pos_matched: false` (the client's position hash did not match) |
 | `illegal_move` | certain | illegal move in a synchronised position | same |
 | `malformed` | suspicious | undecodable frame after Hello (connection closed 4001) | |
 | `bad_seq` | suspicious | seq not last+1 | |
@@ -46,8 +46,9 @@ Suspicious and certain anomalies are logged as `anomaly` security records.
 
 ## 2. Automatic sanctions
 
-With `AUTO_SANCTION_CERTAIN_CHEATS=true` the host ends the game (`Forfeit`) and the anti-cheat
-service sanctions the player (`Anticheat::sanction`, one job on the store writer thread), which:
+With `AUTO_SANCTION_CERTAIN_CHEATS=true` the host ends the game (`Forfeit`) and asks the
+anti-cheat service to sanction the player (`AnomalySink::sanction_certain`, which runs
+`Anticheat::sanction`: one job on the store writer thread), which:
 
 * creates a ban of `BAN_DURATION_HOURS` (`source: 'auto'`, reason `certain_cheat:<kind>`, the game id),
   unless an active ban for cheating that refunds (automatic, or `integrity confirm` without
