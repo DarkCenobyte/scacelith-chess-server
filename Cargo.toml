@@ -32,7 +32,7 @@ scacelith-client = { path = "crates/client" }
 
 tokio = { version = "1.53", features = ["rt-multi-thread", "net", "time", "signal", "io-util", "sync", "macros", "process", "fs"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
-hyper = { version = "1", features = ["server", "http1"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http = "1"
 http-body-util = "0.1"
