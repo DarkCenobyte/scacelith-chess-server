@@ -48,8 +48,9 @@ zeroize.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-# Test certificates for the SMTP client tests (fake SMTP server with STARTTLS and implicit TLS).
-rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+tokio = { workspace = true, features = ["test-util"] }
+# Test certificates (TLS edge, fake SMTP server with STARTTLS and implicit TLS).
+rcgen.workspace = true
 
 [lints]
 workspace = true
