@@ -14,7 +14,7 @@ on:
     - cron: "23 4 * * 1"
   workflow_dispatch:
     inputs:
-      game-ref:
+      game-revision:
         description: Branch, tag or commit of the game to check the contract against
         type: string
         default: master
@@ -193,11 +193,11 @@ jobs:
           persist-credentials: false
 
       # The game's master, or the branch a manual run names (a change made on both sides: run
-      # this workflow on the server's branch with the game's branch as game-ref).
+      # this workflow on the server's branch with the game's branch as game-revision).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: DarkCenobyte/scacelith-chess
-          ref: ${{ inputs.game-ref || 'master' }}
+          ref: ${{ inputs.game-revision || 'master' }}
           path: game
           persist-credentials: false
 
