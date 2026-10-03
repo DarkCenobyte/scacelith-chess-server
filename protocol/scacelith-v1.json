@@ -1,0 +1,640 @@
+{
+  "about": "Scacelith realtime protocol, version 1: the single source of the wire format. protogen (crates/protocol, `cargo run -p scacelith-protocol --features gen --bin protogen`) validates this file and writes the Rust codec (crates/protocol/src/gen.rs), the game's C++ codec (src/net/protocol_gen.h/.cpp), the tables of docs/PROTOCOL.md and the golden vectors (test/fixtures/protocol-vectors.json). Keys named `doc` or ending in `Doc` are prose: they are left out of the fingerprint and of the frozen manifests (protocol/frozen/). Field types: u8 u16 u32 u64 i32 f64 id53 bool str8 enum:<Enum> struct:<Struct> list16:<scalar or struct:Struct>; `min`/`max` bound integers, string byte lengths (str8) and item counts (list16).",
+  "protocol": 1,
+  "minor": 0,
+  "subprotocol": "scacelith.rt1",
+  "constants": [
+    { "name": "MaxClientMessage", "value": 512, "doc": "Largest client message, in bytes (type byte included). The server refuses a larger WebSocket message from its frame header, before reading it (close 1009)." },
+    { "name": "MaxServerMessage", "value": 65536, "doc": "Largest server message, in bytes (type byte included)." },
+    { "name": "MaxPlies", "value": 1200, "doc": "Plies a game may have: a game that reaches it ends (EndReason ServerAborted). Ply indexes are 0..1199." }
+  ],
+  "ranges": [
+    { "first": 1, "last": 15, "dir": "c2s", "area": "connection" },
+    { "first": 16, "last": 31, "dir": "c2s", "area": "lobby" },
+    { "first": 32, "last": 63, "dir": "c2s", "area": "game" },
+    { "first": 64, "last": 111, "dir": "c2s", "area": "future" },
+    { "first": 112, "last": 127, "dir": "c2s", "area": "experimental", "published": false },
+    { "first": 128, "last": 143, "dir": "s2c", "area": "connection" },
+    { "first": 144, "last": 159, "dir": "s2c", "area": "lobby" },
+    { "first": 160, "last": 191, "dir": "s2c", "area": "game" },
+    { "first": 192, "last": 239, "dir": "s2c", "area": "future" },
+    { "first": 240, "last": 255, "dir": "s2c", "area": "experimental", "published": false }
+  ],
+  "caps": [],
+  "enums": [
+    {
+      "name": "Color", "open": false,
+      "doc": "A side of the board. None: no side (no clock running, no offer pending, a rematch window without an offer).",
+      "values": [
+        { "name": "White", "value": 0 },
+        { "name": "Black", "value": 1 },
+        { "name": "None", "value": 2 }
+      ]
+    },
+    {
+      "name": "ColorPref", "open": false,
+      "doc": "Colour asked for in a challenge, or offered to the player who receives it.",
+      "values": [
+        { "name": "Random", "value": 0 },
+        { "name": "White", "value": 1 },
+        { "name": "Black", "value": 2 }
+      ]
+    },
+    {
+      "name": "GameStatus", "open": false,
+      "doc": "Result of a game. The same numbers are the `status` of the game records of the HTTPS API.",
+      "values": [
+        { "name": "Ongoing", "value": 0 },
+        { "name": "WhiteWins", "value": 1 },
+        { "name": "BlackWins", "value": 2 },
+        { "name": "Draw", "value": 3 },
+        { "name": "Aborted", "value": 4, "doc": "no result, unrated" }
+      ]
+    },
+    {
+      "name": "EndReason", "open": true,
+      "doc": "Why a game ended. 0..13 are the game's chess::GameEndReason values (14..19 are kept for new ones), 20 and above happen online only. The same numbers are the `reason` of the game records of the HTTPS API.",
+      "unknownDoc": "show a generic end of game: `status` gives the result",
+      "values": [
+        { "name": "None", "value": 0, "doc": "the game is not over" },
+        { "name": "Checkmate", "value": 1 },
+        { "name": "Resignation", "value": 2 },
+        { "name": "Timeout", "value": 3 },
+        { "name": "IllegalMoves", "value": 4, "doc": "offline games only" },
+        { "name": "Stalemate", "value": 5 },
+        { "name": "InsufficientMaterial", "value": 6 },
+        { "name": "TimeoutVsInsufficient", "value": 7, "doc": "flag fell but the opponent cannot mate: draw" },
+        { "name": "FivefoldRepetition", "value": 8 },
+        { "name": "SeventyFiveMoves", "value": 9 },
+        { "name": "ThreefoldClaim", "value": 10 },
+        { "name": "FiftyMoveClaim", "value": 11 },
+        { "name": "Agreement", "value": 12 },
+        { "name": "IllegalMovesVsInsufficient", "value": 13, "doc": "offline games only" },
+        { "name": "Abandonment", "value": 20, "doc": "disconnected longer than the reconnection grace: loss" },
+        { "name": "AbandonmentVsInsufficient", "value": 21, "doc": "abandoned, but the opponent cannot mate: draw" },
+        { "name": "Aborted", "value": 22, "doc": "aborted by a player before their first move (unrated)" },
+        { "name": "NoShow", "value": 23, "doc": "a first move not made in time (aborted, unrated)" },
+        { "name": "Forfeit", "value": 24, "doc": "certain cheat: loss" },
+        { "name": "ServerAborted", "value": 25, "doc": "the server could not continue the game, or it reached MaxPlies (unrated)" },
+        { "name": "BothDisconnected", "value": 26, "doc": "both players vanished at the same time (aborted, unrated)" }
+      ]
+    },
+    {
+      "name": "GameEventKind", "open": true,
+      "doc": "What a GameEvent reports. 0 is never assigned.",
+      "unknownDoc": "ignore the event",
+      "values": [
+        { "name": "DrawOffered", "value": 1, "doc": "color = the player who offers" },
+        { "name": "DrawDeclined", "value": 2, "doc": "color = the player who declines (also when they move instead of answering)" },
+        { "name": "PlayerDisconnected", "value": 3, "doc": "color = who; arg = their reconnection grace in ms" },
+        { "name": "PlayerReconnected", "value": 4, "doc": "color = who" },
+        { "name": "RematchOffered", "value": 5, "doc": "color = the player who offers (after the end)" },
+        { "name": "RematchDeclined", "value": 6, "doc": "color = the player who declines, or None when the offer expired" }
+      ],
+      "reserved": [
+        { "value": 7, "name": "AbortAvailable", "doc": "retired (never sent)" }
+      ]
+    },
+    {
+      "name": "QueueState", "open": true,
+      "doc": "State of the player in a matchmaking queue.",
+      "unknownDoc": "ignore the message",
+      "values": [
+        { "name": "Left", "value": 0, "doc": "not in the queue (left, or never joined)" },
+        { "name": "Searching", "value": 1 },
+        { "name": "Matched", "value": 2, "doc": "a game was found: its GameSnapshot follows" }
+      ]
+    },
+    {
+      "name": "ChallengeState", "open": true,
+      "doc": "State of a challenge or of a private game waiting for its code.",
+      "unknownDoc": "ignore the message",
+      "values": [
+        { "name": "Pending", "value": 0 },
+        { "name": "Accepted", "value": 1, "doc": "the game starts: its GameSnapshot follows" },
+        { "name": "Declined", "value": 2 },
+        { "name": "Cancelled", "value": 3 },
+        { "name": "Expired", "value": 4 },
+        { "name": "Unavailable", "value": 5, "doc": "the other player cannot play it any more (offline, in a game, refusing challenges)" }
+      ]
+    },
+    {
+      "name": "NoticeCode", "open": true,
+      "doc": "What a Notice announces. 0 is never assigned.",
+      "unknownDoc": "ignore the notice",
+      "values": [
+        { "name": "ServerShutdown", "value": 1, "doc": "arg = ms before the shutdown" },
+        { "name": "Banned", "value": 2, "doc": "arg = end of the ban (epoch ms); the connection closes (4004)" },
+        { "name": "SessionRevoked", "value": 3, "doc": "the session token was revoked; the connection closes (4003)" },
+        { "name": "MatchmakingCooldown", "value": 4, "doc": "arg = end of the cooldown (epoch ms)" },
+        { "name": "ReplacedByNewConnection", "value": 5, "doc": "another connection of the account took over; the connection closes (4007)" },
+        { "name": "RatingRestored", "value": 7, "doc": "arg = rating points given back: an opponent of your rated games was banned for cheating" }
+      ],
+      "reserved": [
+        { "value": 6, "name": "Motd", "doc": "retired (never sent: the message of the day comes from /api/v1/info)" }
+      ]
+    },
+    {
+      "name": "ErrorCode", "open": true,
+      "doc": "Why a request was refused (Error.code, MoveRejected.code). 1..99: connection, 100..199: game, 200..239: lobby, 240..255: violations. A fatal Error carries a connection or violation code, and the close code that follows is 4000 + code (1..99) or 4300 + (code - 240) (240..255). 0 is never assigned.",
+      "unknownDoc": "a generic refusal of the request quoted by `ref` (when `fatal`, the connection closes)",
+      "values": [
+        { "name": "Malformed", "value": 1, "doc": "a message that does not decode (fatal)" },
+        { "name": "UnsupportedProtocol", "value": 2, "doc": "Hello.proto is not 1 (fatal): update the game" },
+        { "name": "Unauthorized", "value": 3, "doc": "session token refused (fatal): log in again" },
+        { "name": "Banned", "value": 4, "doc": "account banned (fatal, after Notice Banned)" },
+        { "name": "RateLimited", "value": 5, "doc": "too many messages: this one was dropped (never fatal)" },
+        { "name": "ServerFull", "value": 6, "doc": "no room for a new player (fatal)" },
+        { "name": "Replaced", "value": 7, "doc": "another connection of the account took over (fatal)" },
+        { "name": "ShuttingDown", "value": 8, "doc": "the server is shutting down (fatal)" },
+        { "name": "Internal", "value": 9, "doc": "unexpected server failure (fatal at Hello, otherwise the request only)" },
+        { "name": "HelloRequired", "value": 10, "doc": "the first message was not a Hello, or none came in time (fatal)" },
+        { "name": "EmailUnverified", "value": 11, "doc": "the account's e-mail address is not verified (fatal)" },
+        { "name": "NotInGame", "value": 100, "doc": "the game does not exist or the player does not play it" },
+        { "name": "NotYourTurn", "value": 101 },
+        { "name": "IllegalMove", "value": 102 },
+        { "name": "StalePly", "value": 103, "doc": "a different move for a ply already played" },
+        { "name": "Desync", "value": 104, "doc": "ply ahead of the game, or posHash of another position" },
+        { "name": "GameOver", "value": 105 },
+        { "name": "AlreadyInGame", "value": 106 },
+        { "name": "InvalidCategory", "value": 107, "doc": "not an official category of this server" },
+        { "name": "DrawOfferLimit", "value": 108 },
+        { "name": "NothingToClaim", "value": 109 },
+        { "name": "AbortNotAllowed", "value": 110 },
+        { "name": "NoPendingOffer", "value": 111 },
+        { "name": "FlagFell", "value": 112, "doc": "the mover's flag fell before the move arrived (GameEnd follows)" },
+        { "name": "QueueNotAllowed", "value": 200 },
+        { "name": "ChallengeNotFound", "value": 201 },
+        { "name": "UserUnavailable", "value": 202 },
+        { "name": "ChallengeLimit", "value": 203 },
+        { "name": "CannotChallengeSelf", "value": 204 },
+        { "name": "CodeInvalid", "value": 205 },
+        { "name": "RatedRequiresOfficialTc", "value": 206 },
+        { "name": "MatchmakingCooldown", "value": 207 },
+        { "name": "InvalidTimeControl", "value": 208 },
+        { "name": "RematchUnavailable", "value": 209 },
+        { "name": "RatedRepeatLimit", "value": 210, "doc": "rated game refused: MATCH_REPEAT_LIMIT reached with this player" },
+        { "name": "ProtocolViolation", "value": 240, "doc": "a message that decodes but is not allowed here (fatal unless stated)" },
+        { "name": "Flood", "value": 241, "doc": "message or gesture flood (fatal)" },
+        { "name": "CheatDetected", "value": 242, "doc": "certain cheat (fatal)" }
+      ],
+      "reserved": [
+        { "value": 243, "name": "SlowConsumer", "doc": "never sent in an Error: a client that does not read gets close 4303 alone" }
+      ]
+    }
+  ],
+  "flags": [
+    {
+      "name": "MoveFlag", "doc": "MoveMade.flags: the move as played.",
+      "bits": [
+        { "name": "Capture", "value": 1 },
+        { "name": "EnPassant", "value": 2 },
+        { "name": "CastleKing", "value": 4 },
+        { "name": "CastleQueen", "value": 8 },
+        { "name": "DoublePush", "value": 16 },
+        { "name": "Promotion", "value": 32 },
+        { "name": "Check", "value": 64 },
+        { "name": "Mate", "value": 128 }
+      ]
+    },
+    {
+      "name": "GestureFlag", "doc": "Gesture.flags.",
+      "bits": [
+        { "name": "Glance", "value": 1, "doc": "looking at one's own scoresheet" },
+        { "name": "Promoting", "value": 2, "doc": "the promotion picker is open" },
+        { "name": "Side", "value": 4, "doc": "the look falls on the table beside the board (clock, captured pieces, scoresheet); each client puts the clock at its own player's right, so the receiver mirrors the look (negates its yaw)" }
+      ]
+    }
+  ],
+  "closeCodes": [
+    { "name": "Normal", "code": 1000, "doc": "normal closure (a client that logs out or quits)" },
+    { "name": "GoingAway", "code": 1001, "doc": "heartbeat timeout: nothing received from the client for the server's HEARTBEAT_TIMEOUT_MS" },
+    { "name": "ProtocolError", "code": 1002, "doc": "WebSocket protocol error (unmasked client frame, reserved bits or opcode, bad control frame)" },
+    { "name": "Unsupported", "code": 1003, "doc": "a text frame" },
+    { "name": "TooBig", "code": 1009, "doc": "a client message larger than MaxClientMessage" },
+    { "name": "Malformed", "code": 4001, "error": "Malformed", "doc": "a client message that does not decode; reconnect with backoff" },
+    { "name": "UnsupportedProtocol", "code": 4002, "error": "UnsupportedProtocol", "doc": "no automatic retry: update the game" },
+    { "name": "Unauthorized", "code": 4003, "error": "Unauthorized", "doc": "no automatic retry: log in again" },
+    { "name": "Banned", "code": 4004, "error": "Banned", "doc": "no automatic retry" },
+    { "name": "ServerFull", "code": 4006, "error": "ServerFull", "doc": "retried after 60 s to 120 s" },
+    { "name": "Replaced", "code": 4007, "error": "Replaced", "doc": "no automatic retry" },
+    { "name": "ShuttingDown", "code": 4008, "error": "ShuttingDown", "doc": "reconnect later (restart backoff)" },
+    { "name": "Internal", "code": 4009, "error": "Internal", "doc": "an unexpected server error; reconnect with backoff" },
+    { "name": "HelloRequired", "code": 4010, "error": "HelloRequired", "doc": "no Hello within WS_HELLO_TIMEOUT_MS, or another message first" },
+    { "name": "EmailUnverified", "code": 4011, "error": "EmailUnverified", "doc": "no automatic retry: verify the e-mail address" },
+    { "name": "ProtocolViolation", "code": 4300, "error": "ProtocolViolation", "doc": "a client message out of place (a Hello whose seq is not 1, a forged type the server does not sanction)" },
+    { "name": "Flood", "code": 4301, "error": "Flood", "doc": "rate limits exceeded again and again" },
+    { "name": "CheatDetected", "code": 4302, "error": "CheatDetected", "doc": "no automatic retry" },
+    { "name": "SlowConsumer", "code": 4303, "doc": "the client does not read its messages (more than WS_SEND_BUFFER_LIMIT bytes queued): no Error precedes it; 4300 + (243 - 240), 243 being the reserved code SlowConsumer" }
+  ],
+  "structs": [
+    {
+      "name": "PlayerInfo", "doc": "A player as shown to others.",
+      "fields": [
+        { "name": "userId", "type": "u32" },
+        { "name": "name", "type": "str8", "min": 1, "max": 24 },
+        { "name": "rating", "type": "u16", "doc": "rating in the game's category" },
+        { "name": "provisional", "type": "bool", "doc": "the rating is still provisional" }
+      ]
+    },
+    {
+      "name": "MoveRec", "doc": "A move of a game record.",
+      "fields": [
+        { "name": "move", "type": "u16", "max": 32767, "doc": "packed move (Move encoding)" },
+        { "name": "spentMs", "type": "u32", "doc": "clock time charged for the move after lag compensation (0 for plies 0 and 1)" },
+        { "name": "clockMs", "type": "u32", "doc": "mover's remaining time after the move, increment included" }
+      ]
+    },
+    {
+      "name": "RatingChange", "doc": "Rating of one player before and after a rated game.",
+      "fields": [
+        { "name": "before", "type": "u16" },
+        { "name": "after", "type": "u16" },
+        { "name": "games", "type": "u32", "doc": "rated games in the category, this one included" },
+        { "name": "provisional", "type": "bool", "doc": "the new rating is still provisional" }
+      ]
+    }
+  ],
+  "messages": [
+    {
+      "id": 1, "name": "Hello", "dir": "c2s",
+      "doc": "First message of a connection. Its first five fields (the Hello prefix: type, seq, proto, minor, caps) are frozen for every version, so that any server can read them and answer any client.",
+      "fields": [
+        { "name": "seq", "type": "u32", "doc": "1" },
+        { "name": "proto", "type": "u16", "doc": "major protocol version: 1" },
+        { "name": "minor", "type": "u16", "doc": "highest minor version the client speaks" },
+        { "name": "caps", "type": "u64", "doc": "capabilities the client supports (bit set)" },
+        { "name": "client", "type": "str8", "max": 48, "doc": "client name and version, for the logs (\"Scacelith/1.5.0 win64\")" },
+        { "name": "token", "type": "str8", "min": 16, "max": 160, "doc": "session token from the HTTPS login of this server" }
+      ]
+    },
+    {
+      "id": 2, "name": "Ping", "dir": "c2s",
+      "doc": "Round-trip and clock-offset probe of the client, answered by the server Pong. At most one is answered per 950 ms.",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "nonce", "type": "u32" }
+      ]
+    },
+    {
+      "id": 3, "name": "Pong", "dir": "c2s",
+      "doc": "Answer to the server Ping, sent at once (the server measures the latency with it).",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "nonce", "type": "u32", "doc": "nonce of the server Ping" }
+      ]
+    },
+    {
+      "id": 16, "name": "QueueJoin", "dir": "c2s",
+      "doc": "Join the matchmaking queue of an official category. Answered by Ack or Error; QueueStatus messages follow.",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "category", "type": "str8", "min": 3, "max": 7, "doc": "category id (\"3+2\")" },
+        { "name": "rated", "type": "bool", "doc": "false: casual queue" }
+      ]
+    },
+    {
+      "id": 17, "name": "QueueLeave", "dir": "c2s",
+      "doc": "Leave the matchmaking queue. Answered by Ack or Error; QueueStatus Left follows.",
+      "fields": [
+        { "name": "seq", "type": "u32" }
+      ]
+    },
+    {
+      "id": 18, "name": "ChallengeCreate", "dir": "c2s",
+      "doc": "Challenge a player by name, or (empty target) create a private game joined with a code. Rated only with an official time control. Answered by Ack or Error; ChallengeStatus follows (with the code of a private game).",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "target", "type": "str8", "max": 24, "doc": "username, or empty for a private game" },
+        { "name": "baseSec", "type": "u16", "min": 15, "max": 10800 },
+        { "name": "incSec", "type": "u8", "max": 180 },
+        { "name": "rated", "type": "bool" },
+        { "name": "color", "type": "enum:ColorPref", "doc": "colour asked for by the challenger" }
+      ]
+    },
+    {
+      "id": 19, "name": "ChallengeAccept", "dir": "c2s",
+      "doc": "Accept a challenge received. Answered by Ack or Error; the game's GameSnapshot follows.",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "id", "type": "u32", "doc": "challenge id (ChallengeReceived.id)" }
+      ]
+    },
+    {
+      "id": 20, "name": "ChallengeDecline", "dir": "c2s",
+      "doc": "Decline a challenge received. Answered by Ack or Error.",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "id", "type": "u32" }
+      ]
+    },
+    {
+      "id": 21, "name": "ChallengeCancel", "dir": "c2s",
+      "doc": "Withdraw one's own challenge or private game. Answered by Ack or Error.",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "id", "type": "u32" }
+      ]
+    },
+    {
+      "id": 22, "name": "ChallengeJoinCode", "dir": "c2s",
+      "doc": "Join a private game by its code. Answered by Ack or Error; the game's GameSnapshot follows.",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "code", "type": "str8", "min": 4, "max": 12, "doc": "code as shown (\"K7QX-9M2P\"); the server ignores dashes, spaces and case" }
+      ]
+    },
+    {
+      "id": 32, "name": "Move", "dir": "c2s",
+      "doc": "Move intent for ply `ply` of game `game`. Answered by MoveMade (to both players), or by MoveRejected followed by a GameSnapshot (to the mover only).",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "game", "type": "id53" },
+        { "name": "ply", "type": "u16", "max": 1199, "doc": "index of the move in the game (0 = White's first move)" },
+        { "name": "move", "type": "u16", "max": 32767, "doc": "packed move (Move encoding)" },
+        { "name": "posHash", "type": "u32", "doc": "digest of the position the move is played in" },
+        { "name": "thinkMs", "type": "u32", "doc": "client-measured time since the turn began (bounds the lag compensation only)" },
+        { "name": "drawOffer", "type": "bool", "doc": "the move comes with a draw offer" }
+      ]
+    },
+    {
+      "id": 33, "name": "Resign", "dir": "c2s",
+      "doc": "Resign a running game. GameEnd follows, or Error.",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "game", "type": "id53" }
+      ]
+    },
+    {
+      "id": 34, "name": "DrawOffer", "dir": "c2s",
+      "doc": "Offer a draw. The opponent receives GameEvent DrawOffered; a refusal is an Error.",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "game", "type": "id53" }
+      ]
+    },
+    {
+      "id": 35, "name": "DrawAnswer", "dir": "c2s",
+      "doc": "Answer the opponent's draw offer: GameEnd (accepted) or GameEvent DrawDeclined follows, or Error.",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "game", "type": "id53" },
+        { "name": "accept", "type": "bool" }
+      ]
+    },
+    {
+      "id": 36, "name": "DrawClaim", "dir": "c2s",
+      "doc": "Claim a draw by threefold repetition or the fifty-move rule in the current position. GameEnd follows, or Error NothingToClaim.",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "game", "type": "id53" }
+      ]
+    },
+    {
+      "id": 37, "name": "Abort", "dir": "c2s",
+      "doc": "Abort the game before one's own first move (unrated). GameEnd follows, or Error AbortNotAllowed.",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "game", "type": "id53" }
+      ]
+    },
+    {
+      "id": 38, "name": "Resync", "dir": "c2s",
+      "doc": "Ask for the game's GameSnapshot.",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "game", "type": "id53" }
+      ]
+    },
+    {
+      "id": 39, "name": "Rematch", "dir": "c2s",
+      "doc": "After the end: accept = true offers (or accepts) a rematch with colours swapped, accept = false declines or withdraws. GameEvent or the new game's GameSnapshot follows, or Error RematchUnavailable.",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "game", "type": "id53" },
+        { "name": "accept", "type": "bool" }
+      ]
+    },
+    {
+      "id": 40, "name": "Gesture", "dir": "c2s",
+      "doc": "The player's live, cosmetic state in game `game`, relayed to the opponent byte for byte (server Gesture) and never answered, stored or looked at beyond decoding. Sent when it changes and at least once a second, paced by Welcome.gestureRate and gestureBurst.",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "game", "type": "id53" },
+        { "name": "ply", "type": "u16", "max": 1199, "doc": "plies played when the current state of the hand (touch, aim, placed, Promoting) began" },
+        { "name": "touch", "type": "u8", "max": 64, "doc": "square of the piece in hand (64 = none)" },
+        { "name": "aim", "type": "u8", "max": 64, "doc": "square the piece is aimed at (64 = none)" },
+        { "name": "placed", "type": "u16", "max": 32767, "doc": "move placed on the board before the clock press, packed (0 = none)" },
+        { "name": "flags", "type": "u8", "max": 7, "doc": "GestureFlag bits" },
+        { "name": "yaw", "type": "i32", "min": -3142, "max": 3142, "doc": "look, milliradians, seat-relative, > 0 to the left" },
+        { "name": "pitch", "type": "i32", "min": -1571, "max": 1571, "doc": "look, milliradians, < 0 down" },
+        { "name": "lean", "type": "u8", "max": 100, "doc": "lean towards the board, percent" }
+      ]
+    },
+    {
+      "id": 128, "name": "Welcome", "dir": "s2c",
+      "doc": "Hello accepted. Its first three fields (proto, minor, caps) are frozen for every version. When activeGame != 0 a GameSnapshot of that game follows.",
+      "fields": [
+        { "name": "proto", "type": "u16", "doc": "1" },
+        { "name": "minor", "type": "u16", "doc": "negotiated minor: min(Hello.minor, server minor)" },
+        { "name": "caps", "type": "u64", "doc": "negotiated capabilities: Hello.caps AND server capabilities" },
+        { "name": "serverTime", "type": "f64", "doc": "server clock (epoch ms) when the session was accepted" },
+        { "name": "userId", "type": "u32" },
+        { "name": "username", "type": "str8", "min": 1, "max": 24 },
+        { "name": "serverName", "type": "str8", "max": 64 },
+        { "name": "heartbeatMs", "type": "u32", "doc": "interval of the server Ping (HEARTBEAT_INTERVAL_MS)" },
+        { "name": "clientPingMs", "type": "u32", "doc": "interval of the client Ping the server wants (0 = the client's default, 10 s)" },
+        { "name": "maxMsgPerSec", "type": "u16", "doc": "messages per second a client may send, sustained (WS_MSG_RATE)" },
+        { "name": "msgBurst", "type": "u16", "doc": "message burst a client may send above it (WS_MSG_BURST)" },
+        { "name": "activeGame", "type": "id53", "doc": "the player's game in progress (0 = none)" },
+        { "name": "gestureRate", "type": "u16", "max": 60, "doc": "gestures per second the server relays, sustained (0 = no relay: send none)" },
+        { "name": "gestureBurst", "type": "u16", "max": 120, "doc": "gesture burst above gestureRate (0 when gestureRate is 0)" }
+      ]
+    },
+    {
+      "id": 129, "name": "Error", "dir": "s2c",
+      "doc": "A request was refused. Frozen layout for every version. fatal: the server closes the connection right after it (close code 4000 + code or 4300 + (code - 240)).",
+      "fields": [
+        { "name": "ref", "type": "u32", "doc": "seq of the message refused (0 when no message caused it)" },
+        { "name": "code", "type": "enum:ErrorCode" },
+        { "name": "fatal", "type": "bool" },
+        { "name": "game", "type": "id53", "doc": "game concerned (0 = none)" }
+      ]
+    },
+    {
+      "id": 130, "name": "Ping", "dir": "s2c",
+      "doc": "Heartbeat, about every Welcome.heartbeatMs: answer with the client Pong at once.",
+      "fields": [
+        { "name": "nonce", "type": "u32" },
+        { "name": "serverTime", "type": "f64", "doc": "server clock (epoch ms) when sent" }
+      ]
+    },
+    {
+      "id": 131, "name": "Pong", "dir": "s2c",
+      "doc": "Answer to the client Ping.",
+      "fields": [
+        { "name": "nonce", "type": "u32", "doc": "nonce of the client Ping" },
+        { "name": "serverTime", "type": "f64", "doc": "server clock (epoch ms) when sent" }
+      ]
+    },
+    {
+      "id": 132, "name": "Ack", "dir": "s2c",
+      "doc": "A lobby request (QueueJoin ... ChallengeJoinCode) succeeded: each one gets exactly one Ack or one Error.",
+      "fields": [
+        { "name": "ref", "type": "u32", "doc": "seq of the request" }
+      ]
+    },
+    {
+      "id": 133, "name": "Notice", "dir": "s2c",
+      "doc": "An announcement from the server (NoticeCode).",
+      "fields": [
+        { "name": "code", "type": "enum:NoticeCode" },
+        { "name": "arg", "type": "f64", "doc": "see NoticeCode (0 when unused)" }
+      ]
+    },
+    {
+      "id": 144, "name": "QueueStatus", "dir": "s2c",
+      "doc": "The player's state in a matchmaking queue: on join, every few seconds while searching, when matched and when left.",
+      "fields": [
+        { "name": "category", "type": "str8", "max": 7, "doc": "category id (may be empty for Left)" },
+        { "name": "rated", "type": "bool" },
+        { "name": "state", "type": "enum:QueueState" },
+        { "name": "waitMs", "type": "u32", "doc": "time spent in the queue" },
+        { "name": "window", "type": "u16", "doc": "current rating window (Searching; 0 otherwise)" },
+        { "name": "queued", "type": "u32", "doc": "players in this queue (Searching; 0 otherwise)" }
+      ]
+    },
+    {
+      "id": 145, "name": "ChallengeReceived", "dir": "s2c",
+      "doc": "A player challenges the receiver.",
+      "fields": [
+        { "name": "id", "type": "u32", "doc": "challenge id" },
+        { "name": "from", "type": "struct:PlayerInfo" },
+        { "name": "baseSec", "type": "u16", "min": 15, "max": 10800 },
+        { "name": "incSec", "type": "u8", "max": 180 },
+        { "name": "rated", "type": "bool" },
+        { "name": "yourColor", "type": "enum:ColorPref", "doc": "colour offered to the receiver" },
+        { "name": "expiresMs", "type": "u32", "doc": "time left to accept" }
+      ]
+    },
+    {
+      "id": 146, "name": "ChallengeStatus", "dir": "s2c",
+      "doc": "State of a challenge for its creator (and for its receiver when it is cancelled or expires).",
+      "fields": [
+        { "name": "id", "type": "u32" },
+        { "name": "state", "type": "enum:ChallengeState" },
+        { "name": "target", "type": "str8", "max": 24, "doc": "username challenged (empty for a private game)" },
+        { "name": "code", "type": "str8", "max": 12, "doc": "code of a private game (empty otherwise)" },
+        { "name": "baseSec", "type": "u16", "min": 15, "max": 10800 },
+        { "name": "incSec", "type": "u8", "max": 180 },
+        { "name": "rated", "type": "bool" }
+      ]
+    },
+    {
+      "id": 160, "name": "GameSnapshot", "dir": "s2c",
+      "doc": "Complete authoritative state of a game: when it starts (both players), after Welcome when activeGame != 0, on Resync, after every MoveRejected, and unsolicited to the opponent when the held clock of a game restored after a restart starts. Clocks are the remaining times at serverTime; the `running` side counts down from there.",
+      "fields": [
+        { "name": "game", "type": "id53" },
+        { "name": "gseq", "type": "u32", "doc": "number of the game's last event (MoveMade, GameEvent, GameEnd) included in this state" },
+        { "name": "category", "type": "str8", "min": 1, "max": 7, "doc": "official category id, or \"custom\"" },
+        { "name": "baseMs", "type": "u32" },
+        { "name": "incMs", "type": "u32" },
+        { "name": "rated", "type": "bool" },
+        { "name": "white", "type": "struct:PlayerInfo" },
+        { "name": "black", "type": "struct:PlayerInfo" },
+        { "name": "you", "type": "enum:Color", "doc": "the receiver's colour (White or Black)" },
+        { "name": "moves", "type": "list16:struct:MoveRec", "max": 1200 },
+        { "name": "running", "type": "enum:Color", "doc": "side whose clock runs from serverTime (None: no clock runs)" },
+        { "name": "whiteMs", "type": "u32" },
+        { "name": "blackMs", "type": "u32" },
+        { "name": "serverTime", "type": "f64" },
+        { "name": "drawOffer", "type": "enum:Color", "doc": "side with a pending draw offer (None: none)" },
+        { "name": "status", "type": "enum:GameStatus" },
+        { "name": "reason", "type": "enum:EndReason" },
+        { "name": "whiteConnected", "type": "bool" },
+        { "name": "blackConnected", "type": "bool" },
+        { "name": "graceMs", "type": "u32", "doc": "reconnection grace of this game" },
+        { "name": "firstMoveMs", "type": "u32", "doc": "time left for the next player's first move (plies 0 and 1; 0 otherwise)" },
+        { "name": "startedAt", "type": "f64", "doc": "server clock (epoch ms) when the game was created" },
+        { "name": "rematch", "type": "enum:Color", "doc": "side with a pending rematch offer (None: none)" },
+        { "name": "autoPress", "type": "bool", "doc": "the robots press the clock by themselves (fixed when the game was created)" }
+      ]
+    },
+    {
+      "id": 161, "name": "MoveMade", "dir": "s2c",
+      "doc": "A move accepted by the server, to both players (for the mover it is the confirmation). Re-sent byte for byte when the mover repeats the same move for the same ply.",
+      "fields": [
+        { "name": "game", "type": "id53" },
+        { "name": "gseq", "type": "u32" },
+        { "name": "ply", "type": "u16", "max": 1199 },
+        { "name": "move", "type": "u16", "max": 32767 },
+        { "name": "flags", "type": "u8", "doc": "MoveFlag bits" },
+        { "name": "spentMs", "type": "u32", "doc": "clock time charged for the move" },
+        { "name": "whiteMs", "type": "u32" },
+        { "name": "blackMs", "type": "u32" },
+        { "name": "serverTime", "type": "f64" },
+        { "name": "drawOffer", "type": "bool", "doc": "the move came with a draw offer" },
+        { "name": "firstMoveMs", "type": "u32", "doc": "time the next player has for their first move (0 when not applicable: the side to move's clock runs from serverTime)" }
+      ]
+    },
+    {
+      "id": 162, "name": "MoveRejected", "dir": "s2c",
+      "doc": "The move intent was refused (to the mover only; never shown to the opponent). A GameSnapshot always follows; FlagFell is also followed by GameEnd.",
+      "fields": [
+        { "name": "game", "type": "id53" },
+        { "name": "ply", "type": "u16", "max": 1199 },
+        { "name": "move", "type": "u16", "max": 32767 },
+        { "name": "code", "type": "enum:ErrorCode" }
+      ]
+    },
+    {
+      "id": 163, "name": "GameEvent", "dir": "s2c",
+      "doc": "Something happened in a game (GameEventKind).",
+      "fields": [
+        { "name": "game", "type": "id53" },
+        { "name": "gseq", "type": "u32" },
+        { "name": "kind", "type": "enum:GameEventKind" },
+        { "name": "color", "type": "enum:Color" },
+        { "name": "arg", "type": "u32", "doc": "see GameEventKind (0 when unused)" }
+      ]
+    },
+    {
+      "id": 164, "name": "GameEnd", "dir": "s2c",
+      "doc": "Final result, to both players. Rated games: RatingUpdate follows once the result is committed.",
+      "fields": [
+        { "name": "game", "type": "id53" },
+        { "name": "gseq", "type": "u32" },
+        { "name": "status", "type": "enum:GameStatus" },
+        { "name": "reason", "type": "enum:EndReason" },
+        { "name": "whiteMs", "type": "u32" },
+        { "name": "blackMs", "type": "u32" },
+        { "name": "serverTime", "type": "f64" }
+      ]
+    },
+    {
+      "id": 165, "name": "RatingUpdate", "dir": "s2c",
+      "doc": "Rating changes of a finished rated game, once the result is committed.",
+      "fields": [
+        { "name": "game", "type": "id53" },
+        { "name": "category", "type": "str8", "min": 1, "max": 7 },
+        { "name": "white", "type": "struct:RatingChange" },
+        { "name": "black", "type": "struct:RatingChange" }
+      ]
+    },
+    {
+      "id": 166, "name": "Gesture", "dir": "s2c", "relayOf": "Gesture",
+      "doc": "The opponent's gestures: the client Gesture without its seq, byte for byte. Cosmetic, never authoritative.",
+      "fields": [
+        { "name": "game", "type": "id53" },
+        { "name": "ply", "type": "u16", "max": 1199 },
+        { "name": "touch", "type": "u8", "max": 64 },
+        { "name": "aim", "type": "u8", "max": 64 },
+        { "name": "placed", "type": "u16", "max": 32767 },
+        { "name": "flags", "type": "u8", "max": 7 },
+        { "name": "yaw", "type": "i32", "min": -3142, "max": 3142 },
+        { "name": "pitch", "type": "i32", "min": -1571, "max": 1571 },
+        { "name": "lean", "type": "u8", "max": 100 }
+      ]
+    }
+  ]
+}

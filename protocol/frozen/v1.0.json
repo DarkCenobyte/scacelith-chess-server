@@ -1,0 +1,1717 @@
+{
+  "caps": [],
+  "closeCodes": [
+    {
+      "code": 1000,
+      "name": "Normal"
+    },
+    {
+      "code": 1001,
+      "name": "GoingAway"
+    },
+    {
+      "code": 1002,
+      "name": "ProtocolError"
+    },
+    {
+      "code": 1003,
+      "name": "Unsupported"
+    },
+    {
+      "code": 1009,
+      "name": "TooBig"
+    },
+    {
+      "code": 4001,
+      "error": "Malformed",
+      "name": "Malformed"
+    },
+    {
+      "code": 4002,
+      "error": "UnsupportedProtocol",
+      "name": "UnsupportedProtocol"
+    },
+    {
+      "code": 4003,
+      "error": "Unauthorized",
+      "name": "Unauthorized"
+    },
+    {
+      "code": 4004,
+      "error": "Banned",
+      "name": "Banned"
+    },
+    {
+      "code": 4006,
+      "error": "ServerFull",
+      "name": "ServerFull"
+    },
+    {
+      "code": 4007,
+      "error": "Replaced",
+      "name": "Replaced"
+    },
+    {
+      "code": 4008,
+      "error": "ShuttingDown",
+      "name": "ShuttingDown"
+    },
+    {
+      "code": 4009,
+      "error": "Internal",
+      "name": "Internal"
+    },
+    {
+      "code": 4010,
+      "error": "HelloRequired",
+      "name": "HelloRequired"
+    },
+    {
+      "code": 4011,
+      "error": "EmailUnverified",
+      "name": "EmailUnverified"
+    },
+    {
+      "code": 4300,
+      "error": "ProtocolViolation",
+      "name": "ProtocolViolation"
+    },
+    {
+      "code": 4301,
+      "error": "Flood",
+      "name": "Flood"
+    },
+    {
+      "code": 4302,
+      "error": "CheatDetected",
+      "name": "CheatDetected"
+    },
+    {
+      "code": 4303,
+      "name": "SlowConsumer"
+    }
+  ],
+  "constants": [
+    {
+      "name": "MaxClientMessage",
+      "value": 512
+    },
+    {
+      "name": "MaxServerMessage",
+      "value": 65536
+    },
+    {
+      "name": "MaxPlies",
+      "value": 1200
+    }
+  ],
+  "enums": [
+    {
+      "name": "Color",
+      "open": false,
+      "values": [
+        {
+          "name": "White",
+          "value": 0
+        },
+        {
+          "name": "Black",
+          "value": 1
+        },
+        {
+          "name": "None",
+          "value": 2
+        }
+      ]
+    },
+    {
+      "name": "ColorPref",
+      "open": false,
+      "values": [
+        {
+          "name": "Random",
+          "value": 0
+        },
+        {
+          "name": "White",
+          "value": 1
+        },
+        {
+          "name": "Black",
+          "value": 2
+        }
+      ]
+    },
+    {
+      "name": "GameStatus",
+      "open": false,
+      "values": [
+        {
+          "name": "Ongoing",
+          "value": 0
+        },
+        {
+          "name": "WhiteWins",
+          "value": 1
+        },
+        {
+          "name": "BlackWins",
+          "value": 2
+        },
+        {
+          "name": "Draw",
+          "value": 3
+        },
+        {
+          "name": "Aborted",
+          "value": 4
+        }
+      ]
+    },
+    {
+      "name": "EndReason",
+      "open": true,
+      "values": [
+        {
+          "name": "None",
+          "value": 0
+        },
+        {
+          "name": "Checkmate",
+          "value": 1
+        },
+        {
+          "name": "Resignation",
+          "value": 2
+        },
+        {
+          "name": "Timeout",
+          "value": 3
+        },
+        {
+          "name": "IllegalMoves",
+          "value": 4
+        },
+        {
+          "name": "Stalemate",
+          "value": 5
+        },
+        {
+          "name": "InsufficientMaterial",
+          "value": 6
+        },
+        {
+          "name": "TimeoutVsInsufficient",
+          "value": 7
+        },
+        {
+          "name": "FivefoldRepetition",
+          "value": 8
+        },
+        {
+          "name": "SeventyFiveMoves",
+          "value": 9
+        },
+        {
+          "name": "ThreefoldClaim",
+          "value": 10
+        },
+        {
+          "name": "FiftyMoveClaim",
+          "value": 11
+        },
+        {
+          "name": "Agreement",
+          "value": 12
+        },
+        {
+          "name": "IllegalMovesVsInsufficient",
+          "value": 13
+        },
+        {
+          "name": "Abandonment",
+          "value": 20
+        },
+        {
+          "name": "AbandonmentVsInsufficient",
+          "value": 21
+        },
+        {
+          "name": "Aborted",
+          "value": 22
+        },
+        {
+          "name": "NoShow",
+          "value": 23
+        },
+        {
+          "name": "Forfeit",
+          "value": 24
+        },
+        {
+          "name": "ServerAborted",
+          "value": 25
+        },
+        {
+          "name": "BothDisconnected",
+          "value": 26
+        }
+      ]
+    },
+    {
+      "name": "GameEventKind",
+      "open": true,
+      "reserved": [
+        {
+          "name": "AbortAvailable",
+          "value": 7
+        }
+      ],
+      "values": [
+        {
+          "name": "DrawOffered",
+          "value": 1
+        },
+        {
+          "name": "DrawDeclined",
+          "value": 2
+        },
+        {
+          "name": "PlayerDisconnected",
+          "value": 3
+        },
+        {
+          "name": "PlayerReconnected",
+          "value": 4
+        },
+        {
+          "name": "RematchOffered",
+          "value": 5
+        },
+        {
+          "name": "RematchDeclined",
+          "value": 6
+        }
+      ]
+    },
+    {
+      "name": "QueueState",
+      "open": true,
+      "values": [
+        {
+          "name": "Left",
+          "value": 0
+        },
+        {
+          "name": "Searching",
+          "value": 1
+        },
+        {
+          "name": "Matched",
+          "value": 2
+        }
+      ]
+    },
+    {
+      "name": "ChallengeState",
+      "open": true,
+      "values": [
+        {
+          "name": "Pending",
+          "value": 0
+        },
+        {
+          "name": "Accepted",
+          "value": 1
+        },
+        {
+          "name": "Declined",
+          "value": 2
+        },
+        {
+          "name": "Cancelled",
+          "value": 3
+        },
+        {
+          "name": "Expired",
+          "value": 4
+        },
+        {
+          "name": "Unavailable",
+          "value": 5
+        }
+      ]
+    },
+    {
+      "name": "NoticeCode",
+      "open": true,
+      "reserved": [
+        {
+          "name": "Motd",
+          "value": 6
+        }
+      ],
+      "values": [
+        {
+          "name": "ServerShutdown",
+          "value": 1
+        },
+        {
+          "name": "Banned",
+          "value": 2
+        },
+        {
+          "name": "SessionRevoked",
+          "value": 3
+        },
+        {
+          "name": "MatchmakingCooldown",
+          "value": 4
+        },
+        {
+          "name": "ReplacedByNewConnection",
+          "value": 5
+        },
+        {
+          "name": "RatingRestored",
+          "value": 7
+        }
+      ]
+    },
+    {
+      "name": "ErrorCode",
+      "open": true,
+      "reserved": [
+        {
+          "name": "SlowConsumer",
+          "value": 243
+        }
+      ],
+      "values": [
+        {
+          "name": "Malformed",
+          "value": 1
+        },
+        {
+          "name": "UnsupportedProtocol",
+          "value": 2
+        },
+        {
+          "name": "Unauthorized",
+          "value": 3
+        },
+        {
+          "name": "Banned",
+          "value": 4
+        },
+        {
+          "name": "RateLimited",
+          "value": 5
+        },
+        {
+          "name": "ServerFull",
+          "value": 6
+        },
+        {
+          "name": "Replaced",
+          "value": 7
+        },
+        {
+          "name": "ShuttingDown",
+          "value": 8
+        },
+        {
+          "name": "Internal",
+          "value": 9
+        },
+        {
+          "name": "HelloRequired",
+          "value": 10
+        },
+        {
+          "name": "EmailUnverified",
+          "value": 11
+        },
+        {
+          "name": "NotInGame",
+          "value": 100
+        },
+        {
+          "name": "NotYourTurn",
+          "value": 101
+        },
+        {
+          "name": "IllegalMove",
+          "value": 102
+        },
+        {
+          "name": "StalePly",
+          "value": 103
+        },
+        {
+          "name": "Desync",
+          "value": 104
+        },
+        {
+          "name": "GameOver",
+          "value": 105
+        },
+        {
+          "name": "AlreadyInGame",
+          "value": 106
+        },
+        {
+          "name": "InvalidCategory",
+          "value": 107
+        },
+        {
+          "name": "DrawOfferLimit",
+          "value": 108
+        },
+        {
+          "name": "NothingToClaim",
+          "value": 109
+        },
+        {
+          "name": "AbortNotAllowed",
+          "value": 110
+        },
+        {
+          "name": "NoPendingOffer",
+          "value": 111
+        },
+        {
+          "name": "FlagFell",
+          "value": 112
+        },
+        {
+          "name": "QueueNotAllowed",
+          "value": 200
+        },
+        {
+          "name": "ChallengeNotFound",
+          "value": 201
+        },
+        {
+          "name": "UserUnavailable",
+          "value": 202
+        },
+        {
+          "name": "ChallengeLimit",
+          "value": 203
+        },
+        {
+          "name": "CannotChallengeSelf",
+          "value": 204
+        },
+        {
+          "name": "CodeInvalid",
+          "value": 205
+        },
+        {
+          "name": "RatedRequiresOfficialTc",
+          "value": 206
+        },
+        {
+          "name": "MatchmakingCooldown",
+          "value": 207
+        },
+        {
+          "name": "InvalidTimeControl",
+          "value": 208
+        },
+        {
+          "name": "RematchUnavailable",
+          "value": 209
+        },
+        {
+          "name": "RatedRepeatLimit",
+          "value": 210
+        },
+        {
+          "name": "ProtocolViolation",
+          "value": 240
+        },
+        {
+          "name": "Flood",
+          "value": 241
+        },
+        {
+          "name": "CheatDetected",
+          "value": 242
+        }
+      ]
+    }
+  ],
+  "flags": [
+    {
+      "bits": [
+        {
+          "name": "Capture",
+          "value": 1
+        },
+        {
+          "name": "EnPassant",
+          "value": 2
+        },
+        {
+          "name": "CastleKing",
+          "value": 4
+        },
+        {
+          "name": "CastleQueen",
+          "value": 8
+        },
+        {
+          "name": "DoublePush",
+          "value": 16
+        },
+        {
+          "name": "Promotion",
+          "value": 32
+        },
+        {
+          "name": "Check",
+          "value": 64
+        },
+        {
+          "name": "Mate",
+          "value": 128
+        }
+      ],
+      "name": "MoveFlag"
+    },
+    {
+      "bits": [
+        {
+          "name": "Glance",
+          "value": 1
+        },
+        {
+          "name": "Promoting",
+          "value": 2
+        },
+        {
+          "name": "Side",
+          "value": 4
+        }
+      ],
+      "name": "GestureFlag"
+    }
+  ],
+  "messages": [
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "name": "proto",
+          "type": "u16"
+        },
+        {
+          "name": "minor",
+          "type": "u16"
+        },
+        {
+          "name": "caps",
+          "type": "u64"
+        },
+        {
+          "max": 48,
+          "name": "client",
+          "type": "str8"
+        },
+        {
+          "max": 160,
+          "min": 16,
+          "name": "token",
+          "type": "str8"
+        }
+      ],
+      "id": 1,
+      "name": "Hello"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "name": "nonce",
+          "type": "u32"
+        }
+      ],
+      "id": 2,
+      "name": "Ping"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "name": "nonce",
+          "type": "u32"
+        }
+      ],
+      "id": 3,
+      "name": "Pong"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "max": 7,
+          "min": 3,
+          "name": "category",
+          "type": "str8"
+        },
+        {
+          "name": "rated",
+          "type": "bool"
+        }
+      ],
+      "id": 16,
+      "name": "QueueJoin"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        }
+      ],
+      "id": 17,
+      "name": "QueueLeave"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "max": 24,
+          "name": "target",
+          "type": "str8"
+        },
+        {
+          "max": 10800,
+          "min": 15,
+          "name": "baseSec",
+          "type": "u16"
+        },
+        {
+          "max": 180,
+          "name": "incSec",
+          "type": "u8"
+        },
+        {
+          "name": "rated",
+          "type": "bool"
+        },
+        {
+          "name": "color",
+          "type": "enum:ColorPref"
+        }
+      ],
+      "id": 18,
+      "name": "ChallengeCreate"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "name": "id",
+          "type": "u32"
+        }
+      ],
+      "id": 19,
+      "name": "ChallengeAccept"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "name": "id",
+          "type": "u32"
+        }
+      ],
+      "id": 20,
+      "name": "ChallengeDecline"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "name": "id",
+          "type": "u32"
+        }
+      ],
+      "id": 21,
+      "name": "ChallengeCancel"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "max": 12,
+          "min": 4,
+          "name": "code",
+          "type": "str8"
+        }
+      ],
+      "id": 22,
+      "name": "ChallengeJoinCode"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "name": "game",
+          "type": "id53"
+        },
+        {
+          "max": 1199,
+          "name": "ply",
+          "type": "u16"
+        },
+        {
+          "max": 32767,
+          "name": "move",
+          "type": "u16"
+        },
+        {
+          "name": "posHash",
+          "type": "u32"
+        },
+        {
+          "name": "thinkMs",
+          "type": "u32"
+        },
+        {
+          "name": "drawOffer",
+          "type": "bool"
+        }
+      ],
+      "id": 32,
+      "name": "Move"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "name": "game",
+          "type": "id53"
+        }
+      ],
+      "id": 33,
+      "name": "Resign"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "name": "game",
+          "type": "id53"
+        }
+      ],
+      "id": 34,
+      "name": "DrawOffer"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "name": "game",
+          "type": "id53"
+        },
+        {
+          "name": "accept",
+          "type": "bool"
+        }
+      ],
+      "id": 35,
+      "name": "DrawAnswer"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "name": "game",
+          "type": "id53"
+        }
+      ],
+      "id": 36,
+      "name": "DrawClaim"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "name": "game",
+          "type": "id53"
+        }
+      ],
+      "id": 37,
+      "name": "Abort"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "name": "game",
+          "type": "id53"
+        }
+      ],
+      "id": 38,
+      "name": "Resync"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "name": "game",
+          "type": "id53"
+        },
+        {
+          "name": "accept",
+          "type": "bool"
+        }
+      ],
+      "id": 39,
+      "name": "Rematch"
+    },
+    {
+      "dir": "c2s",
+      "fields": [
+        {
+          "name": "seq",
+          "type": "u32"
+        },
+        {
+          "name": "game",
+          "type": "id53"
+        },
+        {
+          "max": 1199,
+          "name": "ply",
+          "type": "u16"
+        },
+        {
+          "max": 64,
+          "name": "touch",
+          "type": "u8"
+        },
+        {
+          "max": 64,
+          "name": "aim",
+          "type": "u8"
+        },
+        {
+          "max": 32767,
+          "name": "placed",
+          "type": "u16"
+        },
+        {
+          "max": 7,
+          "name": "flags",
+          "type": "u8"
+        },
+        {
+          "max": 3142,
+          "min": -3142,
+          "name": "yaw",
+          "type": "i32"
+        },
+        {
+          "max": 1571,
+          "min": -1571,
+          "name": "pitch",
+          "type": "i32"
+        },
+        {
+          "max": 100,
+          "name": "lean",
+          "type": "u8"
+        }
+      ],
+      "id": 40,
+      "name": "Gesture"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "name": "proto",
+          "type": "u16"
+        },
+        {
+          "name": "minor",
+          "type": "u16"
+        },
+        {
+          "name": "caps",
+          "type": "u64"
+        },
+        {
+          "name": "serverTime",
+          "type": "f64"
+        },
+        {
+          "name": "userId",
+          "type": "u32"
+        },
+        {
+          "max": 24,
+          "min": 1,
+          "name": "username",
+          "type": "str8"
+        },
+        {
+          "max": 64,
+          "name": "serverName",
+          "type": "str8"
+        },
+        {
+          "name": "heartbeatMs",
+          "type": "u32"
+        },
+        {
+          "name": "clientPingMs",
+          "type": "u32"
+        },
+        {
+          "name": "maxMsgPerSec",
+          "type": "u16"
+        },
+        {
+          "name": "msgBurst",
+          "type": "u16"
+        },
+        {
+          "name": "activeGame",
+          "type": "id53"
+        },
+        {
+          "max": 60,
+          "name": "gestureRate",
+          "type": "u16"
+        },
+        {
+          "max": 120,
+          "name": "gestureBurst",
+          "type": "u16"
+        }
+      ],
+      "id": 128,
+      "name": "Welcome"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "name": "ref",
+          "type": "u32"
+        },
+        {
+          "name": "code",
+          "type": "enum:ErrorCode"
+        },
+        {
+          "name": "fatal",
+          "type": "bool"
+        },
+        {
+          "name": "game",
+          "type": "id53"
+        }
+      ],
+      "id": 129,
+      "name": "Error"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "name": "nonce",
+          "type": "u32"
+        },
+        {
+          "name": "serverTime",
+          "type": "f64"
+        }
+      ],
+      "id": 130,
+      "name": "Ping"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "name": "nonce",
+          "type": "u32"
+        },
+        {
+          "name": "serverTime",
+          "type": "f64"
+        }
+      ],
+      "id": 131,
+      "name": "Pong"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "name": "ref",
+          "type": "u32"
+        }
+      ],
+      "id": 132,
+      "name": "Ack"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "name": "code",
+          "type": "enum:NoticeCode"
+        },
+        {
+          "name": "arg",
+          "type": "f64"
+        }
+      ],
+      "id": 133,
+      "name": "Notice"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "max": 7,
+          "name": "category",
+          "type": "str8"
+        },
+        {
+          "name": "rated",
+          "type": "bool"
+        },
+        {
+          "name": "state",
+          "type": "enum:QueueState"
+        },
+        {
+          "name": "waitMs",
+          "type": "u32"
+        },
+        {
+          "name": "window",
+          "type": "u16"
+        },
+        {
+          "name": "queued",
+          "type": "u32"
+        }
+      ],
+      "id": 144,
+      "name": "QueueStatus"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "name": "id",
+          "type": "u32"
+        },
+        {
+          "name": "from",
+          "type": "struct:PlayerInfo"
+        },
+        {
+          "max": 10800,
+          "min": 15,
+          "name": "baseSec",
+          "type": "u16"
+        },
+        {
+          "max": 180,
+          "name": "incSec",
+          "type": "u8"
+        },
+        {
+          "name": "rated",
+          "type": "bool"
+        },
+        {
+          "name": "yourColor",
+          "type": "enum:ColorPref"
+        },
+        {
+          "name": "expiresMs",
+          "type": "u32"
+        }
+      ],
+      "id": 145,
+      "name": "ChallengeReceived"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "name": "id",
+          "type": "u32"
+        },
+        {
+          "name": "state",
+          "type": "enum:ChallengeState"
+        },
+        {
+          "max": 24,
+          "name": "target",
+          "type": "str8"
+        },
+        {
+          "max": 12,
+          "name": "code",
+          "type": "str8"
+        },
+        {
+          "max": 10800,
+          "min": 15,
+          "name": "baseSec",
+          "type": "u16"
+        },
+        {
+          "max": 180,
+          "name": "incSec",
+          "type": "u8"
+        },
+        {
+          "name": "rated",
+          "type": "bool"
+        }
+      ],
+      "id": 146,
+      "name": "ChallengeStatus"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "name": "game",
+          "type": "id53"
+        },
+        {
+          "name": "gseq",
+          "type": "u32"
+        },
+        {
+          "max": 7,
+          "min": 1,
+          "name": "category",
+          "type": "str8"
+        },
+        {
+          "name": "baseMs",
+          "type": "u32"
+        },
+        {
+          "name": "incMs",
+          "type": "u32"
+        },
+        {
+          "name": "rated",
+          "type": "bool"
+        },
+        {
+          "name": "white",
+          "type": "struct:PlayerInfo"
+        },
+        {
+          "name": "black",
+          "type": "struct:PlayerInfo"
+        },
+        {
+          "name": "you",
+          "type": "enum:Color"
+        },
+        {
+          "max": 1200,
+          "name": "moves",
+          "type": "list16:struct:MoveRec"
+        },
+        {
+          "name": "running",
+          "type": "enum:Color"
+        },
+        {
+          "name": "whiteMs",
+          "type": "u32"
+        },
+        {
+          "name": "blackMs",
+          "type": "u32"
+        },
+        {
+          "name": "serverTime",
+          "type": "f64"
+        },
+        {
+          "name": "drawOffer",
+          "type": "enum:Color"
+        },
+        {
+          "name": "status",
+          "type": "enum:GameStatus"
+        },
+        {
+          "name": "reason",
+          "type": "enum:EndReason"
+        },
+        {
+          "name": "whiteConnected",
+          "type": "bool"
+        },
+        {
+          "name": "blackConnected",
+          "type": "bool"
+        },
+        {
+          "name": "graceMs",
+          "type": "u32"
+        },
+        {
+          "name": "firstMoveMs",
+          "type": "u32"
+        },
+        {
+          "name": "startedAt",
+          "type": "f64"
+        },
+        {
+          "name": "rematch",
+          "type": "enum:Color"
+        },
+        {
+          "name": "autoPress",
+          "type": "bool"
+        }
+      ],
+      "id": 160,
+      "name": "GameSnapshot"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "name": "game",
+          "type": "id53"
+        },
+        {
+          "name": "gseq",
+          "type": "u32"
+        },
+        {
+          "max": 1199,
+          "name": "ply",
+          "type": "u16"
+        },
+        {
+          "max": 32767,
+          "name": "move",
+          "type": "u16"
+        },
+        {
+          "name": "flags",
+          "type": "u8"
+        },
+        {
+          "name": "spentMs",
+          "type": "u32"
+        },
+        {
+          "name": "whiteMs",
+          "type": "u32"
+        },
+        {
+          "name": "blackMs",
+          "type": "u32"
+        },
+        {
+          "name": "serverTime",
+          "type": "f64"
+        },
+        {
+          "name": "drawOffer",
+          "type": "bool"
+        },
+        {
+          "name": "firstMoveMs",
+          "type": "u32"
+        }
+      ],
+      "id": 161,
+      "name": "MoveMade"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "name": "game",
+          "type": "id53"
+        },
+        {
+          "max": 1199,
+          "name": "ply",
+          "type": "u16"
+        },
+        {
+          "max": 32767,
+          "name": "move",
+          "type": "u16"
+        },
+        {
+          "name": "code",
+          "type": "enum:ErrorCode"
+        }
+      ],
+      "id": 162,
+      "name": "MoveRejected"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "name": "game",
+          "type": "id53"
+        },
+        {
+          "name": "gseq",
+          "type": "u32"
+        },
+        {
+          "name": "kind",
+          "type": "enum:GameEventKind"
+        },
+        {
+          "name": "color",
+          "type": "enum:Color"
+        },
+        {
+          "name": "arg",
+          "type": "u32"
+        }
+      ],
+      "id": 163,
+      "name": "GameEvent"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "name": "game",
+          "type": "id53"
+        },
+        {
+          "name": "gseq",
+          "type": "u32"
+        },
+        {
+          "name": "status",
+          "type": "enum:GameStatus"
+        },
+        {
+          "name": "reason",
+          "type": "enum:EndReason"
+        },
+        {
+          "name": "whiteMs",
+          "type": "u32"
+        },
+        {
+          "name": "blackMs",
+          "type": "u32"
+        },
+        {
+          "name": "serverTime",
+          "type": "f64"
+        }
+      ],
+      "id": 164,
+      "name": "GameEnd"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "name": "game",
+          "type": "id53"
+        },
+        {
+          "max": 7,
+          "min": 1,
+          "name": "category",
+          "type": "str8"
+        },
+        {
+          "name": "white",
+          "type": "struct:RatingChange"
+        },
+        {
+          "name": "black",
+          "type": "struct:RatingChange"
+        }
+      ],
+      "id": 165,
+      "name": "RatingUpdate"
+    },
+    {
+      "dir": "s2c",
+      "fields": [
+        {
+          "name": "game",
+          "type": "id53"
+        },
+        {
+          "max": 1199,
+          "name": "ply",
+          "type": "u16"
+        },
+        {
+          "max": 64,
+          "name": "touch",
+          "type": "u8"
+        },
+        {
+          "max": 64,
+          "name": "aim",
+          "type": "u8"
+        },
+        {
+          "max": 32767,
+          "name": "placed",
+          "type": "u16"
+        },
+        {
+          "max": 7,
+          "name": "flags",
+          "type": "u8"
+        },
+        {
+          "max": 3142,
+          "min": -3142,
+          "name": "yaw",
+          "type": "i32"
+        },
+        {
+          "max": 1571,
+          "min": -1571,
+          "name": "pitch",
+          "type": "i32"
+        },
+        {
+          "max": 100,
+          "name": "lean",
+          "type": "u8"
+        }
+      ],
+      "id": 166,
+      "name": "Gesture",
+      "relayOf": "Gesture"
+    }
+  ],
+  "minor": 0,
+  "protocol": 1,
+  "ranges": [
+    {
+      "area": "connection",
+      "dir": "c2s",
+      "first": 1,
+      "last": 15
+    },
+    {
+      "area": "lobby",
+      "dir": "c2s",
+      "first": 16,
+      "last": 31
+    },
+    {
+      "area": "game",
+      "dir": "c2s",
+      "first": 32,
+      "last": 63
+    },
+    {
+      "area": "future",
+      "dir": "c2s",
+      "first": 64,
+      "last": 111
+    },
+    {
+      "area": "experimental",
+      "dir": "c2s",
+      "first": 112,
+      "last": 127,
+      "published": false
+    },
+    {
+      "area": "connection",
+      "dir": "s2c",
+      "first": 128,
+      "last": 143
+    },
+    {
+      "area": "lobby",
+      "dir": "s2c",
+      "first": 144,
+      "last": 159
+    },
+    {
+      "area": "game",
+      "dir": "s2c",
+      "first": 160,
+      "last": 191
+    },
+    {
+      "area": "future",
+      "dir": "s2c",
+      "first": 192,
+      "last": 239
+    },
+    {
+      "area": "experimental",
+      "dir": "s2c",
+      "first": 240,
+      "last": 255,
+      "published": false
+    }
+  ],
+  "structs": [
+    {
+      "fields": [
+        {
+          "name": "userId",
+          "type": "u32"
+        },
+        {
+          "max": 24,
+          "min": 1,
+          "name": "name",
+          "type": "str8"
+        },
+        {
+          "name": "rating",
+          "type": "u16"
+        },
+        {
+          "name": "provisional",
+          "type": "bool"
+        }
+      ],
+      "name": "PlayerInfo"
+    },
+    {
+      "fields": [
+        {
+          "max": 32767,
+          "name": "move",
+          "type": "u16"
+        },
+        {
+          "name": "spentMs",
+          "type": "u32"
+        },
+        {
+          "name": "clockMs",
+          "type": "u32"
+        }
+      ],
+      "name": "MoveRec"
+    },
+    {
+      "fields": [
+        {
+          "name": "before",
+          "type": "u16"
+        },
+        {
+          "name": "after",
+          "type": "u16"
+        },
+        {
+          "name": "games",
+          "type": "u32"
+        },
+        {
+          "name": "provisional",
+          "type": "bool"
+        }
+      ],
+      "name": "RatingChange"
+    }
+  ],
+  "subprotocol": "scacelith.rt1"
+}
