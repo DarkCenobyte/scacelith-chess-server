@@ -964,6 +964,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "scacelith-chess",
+ "scacelith-client",
  "scacelith-gif",
  "scacelith-protocol",
  "serde_json",
