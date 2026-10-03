@@ -300,7 +300,7 @@ key('LOG_IP', { section: 'observability', type: 'enum', values: ['truncated', 'f
 key('RETENTION_SECURITY_DAYS', { section: 'observability', type: 'int', default: 90, min: 1, desc: 'Security events (failed logins, anomalies without sanction) are deleted after this many days.' });
 key('RETENTION_IP_DAYS', { section: 'observability', type: 'int', default: 30, min: 1, desc: 'Stored IP addresses (sessions, security events) are erased after this many days.' });
 key('RETENTION_INTERVAL_MS', { section: 'observability', type: 'int', default: 3600000, min: 60000, max: 2147483647,
-    desc: 'Interval of the retention purge run by the primary (expired sessions and tokens, old security events, anomalies, conduct events and failed analysis jobs, IP erasure). The first run starts about a minute after the server starts. At most 2147483647 (about 24.8 days, the longest timer of Node.js).' });
+    desc: 'Interval of the retention purge run by the primary (expired sessions, tokens and pending signups, old security events, anomalies, conduct events and failed analysis jobs, IP erasure). The first run starts about a minute after the server starts. At most 2147483647 (about 24.8 days, the longest timer of Node.js).' });
 
 // ---------------------------------------------------------------------------------------------------------
 
