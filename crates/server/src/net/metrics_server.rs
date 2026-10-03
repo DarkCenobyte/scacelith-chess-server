@@ -155,7 +155,7 @@ impl MetricsEndpoint {
     }
 
     /// Serves the endpoint on `listener` until `shutdown` turns true, then lets the requests in
-    /// progress finish (at most [`DRAIN_TIMEOUT`], then their connections are dropped) and
+    /// progress finish (at most `DRAIN_TIMEOUT`, 1 s, then their connections are dropped) and
     /// returns.
     pub async fn serve(self: Arc<Self>, listener: TcpListener, mut shutdown: watch::Receiver<bool>) {
         let mut acceptor = Acceptor::new(listener, self.log.clone());

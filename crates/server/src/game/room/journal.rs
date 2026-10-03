@@ -11,7 +11,7 @@
 //! | 2 move | 32 bytes: `u16 ply \| u16 move \| u8 flags \| u8 bits (1 draw offer made with the move, 2 the move declined the opponent's offer) \| u16 0 \| u32 spentMs \| u32 clockAfter \| u32 quotaAfter \| u32 gseq (of its MoveMade) \| i64 recvTime` |
 //! | 3 event | 12 bytes: `u8 kind \| u8 color \| u8 0 \| u8 0 \| u32 gseqAfter \| u32 arg`; kinds: 1 draw offer, 2 draw declined (color = decliner), 3 disconnect (arg = grace), 4 reconnect, 5 desync |
 //! | 3 recovered | 16 bytes: `u8 6 \| u8 2 \| u8 recFlags (1: the first reconnection of each player restarts its first-move timer) \| u8 0 \| u32 gseqAfter \| u32 grace (0: the configured one) \| u32 clock hold` |
-//! | 3 checkpoint | 68 bytes, see [`GameRoom::checkpoint_record`]: in [`GameRoom::journal_state`], and when a clock held since a recovery starts without its player |
+//! | 3 checkpoint | 68 bytes, see `GameRoom::checkpoint_record`: in [`GameRoom::journal_state`], and when a clock held since a recovery starts without its player |
 //! | 4 ended | 24 bytes: `u8 status \| u8 reason \| u8 culprit \| u8 0 \| u32 whiteMs \| u32 blackMs \| u32 gseq (of its GameEnd) \| i64 endedAt` |
 //! | 6 snapshot | the records of [`GameRoom::journal_state`] in one record (compaction): `u8 format (1) \| u8 0 \| u16 count \| count × (u8 kind \| u32 length \| i64 at \| payload)`; a replay starts from the latest snapshot and ignores the records before it |
 //!
