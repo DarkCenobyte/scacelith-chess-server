@@ -20,13 +20,29 @@ use crate::security::secret_box::{mfa_aad, mfa_pending_aad};
 use crate::security::totp::{
     TOTP_DIGITS, TOTP_PERIOD_S, base32_encode, generate_totp_secret, is_totp_code, otpauth_uri, verify_totp,
 };
-use crate::store::{StoreError, User, UserUpdate};
+use crate::store::{StoreError, User, UserStatus, UserUpdate};
 
 /// Window of the per-account second-factor limit (`AUTH_MFA_PER_ACCOUNT`).
 pub const MFA_LIMIT_WINDOW_MS: i64 = 15 * 60_000;
 
 fn already_enabled() -> AuthError {
     AuthError::new(409, "mfa_already_enabled", "Two-step verification is already enabled.")
+}
+
+fn setup_required() -> AuthError {
+    AuthError::new(409, "mfa_setup_required", "Start the two-step verification setup first.")
+}
+
+/// How the activation transaction of [`Inner::mfa_activate`] ended.
+enum Activation {
+    Done,
+    /// The account is gone (deleted meanwhile).
+    Gone,
+    AlreadyEnabled,
+    /// The pending secret changed since it was read (`pending`: another one is pending now).
+    Replaced {
+        pending: bool,
+    },
 }
 
 /// A second factor as typed: a TOTP code or a recovery code.
@@ -146,22 +162,18 @@ impl Inner {
     }
 
     /// Activates the pending secret of `user` when `code` is valid for it: the recovery codes, or
-    /// `None` for a wrong code.
+    /// `None` for a wrong code. The activation is written only while the account is still as
+    /// read (active, not enabled, the same pending secret), so that requests sent at once end as
+    /// they would one after the other: one enables, the others find it enabled, and the recovery
+    /// codes shown are the ones stored.
     pub(crate) async fn mfa_activate(&self, user: &User, code: &str) -> AuthResult<Option<Vec<String>>> {
         if user.mfa_enabled {
             return Err(already_enabled());
         }
-        let secret = user
-            .pending_mfa_secret_enc
-            .as_deref()
-            .and_then(|s| self.secret_box.open(s, &mfa_pending_aad(user.id.into())));
-        let Some(secret) = secret else {
-            return Err(AuthError::new(
-                409,
-                "mfa_setup_required",
-                "Start the two-step verification setup first.",
-            ));
-        };
+        let pending = user.pending_mfa_secret_enc.clone();
+        let secret =
+            pending.as_deref().and_then(|s| self.secret_box.open(s, &mfa_pending_aad(user.id.into())));
+        let Some(secret) = secret else { return Err(setup_required()) };
         let Some(step) = verify_totp(&secret, code, self.now(), -1) else { return Ok(None) };
         let codes = generate_recovery_codes(RECOVERY_CODE_COUNT);
         let hashes = self.recovery_hashes(user.id, &codes);
@@ -169,8 +181,19 @@ impl Inner {
         drop(secret);
         let (id, now) = (user.id, self.now());
         // One transaction: two-step verification is never on without its recovery codes.
-        self.store
+        let activation = self
+            .store
             .write(move |db| {
+                let current = db.users().by_id(id)?;
+                let Some(u) = current.filter(|u| u.status == UserStatus::Active) else {
+                    return Ok(Activation::Gone);
+                };
+                if u.mfa_enabled {
+                    return Ok(Activation::AlreadyEnabled);
+                }
+                if u.pending_mfa_secret_enc != pending {
+                    return Ok(Activation::Replaced { pending: u.pending_mfa_secret_enc.is_some() });
+                }
                 db.users().update(
                     id,
                     &UserUpdate {
@@ -181,10 +204,21 @@ impl Inner {
                         ..UserUpdate::default()
                     },
                 )?;
-                db.mfa().replace_recovery_codes(id, &hashes, now)
+                db.mfa().replace_recovery_codes(id, &hashes, now)?;
+                Ok::<_, StoreError>(Activation::Done)
             })
             .await?;
-        Ok(Some(codes))
+        match activation {
+            Activation::Done => Ok(Some(codes)),
+            Activation::Gone => {
+                Err(AuthError::new(401, "invalid_token", "The session is invalid; log in again."))
+            }
+            Activation::AlreadyEnabled => Err(already_enabled()),
+            // A new setup replaced the secret the code was checked against: a wrong code for the
+            // secret now pending.
+            Activation::Replaced { pending: true } => Ok(None),
+            Activation::Replaced { pending: false } => Err(setup_required()),
+        }
     }
 
     /// Turns two-step verification off (the caller checked the password and the second factor).

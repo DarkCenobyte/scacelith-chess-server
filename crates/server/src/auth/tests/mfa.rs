@@ -344,6 +344,68 @@ async fn enable_without_setup() {
     assert_eq!((r.status, r.json()["error"].clone()), (409, json!("mfa_setup_required")));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enable_requests_sent_at_once_enable_once_and_the_recovery_codes_given_work() {
+    let h = Harness::new().await;
+    let id = h.create_user("alice").await;
+    let token = h.token("alice", PW).await;
+    let r = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": PW })).await;
+    let secret = base32_decode(r.json()["secret"].as_str().unwrap()).unwrap();
+    let code = totp(&secret, h.now());
+    let mut set = JoinSet::new();
+    for _ in 0..4 {
+        let req = h
+            .call(http::Method::POST, "/api/v1/account/mfa/totp/enable")
+            .bearer(&token)
+            .json(&json!({ "code": code }));
+        set.spawn(req.send());
+    }
+    let mut enabled = Vec::new();
+    let mut refused = Vec::new();
+    while let Some(r) = set.join_next().await {
+        let r = r.unwrap();
+        if r.status == 200 {
+            enabled.push(r.json());
+        } else {
+            refused.push((r.status, r.json()["error"].clone()));
+        }
+    }
+    // One request enables (as one after the other would); the others find it enabled.
+    assert_eq!(enabled.len(), 1, "{refused:?}");
+    assert_eq!(refused, vec![(409, json!("mfa_already_enabled")); 3]);
+    // The recovery codes the player was shown are the ones stored.
+    assert_eq!(recovery_count(&h, id).await, 10);
+    h.advance(30_000);
+    let codes = enabled[0]["recoveryCodes"].as_array().unwrap();
+    for c in codes.iter().take(2) {
+        let tok = mfa_step(&h).await;
+        let r = h.post(MFA, json!({ "mfaToken": tok, "recoveryCode": c })).await;
+        assert_eq!(r.status, 200, "{c}: {}", r.text());
+    }
+}
+
+#[tokio::test]
+async fn an_enable_checked_against_a_secret_a_new_setup_replaced_enables_nothing() {
+    let h = Harness::new().await;
+    let id = h.create_user("alice").await;
+    let token = h.token("alice", PW).await;
+    async fn setup(h: &Harness, token: &str) -> Vec<u8> {
+        let r = h.post_as(token, "/api/v1/account/mfa/totp/setup", json!({ "password": PW })).await;
+        base32_decode(r.json()["secret"].as_str().unwrap()).unwrap()
+    }
+    let first = setup(&h, &token).await;
+    let read_before = h.user(id).await;
+    let second = setup(&h, &token).await;
+    // The code of the first secret, checked against the account as read before the second setup:
+    // a wrong code for the secret pending now, as if the requests had come one after the other.
+    assert_eq!(h.auth.inner.mfa_activate(&read_before, &totp(&first, h.now())).await.unwrap(), None);
+    let row = h.user(id).await;
+    assert!(!row.mfa_enabled && row.pending_mfa_secret_enc.is_some());
+    let r =
+        h.post_as(&token, "/api/v1/account/mfa/totp/enable", json!({ "code": totp(&second, h.now()) })).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+}
+
 #[tokio::test]
 async fn a_password_reset_between_the_two_steps_of_a_login_ends_the_mfa_step() {
     let e = enrolled(Setup::default()).await;
