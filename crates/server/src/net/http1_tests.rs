@@ -580,6 +580,22 @@ async fn an_ambiguous_body_length_gets_the_raw_400() {
 }
 
 #[tokio::test]
+async fn a_target_outside_ascii_gets_the_raw_400() {
+    let s = setup(Options::default());
+    // The http crate takes UTF-8 in a target; llhttp takes no byte above 0x7f.
+    for target in ["/healthz?q=\u{e9}", "/api/v1/players/\u{e9}t\u{e9}", "/x?\u{20ac}"] {
+        let mut c = connect(&s.edge, "127.0.0.1");
+        c.io.write_all(format!("GET {target} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).await.expect("write");
+        let answer = until_closed(&mut c.io, Duration::from_secs(3)).await.expect("closed");
+        assert_eq!(answer, ClientError::Malformed.raw_answer(), "{target}");
+    }
+    assert_eq!(s.edge.client_errors(ClientError::Malformed), 3);
+    let mut c = connect(&s.edge, "127.0.0.1");
+    let w = request(&mut c, "GET /healthz?q=%C3%A9 HTTP/1.1\r\nHost: x\r\nX-A: \u{e9}\r\n\r\n").await;
+    assert_eq!(w.status, 200, "percent-encoded, and in a header value, it is fine");
+}
+
+#[tokio::test]
 async fn node_answers_missing_host_and_unknown_expect_itself() {
     let s = setup(Options::default());
     let mut c = connect(&s.edge, "127.0.0.1");

@@ -15,7 +15,8 @@
 //! * hyper's own answers to unparsable requests are replaced by the raw `400` / `431` answers;
 //!   requests llhttp would refuse but hyper accepts (unknown or lower-case methods, a head over
 //!   8192 bytes counted as URL + header names + values, more than 64 header lines,
-//!   `Content-Length` given twice or with `Transfer-Encoding`) get the same raw answers. These
+//!   `Content-Length` given twice or with `Transfer-Encoding`, a target with bytes outside ASCII)
+//!   get the same raw answers. These
 //!   client errors count in `scacelith_http_client_errors_total{reason}` and 1 toward a block of
 //!   the peer (unless it is a trusted proxy);
 //! * a connection the server closes after an answer keeps reading (and discarding) for 2 s, 1 s
@@ -1080,7 +1081,7 @@ impl HttpListener {
         if node_head_size(&req) >= MAX_HEADER_SIZE || req.headers().len() > MAX_HEADER_LINES {
             return Ok(self.raw_error(&st, ClientError::TooLarge));
         }
-        if ambiguous_length(req.headers(), &raw_head) {
+        if ambiguous_length(req.headers(), &raw_head) || !target_of(&req).is_ascii() {
             return Ok(self.raw_error(&st, ClientError::Malformed));
         }
         let is_upgrade = has_token(req.headers(), header::CONNECTION, "upgrade")
