@@ -14,9 +14,13 @@
 //!   handler's own timeouts answer it);
 //! * hyper's own answers to unparsable requests are replaced by the raw `400` / `431` answers;
 //!   requests llhttp would refuse but hyper accepts (unknown or lower-case methods, a head over
-//!   8192 bytes counted as URL + header names + values) get the same raw answers. These client
-//!   errors count in `scacelith_http_client_errors_total{reason}` and 1 toward a block of the peer
-//!   (unless it is a trusted proxy);
+//!   8192 bytes counted as URL + header names + values, more than 64 header lines,
+//!   `Content-Length` given twice or with `Transfer-Encoding`, a target with bytes outside ASCII)
+//!   get the same raw answers, as does a chunked body hyper cannot decode once the handler that
+//!   read it is done (Node answers when the bad bytes come in, also for a route that does not
+//!   read its body). These
+//!   client errors count in `scacelith_http_client_errors_total{reason}` and 1 toward a block of
+//!   the peer (unless it is a trusted proxy);
 //! * a connection the server closes after an answer keeps reading (and discarding) for 2 s, 1 s
 //!   after a raw answer, so the client reads the answer before the socket goes.
 //!
@@ -30,9 +34,21 @@
 //! `Connection: keep-alive` and `Keep-Alive`, or `Connection: close` (the 1000th request of a
 //! connection, a request asking for it, a draining server).
 //!
-//! Known differences with Node's llhttp: header lines ending in a bare LF are accepted (httparse
-//! is lenient there), a head of more than 100 header lines is refused `431` (llhttp keeps 2000,
-//! Node's API saw the first 64), and pipelined requests are answered one after the other.
+//! Known differences with Node's listener, corner cases where hyper's behaviour is kept
+//! (RUST-PORT.md section 1; `tools/rest-diff` shows each one):
+//!
+//! * header lines ending in a bare LF are accepted (httparse is lenient there);
+//! * pipelined requests are answered one after the other (the `Content-Length` lines of a
+//!   request whose head came in with the previous request are not counted);
+//! * the answer to an HTTP/1.0 request has an `HTTP/1.0` status line (Node: `HTTP/1.1`);
+//! * header names are written in title case, `Www-Authenticate` for Node's `WWW-Authenticate`;
+//! * a `#fragment` in the target is dropped (Node routes it as part of the path: `404`);
+//! * a target with a character the http crate refuses, such as `"`, gets the raw `400`;
+//! * a request line without a version (HTTP/0.9) gets the raw `400` (Node answers it as
+//!   HTTP/1.1), the HTTP/2 preface is closed without an answer (Node: the raw `400`);
+//! * a body the route does not read, still on its way when the answer is sent, ends the
+//!   connection after the answer (hyper closes it; Node reads and discards it and keeps the
+//!   connection).
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -79,6 +95,9 @@ pub const SEND_TIMEOUT: Duration = Duration::from_secs(60);
 pub const MAX_REQUESTS_PER_CONNECTION: u32 = 1000;
 /// Largest request head, counted as Node does: URL + header names + header values.
 pub const MAX_HEADER_SIZE: usize = 8192;
+/// Header lines of a request head: Node's API sets `server.maxHeadersCount = 64`, and its
+/// parser refuses a head with more (`431`). hyper itself refuses more than 100.
+pub const MAX_HEADER_LINES: usize = 64;
 /// hyper's read buffer: a raw head larger than this is refused 431 by hyper itself.
 const MAX_BUF: usize = MAX_HEADER_SIZE + 1024;
 /// A raw error answer and the connection behind it last this long at most.
@@ -257,6 +276,35 @@ fn target_of<B>(req: &Request<B>) -> String {
     }
 }
 
+/// A body length llhttp refuses and hyper accepts: `Content-Length` given twice (even with the
+/// same value), or together with `Transfer-Encoding`. hyper keeps one `Content-Length` of equal
+/// ones and drops it next to `Transfer-Encoding`, so the lines are counted in `raw`, the bytes
+/// read while the head came in. When `raw` holds no complete head (pipelined requests), the
+/// request passes.
+fn ambiguous_length(h: &HeaderMap, raw: &[u8]) -> bool {
+    if !h.contains_key(header::CONTENT_LENGTH) && !h.contains_key(header::TRANSFER_ENCODING) {
+        return false;
+    }
+    let (mut lengths, mut chunked) = (0, false);
+    // The first line is the request line (or the end of one when the head started earlier).
+    for line in raw.split_inclusive(|&b| b == b'\n').skip(1) {
+        let Some(line) = line.strip_suffix(b"\n") else {
+            return false;
+        };
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            return lengths > 1 || (lengths == 1 && chunked);
+        }
+        let name = line.split(|&b| b == b':').next().unwrap_or_default();
+        if name.eq_ignore_ascii_case(b"content-length") {
+            lengths += 1;
+        } else if name.eq_ignore_ascii_case(b"transfer-encoding") {
+            chunked = true;
+        }
+    }
+    false
+}
+
 /// Node's head size: URL + header names + header values.
 fn node_head_size<B>(req: &Request<B>) -> usize {
     let url = match req.uri().path_and_query() {
@@ -295,6 +343,8 @@ struct Track {
     close_after: Option<Duration>,
     answered: bool,
     requests: u32,
+    /// The bytes read while waiting for a request head (at most `MAX_BUF`).
+    head: Vec<u8>,
 }
 
 /// The state of one connection, shared by its [`GuardedIo`] and its service.
@@ -323,17 +373,19 @@ impl ConnState {
                 close_after: None,
                 answered: false,
                 requests: 0,
+                head: Vec::new(),
             }),
         }
     }
 
-    fn begin_request(&self) -> u32 {
+    /// A request head was parsed: its number on the connection and the bytes read for it.
+    fn begin_request(&self) -> (u32, Vec<u8>) {
         let mut t = self.track.lock();
         if t.phase != Phase::Closing {
             t.phase = Phase::Request;
         }
         t.requests += 1;
-        t.requests
+        (t.requests, std::mem::take(&mut t.head))
     }
 
     /// The service produced an answer; `close_after`: the server closes the connection after it
@@ -371,12 +423,17 @@ impl ConnState {
         false
     }
 
-    /// Bytes came in: a new request starts on an idle connection.
-    fn bytes_in(&self) {
+    /// Bytes came in: a new request starts on an idle connection; the bytes of a head are kept
+    /// for [`ambiguous_length`].
+    fn bytes_in(&self, data: &[u8]) {
         let mut t = self.track.lock();
         if t.phase == Phase::KeepAlive {
             t.phase = Phase::Head;
             t.head_deadline = Instant::now() + self.edge.timeouts.head;
+        }
+        if t.phase == Phase::Head {
+            let room = MAX_BUF.saturating_sub(t.head.len());
+            t.head.extend_from_slice(&data[..data.len().min(room)]);
         }
     }
 
@@ -563,7 +620,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for GuardedIo<IO> {
             Poll::Ready(Ok(())) => {
                 if buf.filled().len() > before {
                     this.last_progress = Instant::now();
-                    this.st.bytes_in();
+                    this.st.bytes_in(&buf.filled()[before..]);
                 }
                 Poll::Ready(Ok(()))
             }
@@ -738,6 +795,46 @@ impl Body for ResponseBody {
     fn size_hint(&self) -> SizeHint {
         if self.chunked { SizeHint::default() } else { SizeHint::with_exact(self.data.len() as u64) }
     }
+}
+
+/// A request body on its way to the API: notes a chunked encoding hyper cannot decode.
+struct WatchedBody {
+    inner: Incoming,
+    malformed: Arc<AtomicBool>,
+}
+
+impl Body for WatchedBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let frame = ready!(Pin::new(&mut self.inner).poll_frame(cx));
+        if let Some(Err(e)) = &frame
+            && is_bad_encoding(e)
+        {
+            self.malformed.store(true, Ordering::Relaxed);
+        }
+        Poll::Ready(frame)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Whether a body error is a chunked encoding hyper's decoder refused (its errors of kind
+/// `InvalidData` / `InvalidInput`), not a connection that broke off.
+fn is_bad_encoding(e: &hyper::Error) -> bool {
+    std::error::Error::source(e)
+        .and_then(|cause| cause.downcast_ref::<io::Error>())
+        .is_some_and(|io| matches!(io.kind(), io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput))
 }
 
 impl Drop for ResponseBody {
@@ -1026,7 +1123,7 @@ impl HttpListener {
         req: Request<Incoming>,
         st: Arc<ConnState>,
     ) -> Result<Response<ResponseBody>, ClosedWithoutAnswer> {
-        let n = st.begin_request();
+        let (n, raw_head) = st.begin_request();
         let method = req.method().clone();
         if !METHODS.contains(&method.as_str()) {
             return Ok(self.raw_error(&st, ClientError::Malformed));
@@ -1034,8 +1131,11 @@ impl HttpListener {
         if method == Method::CONNECT {
             return Err(ClosedWithoutAnswer);
         }
-        if node_head_size(&req) >= MAX_HEADER_SIZE {
+        if node_head_size(&req) >= MAX_HEADER_SIZE || req.headers().len() > MAX_HEADER_LINES {
             return Ok(self.raw_error(&st, ClientError::TooLarge));
+        }
+        if ambiguous_length(req.headers(), &raw_head) || !target_of(&req).is_ascii() {
+            return Ok(self.raw_error(&st, ClientError::Malformed));
         }
         let is_upgrade = has_token(req.headers(), header::CONNECTION, "upgrade")
             && req.headers().contains_key(header::UPGRADE);
@@ -1100,11 +1200,16 @@ impl HttpListener {
             }
         }
         let api = self.api.clone();
+        let malformed = Arc::new(AtomicBool::new(false));
+        let req = req.map(|inner| WatchedBody { inner, malformed: malformed.clone() });
         let handled = tokio::spawn(async move {
             let res = api.handle(req, keys).await;
             (res, slot)
         })
         .await;
+        if malformed.load(Ordering::Relaxed) {
+            return Ok(self.raw_error(&st, ClientError::Malformed));
+        }
         Ok(match handled {
             Ok((res, slot)) => self.finish(&st, res, keep_alive, head, slot),
             Err(_) => {

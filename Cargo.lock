@@ -960,6 +960,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "scacelith-rest-diff"
+version = "1.0.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "hex",
+ "hmac",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
+ "scacelith-chess",
+ "scacelith-client",
+ "scacelith-protocol",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "scacelith-server"
 version = "1.0.0"
 dependencies = [

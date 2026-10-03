@@ -503,6 +503,124 @@ async fn unknown_methods_and_heads_node_refuses_get_raw_answers() {
 }
 
 #[tokio::test]
+async fn a_head_of_more_than_64_header_lines_gets_the_raw_431() {
+    let s = setup(Options::default());
+    let head = |lines: usize, target: &str, extra: &str| {
+        let more: String = (1..lines).map(|i| format!("Cookie: c{i}=1\r\n")).collect();
+        format!("GET {target} HTTP/1.1\r\nHost: x\r\n{extra}{more}\r\n")
+    };
+    let mut c = connect(&s.edge, "127.0.0.1");
+    let w = request(&mut c, &head(64, "/healthz", "")).await;
+    assert_eq!(w.status, 200, "64 header lines, the Host line included");
+    for (text, what) in [
+        (head(65, "/healthz", ""), "65 header lines"),
+        (head(100, "/api/v1/x", ""), "100 header lines (hyper's own limit is 100)"),
+        (
+            head(
+                61,
+                "/ws",
+                "Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n",
+            ),
+            "a WebSocket upgrade with 65 header lines",
+        ),
+    ] {
+        let mut c = connect(&s.edge, "127.0.0.1");
+        c.io.write_all(text.as_bytes()).await.expect("write");
+        let answer = until_closed(&mut c.io, Duration::from_secs(3)).await.expect("closed");
+        assert_eq!(
+            String::from_utf8_lossy(&answer),
+            String::from_utf8_lossy(ClientError::TooLarge.raw_answer()),
+            "{what}"
+        );
+    }
+    assert_eq!(s.edge.client_errors(ClientError::TooLarge), 3);
+    assert_eq!(reports(&s.guard), [(local(), 3.0)], "each one counts toward a block");
+}
+
+#[tokio::test]
+async fn an_ambiguous_body_length_gets_the_raw_400() {
+    let s = setup(Options::default());
+    let post =
+        |headers: &str, body: &str| format!("POST /api/v1/x HTTP/1.1\r\nHost: x\r\n{headers}\r\n{body}");
+    for (text, what) in [
+        (
+            post("Content-Length: 2\r\nContent-Length: 2\r\n", "{}"),
+            "Content-Length twice with the same value",
+        ),
+        (post("Content-Length: 2\r\ncontent-length: 2\r\n", "{}"), "Content-Length twice, any case"),
+        (
+            post("Content-Length: 2\r\nTransfer-Encoding: chunked\r\n", "2\r\n{}\r\n0\r\n\r\n"),
+            "Content-Length and chunked",
+        ),
+        (
+            post("Transfer-Encoding: chunked\r\nContent-Length: 2\r\n", "2\r\n{}\r\n0\r\n\r\n"),
+            "chunked and Content-Length",
+        ),
+    ] {
+        let mut c = connect(&s.edge, "127.0.0.1");
+        c.io.write_all(text.as_bytes()).await.expect("write");
+        let answer = until_closed(&mut c.io, Duration::from_secs(3)).await.expect("closed");
+        assert_eq!(
+            String::from_utf8_lossy(&answer),
+            String::from_utf8_lossy(ClientError::Malformed.raw_answer()),
+            "{what}"
+        );
+    }
+    assert_eq!(s.edge.client_errors(ClientError::Malformed), 4);
+    let mut c = connect(&s.edge, "127.0.0.1");
+    let w = request(&mut c, &post("Content-Length: 2\r\n", "{}")).await;
+    assert_ne!(w.status, 400, "one Content-Length is fine");
+    let w = request(&mut c, &post("Transfer-Encoding: chunked\r\n", "2\r\n{}\r\n0\r\n\r\n")).await;
+    assert_ne!(w.status, 400, "chunked alone is fine");
+    // The third request of the kept-alive connection is checked as the first.
+    c.io.write_all(post("Content-Length: 2\r\nContent-Length: 2\r\n", "{}").as_bytes()).await.expect("write");
+    let answer = until_closed(&mut c.io, Duration::from_secs(3)).await.expect("closed");
+    assert_eq!(answer, ClientError::Malformed.raw_answer());
+    assert_eq!(s.edge.client_errors(ClientError::Malformed), 5);
+}
+
+#[tokio::test]
+async fn a_target_outside_ascii_gets_the_raw_400() {
+    let s = setup(Options::default());
+    // The http crate takes UTF-8 in a target; llhttp takes no byte above 0x7f.
+    for target in ["/healthz?q=\u{e9}", "/api/v1/players/\u{e9}t\u{e9}", "/x?\u{20ac}"] {
+        let mut c = connect(&s.edge, "127.0.0.1");
+        c.io.write_all(format!("GET {target} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).await.expect("write");
+        let answer = until_closed(&mut c.io, Duration::from_secs(3)).await.expect("closed");
+        assert_eq!(answer, ClientError::Malformed.raw_answer(), "{target}");
+    }
+    assert_eq!(s.edge.client_errors(ClientError::Malformed), 3);
+    let mut c = connect(&s.edge, "127.0.0.1");
+    let w = request(&mut c, "GET /healthz?q=%C3%A9 HTTP/1.1\r\nHost: x\r\nX-A: \u{e9}\r\n\r\n").await;
+    assert_eq!(w.status, 200, "percent-encoded, and in a header value, it is fine");
+}
+
+#[tokio::test]
+async fn a_chunked_body_hyper_cannot_decode_gets_the_raw_400() {
+    let s = setup(Options::default());
+    let upload = |body: &str| {
+        format!(
+            "POST /api/v1/upload HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{body}"
+        )
+    };
+    for (body, what) in [
+        ("zz\r\n{}\r\n0\r\n\r\n", "a chunk size that is not hexadecimal"),
+        ("2\r\n{}XX0\r\n\r\n", "chunk data not followed by CRLF"),
+        ("fffffffffffffffffff\r\n{}\r\n0\r\n\r\n", "a chunk size that overflows"),
+    ] {
+        let mut c = connect(&s.edge, "127.0.0.1");
+        c.io.write_all(upload(body).as_bytes()).await.expect("write");
+        let answer = until_closed(&mut c.io, Duration::from_secs(3)).await.expect("closed");
+        assert_eq!(answer, ClientError::Malformed.raw_answer(), "{what}");
+    }
+    assert_eq!(s.edge.client_errors(ClientError::Malformed), 3);
+    assert_eq!(reports(&s.guard), [(local(), 3.0)], "each one counts toward a block");
+    let mut c = connect(&s.edge, "127.0.0.1");
+    let w = request(&mut c, &upload("2\r\n{}\r\n0\r\n\r\n")).await;
+    assert_eq!(w.status, 200, "a well-formed chunked body");
+}
+
+#[tokio::test]
 async fn node_answers_missing_host_and_unknown_expect_itself() {
     let s = setup(Options::default());
     let mut c = connect(&s.edge, "127.0.0.1");

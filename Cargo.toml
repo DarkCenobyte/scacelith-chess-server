@@ -13,10 +13,20 @@
 #                       (`scacelith-bench`)
 #   scacelith-live-check  tools/live-check: the game's C++ online client (its live tests) against
 #                       this server (`scacelith-live-check`)
+#   scacelith-rest-diff tools/rest-diff: differential test of the HTTPS API against the former
+#                       Node.js server (`rest-diff`)
 
 [workspace]
 resolver = "3"
-members = ["crates/protocol", "crates/chess", "crates/gif", "crates/server", "crates/client", "tools/live-check"]
+members = [
+    "crates/protocol",
+    "crates/chess",
+    "crates/gif",
+    "crates/server",
+    "crates/client",
+    "tools/live-check",
+    "tools/rest-diff",
+]
 
 [workspace.package]
 version = "1.0.0"
