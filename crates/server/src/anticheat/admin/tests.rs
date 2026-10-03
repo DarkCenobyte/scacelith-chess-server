@@ -1464,12 +1464,15 @@ async fn a_game_recorded_against_a_confirmed_cheater_under_an_active_ban_is_refu
     let vera_win = game(vera, cheat, WHITE_WINS, NOW + 3000); // a win: untouched
     let vic_omar = game(omar, vic, WHITE_WINS, NOW + 4000); // a loss to someone else: untouched
     let logs = LogCapture::start();
-    let res = w.finish(vec![late.clone(), in_play.clone(), val_draw.clone(), vera_win, vic_omar]).await;
-    let refund_logs: Vec<(Value, Value)> = logs
+    let batch = vec![late.clone(), in_play.clone(), val_draw.clone(), vera_win, vic_omar];
+    // Other tests log too (with the same user ids): the game ids are unique to this one.
+    let ours: Vec<Value> = batch.iter().map(|g| json!(g.id)).collect();
+    let res = w.finish(batch).await;
+    let refund_logs: Vec<(Value, Value, Value)> = logs
         .records("store")
         .into_iter()
-        .filter(|r| r["msg"] == "rating.refund" && r["cheaterId"] == json!(cheat))
-        .map(|r| (r["gameId"].clone(), r["points"].clone()))
+        .filter(|r| r["msg"] == "rating.refund" && ours.contains(&r["gameId"]))
+        .map(|r| (r["cheaterId"].clone(), r["gameId"].clone(), r["points"].clone()))
         .collect();
     drop(logs);
     let lost_in = |i: usize, white: bool| {
@@ -1526,9 +1529,9 @@ async fn a_game_recorded_against_a_confirmed_cheater_under_an_active_ban_is_refu
     assert_eq!(
         refund_logs,
         [
-            (json!(late.id), json!(10)),
-            (json!(in_play.id), json!(lost_in(1, true))),
-            (json!(val_draw.id), json!(lost_in(2, true)))
+            (json!(cheat), json!(late.id), json!(10)),
+            (json!(cheat), json!(in_play.id), json!(lost_in(1, true))),
+            (json!(cheat), json!(val_draw.id), json!(lost_in(2, true)))
         ]
     );
 

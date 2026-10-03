@@ -1,4 +1,5 @@
-//! Tests of the reports, ported from anticheat.reports.
+//! Tests of the reports, ported from anticheat.reports (the body checks and the HTTP answers are
+//! the route's, tested with it), and of the service as the routes reach it ([`ReportDesk`]).
 
 use std::sync::Arc;
 
@@ -6,7 +7,9 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::anticheat::testing::*;
-use crate::clock::ManualClock;
+use crate::clock::{Clock, ManualClock};
+use crate::http::routes::reports::validate_report;
+use crate::ids::GameId;
 use crate::store::status::WHITE_WINS;
 use crate::store::tests::support::LogCapture;
 use crate::store::{GameRecord, IntegrityUpdate, NewUser, Report};
@@ -45,7 +48,7 @@ async fn world(per_day: i64) -> World {
         seed_rating(&store, id, "5+0", 1500, 200).await;
         ids.push(id);
     }
-    let reports = Reports::new(&config, store.clone(), clock.clone());
+    let reports = Reports::new(&config, store.clone());
     World { store, clock, reports, alice: ids[0], bob: ids[1], carol: ids[2], dave: ids[3] }
 }
 
@@ -68,12 +71,18 @@ impl World {
         self.game_at(white, black, NOW - HOUR).await
     }
 
-    async fn file(&self, reporter: UserId, body: Value) -> ReportOutcome {
-        self.reports.file(reporter, &body).await
+    /// Files a report as the route does: the body checked, then the service at the clock's time.
+    async fn try_file(&self, reporter: UserId, body: Value) -> Result<ReportOutcome, StoreError> {
+        let req = validate_report(&body).expect("a valid report");
+        self.reports.file(reporter, req, self.clock.wall_ms()).await
     }
 
-    async fn status(&self, reporter: UserId, body: Value) -> u16 {
-        self.file(reporter, body).await.status()
+    async fn file(&self, reporter: UserId, body: Value) -> ReportOutcome {
+        self.try_file(reporter, body).await.expect("the store works")
+    }
+
+    async fn can(&self, user: UserId, game: &GameSummary) -> bool {
+        self.reports.can_report(user, game, self.clock.wall_ms()).await
     }
 
     /// Every report, oldest first.
@@ -97,7 +106,7 @@ async fn a_player_reports_their_opponent_and_the_report_is_stored_with_a_weight(
     let g = w.game(w.alice, w.bob).await;
     let logs = LogCapture::start();
     let res = w.file(w.alice, json!({ "gameId": g, "reported": "BOB", "category": "cheating", "comment": "  too perfect\u{7} " })).await;
-    assert_eq!((res.status(), res.body()), (202, Some(json!({ "status": "received" }))));
+    assert_eq!(res, ReportOutcome::Received);
     let all = w.all().await;
     assert_eq!(all.len(), 1);
     let r = &all[0];
@@ -118,8 +127,8 @@ async fn a_player_reports_their_opponent_and_the_report_is_stored_with_a_weight(
     // Game ids may come as strings (53-bit ids in JSON).
     let g2 = w.game(w.bob, w.alice).await;
     assert_eq!(
-        w.status(w.alice, json!({ "gameId": g2.to_string(), "reported": "bob", "category": "abuse" })).await,
-        202
+        w.file(w.alice, json!({ "gameId": g2.to_string(), "reported": "bob", "category": "abuse" })).await,
+        ReportOutcome::Received
     );
 }
 
@@ -131,7 +140,7 @@ async fn duplicates_get_the_same_answer_and_nothing_about_the_reported_account_l
     let b = w
         .file(w.alice, json!({ "gameId": g, "reported": "bob", "category": "other", "comment": "again" }))
         .await;
-    assert_eq!((a.status(), a.body()), (b.status(), b.body()));
+    assert_eq!((a, b), (ReportOutcome::Received, ReportOutcome::Received));
     assert_eq!(w.all().await.len(), 1);
     // A flagged or unflagged reported player gets exactly the same answer.
     w.store
@@ -148,38 +157,28 @@ async fn duplicates_get_the_same_answer_and_nothing_about_the_reported_account_l
         .unwrap();
     let g2 = w.game(w.carol, w.alice).await;
     let c = w.file(w.alice, json!({ "gameId": g2, "reported": "carol", "category": "cheating" })).await;
-    assert_eq!((c.status(), c.body()), (a.status(), a.body()));
+    assert_eq!(c, a);
 }
 
 #[tokio::test]
-async fn a_store_failure_is_left_to_the_route() {
+async fn a_store_failure_is_returned() {
     let w = world(5).await;
     let g = w.game(w.alice, w.bob).await;
     exec(&w.store, "CREATE TRIGGER no_reports BEFORE INSERT ON reports BEGIN SELECT RAISE(ABORT, 'database is locked'); END;")
         .await;
-    let res = w.file(w.alice, json!({ "gameId": g, "reported": "bob", "category": "cheating" })).await;
-    assert_eq!(res.status(), 500);
-    assert!(res.body().is_none());
-    assert!(
-        matches!(res, ReportOutcome::Failed(ref e) if e.message().contains("database is locked")),
-        "{res:?}"
-    );
+    let res = w.try_file(w.alice, json!({ "gameId": g, "reported": "bob", "category": "cheating" })).await;
+    assert!(matches!(res, Err(ref e) if e.message().contains("database is locked")), "{res:?}");
     w.store.close().await;
-    assert!(matches!(
-        w.file(w.alice, json!({ "gameId": g, "reported": "bob", "category": "cheating" })).await,
-        ReportOutcome::Failed(_)
-    ));
+    assert!(
+        w.try_file(w.alice, json!({ "gameId": g, "reported": "bob", "category": "cheating" })).await.is_err()
+    );
 }
 
 #[tokio::test]
 async fn only_the_opponent_of_a_recent_own_game_can_be_reported() {
     let w = world(5).await;
     let g = w.game(w.alice, w.bob).await;
-    let not_allowed = |res: ReportOutcome| {
-        res.status() == 403
-            && res.body().unwrap()["error"] == "report_not_allowed"
-            && res.body().unwrap()["message"] == NOT_ALLOWED_MESSAGE
-    };
+    let not_allowed = |res: ReportOutcome| res == ReportOutcome::NotAllowed;
     assert!(
         not_allowed(w.file(w.carol, json!({ "gameId": g, "reported": "bob", "category": "cheating" })).await),
         "not a player"
@@ -211,8 +210,8 @@ async fn only_the_opponent_of_a_recent_own_game_can_be_reported() {
     );
     let recent = w.game_at(w.alice, w.bob, NOW - 6 * DAY).await;
     assert_eq!(
-        w.status(w.alice, json!({ "gameId": recent, "reported": "bob", "category": "cheating" })).await,
-        202
+        w.file(w.alice, json!({ "gameId": recent, "reported": "bob", "category": "cheating" })).await,
+        ReportOutcome::Received
     );
     // A renamed opponent is still found through the account.
     let g3 = w.game(w.alice, w.dave).await;
@@ -225,88 +224,10 @@ async fn only_the_opponent_of_a_recent_own_game_can_be_reported() {
         .await
         .unwrap();
     assert_eq!(
-        w.status(w.alice, json!({ "gameId": g3, "reported": "dave2", "category": "cheating" })).await,
-        202
+        w.file(w.alice, json!({ "gameId": g3, "reported": "dave2", "category": "cheating" })).await,
+        ReportOutcome::Received
     );
     assert_eq!(w.all().await.len(), 2);
-}
-
-#[test]
-fn the_body_is_validated() {
-    let ok = json!({ "gameId": 5, "reported": "bob", "category": "other" });
-    assert_eq!(
-        validate_report(&ok),
-        Ok(ReportRequest {
-            game_id: 5,
-            reported: "bob".into(),
-            category: ReportCategory::Other,
-            comment: String::new()
-        })
-    );
-    let bad =
-        |body: Value, message: &str| assert_eq!(validate_report(&body), Err(message.to_string()), "{body}");
-    bad(Value::Null, "A JSON object is expected.");
-    bad(json!([1]), "A JSON object is expected.");
-    bad(json!({ "gameId": -1, "reported": "bob", "category": "cheating" }), "gameId must be a game id.");
-    bad(json!({ "gameId": 1.5, "reported": "bob", "category": "cheating" }), "gameId must be a game id.");
-    bad(json!({ "gameId": "12a", "reported": "bob", "category": "cheating" }), "gameId must be a game id.");
-    bad(
-        json!({ "gameId": "99999999999999999", "reported": "bob", "category": "cheating" }),
-        "gameId must be a game id.",
-    );
-    bad(
-        json!({ "gameId": 9_007_199_254_740_992u64, "reported": "bob", "category": "cheating" }),
-        "gameId must be a game id.",
-    );
-    bad(json!({ "gameId": 5, "reported": "", "category": "cheating" }), "reported must be a username.");
-    bad(json!({ "gameId": 5, "reported": "  ", "category": "cheating" }), "reported must be a username.");
-    bad(
-        json!({ "gameId": 5, "reported": "x".repeat(25), "category": "cheating" }),
-        "reported must be a username.",
-    );
-    bad(json!({ "gameId": 5, "reported": 7, "category": "cheating" }), "reported must be a username.");
-    bad(
-        json!({ "gameId": 5, "reported": "bob", "category": "rude" }),
-        "category must be one of cheating, abuse, other.",
-    );
-    bad(
-        json!({ "gameId": 5, "reported": "bob", "category": "other", "comment": "é".repeat(501) }),
-        "comment is limited to 500 characters.",
-    );
-    bad(
-        json!({ "gameId": 5, "reported": "bob", "category": "other", "comment": 42 }),
-        "comment must be text.",
-    );
-    let long = validate_report(
-        &json!({ "gameId": 5, "reported": " bob ", "category": "other", "comment": "é".repeat(500) }),
-    );
-    let long = long.unwrap();
-    assert_eq!((long.comment.chars().count(), long.reported.as_str()), (500, "bob"));
-    assert_eq!(
-        validate_report(&json!({ "gameId": "007", "reported": "b", "category": "abuse", "comment": null }))
-            .unwrap()
-            .game_id,
-        7
-    );
-    assert_eq!(
-        validate_report(&json!({ "gameId": 7.0, "reported": "b", "category": "abuse" })).unwrap().game_id,
-        7
-    );
-    // Unknown fields are not refused.
-    assert!(
-        validate_report(&json!({ "gameId": 7, "reported": "b", "category": "abuse", "extra": 1 })).is_ok()
-    );
-}
-
-#[tokio::test]
-async fn invalid_bodies_get_400_with_the_message() {
-    let w = world(5).await;
-    let res = w.file(w.alice, json!({ "gameId": 0, "reported": "bob", "category": "cheating" })).await;
-    assert_eq!(res.status(), 400);
-    assert_eq!(
-        res.body(),
-        Some(json!({ "error": "invalid_request", "message": "gameId must be a game id." }))
-    );
 }
 
 #[tokio::test]
@@ -314,24 +235,19 @@ async fn reports_per_day_per_reporter() {
     let w = world(2).await;
     let ids = [w.game(w.alice, w.bob).await, w.game(w.alice, w.carol).await, w.game(w.alice, w.dave).await];
     assert_eq!(
-        w.status(w.alice, json!({ "gameId": ids[0], "reported": "bob", "category": "cheating" })).await,
-        202
+        w.file(w.alice, json!({ "gameId": ids[0], "reported": "bob", "category": "cheating" })).await,
+        ReportOutcome::Received
     );
     assert_eq!(
-        w.status(w.alice, json!({ "gameId": ids[1], "reported": "carol", "category": "cheating" })).await,
-        202
+        w.file(w.alice, json!({ "gameId": ids[1], "reported": "carol", "category": "cheating" })).await,
+        ReportOutcome::Received
     );
     let res = w.file(w.alice, json!({ "gameId": ids[2], "reported": "dave", "category": "cheating" })).await;
-    assert_eq!(res.status(), 429);
-    assert_eq!(
-        res.body(),
-        Some(json!({ "error": "report_limit", "message": "At most 2 reports per day.", "retryAfter": 3600 }))
-    );
-    assert_eq!(res.retry_after(), Some(3600));
+    assert_eq!(res, ReportOutcome::LimitReached);
     w.clock.advance((DAY + 1) as f64);
     assert_eq!(
-        w.status(w.alice, json!({ "gameId": ids[2], "reported": "dave", "category": "cheating" })).await,
-        202
+        w.file(w.alice, json!({ "gameId": ids[2], "reported": "dave", "category": "cheating" })).await,
+        ReportOutcome::Received
     );
 }
 
@@ -397,8 +313,8 @@ async fn sock_puppets_weigh_little_and_a_credible_reporter_still_counts() {
         let sock = account(&w.store, &format!("sock{i}"), NOW - HOUR).await;
         let g = w.game(sock, w.bob).await;
         assert_eq!(
-            w.status(sock, json!({ "gameId": g, "reported": "bob", "category": "cheating" })).await,
-            202
+            w.file(sock, json!({ "gameId": g, "reported": "bob", "category": "cheating" })).await,
+            ReportOutcome::Received
         );
     }
     let all = w.all().await;
@@ -457,8 +373,8 @@ async fn the_daily_cap_counts_every_report_received() {
         .collect();
     assert_eq!(capped_weight(1.0, &newest, NOW), 1.0, "the newest 200 alone miss the cap");
     assert_eq!(
-        w.status(w.alice, json!({ "gameId": g, "reported": "bob", "category": "cheating" })).await,
-        202
+        w.file(w.alice, json!({ "gameId": g, "reported": "bob", "category": "cheating" })).await,
+        ReportOutcome::Received
     );
     let filed = &w.store.reports().for_reported(w.bob, 1).await.unwrap()[0];
     assert_eq!(filed.reporter_id, w.alice);
@@ -502,38 +418,38 @@ async fn only_a_credible_report_asks_for_the_analysis_at_report_priority() {
 async fn can_report_answers_the_rules_without_filing_anything() {
     let w = world(2).await;
     let g = w.summary(w.game(w.alice, w.bob).await).await;
-    assert!(w.reports.can_report(w.alice, &g).await);
-    assert!(w.reports.can_report(w.bob, &g).await, "either player");
-    assert!(!w.reports.can_report(w.carol, &g).await, "not a player of that game");
+    assert!(w.can(w.alice, &g).await);
+    assert!(w.can(w.bob, &g).await, "either player");
+    assert!(!w.can(w.carol, &g).await, "not a player of that game");
     let old = w.summary(w.game_at(w.alice, w.bob, NOW - 8 * DAY).await).await;
-    assert!(!w.reports.can_report(w.alice, &old).await, "too old");
+    assert!(!w.can(w.alice, &old).await, "too old");
     let future = w.summary(w.game_at(w.alice, w.bob, NOW + HOUR).await).await;
-    assert!(!w.reports.can_report(w.alice, &future).await, "not ended yet");
+    assert!(!w.can(w.alice, &future).await, "not ended yet");
     let mut own = g.clone();
     own.black_id = w.alice;
-    assert!(!w.reports.can_report(w.alice, &own).await, "against oneself");
+    assert!(!w.can(w.alice, &own).await, "against oneself");
     assert!(w.all().await.is_empty(), "nothing filed");
     assert_eq!(
-        w.status(w.alice, json!({ "gameId": g.id, "reported": "bob", "category": "cheating" })).await,
-        202
+        w.file(w.alice, json!({ "gameId": g.id, "reported": "bob", "category": "cheating" })).await,
+        ReportOutcome::Received
     );
-    assert!(!w.reports.can_report(w.alice, &g).await, "already reported");
-    assert!(w.reports.can_report(w.bob, &g).await, "the opponent still may");
+    assert!(!w.can(w.alice, &g).await, "already reported");
+    assert!(w.can(w.bob, &g).await, "the opponent still may");
     let g2 = w.game(w.alice, w.carol).await;
     let g3 = w.summary(w.game(w.alice, w.dave).await).await;
     assert_eq!(
-        w.status(w.alice, json!({ "gameId": g2, "reported": "carol", "category": "abuse" })).await,
-        202
+        w.file(w.alice, json!({ "gameId": g2, "reported": "carol", "category": "abuse" })).await,
+        ReportOutcome::Received
     );
-    assert!(!w.reports.can_report(w.alice, &g3).await, "REPORTS_PER_DAY reached");
+    assert!(!w.can(w.alice, &g3).await, "REPORTS_PER_DAY reached");
     assert_eq!(
-        w.status(w.alice, json!({ "gameId": g3.id, "reported": "dave", "category": "abuse" })).await,
-        429
+        w.file(w.alice, json!({ "gameId": g3.id, "reported": "dave", "category": "abuse" })).await,
+        ReportOutcome::LimitReached
     );
     w.clock.advance((DAY + 1) as f64);
-    assert!(w.reports.can_report(w.alice, &g3).await, "the next day");
+    assert!(w.can(w.alice, &g3).await, "the next day");
     w.store.close().await;
-    assert!(!w.reports.can_report(w.alice, &g3).await, "a store failure answers false");
+    assert!(!w.can(w.alice, &g3).await, "a store failure answers false");
 }
 
 #[test]
@@ -551,4 +467,58 @@ fn review_priority_grows_with_level_score_and_logarithmically_with_reports() {
             > review_priority(IntegrityLevel::None, 0.0, 2.0)
     );
     assert_eq!(review_priority(IntegrityLevel::Confirmed, f64::NAN, -3.0), 5);
+}
+
+// ---- through the routes' interface -------------------------------------------------------------
+
+fn auth(user: UserId, username: &str) -> AuthInfo {
+    AuthInfo {
+        user_id: user,
+        username: username.into(),
+        session_id: 1,
+        email_verified: true,
+        token_hash: None,
+    }
+}
+
+fn request(game_id: GameId, reported: &str, category: ReportCategory) -> ReportRequest {
+    ReportRequest { game_id, reported: reported.into(), category, comment: String::new() }
+}
+
+#[tokio::test]
+async fn the_routes_file_reports_and_ask_reportable_through_the_report_desk() {
+    let w = world(1).await;
+    let desk: Arc<dyn ReportDesk> = Arc::new(w.reports.clone());
+    let g = w.game(w.alice, w.bob).await;
+    let summary = w.summary(g).await;
+    // The routes give their own clock: the time of the request.
+    let at = NOW + 5 * 60_000;
+    assert!(desk.can_report(w.alice, summary.clone(), at).await);
+    let filed = desk.file(auth(w.alice, "alice"), request(g, "Bob", ReportCategory::Cheating), at).await;
+    assert_eq!(filed.unwrap(), ReportOutcome::Received);
+    let all = w.all().await;
+    assert_eq!((all.len(), all[0].reported_id, all[0].created_at), (1, w.bob, at));
+    assert!(!desk.can_report(w.alice, summary.clone(), at).await, "already reported");
+    let g2 = w.game(w.alice, w.carol).await;
+    let limit = desk.file(auth(w.alice, "alice"), request(g2, "carol", ReportCategory::Abuse), at).await;
+    assert_eq!(limit.unwrap(), ReportOutcome::LimitReached, "REPORTS_PER_DAY is 1");
+    let other = desk.file(auth(w.carol, "carol"), request(g, "bob", ReportCategory::Cheating), at).await;
+    assert_eq!(other.unwrap(), ReportOutcome::NotAllowed, "not a player of that game");
+    assert!(!desk.can_report(w.alice, summary, at + 8 * DAY).await, "too old by then");
+}
+
+#[tokio::test]
+async fn a_store_failure_reaches_the_routes_as_an_internal_error() {
+    let w = world(5).await;
+    let desk: Arc<dyn ReportDesk> = Arc::new(w.reports.clone());
+    let g = w.game(w.alice, w.bob).await;
+    let summary = w.summary(g).await;
+    w.store.close().await;
+    let err = desk
+        .file(auth(w.alice, "alice"), request(g, "bob", ReportCategory::Cheating), NOW)
+        .await
+        .unwrap_err();
+    assert_eq!((err.status, err.code.as_ref()), (500, "internal_error"));
+    assert!(err.internal.is_some(), "the store error is kept for the log");
+    assert!(!desk.can_report(w.alice, summary, NOW).await);
 }

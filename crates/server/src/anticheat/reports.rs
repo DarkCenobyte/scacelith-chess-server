@@ -1,6 +1,8 @@
 //! Player reports: eligibility rules, reporter credibility, the anti-brigading cap and the review
 //! priority, plus the service behind `POST /api/v1/reports` ([`Reports::file`]) and the
-//! `reportable` flag of `GET /api/v1/games/:id` ([`Reports::can_report`]).
+//! `reportable` flag of `GET /api/v1/games/:id` ([`Reports::can_report`]), which the routes reach
+//! through [`ReportDesk`] (the route checks the body with
+//! [`validate_report`](crate::http::routes::reports::validate_report) and answers the outcome).
 //!
 //! A report never changes a player's integrity level; it only raises the review priority that
 //! moderators see (`admin reports`, `admin integrity list`), in proportion to the reporter's
@@ -10,13 +12,13 @@
 //! reports received by one player in 24 hours sum to at most [`rules::DAILY_WEIGHT_CAP`], and
 //! the low-credibility ones to at most [`rules::LOW_CRED_DAILY_CAP`].
 
-use serde_json::{Value, json};
-
 use super::integrity::IntegrityLevel;
 use super::players::level_of;
-use crate::clock::SharedClock;
 use crate::config::Config;
-use crate::ids::{GameId, UserId};
+use crate::http::router::BoxFuture;
+use crate::http::routes::reports::{ReportDesk, ReportOutcome, ReportRequest};
+use crate::http::{ApiError, AuthInfo};
+use crate::ids::UserId;
 use crate::log::Logger;
 use crate::store::{
     Db, ErrorKind, GameSummary, NewReport, Priority, ReportCategory, ReportStatus, Store, StoreError,
@@ -30,10 +32,6 @@ pub mod rules {
     pub const DAY_MS: i64 = 86_400_000;
     /// The game must have ended within the last 7 days.
     pub const MAX_AGE_MS: i64 = 7 * DAY_MS;
-    /// Longest comment, in code points.
-    pub const COMMENT_MAX: usize = 500;
-    /// Longest reported username, in UTF-16 code units.
-    pub const USERNAME_MAX: usize = 24;
     /// Summed weight of the reports one player receives per 24 hours.
     pub const DAILY_WEIGHT_CAP: f64 = 2.0;
     /// A report weighing less than this is of low credibility.
@@ -167,55 +165,6 @@ pub fn review_priority(level: IntegrityLevel, score: f64, report_weight: f64) ->
     js::round_i64(base + stat + rep)
 }
 
-/// A validated report body.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReportRequest {
-    pub game_id: GameId,
-    /// The reported username, trimmed.
-    pub reported: String,
-    pub category: ReportCategory,
-    /// Without control characters, trimmed (may be empty).
-    pub comment: String,
-}
-
-/// Validates a report body; the error is the message of the 400 answer.
-pub fn validate_report(body: &Value) -> Result<ReportRequest, String> {
-    let Some(body) = body.as_object() else { return Err("A JSON object is expected.".into()) };
-    let game_id = match body.get("gameId") {
-        Some(Value::String(s)) if (1..=16).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit()) => {
-            s.parse::<u64>().ok().map(|n| n as f64)
-        }
-        Some(Value::Number(n)) => n.as_f64(),
-        _ => None,
-    };
-    let game_id = match game_id {
-        Some(g) if g > 0.0 && g.fract() == 0.0 && g <= 9_007_199_254_740_991.0 => g as GameId,
-        _ => return Err("gameId must be a game id.".into()),
-    };
-    let reported = match body.get("reported") {
-        Some(Value::String(s)) if !js::trim(s).is_empty() && js::utf16_len(s) <= USERNAME_MAX => js::trim(s),
-        _ => return Err("reported must be a username.".into()),
-    };
-    let category = match body.get("category").and_then(Value::as_str).and_then(ReportCategory::parse) {
-        Some(c) => c,
-        None => return Err("category must be one of cheating, abuse, other.".into()),
-    };
-    let comment = match body.get("comment") {
-        None | Some(Value::Null) => "",
-        Some(Value::String(s)) => s.as_str(),
-        Some(_) => return Err("comment must be text.".into()),
-    };
-    let cleaned: String = comment
-        .chars()
-        .filter(|&c| !matches!(c, '\u{0}'..='\u{8}' | '\u{b}'..='\u{1f}' | '\u{7f}'))
-        .collect();
-    let comment = js::trim(&cleaned).to_string();
-    if comment.chars().count() > COMMENT_MAX {
-        return Err(format!("comment is limited to {COMMENT_MAX} characters."));
-    }
-    Ok(ReportRequest { game_id, reported: reported.to_string(), category, comment })
-}
-
 /// The opponent a player may report.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Opponent {
@@ -245,63 +194,6 @@ pub fn reportable_opponent(game: &GameSummary, user: UserId, now: i64) -> Option
     Some(Opponent { id, name: name.clone() })
 }
 
-/// The answer to `POST /api/v1/reports` (the route answers 401 `Log in first.` itself for an
-/// anonymous request).
-#[derive(Debug)]
-pub enum ReportOutcome {
-    /// 202 `{"status": "received"}`: filed, or already filed (the same answer, which says nothing
-    /// about the reported account).
-    Accepted,
-    /// 400 `{"error": "invalid_request", "message": ...}`.
-    Invalid(String),
-    /// 429 `{"error": "report_limit", "message": "At most <n> reports per day.", "retryAfter": 3600}`
-    /// with `Retry-After: 3600`.
-    Limit { per_day: i64 },
-    /// 403 `report_not_allowed`: not the opponent of the reporter in a game that ended within
-    /// 7 days.
-    NotAllowed,
-    /// The store failed (the former server answered 500 `internal_error`; `busy` may be a 503).
-    Failed(StoreError),
-}
-
-/// The message of [`ReportOutcome::NotAllowed`].
-pub const NOT_ALLOWED_MESSAGE: &str =
-    "You can report the opponent of one of your games that ended in the last 7 days.";
-
-impl ReportOutcome {
-    /// The HTTP status (500 for [`ReportOutcome::Failed`]).
-    pub fn status(&self) -> u16 {
-        match self {
-            ReportOutcome::Accepted => 202,
-            ReportOutcome::Invalid(_) => 400,
-            ReportOutcome::Limit { .. } => 429,
-            ReportOutcome::NotAllowed => 403,
-            ReportOutcome::Failed(_) => 500,
-        }
-    }
-
-    /// The JSON body (`None` for [`ReportOutcome::Failed`], left to the route's error handling).
-    pub fn body(&self) -> Option<Value> {
-        match self {
-            ReportOutcome::Accepted => Some(json!({ "status": "received" })),
-            ReportOutcome::Invalid(message) => {
-                Some(json!({ "error": "invalid_request", "message": message }))
-            }
-            ReportOutcome::Limit { per_day } => Some(json!({ "error": "report_limit",
-                "message": format!("At most {per_day} reports per day."), "retryAfter": 3600 })),
-            ReportOutcome::NotAllowed => {
-                Some(json!({ "error": "report_not_allowed", "message": NOT_ALLOWED_MESSAGE }))
-            }
-            ReportOutcome::Failed(_) => None,
-        }
-    }
-
-    /// The `Retry-After` header, in seconds.
-    pub fn retry_after(&self) -> Option<u64> {
-        matches!(self, ReportOutcome::Limit { .. }).then_some(3600)
-    }
-}
-
 /// A report stored, for the log line written after the commit.
 struct Filed {
     id: i64,
@@ -310,6 +202,7 @@ struct Filed {
     raw_weight: f64,
 }
 
+/// What a filing did: answered without a new report, or stored one.
 enum Filing {
     Answer(ReportOutcome),
     Filed(Filed),
@@ -319,7 +212,6 @@ enum Filing {
 #[derive(Clone)]
 pub struct Reports {
     store: Store,
-    clock: SharedClock,
     logger: Logger,
     per_day: i64,
 }
@@ -332,42 +224,40 @@ impl std::fmt::Debug for Reports {
 
 impl Reports {
     /// The service of a server (`REPORTS_PER_DAY` from `config`).
-    pub fn new(config: &Config, store: Store, clock: SharedClock) -> Reports {
-        Reports { store, clock, logger: Logger::root().child("anticheat"), per_day: config.reports_per_day }
+    pub fn new(config: &Config, store: Store) -> Reports {
+        Reports { store, logger: Logger::root().child("anticheat"), per_day: config.reports_per_day }
     }
 
-    /// Handles a report filed by `reporter` (`POST /api/v1/reports`, the body as parsed JSON),
-    /// in one store write job: the `REPORTS_PER_DAY` quota, the game and its opponent, the
-    /// duplicate check, the reporter's weight capped against brigading, the report, and the
-    /// analysis request of the game (`report` priority for a credible report, `signal` for a
-    /// low-credibility one, none for an abuse report).
-    pub async fn file(&self, reporter: UserId, body: &Value) -> ReportOutcome {
-        let req = match validate_report(body) {
-            Ok(r) => r,
-            Err(message) => return ReportOutcome::Invalid(message),
-        };
-        let now = self.clock.wall_ms();
+    /// Files a report of `reporter` checked by the route, at `now`, in one store write job: the
+    /// `REPORTS_PER_DAY` quota, the game and its opponent (also under a former name), the
+    /// duplicate check (the same answer as a new report), the reporter's weight capped against
+    /// brigading, the report, and the analysis request of the game (`report` priority for a
+    /// credible report, `signal` for a low-credibility one, none for an abuse report). The
+    /// `report.filed` security line is logged after the commit. A store failure is returned.
+    pub async fn file(
+        &self,
+        reporter: UserId,
+        req: ReportRequest,
+        now: i64,
+    ) -> Result<ReportOutcome, StoreError> {
         let (per_day, logger) = (self.per_day, self.logger.clone());
         let (game_id, category) = (req.game_id, req.category);
-        let job = self.store.write(move |db| file_report(db, reporter, &req, per_day, now, &logger));
-        match job.await {
-            Ok(Filing::Answer(answer)) => answer,
-            Ok(Filing::Filed(f)) => {
+        match self.store.write(move |db| file_report(db, reporter, &req, per_day, now, &logger)).await? {
+            Filing::Answer(answer) => Ok(answer),
+            Filing::Filed(f) => {
                 log_security!(self.logger, "report.filed", { "reportId": f.id, "reporterId": reporter,
                     "reportedId": f.reported, "gameId": game_id, "category": category.as_str(),
                     "weight": f.weight, "rawWeight": f.raw_weight });
-                ReportOutcome::Accepted
+                Ok(ReportOutcome::Received)
             }
-            Err(e) => ReportOutcome::Failed(e),
         }
     }
 
     /// Whether [`Reports::file`] would take a new report from `user` against the opponent of `game`
-    /// now (`GET /api/v1/games/:id` `reportable`): the game qualifies, the user is under
+    /// at `now` (`GET /api/v1/games/:id` `reportable`): the game qualifies, the user is under
     /// `REPORTS_PER_DAY` and has not reported that opponent for that game yet. Any store failure
     /// answers `false`.
-    pub async fn can_report(&self, user: UserId, game: &GameSummary) -> bool {
-        let now = self.clock.wall_ms();
+    pub async fn can_report(&self, user: UserId, game: &GameSummary, now: i64) -> bool {
         let Some(opponent) = reportable_opponent(game, user, now) else { return false };
         let (per_day, game_id) = (self.per_day, game.id);
         self.store
@@ -382,6 +272,29 @@ impl Reports {
     }
 }
 
+/// The routes' view of the service: `POST /reports` answers the outcome (a store failure as 500
+/// `internal_error`, as the former server did), `GET /games/:id` shows `reportable`. The app
+/// passes the service to the routes as `Arc<dyn ReportDesk>`.
+impl ReportDesk for Reports {
+    fn file(
+        &self,
+        reporter: AuthInfo,
+        report: ReportRequest,
+        now_ms: i64,
+    ) -> BoxFuture<Result<ReportOutcome, ApiError>> {
+        let reports = self.clone();
+        // `Reports::file` is the inherent method: it takes precedence over this one.
+        Box::pin(async move {
+            Reports::file(&reports, reporter.user_id, report, now_ms).await.map_err(ApiError::internal)
+        })
+    }
+
+    fn can_report(&self, user: UserId, game: GameSummary, now_ms: i64) -> BoxFuture<bool> {
+        let reports = self.clone();
+        Box::pin(async move { Reports::can_report(&reports, user, &game, now_ms).await })
+    }
+}
+
 /// The write job of [`Reports::file`].
 fn file_report(
     db: &Db<'_>,
@@ -392,7 +305,7 @@ fn file_report(
     logger: &Logger,
 ) -> Result<Filing, StoreError> {
     if db.reports().count_by_reporter_since(reporter, now - DAY_MS)? >= per_day {
-        return Ok(Filing::Answer(ReportOutcome::Limit { per_day }));
+        return Ok(Filing::Answer(ReportOutcome::LimitReached));
     }
     let game = db.games().by_id(req.game_id)?;
     let Some(opponent) = game.and_then(|g| reportable_opponent(&g.summary, reporter, now)) else {
@@ -406,7 +319,7 @@ fn file_report(
         return Ok(Filing::Answer(ReportOutcome::NotAllowed));
     }
     if db.reports().exists(reporter, opponent.id, Some(req.game_id))? {
-        return Ok(Filing::Answer(ReportOutcome::Accepted));
+        return Ok(Filing::Answer(ReportOutcome::Received));
     }
 
     let (mut actioned, mut dismissed) = (0, 0);
@@ -445,7 +358,7 @@ fn file_report(
     let id = match created {
         Ok(id) => id,
         // The same report filed at the same moment: the UNIQUE index kept one.
-        Err(e) if e.kind() == ErrorKind::Duplicate => return Ok(Filing::Answer(ReportOutcome::Accepted)),
+        Err(e) if e.kind() == ErrorKind::Duplicate => return Ok(Filing::Answer(ReportOutcome::Received)),
         Err(e) => return Err(e),
     };
     // The reported game is analysed ahead of the ordinary ones, even when the queue policy left it
