@@ -637,12 +637,6 @@ impl Instance {
         &self.store
     }
 
-    /// The realtime connections (tests).
-    #[cfg(test)]
-    pub(crate) fn realtime(&self) -> &Realtime {
-        &self.realtime
-    }
-
     /// The SIGHUP reload: `RELOADING=1`, the certificate and key read again (the outcome is
     /// logged; a failure keeps the current certificate), then `READY=1` whatever the outcome.
     pub(crate) async fn reload_certificates(&self) {

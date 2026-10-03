@@ -13,6 +13,8 @@ pub mod admission;
 pub(crate) mod conn;
 pub mod deps;
 pub mod drain;
+#[cfg(test)]
+mod e2e;
 pub mod endpoint;
 pub(crate) mod frames;
 pub(crate) mod link;
