@@ -160,16 +160,18 @@ published ranges; the experimental ranges are never published, and a published p
      every error code and close code, and the [close-code rule](#errors-and-close-codes);
   4. the `Ping` and `Pong` layouts of both directions.
 * **What a minor may do**, and nothing else: add message types inside the published ranges;
-  append fields at the end of an existing message; add values to open enums; add flag bits,
+  append fields at the end of an existing S2C message; add values to open enums; add flag bits,
   capability bits and close codes; widen the bounds of a C2S field; narrow the bounds of an S2C
-  field. Nothing is removed, renumbered, renamed, retyped or moved; structs, closed enums,
-  constants and ranges never change; a retired enum value stays reserved forever. Every released
-  minor is frozen as `protocol/frozen/v1.<minor>.json`, and `protogen` refuses a schema that breaks
-  these rules.
+  field. A C2S message never gains fields, Hello included: the server decodes strictly, and the
+  frames of older clients would lack them. What clients send in addition is a new C2S message
+  type, gated by a capability bit when it is optional. Nothing is removed, renumbered, renamed,
+  retyped or moved; structs, closed enums, constants and ranges never change; a retired enum value
+  stays reserved forever. Every released minor is frozen as `protocol/frozen/v1.<minor>.json`, and
+  `protogen` refuses a schema that breaks these rules.
 * **Reading a Hello of any minor.** The server reads the 17-byte prefix first: a `proto` it does
   not support is refused with `UnsupportedProtocol` whatever follows. A Hello whose `minor` is
-  higher than the server's may carry fields the server does not know after the ones it knows:
-  the server ignores them (this is the only place where the server accepts trailing bytes).
+  higher than the server's is read the same way, except that bytes after the fields the server
+  knows are ignored (this is the only place where the server accepts trailing bytes).
 * **Fingerprint.** The schema fingerprint is the first four bytes (big-endian) of SHA-256 of the
   canonical schema (prose left out, keys sorted, no whitespace). It appears in `/api/v1/info`, the
   vectors and the logs, and is never a reason to refuse a peer.

@@ -35,7 +35,8 @@
 //! # Versions
 //!
 //! [`PROTOCOL_VERSION`] is 1 for the life of this protocol. A later minor ([`MINOR`]) only adds
-//! message types, appends fields to messages, adds values to open enums and defines capability
+//! message types, appends fields to server messages (a client message never gains fields: the
+//! server must keep decoding older clients), adds values to open enums and defines capability
 //! bits ([`CAPS`]); the server reads the Hello of any minor ([`decode_hello`],
 //! [`HelloPrefix`]). [`FINGERPRINT`] identifies the schema in logs and is never compared.
 
@@ -165,8 +166,8 @@ impl HelloPrefix {
     }
 }
 
-/// Decodes a Hello as the server does: strictly, except that the Hello of a later minor than
-/// [`MINOR`] may carry fields this codec does not know (trailing bytes), which are ignored.
+/// Decodes a Hello as the server does: strictly, except that bytes after the fields this codec
+/// knows are ignored in the Hello of a later minor than [`MINOR`].
 pub fn decode_hello(buf: &[u8]) -> Result<Hello, DecodeError> {
     let first = buf.first().copied();
     if first != Some(MsgType::Hello.to_u8()) {

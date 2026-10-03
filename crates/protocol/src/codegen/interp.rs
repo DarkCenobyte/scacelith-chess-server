@@ -143,8 +143,8 @@ pub fn decode(schema: &Schema, bytes: &[u8], dir: Dir, strict: bool) -> Result<D
     Ok(Decoded::Message { key: m.key.clone(), fields })
 }
 
-/// Decodes a Hello like a server: strict, except that a Hello of a higher minor than the
-/// schema's may carry fields this minor does not know (trailing bytes).
+/// Decodes a Hello like a server: strict, except that bytes after the fields this minor knows are
+/// ignored in a Hello of a higher minor than the schema's.
 pub fn decode_hello(schema: &Schema, bytes: &[u8]) -> Result<Value, String> {
     let m = schema.message_by_id(1).expect("Hello is frozen at 0x01");
     match bytes.first().map(|&id| schema.message_by_id(id)) {

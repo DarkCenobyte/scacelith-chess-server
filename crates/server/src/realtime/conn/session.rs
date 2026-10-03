@@ -182,7 +182,7 @@ impl Session {
             self.forged(type_byte);
             return;
         }
-        // A Hello is read as at the handshake: a later minor's appended fields are ignored.
+        // A Hello is read as at the handshake (trailing bytes ignored in a later minor's Hello).
         let decoded = if type_byte == MsgType::Hello.to_u8() {
             decode_hello(&buf).map(ClientMsg::Hello)
         } else {

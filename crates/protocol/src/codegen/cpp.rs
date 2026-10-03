@@ -190,7 +190,7 @@ pub fn header(schema: &Schema) -> String {
     o.line("//                         a later minor) are ignored and open enums keep the values this codec");
     o.line("//                         does not know (isValid() is false for them).");
     o.line("//   decodeHello(p, n, h)  a Hello as a server reads it: strict, except that a Hello of a later");
-    o.line("//                         minor may carry fields this codec does not know.");
+    o.line("//                         minor may have trailing bytes, which are ignored.");
     o.line("//   valid(m)              true when m holds only values a sender may send (decode(encode(m))");
     o.line("//                         then gives m back).");
     o.line("//   peekType(p, n, t)     type of a message (false when empty or unknown).");
@@ -701,9 +701,9 @@ pub fn source(schema: &Schema) -> String {
     o.line("bool decodeHello(const uint8_t* p, size_t n, Hello& out) {");
     o.line("    HelloPrefix prefix;");
     o.line("    if (!readHelloPrefix(p, n, prefix)) return false;");
-    o.line("    if (prefix.minor <= kMinor) return decode(p, n, out);   // no field of a later minor");
+    o.line("    if (prefix.minor <= kMinor) return decode(p, n, out);   // strict");
     o.line("    Reader r(p, n, false);");
-    o.line("    return r.type(MsgType::Hello) && getFields(r, out);   // fields of a later minor follow");
+    o.line("    return r.type(MsgType::Hello) && getFields(r, out);   // trailing bytes ignored");
     o.line("}");
     o.line("");
     o.line("}  // namespace proto");
