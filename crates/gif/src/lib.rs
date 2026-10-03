@@ -2,7 +2,7 @@
 //! the players, the result and the last move around it. GPL-3.0-or-later.
 //!
 //! The output is byte-identical to the former Node.js server's renderer (`src/gif/*.js` at commit
-//! 7531830): the same palette, anti-aliased pieces (the cburnett SVG set, rasterized here with the
+//! 9b65410): the same palette, anti-aliased pieces (the cburnett SVG set, rasterized here with the
 //! floating-point semantics of V8), bitmap fonts (Terminus subsets), layout, frame differences and
 //! LZW stream. The assets are embedded in the binary and parsed once, on first use.
 //!

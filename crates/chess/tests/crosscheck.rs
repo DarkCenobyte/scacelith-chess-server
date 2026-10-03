@@ -4,12 +4,12 @@
 
 mod common;
 
-use common::{decode_base64, fen_prefix, fnv, read_json, server_path};
+use common::{decode_base64, fen_prefix, fnv, read_json, repo_path};
 use scacelith_chess::{ChessGame, Color, GameStatus, PgnTags, Position, move_uci};
 use serde_json::Value;
 
 fn fixture() -> Value {
-    read_json(server_path("test/fixtures/chess-crosscheck.json"))
+    read_json(repo_path("test/fixtures/chess-crosscheck.json"))
 }
 
 fn decode_legal(b64: &str) -> Vec<u16> {

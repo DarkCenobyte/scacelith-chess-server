@@ -2,7 +2,7 @@
 
 - Machine: 4 CPUs (Intel(R) Xeon(R) Processor @ 2.10GHz), 15.7 GiB RAM, kernel 6.18.44-fc-v64
 - Server CPUs: 0,1, load generator CPUs: 2,3, WORKERS=2, TLS (ECDSA P-256, no resumption)
-- rust: scacelith-server b02f03b; password hash argon2id m=65536 t=3 p=4, PASSWORD_HASH_CONCURRENCY=2 (whole server)
+- rust: scacelith-server bc1e21b; password hash argon2id m=65536 t=3 p=4, PASSWORD_HASH_CONCURRENCY=2 (whole server)
 - node26: node v26.10.0; password hash argon2id m=65536 t=3 p=4, PASSWORD_HASH_CONCURRENCY=1 per worker x 2
 
 ### idle

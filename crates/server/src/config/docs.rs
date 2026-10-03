@@ -226,7 +226,7 @@ pub fn gen_config_docs(root: &Path, check: bool, out: &mut dyn Write, err: &mut 
     if !root.join("crates/server/Cargo.toml").is_file() {
         let _ = writeln!(
             err,
-            "gen-config-docs: run it from the dedicated-server directory (the one that holds crates/ and docs/)."
+            "gen-config-docs: run it from the root of the server repository (the directory that holds crates/ and docs/)."
         );
         return 1;
     }

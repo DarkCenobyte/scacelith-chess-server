@@ -1,0 +1,18 @@
+[Event "Scacelith Test Server casual custom"]
+[Site "chess.example.org"]
+[Date "2026.09.28"]
+[Round "-"]
+[White "Kim"]
+[Black "Lou"]
+[Result "*"]
+[UTCDate "2026.09.28"]
+[UTCTime "23:30:05"]
+[WhiteElo "-"]
+[BlackElo "-"]
+[TimeControl "90+5"]
+[Termination "unterminated"]
+[PlyCount "1"]
+[ScacelithGameId "4100000005072"]
+
+1. e4 {[%clk 0:01:30.0] [%emt 0:00:00.0]} {Aborted: first move not played in
+time} *

@@ -1,0 +1,30 @@
+[Event "Scacelith Test Server rated 1+0"]
+[Site "chess.example.org"]
+[Date "2026.09.28"]
+[Round "-"]
+[White "Erin"]
+[Black "Finn"]
+[Result "0-1"]
+[UTCDate "2026.09.28"]
+[UTCTime "20:30:05"]
+[WhiteElo "1702"]
+[BlackElo "1688"]
+[WhiteRatingDiff "-8"]
+[BlackRatingDiff "+8"]
+[TimeControl "60+0"]
+[Termination "time forfeit"]
+[PlyCount "18"]
+[ScacelithGameId "4100000002033"]
+
+1. d4 {[%clk 0:01:00.0] [%emt 0:00:00.0]} 1... d5 {[%clk 0:01:00.0]
+[%emt 0:00:00.0]} 2. c4 {[%clk 0:00:52.6] [%emt 0:00:07.3]} 2... e6
+{[%clk 0:00:58.7] [%emt 0:00:01.2]} 3. Nc3 {[%clk 0:00:45.7] [%emt 0:00:06.9]}
+3... Nf6 {[%clk 0:00:57.1] [%emt 0:00:01.5]} 4. Bg5 {[%clk 0:00:37.6]
+[%emt 0:00:08.1]} 4... Be7 {[%clk 0:00:56.0] [%emt 0:00:01.1]} 5. e3
+{[%clk 0:00:30.0] [%emt 0:00:07.6]} 5... O-O {[%clk 0:00:54.6]
+[%emt 0:00:01.3]} 6. Nf3 {[%clk 0:00:23.5] [%emt 0:00:06.4]} 6... Nbd7
+{[%clk 0:00:53.7] [%emt 0:00:00.9]} 7. Rc1 {[%clk 0:00:15.7] [%emt 0:00:07.8]}
+7... c6 {[%clk 0:00:52.5] [%emt 0:00:01.2]} 8. Bd3 {[%clk 0:00:08.4]
+[%emt 0:00:07.2]} 8... dxc4 {[%clk 0:00:51.0] [%emt 0:00:01.4]} 9. Bxc4
+{[%clk 0:00:01.3] [%emt 0:00:07.1]} 9... Nd5 {[%clk 0:00:50.0]
+[%emt 0:00:01.0]} {Loss on time} 0-1

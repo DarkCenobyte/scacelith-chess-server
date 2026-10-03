@@ -1,7 +1,9 @@
 # scacelith-live-check
 
 Live interoperability check: the game's C++ online client (`net::OnlineClient`, the opt-in
-`net_live_*` tests of `build/scacelith_tests`) against this server, over real TLS. Each part starts
+`net_live_*` tests of `build/scacelith_tests` in a checkout of the game,
+[DarkCenobyte/scacelith-chess](https://github.com/DarkCenobyte/scacelith-chess)) against this
+server, over real TLS. Each part starts
 a server of its own and drives the C++ test that goes with it; the C++ test talks to the server
 like the game does: native TLS with a pinned certificate, the HTTPS API and the WebSocket on one
 port.
@@ -9,20 +11,25 @@ port.
 ## Build and run
 
 ```sh
-# The server and the harness (debug builds are enough)
-cd dedicated-server && cargo build -p scacelith-server -p scacelith-live-check && cd ..
+# The server and the harness (debug builds are enough), in this repository
+cargo build -p scacelith-server -p scacelith-live-check
+SERVER=$PWD
 
-# The C++ tests (see the main README): Linux, and Windows cross-compiled
+# The C++ tests, in a checkout of the game (see its README): Linux, and Windows cross-compiled
+git clone https://github.com/DarkCenobyte/scacelith-chess ../scacelith-chess && cd ../scacelith-chess
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build scacelith_tests
 cmake -B build-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake -DCMAKE_BUILD_TYPE=Release
 ninja -C build-win scacelith_tests
 
-# From the root of the source tree the tests were built from (they write their temporary
-# credential files there)
-dedicated-server/target/debug/scacelith-live-check                       # build/scacelith_tests
+# From the root of the game's checkout (the tests write their temporary credential files there)
+$SERVER/target/debug/scacelith-live-check                                 # build/scacelith_tests
 LC_ALL=C.UTF-8 WINEDEBUG=-all \
-  dedicated-server/target/debug/scacelith-live-check wine build-win/scacelith_tests.exe   # WinHTTP
+  $SERVER/target/debug/scacelith-live-check wine build-win/scacelith_tests.exe   # WinHTTP
 ```
+
+The live tests need neither Stockfish nor the coach's voice model: a quicker build of the game's
+tests configures with `-DSCACELITH_STOCKFISH=OFF -DSCACELITH_SUPERTONIC_DOWNLOAD=OFF`, as the CI's
+interop job does.
 
 ```text
 scacelith-live-check [--only=game,account,sso] [--server=PATH] [--sso-http] [COMMAND...]

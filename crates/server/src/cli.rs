@@ -30,7 +30,7 @@ Commands:
   gen-secret       Print a new random value for SERVER_SECRET.
   gen-config-docs  Write .env.example and docs/CONFIG.md from the configuration keys
                    (--check: only report the files that are out of date).
-                   Run it in the dedicated-server directory.
+                   Run it at the root of the server repository.
   admin            Administration commands (scacelith-server admin --help).
   version          Print the version.
   help             Show this help.
@@ -235,6 +235,6 @@ mod tests {
         );
         let elsewhere = at(&std::env::temp_dir(), &["gen-config-docs", "--check"]);
         assert_eq!(elsewhere.code, 1);
-        assert!(elsewhere.err.contains("run it from the dedicated-server directory"));
+        assert!(elsewhere.err.contains("run it from the root of the server repository"));
     }
 }

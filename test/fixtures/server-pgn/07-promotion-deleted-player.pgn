@@ -1,0 +1,24 @@
+[Event "Scacelith Test Server rated 5+0"]
+[Site "chess.example.org"]
+[Date "2026.09.29"]
+[Round "-"]
+[White "Mia"]
+[Black "deleted#42"]
+[Result "1-0"]
+[UTCDate "2026.09.29"]
+[UTCTime "00:30:05"]
+[WhiteElo "1530"]
+[BlackElo "1450"]
+[WhiteRatingDiff "+7"]
+[BlackRatingDiff "-7"]
+[TimeControl "300+0"]
+[Termination "normal"]
+[PlyCount "9"]
+[ScacelithGameId "4100000006085"]
+
+1. e4 {[%clk 0:05:00.0] [%emt 0:00:00.0]} 1... d5 {[%clk 0:05:00.0]
+[%emt 0:00:00.0]} 2. exd5 {[%clk 0:04:56.6] [%emt 0:00:03.3]} 2... c6
+{[%clk 0:04:55.7] [%emt 0:00:04.2]} 3. dxc6 {[%clk 0:04:55.4] [%emt 0:00:01.1]}
+3... Nf6 {[%clk 0:04:53.7] [%emt 0:00:02.0]} 4. cxb7 {[%clk 0:04:52.5]
+[%emt 0:00:02.9]} 4... Nbd7 {[%clk 0:04:48.6] [%emt 0:00:05.0]} 5. bxa8=Q
+{[%clk 0:04:46.5] [%emt 0:00:05.9]} {Resignation} 1-0

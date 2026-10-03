@@ -32,7 +32,6 @@ rustup: `rustup toolchain install 1.99.0 --target x86_64-unknown-linux-musl`) an
 compiler for *ring* and the bundled SQLite (Debian and Ubuntu: `apt install musl-tools`):
 
 ```sh
-cd dedicated-server
 CC_x86_64_unknown_linux_musl=musl-gcc \
   cargo build --release --locked -p scacelith-server --target x86_64-unknown-linux-musl
 # -> target/x86_64-unknown-linux-musl/release/scacelith-server

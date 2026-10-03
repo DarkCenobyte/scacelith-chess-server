@@ -24,9 +24,9 @@ use crate::servers::{Cert, Kind, Programs, Server};
 const USAGE: &str = "Usage: rest-diff [options]
 
 Options:
-  --node PATH        node executable (default: $NODE, else /opt/nvm/versions/node/v24.21.0/bin/node)
-  --node-dir PATH    the Node server tree (default: $SCACELITH_NODE_DIR, else
-                     /home/user/rsw/node-ref/dedicated-server)
+  --node PATH        node executable (default: $NODE, else node from the PATH)
+  --node-dir PATH    the Node server tree (default: $SCACELITH_NODE_DIR, else ../node-ref next to
+                     the repository: git worktree add ../node-ref 9b65410)
   --rust PATH        scacelith-server binary (default: target/debug/scacelith-server of the workspace)
   --profile NAME     run only this profile (repeatable)
   --scenario NAME    run only this scenario (repeatable)
@@ -58,12 +58,10 @@ fn workspace_dir() -> PathBuf {
 fn parse_args() -> Result<Options, String> {
     let mut o = Options {
         programs: Programs {
-            node: std::env::var_os("NODE")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/opt/nvm/versions/node/v24.21.0/bin/node")),
+            node: std::env::var_os("NODE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("node")),
             node_dir: std::env::var_os("SCACELITH_NODE_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/home/user/rsw/node-ref/dedicated-server")),
+                .unwrap_or_else(|| workspace_dir().join("../node-ref")),
             rust: workspace_dir().join("target/debug/scacelith-server"),
         },
         profiles: Vec::new(),

@@ -5,18 +5,17 @@ the same settings and the same load generator: how to run the comparison, what e
 measures, the choices made to keep it fair, and the results of 2026-10-03, with two runs of the
 Rust server alone at a realistic pace. [SIZING.md](SIZING.md) derives its unit costs from these
 results. The load study of the Node.js server alone (2026-09) is in the git history of this file
-(for example at commit 08d27f1).
+(for example at commit 49ac14f).
 
 ## Running the comparison
 
 ### Quick start
 
 ```sh
-cd dedicated-server
 # A checkout of the Node.js server (the last commit before the rewrite), with its dependencies:
-git worktree add ../node-ref 7531830 && (cd ../node-ref/dedicated-server && npm ci)
+git worktree add ../node-ref 9b65410 && (cd ../node-ref && npm ci)
 
-bench/run.sh --node26 /path/to/node26/bin/node --node-tree ../node-ref/dedicated-server
+bench/run.sh --node26 /path/to/node26/bin/node --node-tree ../node-ref
 bench/run.sh ... --quick                       # same steps, small sizes: checks the set-up in minutes
 bench/run.sh ... --targets rust,node26,node24 --node24 /path/to/node24/bin/node
 bench/run.sh --targets rust --scenarios games -- --steps 1000,4000,8000 --move-interval-ms 5000 --gesture-hz 1
@@ -205,8 +204,8 @@ for the cached GIF endpoint, which then reports `429`s): do not quote it.
 - Machine: a KVM guest with 4 vCPUs (Intel Xeon Processor @ 2.10 GHz), 15.7 GiB of RAM, Linux
   6.18.44; the server on CPUs 0 and 1, the load generator on CPUs 2 and 3; `WORKERS=2`; TLS 1.3
   with an ECDSA P-256 certificate, no resumption.
-- Rust: `scacelith-server` at commit b02f03b, `PASSWORD_HASH_CONCURRENCY=2` (whole server).
-- Node 26: Node.js v26.10.0 running the Node.js server at commit 7531830,
+- Rust: `scacelith-server` at commit bc1e21b, `PASSWORD_HASH_CONCURRENCY=2` (whole server).
+- Node 26: Node.js v26.10.0 running the Node.js server at commit 9b65410,
   `PASSWORD_HASH_CONCURRENCY=1` per worker × 2.
 - Both: Argon2id with m = 64 MiB, t = 3, p = 4.
 

@@ -515,8 +515,9 @@ fn categories() {
 
 // ---- the shared vectors ----------------------------------------------------------------------
 
-const GENERATOR: &str = "dedicated-server/crates/server/src/matching/elo/tests.rs (cargo test elo_vectors; \
-                         SCACELITH_UPDATE_VECTORS=1 rewrites it); checked by tests/elo_tests.cpp";
+const GENERATOR: &str = "crates/server/src/matching/elo/tests.rs of scacelith-chess-server (cargo test \
+                         elo_vectors; SCACELITH_UPDATE_VECTORS=1 rewrites it); checked by the game's \
+                         tests/elo_tests.cpp";
 
 fn vectors_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test/fixtures/elo-vectors.json")

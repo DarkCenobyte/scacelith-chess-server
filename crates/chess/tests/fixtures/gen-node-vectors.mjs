@@ -5,9 +5,8 @@
 // generation order.
 //
 // The Node.js sources are those of the last commit before the Rust rewrite:
-//   git worktree add /tmp/scacelith-node 46d51dd^
-//   /opt/node22/bin/node dedicated-server/crates/chess/tests/fixtures/gen-node-vectors.mjs \
-//       /tmp/scacelith-node/dedicated-server
+//   git worktree add /tmp/scacelith-node 9b65410
+//   node crates/chess/tests/fixtures/gen-node-vectors.mjs /tmp/scacelith-node
 // writes node-vectors.json next to this script.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -15,7 +14,7 @@ import path from 'node:path';
 
 const serverDir = process.argv[2];
 if (!serverDir) {
-    console.error('usage: gen-node-vectors.mjs <former Node.js dedicated-server directory>');
+    console.error('usage: gen-node-vectors.mjs <former Node.js server directory>');
     process.exit(2);
 }
 const load = (rel) => import(pathToFileURL(path.resolve(serverDir, rel)).href);
@@ -76,7 +75,7 @@ function mutate(items, alphabet, r) {
     return out;
 }
 
-const SERVER_02 = readFileSync(new URL('../../../../../tests/data/server-pgn/02-resignation-castling.pgn', import.meta.url), 'utf8');
+const SERVER_02 = readFileSync(new URL('../../../../test/fixtures/server-pgn/02-resignation-castling.pgn', import.meta.url), 'utf8');
 const FUZZ_ALPHABET = '[]{}()"\\;%$!?+-=*/.:0123456789 \n\rabcdefghKQRBNOxo#\u00bd\u2026\u0000\u00e9';
 
 const UNICODE_BASE = '\ufeff[Event "Unicode \u2654 test \ud83d\ude00"]\r\n[White "J\u00f6rg \ud83d\ude00\ud83d\ude00"]\r\n'
@@ -215,7 +214,7 @@ const writer = [];
 }
 
 const out = {
-    generator: 'dedicated-server/crates/chess/tests/fixtures/gen-node-vectors.mjs (the Node.js server of 46d51dd^)',
+    generator: 'crates/chess/tests/fixtures/gen-node-vectors.mjs (the Node.js server of 9b65410)',
     reader,
     bases,
     san,

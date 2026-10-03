@@ -16,7 +16,7 @@ and the security model. It is the reference for behaviour; module documentation 
 | [SIZING.md](SIZING.md) | capacity and hosting |
 
 The server is written in Rust (toolchain 1.99.0, pinned by `rust-toolchain.toml`). It replaced a
-Node.js server, which stays in the Git history (last in commit 7531830); "the former server" in
+Node.js server, which stays in the Git history (last in commit 9b65410); "the former server" in
 the code and the documents refers to that history only.
 
 ## 1. Process
@@ -86,7 +86,7 @@ saves its security events, and the store closes last (section 5.5).
 
 | Section | Code (`crates/server/src` unless stated) |
 |---|---|
-| 5.1 protocol | `crates/protocol`, `../src/net/protocol_gen.*` (generated) |
+| 5.1 protocol | `crates/protocol`; the game's `src/net/protocol_gen.*` (generated) |
 | 5.2 chess | `crates/chess` |
 | 5.3 rooms and hosts | `game::room`, `game::host`, `game::clock`, `game::timers` |
 | 5.4 matching | `matching` (Elo, matchmaker, challenges, conduct), `realtime::lobby` |
@@ -256,10 +256,12 @@ as 60 s at most.
 
 The protocol is specified, and frozen as version 1 (minor 0), in [PROTOCOL.md](PROTOCOL.md). Its
 single source is `protocol/scacelith-v1.json`; `protogen` generates the Rust codec
-(`crates/protocol/src/gen.rs`), the game's C++ codec (`../src/net/protocol_gen.h` and `.cpp`,
-namespace `net::proto`), the tables of PROTOCOL.md and the golden vectors
-(`test/fixtures/protocol-vectors.json`), read by the Rust tests and by `../tests/net_tests.cpp`.
-RUST-PORT.md section 7 describes the generator and the freeze.
+(`crates/protocol/src/gen.rs`), the tables of PROTOCOL.md and the golden vectors
+(`test/fixtures/protocol-vectors.json`), read by the Rust tests; in a checkout of the game
+([DarkCenobyte/scacelith-chess](https://github.com/DarkCenobyte/scacelith-chess)) it also writes the game's C++ codec
+(`src/net/protocol_gen.h` and `.cpp`, namespace `net::proto`) and the game's copy of the protocol
+(`protocol/`: the schema, the frozen manifests, this specification and the golden vectors, read by
+its `tests/net_tests.cpp`). RUST-PORT.md section 7 describes the generator and the freeze.
 
 * Constants: `PROTOCOL_VERSION` 1, `PROTOCOL_MINOR` 0, subprotocol `scacelith.rt1`, `CAPS` 0,
   `FINGERPRINT` (the first 4 bytes, big-endian, of the SHA-256 of the schema's canonical JSON),

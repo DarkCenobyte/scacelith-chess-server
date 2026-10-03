@@ -1,4 +1,4 @@
-//! PGN writer: the files of tests/data/server-pgn (written by the former server's
+//! PGN writer: the files of test/fixtures/server-pgn (written by the former server's
 //! `GET /api/v1/games/:id/pgn`, `tools/gen-pgn-fixtures.js`) are reproduced byte for byte from
 //! their moves, clocks, ending and tags.
 
@@ -54,7 +54,7 @@ fn numbers(v: &Value) -> Vec<u64> {
 
 #[test]
 fn the_server_pgn_files_are_reproduced_byte_for_byte() {
-    let dir = repo_path("tests/data/server-pgn");
+    let dir = repo_path("test/fixtures/server-pgn");
     let index = read_json(dir.join("index.json"));
     let games = index["games"].as_array().unwrap();
     assert_eq!(games.len(), ENDINGS.len());

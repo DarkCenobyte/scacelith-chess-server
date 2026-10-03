@@ -1,9 +1,9 @@
-// Generates dedicated-server/test/fixtures/chess-crosscheck.json with the GAME's own rules
+// Generates test/fixtures/chess-crosscheck.json with the GAME's own rules
 // (src/chess/position.cpp + game.cpp), so that the server's Rust rules (the scacelith-chess
-// crate, dedicated-server/crates/chess) can be checked against them move for move
+// crate, crates/chess) can be checked against them move for move
 // (crates/chess/tests/crosscheck.rs: cargo test -p scacelith-chess --test crosscheck).
 //
-// Build and run: dedicated-server/tools/gen-chess-crosscheck.sh (from anywhere).
+// Build and run: tools/gen-chess-crosscheck.sh GAME_CHECKOUT (from anywhere).
 // Usage: gen-chess-crosscheck <assets/i18n/en.lang> <output.json>
 //
 // Everything is deterministic (fixed seed, own PRNG): the same sources give the same file.
@@ -511,7 +511,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::string out = "{\n \"generator\": \"dedicated-server/tools/gen-chess-crosscheck.cpp (game rules: src/chess/position.cpp, game.cpp)\",\n";
+    std::string out = "{\n \"generator\": \"tools/gen-chess-crosscheck.cpp of scacelith-chess-server (game rules: src/chess/position.cpp, game.cpp)\",\n";
 
     // FEN parsing / normalisation.
     out += " \"fens\": [\n";

@@ -895,14 +895,14 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "scacelith-chess"
-version = "1.0.0"
+version = "0.9.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "scacelith-client"
-version = "1.0.0"
+version = "0.9.0"
 dependencies = [
  "base64",
  "bytes",
@@ -921,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "scacelith-gif"
-version = "1.0.0"
+version = "0.9.0"
 dependencies = [
  "hex",
  "libm",
@@ -931,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "scacelith-live-check"
-version = "1.0.0"
+version = "0.9.0"
 dependencies = [
  "base64",
  "bytes",
@@ -952,7 +952,7 @@ dependencies = [
 
 [[package]]
 name = "scacelith-protocol"
-version = "1.0.0"
+version = "0.9.0"
 dependencies = [
  "bytes",
  "serde_json",
@@ -961,7 +961,7 @@ dependencies = [
 
 [[package]]
 name = "scacelith-rest-diff"
-version = "1.0.0"
+version = "0.9.0"
 dependencies = [
  "base64",
  "bytes",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "scacelith-server"
-version = "1.0.0"
+version = "0.9.0"
 dependencies = [
  "aes-gcm",
  "arc-swap",

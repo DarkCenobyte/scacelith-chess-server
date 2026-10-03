@@ -523,7 +523,7 @@ fn env_example_and_config_md_are_generated_from_the_current_keys() {
     assert_eq!(
         stale_files(&server_dir()),
         Vec::<&str>::new(),
-        "run `cargo run -p scacelith-server -- gen-config-docs` in dedicated-server/"
+        "run `cargo run -p scacelith-server -- gen-config-docs` at the root of the repository"
     );
     let env = render_env_example();
     let doc = render_config_doc();
@@ -553,10 +553,13 @@ fn env_example_and_config_md_are_generated_from_the_current_keys() {
 
 #[test]
 fn heartbeat_interval_gives_the_game_clients_probe_and_dead_connection_bounds() {
-    let client = server_dir().join("../src/net/online_client.cpp");
-    let Ok(src) = std::fs::read_to_string(&client) else {
-        return; // client sources not present
+    // The game's sources: a checkout of DarkCenobyte/scacelith-chess named by SCACELITH_CLIENT_DIR
+    // (the interop job of the CI sets it).
+    let Some(client) = std::env::var_os("SCACELITH_CLIENT_DIR").filter(|d| !d.is_empty()) else {
+        return;
     };
+    let client = PathBuf::from(client).join("src/net/online_client.cpp");
+    let src = std::fs::read_to_string(&client).unwrap_or_else(|e| panic!("{}: {e}", client.display()));
     let flat: String = src.split_whitespace().collect::<Vec<_>>().join(" ");
     let pattern = "silence = std::max<uint32_t>(";
     let Some(at) = flat.find(pattern) else {

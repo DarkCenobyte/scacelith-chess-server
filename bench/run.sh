@@ -25,9 +25,9 @@ Usage: bench/run.sh [options] [-- extra scacelith-bench options]
   --quick             small sizes and short windows (checks the set-up in a few minutes)
   --node24 PATH       Node.js 24 binary                                   [$NODE24]
   --node26 PATH       Node.js 26 binary                                   [$NODE26]
-  --node-tree DIR     dedicated-server/ of a checkout of the Node.js server, with its
-                      node_modules installed (git worktree add ../node-ref 7531830;
-                      cd ../node-ref/dedicated-server && npm ci)          [$SCACELITH_NODE_TREE]
+  --node-tree DIR     a checkout of the former Node.js server, with its node_modules
+                      installed (git worktree add ../node-ref 9b65410;
+                      cd ../node-ref && npm ci)                           [$SCACELITH_NODE_TREE]
   --server-cpus LIST  CPUs of the server (taskset -c)                     [0,1]
   --load-cpus LIST    CPUs of the load generator                          [2,3]
   --port N            API and WebSocket port (both servers)               [18443]
@@ -133,7 +133,7 @@ for t in "${TARGET_LIST[@]}"; do
     esac
 done
 if [[ $needs_node_tree == 1 ]]; then
-    [[ -f $NODE_TREE/bin/scacelith-server.js ]] || die "--node-tree must be the dedicated-server/ of the Node.js server"
+    [[ -f $NODE_TREE/bin/scacelith-server.js ]] || die "--node-tree must be a checkout of the former Node.js server (bin/scacelith-server.js)"
 fi
 
 # ---- results directory, certificate, shared settings ----------------------------------------------

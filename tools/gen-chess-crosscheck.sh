@@ -1,12 +1,17 @@
 #!/bin/sh
 # Builds tools/gen-chess-crosscheck.cpp against the game's chess rules (src/chess/position.cpp,
-# src/chess/game.cpp) and regenerates test/fixtures/chess-crosscheck.json.
-# Usage: dedicated-server/tools/gen-chess-crosscheck.sh [output.json]   (CXX overrides g++)
+# src/chess/game.cpp of a checkout of DarkCenobyte/scacelith-chess) and regenerates
+# test/fixtures/chess-crosscheck.json.
+# Usage: tools/gen-chess-crosscheck.sh GAME_CHECKOUT [output.json]   (CXX overrides g++)
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 server=$(dirname "$here")
-root=$(dirname "$server")
-out=${1:-"$server/test/fixtures/chess-crosscheck.json"}
+if [ $# -lt 1 ] || [ ! -f "$1/src/chess/position.cpp" ]; then
+    echo "usage: tools/gen-chess-crosscheck.sh GAME_CHECKOUT [output.json]" >&2
+    exit 2
+fi
+root=$(cd "$1" && pwd)
+out=${2:-"$server/test/fixtures/chess-crosscheck.json"}
 cxx=${CXX:-g++}
 build=$(mktemp -d "${TMPDIR:-/tmp}/chess-crosscheck.XXXXXX")
 trap 'rm -rf "$build"' EXIT INT TERM

@@ -1,4 +1,4 @@
-//! PGN reader: the server's own PGN (tests/data/server-pgn and ChessGame::pgn round trips),
+//! PGN reader: the server's own PGN (test/fixtures/server-pgn and ChessGame::pgn round trips),
 //! lichess and chess.com exports, lenient SAN, movetext structure, first game only, and hostile
 //! inputs (only `PgnError`, with its line and column).
 
@@ -70,7 +70,7 @@ fn tag_list(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 
 #[test]
 fn the_pgn_files_the_server_writes() {
-    let dir = repo_path("tests/data/server-pgn");
+    let dir = repo_path("test/fixtures/server-pgn");
     let index = read_json(dir.join("index.json"));
     let files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
@@ -454,7 +454,7 @@ fn hostile_and_broken_inputs_give_a_pgn_error_with_line_and_column() {
 #[test]
 fn fuzz_mutated_pgn_gives_a_game_or_a_pgn_error() {
     let base =
-        std::fs::read_to_string(repo_path("tests/data/server-pgn/02-resignation-castling.pgn")).unwrap();
+        std::fs::read_to_string(repo_path("test/fixtures/server-pgn/02-resignation-castling.pgn")).unwrap();
     let base: Vec<char> = base.chars().collect();
     let alphabet: Vec<char> =
         "[]{}()\"\\;%$!?+-=*/.:0123456789 \n\rabcdefghKQRBNOxo#\u{bd}\u{2026}\u{0}\u{e9}".chars().collect();

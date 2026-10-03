@@ -1,12 +1,14 @@
 # Scacelith dedicated server
 
-The online multiplayer server of Scacelith: accounts, rated matchmaking, challenges and private
+The online multiplayer server of [Scacelith](https://github.com/DarkCenobyte/scacelith-chess), a
+photorealistic chess game played in first person: accounts, rated matchmaking, challenges and private
 games, authoritative games with server clocks (the robots press the clock by themselves unless
 `AUTO_PRESS_CLOCK=false`), the opponent's live gestures (head, hand) relayed without being
 stored, one Elo per official time control, anti-cheat and reports. It is one Rust program,
 `scacelith-server`, a single binary with its database (SQLite) built in. The game (the Windows
-binary) is only a client of it; anyone can run a community server, and players choose the server
-in the game's Options.
+binary, developed in [DarkCenobyte/scacelith-chess](https://github.com/DarkCenobyte/scacelith-chess))
+is only a client of it; anyone can run a community server, and players choose the server in the
+game's Options.
 
 - Official server: `caissa.scacelith.com`, TCP port `443` (HTTPS API and WSS on the same port).
 - Licence: GPL-3.0-or-later, for the source and for the binaries built from it (see
@@ -36,7 +38,8 @@ in the game's Options.
 | [docs/DEPLOY.md](docs/DEPLOY.md) | installing the server as a systemd service: build, account, configuration, TLS, firewall, logs, upgrades, backups and restore |
 | [docs/CONFIG.md](docs/CONFIG.md) | every setting, with its default and range (generated from the code) |
 | [docs/API.md](docs/API.md) | the HTTPS API: every endpoint with its answers, errors, rate limits and curl examples |
-| [docs/PROTOCOL.md](docs/PROTOCOL.md) | the realtime WebSocket protocol, version 1 (frozen) |
+| [OpenAPI reference](https://darkcenobyte.github.io/scacelith-chess-server/) | the same API as an OpenAPI 3.1 description, in the ten languages of the game (`gh-pages` branch) |
+| [docs/PROTOCOL.md](docs/PROTOCOL.md) | the realtime WebSocket protocol, version 1 (frozen); its schema is `protocol/scacelith-v1.json`, the released wire `protocol/frozen/` |
 | [docs/DESIGN.md](docs/DESIGN.md) | how the server works: flows, contracts, game policies, security model |
 | [docs/RUST-PORT.md](docs/RUST-PORT.md) | architecture and code layout: process model, crates and modules, interfaces |
 | [docs/ANTICHEAT.md](docs/ANTICHEAT.md) | anomalies, sanctions, rating refunds, engine analysis, the statistical model, reports, moderation |
@@ -60,7 +63,6 @@ in the game's Options.
 ## Build
 
 ```sh
-cd dedicated-server
 cargo build --release --locked -p scacelith-server
 # -> target/release/scacelith-server, linked to the build machine's glibc
 
@@ -75,7 +77,6 @@ common passwords are built into it. [docs/DEPLOY.md](docs/DEPLOY.md) installs it
 ## Quick start
 
 ```sh
-cd dedicated-server
 cp .env.example .env                              # never commit .env
 target/release/scacelith-server gen-secret        # paste the value as SERVER_SECRET in .env
 # edit .env: SERVER_NAME, SERVER_PUBLIC_HOST, TLS_CERT_FILE, TLS_KEY_FILE, mail settings...
@@ -96,7 +97,7 @@ certificate.
 | `scacelith-server migrate` | applies the database migrations, prints a JSON report and exits |
 | `scacelith-server check-config` | validates the configuration and prints it with the secrets hidden (warnings on stderr) |
 | `scacelith-server gen-secret` | prints a new random value for `SERVER_SECRET` (48 random bytes, base64) |
-| `scacelith-server gen-config-docs [--check]` | writes `.env.example` and `docs/CONFIG.md` from the configuration keys (run it in `dedicated-server/`) |
+| `scacelith-server gen-config-docs [--check]` | writes `.env.example` and `docs/CONFIG.md` from the configuration keys (run it at the root of the repository) |
 | `scacelith-server admin ...` | moderation and maintenance commands (`admin --help`) |
 | `scacelith-server version`, `help` | the version, the list of commands |
 
@@ -384,7 +385,7 @@ licences:
   Dimitar Toshkov Zhekov, modified (a zero without a slash) and renamed as the licence asks of
   modified versions; SIL Open Font License 1.1 (`assets/fonts/scacelith-gif/OFL.txt`). They were
   made from the Terminus Font 4.49.1 sources by `tools/gen-gif-font.js` of the former Node.js
-  server (in Git history, commit 7531830).
+  server (in Git history, commit 9b65410).
 
 ## Password hashing
 
@@ -670,7 +671,6 @@ capacity ([docs/SIZING.md](docs/SIZING.md#gestures)).
 ## Development
 
 ```sh
-cd dedicated-server
 cargo test --workspace                                   # unit, integration and end-to-end tests
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
@@ -683,7 +683,15 @@ The workspace has five crates: `scacelith-server` (the server), `scacelith-proto
 protocol codec and its generator, `protogen`), `scacelith-chess` (rules and notation),
 `scacelith-gif` (the GIF renderer) and `scacelith-client` (a Rust client used by the tests and the
 load generator). The protocol schema, `protocol/scacelith-v1.json`, is the single source of the
-Rust and C++ codecs: change it, run `protogen`, and commit the generated files with it. The
+Rust and C++ codecs: change it, run `protogen`, and commit the generated files with it.
+
+The game and the server share a contract, kept on both sides: the realtime protocol (the schema,
+the frozen manifests, [docs/PROTOCOL.md](docs/PROTOCOL.md) and the golden vectors, of which the
+game keeps a copy in its `protocol/` folder), the rating vectors (`test/fixtures/elo-vectors.json`,
+the game's `tests/data/elo-vectors.json`) and the server's PGN files (`test/fixtures/server-pgn/`,
+the game's `tests/data/server-pgn/`). `protogen -- --client ../scacelith-chess` writes the game's
+C++ codec and its copy of the protocol in a checkout of the game, and
+`tools/interop/check-game.sh ../scacelith-chess` checks the whole contract against one. The
 configuration keys live in `crates/server/src/config/keys.rs`: after a change, run
 `gen-config-docs` (without `--check`). The real-engine analysis tests run when Stockfish is
 installed where distributions put it, or named by `SCACELITH_TEST_ENGINE`, and return at once

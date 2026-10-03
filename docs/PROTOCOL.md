@@ -5,11 +5,14 @@ dedicated server speak over a WebSocket: enough to write a compatible client or 
 alone. Version 1 is **frozen**: what this document describes never changes; later minor versions
 only add to it, under the rules of [Versions and evolution](#versions-and-evolution).
 
-The wire format has a single source, `protocol/scacelith-v1.json`. The `protogen` tool
-(`cargo run -p scacelith-protocol --features gen --bin protogen` in `dedicated-server/`) checks it
-and generates the server's Rust codec, the game's C++ codec, the golden vectors and the tables of
-this document (between `protogen` markers; the prose is written by hand). The HTTPS account API is
-described in `docs/API.md`.
+The wire format has a single source, `protocol/scacelith-v1.json` of the server repository
+([DarkCenobyte/scacelith-chess-server](https://github.com/DarkCenobyte/scacelith-chess-server)).
+Its `protogen` tool (`cargo run -p scacelith-protocol --features gen --bin protogen`) checks it and
+generates the server's Rust codec, the game's C++ codec, the golden vectors and the tables of this
+document (between `protogen` markers; the prose is written by hand). The game
+([DarkCenobyte/scacelith-chess](https://github.com/DarkCenobyte/scacelith-chess)) keeps a copy of the schema, of the frozen manifests, of
+this document and of the golden vectors in its `protocol/` folder, written by the same tool. The
+HTTPS account API is described in `docs/API.md` of the server repository.
 
 <!-- protogen:begin summary -->
 

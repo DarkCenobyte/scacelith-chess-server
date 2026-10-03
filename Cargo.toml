@@ -1,9 +1,10 @@
-# Scacelith dedicated server (Rust). GPL-3.0-or-later, see ../LICENSE.
+# Scacelith dedicated server (Rust). GPL-3.0-or-later, see LICENSE.
 #
 # Crates:
 #   scacelith-protocol  realtime protocol v1: generated codec, constants, and the `protogen` tool
-#                       that writes the Rust codec, the game's C++ codec, docs/PROTOCOL.md tables
-#                       and the golden vectors from protocol/scacelith-v1.json
+#                       that writes the Rust codec, docs/PROTOCOL.md tables and the golden vectors
+#                       from protocol/scacelith-v1.json, and the game's C++ codec and its copy of
+#                       the protocol in a checkout of the game (--client)
 #   scacelith-chess     chess rules, SAN/UCI/FEN, PGN reader and writer (mirror of the game's rules)
 #   scacelith-gif       animated GIF of a game (renderer and encoder, byte-identical to the
 #                       former Node.js server)
@@ -29,11 +30,11 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.99"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/DarkCenobyte/scacelith-chess"
+repository = "https://github.com/DarkCenobyte/scacelith-chess-server"
 publish = false
 
 [workspace.dependencies]

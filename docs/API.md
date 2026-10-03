@@ -9,7 +9,9 @@ same server, opened with a session token of this API: see [PROTOCOL.md](PROTOCOL
 contracts are in
 [DESIGN.md](DESIGN.md) section 5.9, the security model in section 8, every setting named here in
 [CONFIG.md](CONFIG.md). The game's side of these calls is described in
-[docs/ONLINE_CLIENT.md](../../docs/ONLINE_CLIENT.md).
+[docs/ONLINE_CLIENT.md](https://github.com/DarkCenobyte/scacelith-chess/blob/master/docs/ONLINE_CLIENT.md) of the game's repository.
+The same API is published as an OpenAPI 3.1 description, in the ten languages of the game, at
+<https://darkcenobyte.github.io/scacelith-chess-server/> (the `gh-pages` branch).
 
 This reference describes what the code does (`crates/server/src/http/` for the pipeline, the
 router and the routes, `crates/server/src/auth/` for accounts and sessions). Defaults are those of

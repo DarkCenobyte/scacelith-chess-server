@@ -7,7 +7,7 @@ reference for *behaviour* (what the server does); this file says *how the code i
 Installing and running the server is described in [DEPLOY.md](DEPLOY.md).
 
 The Rust server replaced the former Node.js server (kept in Git history, last in commit
-7531830). The Node server was never used in production, so the rewrite did not keep its internal
+9b65410). The Node server was never used in production, so the rewrite did not keep its internal
 formats; what stayed identical is everything a game client sees through the HTTPS API
 (section 1).
 
@@ -76,7 +76,7 @@ no shard bus: what the Node primary owned is in-process state.
 ## 3. Workspace
 
 ```
-dedicated-server/
+scacelith-chess-server/
   Cargo.toml              workspace (shared dependency versions, lints, profiles)
   rust-toolchain.toml     Rust 1.99.0 (+ x86_64-unknown-linux-musl for the static release build)
   protocol/scacelith-v1.json   realtime protocol schema (source of all generated codecs)
@@ -87,7 +87,8 @@ dedicated-server/
   crates/server           scacelith-server: the server library and binary, migrations
   crates/client           scacelith-client: Rust client SDK (integration tests, `scacelith-bench`)
   assets/                 GIF fonts and piece set (embedded at build time)
-  test/fixtures           shared vectors (Elo, protocol, chess cross-check), also read by the C++ tests
+  test/fixtures           shared vectors (Elo, protocol, chess cross-check, the server's PGN files);
+                          the game keeps copies of the Elo and protocol vectors and of the PGN files
   tools/                  generator of the chess cross-check vectors (C++)
   bench/                  benchmark harness (docs/BENCHMARK.md)
   deploy/systemd          example unit and its companion files (docs/DEPLOY.md)
@@ -224,12 +225,23 @@ gen --bin protogen`) validates it and writes the derived files:
 | File | Content |
 |---|---|
 | `crates/protocol/src/gen.rs`, `crates/protocol/src/gen_json.rs` | the Rust codec and its JSON bridge |
-| `../src/net/protocol_gen.h`, `../src/net/protocol_gen.cpp` | the game's C++ codec |
 | `docs/PROTOCOL.md` | the tables between the `protogen` markers (the prose is written by hand) |
 | `test/fixtures/protocol-vectors.json` | the golden vectors, read by the Rust and C++ tests |
 
-`protogen --check` writes nothing and fails when a derived file is stale; a test of the
-`scacelith-protocol` crate runs the same check. Every released minor is frozen as
+With `--client DIR` (after `--` when run through cargo), `DIR` being a checkout of the game
+([DarkCenobyte/scacelith-chess](https://github.com/DarkCenobyte/scacelith-chess)), it also writes the game's files:
+
+| File in the game | Content |
+|---|---|
+| `src/net/protocol_gen.h`, `src/net/protocol_gen.cpp` | the game's C++ codec |
+| `protocol/scacelith-v1.json`, `protocol/frozen/*.json` | copies of the schema and of the frozen manifests |
+| `protocol/PROTOCOL.md` | a copy of [PROTOCOL.md](PROTOCOL.md) |
+| `protocol/protocol-vectors.json` | a copy of the golden vectors, read by the game's C++ tests |
+
+`protogen --check` writes nothing and fails when a derived file is stale (with `--client`, also
+one of the game's); a test of the `scacelith-protocol` crate runs the same check, on the game too
+when `SCACELITH_CLIENT_DIR` names a checkout of it. The CI's interop job runs it against the
+game's `master`. Every released minor is frozen as
 `protocol/frozen/v1.<minor>.json` (`protogen --freeze`), and `protogen` refuses a schema that
 breaks the append-only rules of PROTOCOL.md "Versions and evolution" against those manifests.
 
@@ -387,4 +399,5 @@ struct of the services it needs (config, store, auth, report desk, GIF service, 
   it and explains what it expects.
 * Exit codes: 0 success, 1 failure, 2 usage.
 * Release build: static `x86_64-unknown-linux-musl` binary ([DEPLOY.md](DEPLOY.md), section 1),
-  GPL-3.0-or-later, its source in this repository.
+  GPL-3.0-or-later, its source in this repository; the release workflow
+  (`.github/workflows/release.yml`) builds it and attests its provenance.

@@ -1,6 +1,6 @@
 # Sizing and hosting
 
-This page tells an operator how many players a machine can hold, what limits it first, and how to set up a small VPS for the server. The unit costs were measured on 2026-10-03 with `bench/run.sh` ([BENCHMARK.md](BENCHMARK.md#results-of-2026-10-03)): the server at commit b02f03b on a 4-vCPU Intel Xeon @ 2.10 GHz KVM guest (the "test vCPU" below), pinned to 2 vCPUs with `WORKERS=2`, the load generator pinned to the other 2, TLS 1.3 over loopback. Figures for another host are scaled by a speed factor `s`: how much work one of its vCores does compared with the test vCPU. Values marked "(inferred)" are reasoned from the measurements, not measured directly. Every setting is described in [CONFIG.md](CONFIG.md).
+This page tells an operator how many players a machine can hold, what limits it first, and how to set up a small VPS for the server. The unit costs were measured on 2026-10-03 with `bench/run.sh` ([BENCHMARK.md](BENCHMARK.md#results-of-2026-10-03)): the server at commit bc1e21b on a 4-vCPU Intel Xeon @ 2.10 GHz KVM guest (the "test vCPU" below), pinned to 2 vCPUs with `WORKERS=2`, the load generator pinned to the other 2, TLS 1.3 over loopback. Figures for another host are scaled by a speed factor `s`: how much work one of its vCores does compared with the test vCPU. Values marked "(inferred)" are reasoned from the measurements, not measured directly. Every setting is described in [CONFIG.md](CONFIG.md).
 
 Terms used throughout:
 

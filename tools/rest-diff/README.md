@@ -19,8 +19,8 @@ cargo build -p scacelith-server -p scacelith-rest-diff      # debug builds are e
 
 | Option | Meaning |
 |---|---|
-| `--node PATH` | node executable (default `$NODE`, else `/opt/nvm/versions/node/v24.21.0/bin/node`) |
-| `--node-dir PATH` | the Node server tree, read only (default `$SCACELITH_NODE_DIR`, else `/home/user/rsw/node-ref/dedicated-server`) |
+| `--node PATH` | node executable (default `$NODE`, else `node` from the `PATH`) |
+| `--node-dir PATH` | the Node server tree, read only (default `$SCACELITH_NODE_DIR`, else `../node-ref` next to the repository) |
 | `--rust PATH` | the `scacelith-server` binary (default `target/debug/scacelith-server` of the workspace) |
 | `--profile NAME`, `--scenario NAME` | run only these (repeatable) |
 | `--accepted FILE` | the accepted deviations (default `tools/rest-diff/accepted.txt`) |

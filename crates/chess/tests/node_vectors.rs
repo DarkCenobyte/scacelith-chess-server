@@ -130,7 +130,10 @@ fn the_reader_gives_the_former_servers_outcome_on_mutated_input() {
         } else {
             let base = str_of(&set["base"]);
             let base: Vec<char> = if base.starts_with("server-pgn/") {
-                std::fs::read_to_string(repo_path(&format!("tests/data/{base}"))).unwrap().chars().collect()
+                std::fs::read_to_string(repo_path(&format!("test/fixtures/{base}")))
+                    .unwrap()
+                    .chars()
+                    .collect()
             } else {
                 base.chars().collect()
             };
@@ -160,7 +163,7 @@ fn the_unmodified_bases_read_the_same() {
         let limits = limits_of(&set["limits"]);
         let got = match &set["base"] {
             Value::String(s) if s.starts_with("server-pgn/") => describe(read_pgn(
-                &std::fs::read_to_string(repo_path(&format!("tests/data/{s}"))).unwrap(),
+                &std::fs::read_to_string(repo_path(&format!("test/fixtures/{s}"))).unwrap(),
                 &limits,
             )),
             Value::String(s) => describe(read_pgn(s, &limits)),

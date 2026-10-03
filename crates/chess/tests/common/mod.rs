@@ -7,11 +7,6 @@ use scacelith_chess::{ChessGame, Position, encode_move, parse_square};
 
 /// A path relative to the repository root.
 pub fn repo_path(rel: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..").join(rel)
-}
-
-/// A path relative to `dedicated-server/`.
-pub fn server_path(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel)
 }
 

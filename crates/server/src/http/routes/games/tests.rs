@@ -665,7 +665,7 @@ fn fixture_games() -> Vec<(&'static str, &'static str, Game)> {
         .collect()
 }
 
-/// The files of tests/data/server-pgn (written by the former server's `tools/gen-pgn-fixtures.js`):
+/// The files of test/fixtures/server-pgn (written by the former server's `tools/gen-pgn-fixtures.js`):
 /// each PGN, then `index.json`.
 fn render_fixtures() -> Vec<(String, String)> {
     let config = fixture_config();
@@ -691,7 +691,7 @@ fn render_fixtures() -> Vec<(String, String)> {
     out.push((
         "index.json".into(),
         format!(
-            "{{\n  \"generator\": \"the former Node.js server (tools/gen-pgn-fixtures.js, GET /api/v1/games/:id/pgn); reproduced byte for byte by dedicated-server/crates/chess/tests/pgn_write.rs\",\n  \"games\": [\n{}\n  ]\n}}\n",
+            "{{\n  \"generator\": \"the former Node.js server (tools/gen-pgn-fixtures.js, GET /api/v1/games/:id/pgn); reproduced byte for byte by crates/chess/tests/pgn_write.rs of scacelith-chess-server\",\n  \"games\": [\n{}\n  ]\n}}\n",
             index.join(",\n")
         ),
     ));
@@ -808,11 +808,7 @@ fn the_server_pgn_tag_order_san_clocks_wrapping_endings_deleted_players() {
 
 #[test]
 fn the_fixtures_of_the_game_pgn_reader_are_reproduced_byte_for_byte() {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../tests/data/server-pgn");
-    if !dir.is_dir() {
-        eprintln!("skipped: not in a full checkout of the repository");
-        return;
-    }
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test/fixtures/server-pgn");
     let files = render_fixtures();
     assert_eq!(files.iter().filter(|(n, _)| n.ends_with(".pgn")).count(), 8);
     for (name, text) in &files {

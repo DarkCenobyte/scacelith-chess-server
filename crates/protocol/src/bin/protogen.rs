@@ -5,22 +5,26 @@
 //! protogen --check         write nothing; exit 1 when a derived file is stale or a rule is broken
 //! protogen --freeze        write protocol/frozen/v{proto}.{minor}.json (a released minor)
 //! protogen --freeze --force  replace a frozen manifest (only before the minor is released)
-//! protogen --root DIR      use DIR as the dedicated-server directory
+//! protogen --root DIR      use DIR as the root of this repository
+//! protogen --client DIR    also write (or with --check, check) the game's C++ codec and its copy
+//!                          of the protocol in DIR, a checkout of DarkCenobyte/scacelith-chess
 //! ```
 //!
-//! Run it from anywhere with `cargo run -p scacelith-protocol --features gen --bin protogen`.
+//! Run it from anywhere with `cargo run -p scacelith-protocol --features gen --bin protogen`
+//! (arguments after `--`).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use scacelith_protocol::codegen::{self, Mode};
 
-const USAGE: &str = "usage: protogen [--check | --freeze [--force]] [--root DIR]";
+const USAGE: &str = "usage: protogen [--check | --freeze [--force]] [--root DIR] [--client DIR]";
 
 fn main() -> ExitCode {
     let mut mode = Mode::Write;
     let mut force = false;
     let mut root: Option<PathBuf> = None;
+    let mut client: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -29,6 +33,10 @@ fn main() -> ExitCode {
             "--force" => force = true,
             "--root" => match args.next() {
                 Some(dir) => root = Some(PathBuf::from(dir)),
+                None => return usage(),
+            },
+            "--client" => match args.next() {
+                Some(dir) => client = Some(PathBuf::from(dir)),
                 None => return usage(),
             },
             "-h" | "--help" => {
@@ -44,7 +52,7 @@ fn main() -> ExitCode {
         _ => {}
     }
     let root = root.unwrap_or_else(codegen::default_root);
-    match codegen::run(&root, mode) {
+    match codegen::run(&root, client.as_deref(), mode) {
         Ok(report) => {
             for line in report {
                 println!("protogen: {line}");

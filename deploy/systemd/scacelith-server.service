@@ -11,7 +11,7 @@
 
 [Unit]
 Description=Scacelith dedicated server
-Documentation=https://github.com/DarkCenobyte/scacelith-chess/blob/master/dedicated-server/docs/DEPLOY.md
+Documentation=https://github.com/DarkCenobyte/scacelith-chess-server/blob/master/docs/DEPLOY.md
 # BIND_ADDRESS may name an address that only exists once the network is configured, and the
 # server resolves its SMTP relay by name.
 Wants=network-online.target

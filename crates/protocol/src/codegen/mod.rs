@@ -7,10 +7,12 @@
 //! | `crates/protocol/src/gen_json.rs` | the JSON form of the messages (tests) |
 //! | `docs/PROTOCOL.md` | the generated tables (between `protogen` markers) |
 //! | `test/fixtures/protocol-vectors.json` | the golden vectors |
-//! | `../src/net/protocol_gen.h`, `.cpp` | the game client's C++ codec |
 //!
-//! Paths are relative to `dedicated-server/`. The library compiles this module for its tests
-//! (the freshness check) and with the `gen` feature (the binary).
+//! Paths are relative to the root of this repository. Given a checkout of the game
+//! (DarkCenobyte/scacelith-chess, [`CLIENT_FILES`]), it also writes the game's C++ codec and the
+//! game's copy of the protocol: the schema, the frozen manifests, the specification and the golden
+//! vectors, identical to this repository's. The library compiles this module for its tests (the
+//! freshness check) and with the `gen` feature (the binary).
 
 mod canon;
 mod cpp;
@@ -33,10 +35,20 @@ pub const SCHEMA_PATH: &str = "protocol/scacelith-v1.json";
 pub const FROZEN_DIR: &str = "protocol/frozen";
 const DOC_PATH: &str = "docs/PROTOCOL.md";
 
-/// The `dedicated-server/` directory of the source tree this crate was built from.
+/// The root of the source tree this crate was built from.
 pub fn default_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
+
+/// The files protogen writes in a checkout of the game, relative to its root: the C++ codec, then
+/// the game's copy of the protocol (`protocol/`), whose frozen manifests follow the schema.
+pub const CLIENT_FILES: [&str; 5] = [
+    "src/net/protocol_gen.h",
+    "src/net/protocol_gen.cpp",
+    "protocol/scacelith-v1.json",
+    "protocol/PROTOCOL.md",
+    "protocol/protocol-vectors.json",
+];
 
 /// What a run does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,22 +89,48 @@ fn frozen(root: &Path) -> Result<Vec<(String, Schema)>, String> {
     Ok(out)
 }
 
-/// Every derived file: `(path relative to the root, content)`.
-pub fn outputs(root: &Path, schema: &Schema) -> Result<Vec<(&'static str, String)>, String> {
+/// Every derived file of this repository: `(path relative to the root, content)`.
+pub fn outputs(root: &Path, schema: &Schema) -> Result<Vec<(String, String)>, String> {
     let doc_path = root.join(DOC_PATH);
     let doc = fs::read_to_string(&doc_path).map_err(|e| format!("{}: {e}", doc_path.display()))?;
     Ok(vec![
-        ("crates/protocol/src/gen.rs", rust::codec(schema)),
-        ("crates/protocol/src/gen_json.rs", rust::json_bridge(schema)),
-        (DOC_PATH, docs::splice(&doc, schema)?),
-        ("test/fixtures/protocol-vectors.json", vectors::build(schema)),
-        ("../src/net/protocol_gen.h", cpp::header(schema)),
-        ("../src/net/protocol_gen.cpp", cpp::source(schema)),
+        ("crates/protocol/src/gen.rs".into(), rust::codec(schema)),
+        ("crates/protocol/src/gen_json.rs".into(), rust::json_bridge(schema)),
+        (DOC_PATH.into(), docs::splice(&doc, schema)?),
+        ("test/fixtures/protocol-vectors.json".into(), vectors::build(schema)),
     ])
 }
 
-/// Runs protogen on a root; `Ok` carries the report lines, `Err` the reason of the failure.
-pub fn run(root: &Path, mode: Mode) -> Result<Vec<String>, String> {
+/// Every file protogen writes in a checkout of the game ([`CLIENT_FILES`] and one manifest per
+/// frozen minor): `(path relative to the game's root, content)`. The copies are taken from this
+/// repository's files as they will be once its own derived files are written.
+pub fn client_outputs(root: &Path, schema: &Schema) -> Result<Vec<(String, String)>, String> {
+    let read = |rel: &str| {
+        let path = root.join(rel);
+        fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    let derived = outputs(root, schema)?;
+    let derived = |rel: &str| derived.iter().find(|(r, _)| r == rel).map(|(_, c)| c.clone());
+    let [header, source, schema_copy, doc_copy, vectors_copy] = CLIENT_FILES;
+    let mut files = vec![
+        (header.to_string(), cpp::header(schema)),
+        (source.to_string(), cpp::source(schema)),
+        (schema_copy.to_string(), read(SCHEMA_PATH)?),
+        (doc_copy.to_string(), derived(DOC_PATH).expect("the specification is a derived file")),
+        (
+            vectors_copy.to_string(),
+            derived("test/fixtures/protocol-vectors.json").expect("the vectors are a derived file"),
+        ),
+    ];
+    for (name, _) in frozen(root)? {
+        files.push((format!("protocol/frozen/{name}"), read(&format!("{FROZEN_DIR}/{name}"))?));
+    }
+    Ok(files)
+}
+
+/// Runs protogen on a root, and on a checkout of the game when `client` names one; `Ok` carries
+/// the report lines, `Err` the reason of the failure.
+pub fn run(root: &Path, client: Option<&Path>, mode: Mode) -> Result<Vec<String>, String> {
     let schema = load(root)?;
     let frozen = frozen(root)?;
     // A forced freeze replaces the manifest of the schema's own minor (not released yet), which
@@ -129,25 +167,40 @@ pub fn run(root: &Path, mode: Mode) -> Result<Vec<String>, String> {
             schema.protocol, schema.minor
         ));
     }
-    let files = outputs(root, &schema)?;
+    // The game's files are computed first: they copy this repository's files as regenerated.
+    let mut files: Vec<(PathBuf, String, String)> = Vec::new();
+    if let Some(client) = client {
+        if !client.join("src/net").is_dir() {
+            return Err(format!("{}: not a checkout of the game (no src/net)", client.display()));
+        }
+        for (rel, content) in client_outputs(root, &schema)? {
+            files.push((client.join(&rel), format!("game: {rel}"), content));
+        }
+    }
+    for (rel, content) in outputs(root, &schema)? {
+        files.push((root.join(&rel), rel, content));
+    }
     let total = files.len();
     let mut stale = Vec::new();
-    for (rel, content) in files {
-        let path = root.join(rel);
+    for (path, label, content) in files {
         if fs::read_to_string(&path).is_ok_and(|current| current == content) {
             continue;
         }
         match mode {
-            Mode::Check => stale.push(rel),
+            Mode::Check => stale.push(label),
             _ => {
+                if let Some(dir) = path.parent() {
+                    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+                }
                 fs::write(&path, content).map_err(|e| format!("{}: {e}", path.display()))?;
-                report.push(format!("wrote {rel}"));
+                report.push(format!("wrote {label}"));
             }
         }
     }
     if !stale.is_empty() {
         return Err(format!(
-            "stale generated files (run `cargo run -p scacelith-protocol --features gen --bin protogen`):\n  {}",
+            "stale generated files (run `cargo run -p scacelith-protocol --features gen --bin protogen{}`):\n  {}",
+            if client.is_some() { " -- --client DIR" } else { "" },
             stale.join("\n  ")
         ));
     }
@@ -161,10 +214,13 @@ pub fn run(root: &Path, mode: Mode) -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
 
-    /// The committed derived files match the schema, and the schema keeps the frozen wire.
+    /// The committed derived files match the schema, and the schema keeps the frozen wire. With
+    /// `SCACELITH_CLIENT_DIR` naming a checkout of the game, its C++ codec and its copy of the
+    /// protocol are checked too.
     #[test]
     fn generated_files_are_fresh() {
-        if let Err(e) = run(&default_root(), Mode::Check) {
+        let client = std::env::var_os("SCACELITH_CLIENT_DIR").filter(|d| !d.is_empty()).map(PathBuf::from);
+        if let Err(e) = run(&default_root(), client.as_deref(), Mode::Check) {
             panic!("{e}");
         }
     }
@@ -192,14 +248,17 @@ mod tests {
         let welcome = messages.iter_mut().find(|m| m["name"] == "Welcome").unwrap();
         welcome["fields"].as_array_mut().unwrap().pop();
         let root = scratch_root("force", &serde_json::to_string_pretty(&older).unwrap());
-        let refused = run(&root, Mode::Freeze { force: false }).unwrap_err();
+        let refused = run(&root, None, Mode::Freeze { force: false }).unwrap_err();
         assert!(refused.contains("the wire of the frozen v1.0 changed"), "{refused}");
-        assert!(run(&root, Mode::Check).unwrap_err().contains("append-only rule"));
-        assert_eq!(run(&root, Mode::Freeze { force: true }).unwrap(), ["wrote protocol/frozen/v1.0.json"]);
+        assert!(run(&root, None, Mode::Check).unwrap_err().contains("append-only rule"));
+        assert_eq!(
+            run(&root, None, Mode::Freeze { force: true }).unwrap(),
+            ["wrote protocol/frozen/v1.0.json"]
+        );
         let written = fs::read_to_string(root.join(FROZEN_DIR).join("v1.0.json")).unwrap();
         assert_eq!(written, manifest::render(&schema));
         assert_eq!(
-            run(&root, Mode::Freeze { force: false }).unwrap(),
+            run(&root, None, Mode::Freeze { force: false }).unwrap(),
             ["protocol/frozen/v1.0.json up to date"]
         );
         let _ = fs::remove_dir_all(&root);
