@@ -32,7 +32,7 @@ use crate::anticheat::worker::AnalysisPool;
 use crate::clock::{Clock, ManualClock};
 use crate::ids::{GameId, UserId};
 use crate::store::status::WHITE_WINS;
-use crate::store::{IntegrityLevel as StoredLevel, JobStatus, StoreError};
+use crate::store::{IntegrityLevel as StoredLevel, JobStatus, Priority, StoreError};
 
 /// The engine of the tests: `SCACELITH_TEST_ENGINE`, else Stockfish where distributions install it.
 fn engine_path() -> Option<PathBuf> {
@@ -448,8 +448,13 @@ async fn real_engine_the_pool_analyses_a_queued_game_end_to_end() {
     g.spent_ms = Some(played.spent_ms.clone());
     g.moves = played.moves.clone();
     let id = g.id;
+    // The game's end queues it as the ordinary random sample (the test store samples every game),
+    // the only jobs whose games join the population. Not `Analysis::enqueue`: that is the
+    // moderator request, queued at manual priority, whose game is scored but kept out of the
+    // population. (The Node test queued through its fake store, at ordinary priority by default.)
     store.finish_batch(vec![g]).await.expect("game stored");
-    store.analysis().enqueue(id, NOW).await.expect("job queued");
+    let queued = store.analysis().job(id).await.unwrap().expect("the game's end queued its analysis");
+    assert_eq!(queued.priority, Priority::Ordinary);
 
     let mut pool = AnalysisPool::start(&config, store.clone(), clock.clone());
     let end = tokio::time::Instant::now() + Duration::from_secs(50);
