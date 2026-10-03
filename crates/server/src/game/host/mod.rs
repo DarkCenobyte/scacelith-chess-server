@@ -6,10 +6,13 @@
 //! thread, before the shard serves anything) and spawns the actor. The actor processes its inbox
 //! one message at a time (a connection's frames and its detach stay ordered: they travel through
 //! the same inbox), and a 10 ms beat (`MissedTickBehavior::Delay`) runs the timers, detects
-//! stalls, starts commits and compacts the journal. A beat that comes more than
+//! stalls, starts commits and compacts the journal. A beat first handles the messages already in
+//! the inbox (read before it: each request processes the deadlines due at its own arrival, so a
+//! move read before its flag deadline is never overtaken by that deadline's timer), never those
+//! that arrive meanwhile, so a busy inbox cannot hold the timers back. A beat that comes more than
 //! `GAME_STALL_MIN_MS` late means the actor did not run meanwhile: the actor then yields, handles
-//! every message already in its inbox (they count as arrived when the stall began, up to
-//! `GAME_STALL_CREDIT_MAX_MS` earlier), and only then fires the deadlines due by that beat, so
+//! the messages that reached its inbox meanwhile (they count as arrived when the stall began, up
+//! to `GAME_STALL_CREDIT_MAX_MS` earlier), and only then fires the deadlines due by that beat, so
 //! that a flag that fell during the stall overtakes no request that waited through it.
 //!
 //! [`HostHandle`] is the cheap, cloneable way in: every method posts to the inbox and returns
@@ -491,26 +494,44 @@ async fn step(shard: &mut Shard, msg: Msg) -> ControlFlow<()> {
     ControlFlow::Break(())
 }
 
+/// Handles the messages already in the inbox, not those that arrive meanwhile (a busy inbox
+/// cannot hold a beat back); `Break` once the host shut down.
+async fn drain(shard: &mut Shard, inbox: &mut mpsc::UnboundedReceiver<Msg>) -> ControlFlow<()> {
+    for _ in 0..inbox.len() {
+        let Ok(msg) = inbox.try_recv() else { break };
+        step(shard, msg).await?;
+    }
+    ControlFlow::Continue(())
+}
+
+/// One beat: the requests already in the inbox first (they were read before it, and each one
+/// processes the deadlines due at its own arrival: a move read before its flag deadline is not
+/// overtaken by the timer of that deadline), then the timers, commits and compaction. After a
+/// detected stall, what reached the inbox meanwhile goes first too, then the timers due by that
+/// beat. `Break` once the host shut down.
+async fn beat(shard: &mut Shard, inbox: &mut mpsc::UnboundedReceiver<Msg>) -> ControlFlow<()> {
+    drain(shard, inbox).await?;
+    let t = shard.now();
+    if shielded(shard, "game host beat failed", |s| s.heartbeat(t)) == Some(true) {
+        tokio::task::yield_now().await;
+        drain(shard, inbox).await?;
+        shielded(shard, "game host beat failed", Shard::after_stall);
+    }
+    ControlFlow::Continue(())
+}
+
 /// The actor of one host (see the module documentation).
 async fn run(mut shard: Shard, mut inbox: mpsc::UnboundedReceiver<Msg>) {
-    let mut beat = tokio::time::interval(Duration::from_millis(SLOT_MS as u64));
-    beat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut ticks = tokio::time::interval(Duration::from_millis(SLOT_MS as u64));
+    ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         // The beat and the task results come at a bounded rate: first, so that a busy inbox
         // cannot starve the timers.
         tokio::select! {
             biased;
-            _ = beat.tick() => {
-                let t = shard.now();
-                if shielded(&mut shard, "game host beat failed", |s| s.heartbeat(t)) == Some(true) {
-                    // A stall: what waited in the inbox goes first, then the timers due by now.
-                    tokio::task::yield_now().await;
-                    while let Ok(msg) = inbox.try_recv() {
-                        if step(&mut shard, msg).await.is_break() {
-                            return;
-                        }
-                    }
-                    shielded(&mut shard, "game host beat failed", Shard::after_stall);
+            _ = ticks.tick() => {
+                if beat(&mut shard, &mut inbox).await.is_break() {
+                    return;
                 }
             }
             Some(result) = shard.tasks.join_next_with_id(), if !shard.tasks.is_empty() => {

@@ -204,8 +204,10 @@ const SECURITY_DELETE_SQL: &str =
 
 /// The purge's statements, in order.
 fn steps(t: i64, policy: RetentionPolicy) -> [Step; 10] {
-    let ip_before = t - policy.ip_days * DAY;
-    let security_before = t - policy.security_days * DAY;
+    // The day counts have no maximum: a period beyond the millisecond range keeps everything (its
+    // cutoff saturates in the past), it must not wrap into a cutoff in the future.
+    let ip_before = t.saturating_sub(policy.ip_days.saturating_mul(DAY));
+    let security_before = t.saturating_sub(policy.security_days.saturating_mul(DAY));
     [
         Step {
             count: Count::IpErased,
