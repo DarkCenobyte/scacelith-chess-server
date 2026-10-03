@@ -653,3 +653,16 @@ async fn api_client_flows() {
     assert!(requests[5].starts_with("POST /api/v1/auth/logout HTTP/1.1\r\n"));
     assert!(requests[5].contains(&format!("Authorization: Bearer {TOKEN}\r\n")));
 }
+
+#[tokio::test]
+async fn connections_open_from_the_chosen_local_address() {
+    let (listener, endpoint) = listen().await;
+    let from = "127.0.0.2".parse().unwrap();
+    let endpoint = endpoint.with_local_addr(from);
+    assert_eq!(endpoint.local_addr(), Some(from));
+    let (connected, accepted) = tokio::join!(endpoint.connect(), listener.accept());
+    let (stream, _) = connected.unwrap();
+    let (_, peer) = accepted.unwrap();
+    assert_eq!(peer.ip(), from);
+    assert_eq!(stream.tcp().local_addr().unwrap().ip(), from);
+}
