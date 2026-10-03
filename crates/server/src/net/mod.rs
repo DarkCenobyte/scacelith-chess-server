@@ -4,6 +4,7 @@
 
 pub mod abuse;
 pub mod guard;
+pub mod health;
 pub mod ip;
 pub mod limits;
 mod linked;
