@@ -176,6 +176,59 @@ pub async fn exec(store: &Store, sql: &'static str) {
         .expect("SQL runs");
 }
 
+/// The players of the refund scenarios, in this order: a cheater, his victims and a newcomer.
+pub const REFUND_PLAYERS: [&str; 7] = ["Cheat", "Vic", "Val", "Vera", "Vold", "Omar", "Nova"];
+
+/// Seeds the rated 3+2 records of [`REFUND_PLAYERS`] (40 games, K 20; Nova is a newcomer).
+pub async fn seed_refund_ratings(store: &Store, ids: &[UserId]) {
+    for (i, rating) in [1500, 1500, 1700, 1500, 1500, 1500].into_iter().enumerate() {
+        seed_rating(store, ids[i], "3+2", rating, 40).await;
+    }
+}
+
+/// The games of the refund scenario that a refund concerns.
+pub struct RefundScenario {
+    /// Lost by Vold 70 days ago, outside the 60-day window.
+    pub old: GameRecord,
+    /// Lost by Vic 20 days ago: refunded.
+    pub vic_loss: GameRecord,
+    /// A draw that cost the higher-rated Val points: refunded.
+    pub val_draw: GameRecord,
+    /// The game that gave Nova a first rating below the working rating: not refunded.
+    pub nova_first: GameRecord,
+}
+
+/// The games of the refund scenario, committed in one batch.
+pub async fn play_refund_scenario(store: &Store, ids: &[UserId]) -> RefundScenario {
+    use crate::store::status::{BLACK_WINS, DRAW, WHITE_WINS};
+    let [cheat, vic, val, vera, vold, omar, nova] = ids[..] else { panic!("the seven players") };
+    let old = game(cheat, vold, WHITE_WINS, NOW - 70 * DAY);
+    let vic_loss = game(cheat, vic, WHITE_WINS, NOW - 20 * DAY);
+    let mut casual = game(vic, cheat, BLACK_WINS, NOW - 19 * DAY); // no rating change
+    casual.rated = false;
+    let val_draw = game(val, cheat, DRAW, NOW - 18 * DAY);
+    let vera_win = game(vera, cheat, WHITE_WINS, NOW - 17 * DAY); // a win: untouched
+    let vic_omar = game(omar, vic, WHITE_WINS, NOW - 16 * DAY); // a loss to someone else
+    let mut batch = vec![old.clone(), vic_loss.clone(), casual, val_draw.clone(), vera_win, vic_omar];
+    // Nova's unrated phase, then a game lost to the cheater that gives Nova a first rating below
+    // the working rating (no K-formula loss: not refunded).
+    for i in 0..4 {
+        batch.push(game(omar, nova, if i == 0 { DRAW } else { WHITE_WINS }, NOW - (15 - i) * DAY));
+    }
+    let nova_first = game(cheat, nova, WHITE_WINS, NOW - 10 * DAY);
+    batch.push(nova_first.clone());
+    batch.push(game(vic, omar, WHITE_WINS, NOW - 5 * DAY)); // Vic's rating moved on since
+    store.finish_batch(batch).await.expect("scenario stored");
+    RefundScenario { old, vic_loss, val_draw, nova_first }
+}
+
+/// Rating points a side lost in a stored game.
+pub async fn rating_lost(store: &Store, g: &GameRecord, white: bool) -> i64 {
+    let c = store.games().by_id(g.id).await.unwrap().unwrap().summary.rating_changes.unwrap();
+    let side = if white { c.white } else { c.black };
+    side.before - side.after
+}
+
 /// Holds the writer thread until the returned guard is dropped.
 pub fn hold_writer(store: &Store) -> impl Drop {
     let (tx, rx) = std::sync::mpsc::channel::<()>();

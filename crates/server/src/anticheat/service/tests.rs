@@ -10,7 +10,7 @@ use crate::anticheat::players::{apply_player_score, score_player_games};
 use crate::anticheat::scoring::Population;
 use crate::anticheat::testing::*;
 use crate::clock::ManualClock;
-use crate::store::status::{BLACK_WINS, DRAW, WHITE_WINS};
+use crate::store::status::WHITE_WINS;
 use crate::store::tests::support::LogCapture;
 use crate::store::{
     GameRecord, IntegrityLevel, IntegrityUpdate, NewSanction, Priority, RefundScope, SanctionKind, Source,
@@ -563,49 +563,19 @@ async fn the_sink_spawns_the_follow_up() {
 
 // ---- refunds of an automatic ban (anticheat.refunds) -------------------------------------------
 
-/// The players of the refund scenarios: rated records (40 games, K 20), and a newcomer (Nova).
+/// The players of the refund scenarios ([`REFUND_PLAYERS`]) with their rated records.
 async fn refund_world(overrides: &[(&str, &str)]) -> World {
-    let w = world(overrides, &["Cheat", "Vic", "Val", "Vera", "Vold", "Omar", "Nova"]).await;
-    for (i, rating) in [1500, 1500, 1700, 1500, 1500, 1500].into_iter().enumerate() {
-        seed_rating(&w.store, w.ids[i], "3+2", rating, 40).await;
-    }
+    let w = world(overrides, &REFUND_PLAYERS).await;
+    seed_refund_ratings(&w.store, &w.ids).await;
     w
 }
 
-struct Scenario {
-    old: GameRecord,
-    vic_loss: GameRecord,
-    val_draw: GameRecord,
-    nova_first: GameRecord,
-}
-
-/// The games of the scenario, committed in one batch.
-async fn play(w: &World) -> Scenario {
-    let [cheat, vic, val, vera, vold, omar, nova] = w.ids[..] else { unreachable!() };
-    let old = game(cheat, vold, WHITE_WINS, NOW - 70 * DAY); // outside the 60-day window
-    let vic_loss = game(cheat, vic, WHITE_WINS, NOW - 20 * DAY); // refunded
-    let mut casual = game(vic, cheat, BLACK_WINS, NOW - 19 * DAY); // no rating change
-    casual.rated = false;
-    let val_draw = game(val, cheat, DRAW, NOW - 18 * DAY); // the higher-rated Val loses points
-    let vera_win = game(vera, cheat, WHITE_WINS, NOW - 17 * DAY); // a win: untouched
-    let vic_omar = game(omar, vic, WHITE_WINS, NOW - 16 * DAY); // a loss to someone else
-    let mut batch = vec![old.clone(), vic_loss.clone(), casual, val_draw.clone(), vera_win, vic_omar];
-    // Nova's unrated phase, then a game lost to the cheater that gives Nova a first rating below
-    // the working rating (no K-formula loss: not refunded).
-    for i in 0..4 {
-        batch.push(game(omar, nova, if i == 0 { DRAW } else { WHITE_WINS }, NOW - (15 - i) * DAY));
-    }
-    let nova_first = game(cheat, nova, WHITE_WINS, NOW - 10 * DAY);
-    batch.push(nova_first.clone());
-    batch.push(game(vic, omar, WHITE_WINS, NOW - 5 * DAY)); // Vic's rating moved on since
-    w.store.finish_batch(batch).await.unwrap();
-    Scenario { old, vic_loss, val_draw, nova_first }
+async fn play(w: &World) -> RefundScenario {
+    play_refund_scenario(&w.store, &w.ids).await
 }
 
 async fn lost(w: &World, g: &GameRecord, white: bool) -> i64 {
-    let c = w.store.games().by_id(g.id).await.unwrap().unwrap().summary.rating_changes.unwrap();
-    let side = if white { c.white } else { c.black };
-    side.before - side.after
+    rating_lost(&w.store, g, white).await
 }
 
 async fn rating(w: &World, user: UserId) -> crate::store::RatingRecord {
