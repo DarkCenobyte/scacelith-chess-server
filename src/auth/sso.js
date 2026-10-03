@@ -208,21 +208,29 @@ export function createSso(svc) {
         requireEnabled();
         if (!SSO_TOKEN_RE.test(linkTicket)) throw expired();
         const h = sha256Hex(linkTicket);
-        // One of the ticket's tries, taken before the check: parallel requests cannot pass LINK_TRIES.
-        const row = store.tokens.reserveTry('sso_link', h, LINK_TRIES, now());
-        if (!row) throw expired();
+        const row = store.tokens.get('sso_link', h);
+        if (!isLive(row, now())) throw expired();
         const d = dataOf(row);
         const user = store.users.byId(d.userId);
         if (!user || user.status !== 'active') {
             store.tokens.consume('sso_link', h, now());
             throw expired();
         }
+        // One of the ticket's tries, taken after the login's wait (429) and proof of work (428) and
+        // before the hash: parallel requests cannot pass LINK_TRIES.
+        let tries = 0;
+        const reserve = () => {
+            const r = store.tokens.reserveTry('sso_link', h, LINK_TRIES, now());
+            if (!r) throw expired();
+            tries = dataOf(r).tries;
+        };
         let current;
         try {
-            current = await login.verifyPassword({ key: 'l:' + user.username.toLowerCase(), user, password, ip, pow, method: 'google_link', reserve: true });
+            current = await login.verifyPassword({ key: 'l:' + user.username.toLowerCase(), user, password, ip, pow, method: 'google_link', reserve });
         } catch (err) {
-            // The last try's wrong password ends the ticket; a wait (429) or a busy hash queue keep it.
-            if (err instanceof AuthError && err.code === 'invalid_credentials' && d.tries >= LINK_TRIES) {
+            // The last try's wrong password ends the ticket; a wait, a proof of work or a refusal of
+            // the hash queue keep it (the queue's after taking the try).
+            if (err instanceof AuthError && err.code === 'invalid_credentials' && tries >= LINK_TRIES) {
                 store.tokens.consume('sso_link', h, now());
                 throw expired();
             }

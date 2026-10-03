@@ -7,7 +7,8 @@
 //    per-IP limit of the auth endpoints (router, shared through the primary) and the login
 //    proof of work bound what several shards add up to. The password step of a Google link
 //    (auth/sso.js) is the same check (verifyPassword) under the same counter, the account's
-//    username, counted before its hash so that parallel requests are all counted.
+//    username, counted before its hash so that parallel requests are all counted (a refusal of
+//    the hash queue then still counts).
 //  * Whole server: each failed login is counted locally and through the primary
 //    (`ratelimit.take` on a server-wide key with limit POW_LOGIN_TRIGGER_PER_MIN / min). Above the
 //    trigger, every login needs a proof of work (POW_LOGIN_BITS) for the next 5 minutes.
@@ -124,12 +125,13 @@ export function createLogin(svc) {
      * counter `key`: the wait of a counter at its threshold (429), the login proof of work while
      * it is on (428), then the check. Unknown account, wrong password and account without a usable
      * password (Google-only, or a bench account's '!' hash) do the same work and fail alike
-     * (401 invalid_credentials, counted). `reserve`: the failure is counted before the hash and
-     * cleared on success, so that parallel checks are all counted (the Google link step). `method`
-     * other than 'password' is noted in the failure events.
+     * (401 invalid_credentials, counted). `reserve`: the caller's own reservation (the Google link
+     * step takes one of its ticket's tries; it throws to refuse), run after the wait and the proof
+     * of work; the failure is then counted before the hash and cleared on success, so that parallel
+     * checks are all counted. `method` other than 'password' is noted in the failure events.
      * @returns {Promise<object>} the account as stored now (after a rehash), the password matching it
      */
-    async function verifyPassword({ key, user, password, ip, pow, method = 'password', reserve = false }) {
+    async function verifyPassword({ key, user, password, ip, pow, method = 'password', reserve = null }) {
         const wait = failures.retryAfter(key);
         if (wait > 0) {
             loginThrottled.inc();
@@ -137,6 +139,7 @@ export function createLogin(svc) {
             throw tooManyAttempts(wait);
         }
         if (powActive()) await svc.requirePow('login', config.powLoginBits, ip, pow);
+        if (reserve) reserve();
         const reserved = reserve ? failures.fail(key) : null;
         const budget = svc.hashBudget(ip);
         const stored = user && typeof user.passwordHash === 'string' && !user.passwordHash.startsWith('!') ? user.passwordHash : null;

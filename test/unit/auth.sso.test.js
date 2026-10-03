@@ -9,6 +9,7 @@ import crypto from 'node:crypto';
 import net from 'node:net';
 import { createOidcClient, ssoOriginTag } from '../../src/auth/oidc.js';
 import { createMailer } from '../../src/mail/index.js';
+import { dataOf } from '../../src/auth/tokens.js';
 import { sha256Hex } from '../../src/security/keys.js';
 import { createPasswordHasher } from '../../src/security/password.js';
 import { solvePow } from '../../src/security/pow.js';
@@ -498,8 +499,9 @@ for (const verification of ['1', '0']) {
         } finally { hasher.checkPassword = check; }
         const statuses = all.map((a) => a.status);
         assert.ok(checks <= 5, `${checks} password checks`);
-        assert.ok(statuses.every((st) => st === 401 || st === 410), String(statuses));
-        assert.ok(statuses.filter((st) => st === 410).length >= 5, String(statuses));
+        // Past the ticket's tries 410, or first 429 once the failures counted reach the account's wait.
+        assert.ok(statuses.every((st) => st === 401 || st === 410 || st === 429), String(statuses));
+        assert.ok(statuses.filter((st) => st === 401).length <= 4, String(statuses));
         assert.equal((await x.link(r.json.linkTicket, PW)).status, 410);
         assert.equal(googleLink(s), null);
     });
@@ -645,19 +647,35 @@ for (const verification of ['1', '0']) {
         assert.equal(googleLink(s), null);
     });
 
-    test(`${mode}: during a login proof-of-work wave the link step asks for it too (428)`, async (t) => {
+    test(`${mode}: the account's wait (429) and a login proof-of-work wave (428) apply to the link step and take none of its tries`, async (t) => {
         const x = await setup({ ...env, POW_LOGIN_BITS: '4' });
         t.after(x.close);
         const { s } = x;
-        await s.createUser({ username: 'Magnus', email: 'magnus@gmail.com', password: PW });
-        const { r } = await x.signIn(claims());
+        const u = await s.createUser({ username: 'Magnus', email: 'magnus@gmail.com', password: PW });
+        for (let i = 1; i <= 5; i++) await x.post('/api/v1/auth/login', { login: 'magnus', password: `wrong password ${i}` });
+        let { r } = await x.signIn(claims());
+        for (let i = 0; i < 6; i++) {
+            const l = await x.link(r.json.linkTicket, PW);
+            assert.deepEqual([l.status, l.json.error], [429, 'too_many_attempts']);
+        }
+        assert.equal(dataOf(s.store.tokens.get('sso_link', sha256Hex(r.json.linkTicket))).tries, 0);
+        s.now.advance(2001);
+        assert.equal((await x.link(r.json.linkTicket, PW)).status, 200);
+        assert.deepEqual(googleLink(s), { userId: u.id });
+
+        const v = await s.createUser({ username: 'Hikaru', email: 'hikaru@gmail.com', password: PW });
+        ({ r } = await x.signIn(claims({ sub: '2002', email: 'hikaru@gmail.com' })));
         s.auth._svc.login.activatePow('test');
-        let l = await x.link(r.json.linkTicket, PW);
-        assert.deepEqual([l.status, l.json.error, l.json.pow.bits], [428, 'pow_required', 4]);
-        const pow = { challenge: l.json.pow.challenge, nonce: solvePow(l.json.pow.challenge, 4) };
-        l = await x.link(r.json.linkTicket, PW, { pow });
+        // As the game does: each password first without a proof, then again with the proof solved.
+        const withPow = async (password) => {
+            const l = await x.link(r.json.linkTicket, password);
+            assert.deepEqual([l.status, l.json.error, l.json.pow.bits], [428, 'pow_required', 4]);
+            return x.link(r.json.linkTicket, password, { pow: { challenge: l.json.pow.challenge, nonce: solvePow(l.json.pow.challenge, 4) } });
+        };
+        for (let i = 1; i <= 4; i++) assert.equal((await withPow(`wrong password ${i}`)).status, 401, `try ${i}`);
+        const l = await withPow(PW);
         assert.equal(l.status, 200, l.text);
-        assert.equal(googleLink(s).userId, s.store.users.byUsername('Magnus').id);
+        assert.deepEqual(googleLink(s, '2002'), { userId: v.id });
     });
 }
 

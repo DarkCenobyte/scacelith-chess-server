@@ -48,8 +48,8 @@ configuration; a community server may change them.
   `TLS_MODE=off` (plain HTTP) is for local development only.
 - A few HTML pages live outside `/api`, for the links of e-mails
   ([section 14](#14-html-pages-outside-api)). Google sign-in has no page on the server: Google
-  sends the browser back to the game itself, on 127.0.0.1. The health endpoints answer both inside and outside
-  `/api/v1` ([section 15](#15-health-endpoints)).
+  sends the browser back to the game itself, on 127.0.0.1. The health endpoints answer both
+  inside and outside `/api/v1` ([section 15](#15-health-endpoints)).
 - A trailing slash is ignored (`/api/v1/info/` is `/api/v1/info`), and path parameters are
   URL-decoded.
 - The Node SDK in `src/client/` (`ApiClient`) wraps these calls for tests, bots and tools. It also
@@ -324,7 +324,8 @@ Other throttles, answered by the endpoints themselves:
 `POST /auth/register` always needs a proof of work when `POW_REGISTER_BITS` is above 0 (18 by
 default; `GET /info` gives it as `pow.register`). `POST /auth/login` and
 `POST /auth/sso/google/link` (one kind of challenge for both) need one only for 5 minutes after
-the server sees a wave of failed sign-ins (`POW_LOGIN_TRIGGER_PER_MIN`, then `POW_LOGIN_BITS`). A client cannot know that in advance, and finds out from the answer.
+the server sees a wave of failed sign-ins (`POW_LOGIN_TRIGGER_PER_MIN`, then `POW_LOGIN_BITS`). A
+client cannot know that in advance, and finds out from the answer.
 
 1. The request without (or with a refused) proof answers 428:
 
@@ -836,10 +837,13 @@ Answers (200):
 
 Errors:
 
-- 401 `invalid_credentials`: a wrong password; the ticket stays, for 5 tries in all;
-- 410 `sso_expired`: an unknown, used or expired ticket, the 5th wrong password, or the account
-  changed (status, address, password, two-step verification turned on) since `finish`; start
-  again from the game;
+- 401 `invalid_credentials`: a wrong password; the ticket stays, for 5 tries in all. A try is
+  taken just before the password is checked: a 429 `too_many_attempts` or a 428 `pow_required`
+  answer takes none, a refusal of the hash queue (503 `server_busy`, 429 `rate_limited`) has
+  taken one and counts as a failure of the account;
+- 410 `sso_expired`: an unknown, used or expired ticket, the 5th wrong password, an account
+  whose status or address changed since `finish`, or one whose status, address, password or
+  two-step verification changed while the link was being stored; start again from the game;
 - 429 `too_many_attempts` (`retryAfter`): the account's failure delay, the same counter as
   `POST /auth/login`;
 - 403 `banned` (with `until`), only after a correct password;

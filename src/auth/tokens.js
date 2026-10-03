@@ -10,7 +10,7 @@
 //   sso_link       10 min     SSO finish answer (sso_...)  { userId, sub, email, tries }
 //
 // sso_attempt is consumed by finish, sso_ticket by complete. An sso_link row (user_id = the
-// account) waits for the account's password: `tries` is reserved before each check (at most 5,
+// account) waits for the account's password: `tries` is reserved before each hash (at most 5,
 // store tokens.reserveTry), and the row is consumed by the right password, the 5th failure or a
 // failed re-check. mfa_login's `link` ({ sub, email, pwh }) is the Google link a correct code
 // stores. The Google `state` itself is never stored, only its SHA-256 in the attempt (auth/sso.js).
