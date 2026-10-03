@@ -171,8 +171,9 @@ pub(crate) async fn linger(reader: &mut WsReader) {
     while let WsEvent::Message(_) = reader.next().await {}
 }
 
-/// The claim of presence of an admitted connection: released when dropped (the lobby removes it
-/// only while it is still the account's live connection).
+/// A connection's claim of presence, taken before the claim is posted: released when dropped (the
+/// lobby removes it only while it is still the account's live connection, so releasing a claim it
+/// refused or replaced changes nothing).
 #[derive(Debug)]
 pub(crate) struct ClaimGuard {
     lobby: Lobby,

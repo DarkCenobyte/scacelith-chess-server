@@ -185,6 +185,13 @@ impl Lobby {
         (Lobby { tx: tx.clone() }, LobbyInbox { tx, rx })
     }
 
+    /// A lobby handle whose inbox the test reads itself (no actor).
+    #[cfg(test)]
+    pub(crate) fn manual() -> (Lobby, mpsc::UnboundedReceiver<LobbyMsg>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Lobby { tx }, rx)
+    }
+
     pub(crate) fn post(&self, msg: LobbyMsg) {
         let _ = self.tx.send(msg);
     }

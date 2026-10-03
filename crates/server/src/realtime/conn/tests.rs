@@ -26,7 +26,7 @@ use crate::net::ws::{AdmissionPermit, CLOSE_TIMEOUT, WsConnection, WsSettings};
 use crate::realtime::drain::{Drain, DrainPhase};
 use crate::realtime::endpoint::Endpoint;
 use crate::realtime::link::ConnLink;
-use crate::realtime::lobby::{Lobby, LobbyDeps, LobbyMsg, Timer};
+use crate::realtime::lobby::{ClaimOutcome, Lobby, LobbyDeps, LobbyMsg, Timer};
 use crate::realtime::testing::{FakeHosts, FakeTokens, HostCall, RecordingAnomalies, TokioClock, name};
 use crate::store::tests::support::TempDir;
 use crate::store::{NewSanction, NewUser, SanctionKind, Source, Store, StoreOptions};
@@ -536,6 +536,36 @@ async fn closes_a_hello_whose_session_is_revoked_during_the_claim_or_whose_check
     rig.tokens.set_failing(false);
     let (_b, w) = rig.login(BOB).await;
     assert_eq!(w.user_id, 2, "the revoked claim was released");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hello_that_stops_waiting_after_its_claim_was_answered_releases_it() {
+    // The lobby answers the claim while the connection task still waits for the answer, and the
+    // task stops before it reads it (its client went away meanwhile): the claim is released.
+    let rig = Rig::new(&[]).await;
+    let (lobby, mut inbox) = Lobby::manual();
+    let ctx = ConnContext { lobby, ..clone_ctx(&rig.ctx) };
+    let hello = hello(1, ALICE);
+    let mut auth = Box::pin(super::hello::authenticate(&ctx, 77, &hello));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let reply = loop {
+        std::future::poll_fn(|cx| {
+            assert!(auth.as_mut().poll(cx).is_pending(), "the claim is not answered yet");
+            std::task::Poll::Ready(())
+        })
+        .await;
+        match inbox.try_recv() {
+            Ok(LobbyMsg::Claim { reply, .. }) => break reply,
+            Ok(_) => panic!("a claim expected first"),
+            Err(_) => {
+                assert!(std::time::Instant::now() < deadline, "no claim posted");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+    };
+    assert!(reply.send(ClaimOutcome::Admitted { active_game: 0 }).is_ok(), "the task still waits");
+    drop(auth);
+    assert!(matches!(inbox.try_recv(), Ok(LobbyMsg::Release { user: 1, conn: 77 })), "the claim is released");
 }
 
 #[tokio::test(start_paused = true)]
