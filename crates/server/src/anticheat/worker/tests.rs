@@ -22,6 +22,8 @@ use crate::store::status::WHITE_WINS;
 use crate::store::tests::support::{LogCapture, TempDir};
 use crate::store::{IntegrityLevel as StoredLevel, IntegrityUpdate, JobStatus};
 
+mod real_engine;
+
 /// Serialises the tests that run pools: the engine gauges are process-wide. Taken before any log
 /// capture.
 static POOLS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
