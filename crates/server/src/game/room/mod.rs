@@ -46,6 +46,8 @@ pub mod journal;
 #[cfg(test)]
 mod journal_tests;
 #[cfg(test)]
+mod real_rules_tests;
+#[cfg(test)]
 mod recovery_tests;
 #[cfg(test)]
 mod tests;

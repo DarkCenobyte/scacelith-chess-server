@@ -6,6 +6,7 @@ pub mod clock;
 pub mod room;
 pub mod rules;
 pub mod testing;
+pub mod timers;
 
 pub use self::room::{GameRoom, Outcome, RoomSettings, RoomSpec, Timing};
 pub use self::rules::{Rules, Side};
