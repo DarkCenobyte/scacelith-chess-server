@@ -23,9 +23,7 @@ pub fn migrate(config: Config) -> i32 {
 /// `scacelith-server admin ...`: the administration commands (`args` follow `admin`). Loads the
 /// configuration itself, after the help, as the former `scacelith-admin` did.
 pub fn admin(args: &[String]) -> i32 {
-    let _ = args;
-    eprintln!("scacelith-server: admin is not available yet in this build.");
-    1
+    crate::anticheat::admin::main(args)
 }
 
 fn not_available(command: &str, config: &Config) -> i32 {
