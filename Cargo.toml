@@ -80,8 +80,11 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 2
 
-# The chess rules run in the debug tests of every crate that uses them.
+# The chess rules and the GIF renderer run in the debug tests of every crate that uses them.
 [profile.dev.package.scacelith-chess]
+opt-level = 2
+
+[profile.dev.package.scacelith-gif]
 opt-level = 2
 
 [profile.release]

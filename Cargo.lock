@@ -924,9 +924,8 @@ version = "1.0.0"
 dependencies = [
  "hex",
  "libm",
- "scacelith-chess",
+ "serde_json",
  "sha2",
- "unicode-normalization",
 ]
 
 [[package]]

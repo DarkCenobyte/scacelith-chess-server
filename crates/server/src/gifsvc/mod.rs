@@ -33,6 +33,7 @@ mod cache;
 mod job;
 mod pool;
 mod request;
+mod rules;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -46,6 +47,7 @@ use tokio::sync::watch;
 
 pub use cache::GifCache;
 pub use job::{GameRenderer, GifJob, JobPlayer};
+pub use rules::ChessRules;
 pub use pool::{GIF_THREAD_NICE, GifError, IDLE_STOP, PoolSettings, PoolStats, RenderPool, Renderer};
 pub use request::{
     GIF_BODY_FIELDS, GIF_BODY_LIMIT_BYTES, GIF_BUSY_RETRY_SEC, GIF_CONTENT_TYPE, GIF_DISABLED_MESSAGE,
