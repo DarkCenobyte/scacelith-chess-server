@@ -179,7 +179,7 @@ impl GifEncoder {
             out.extend_from_slice(&v.to_le_bytes());
         }
         out.push(0); // no local colour table, not interlaced
-        lzw(out, f.pixels, self.min_code_size);
+        lzw(out, f.pixels, self.min_code_size, f.transparent);
         self.frames += 1;
         Ok(())
     }
@@ -198,11 +198,17 @@ const MAX_CODE: u16 = 4096;
 struct LzwTable {
     entries: Box<[u32]>,
     generation: u32,
+    /// `chain[len]`: the code of the string of `len` run symbols (see [`lzw`]).
+    chain: Box<[u16]>,
 }
 
 impl LzwTable {
     fn new() -> LzwTable {
-        LzwTable { entries: vec![0; usize::from(MAX_CODE) << 8].into_boxed_slice(), generation: 0 }
+        LzwTable {
+            entries: vec![0; usize::from(MAX_CODE) << 8].into_boxed_slice(),
+            generation: 0,
+            chain: vec![0; usize::from(MAX_CODE) + 1].into_boxed_slice(),
+        }
     }
 
     /// Empties the table; returns the tag of the new generation.
@@ -267,11 +273,22 @@ impl CodeWriter<'_> {
     }
 }
 
+/// How many bytes at the start of `s` equal `k` (16 at a time, which the compiler vectorizes).
+fn run_length(s: &[u8], k: u8) -> usize {
+    let full = s.as_chunks::<16>().0.iter().take_while(|c| **c == [k; 16]).count() * 16;
+    full + s[full..].iter().take_while(|&&p| p == k).count()
+}
+
 /// LZW-compresses palette indices (each below 2 ** min_code_size) into GIF image data: the
-/// minimum code size, then the data sub-blocks. Plain greedy LZW, with the code-size rules of
-/// GIF decoders: the width grows before a code that needs it is assigned, and the end code takes
-/// the width a decoder expects after it added the entry of the last data code.
-fn lzw(out: &mut Vec<u8>, pixels: &[u8], min_code_size: u8) {
+/// minimum code size, then the data sub-blocks. Greedy LZW (longest match), with the code-size
+/// rules of GIF decoders: the width grows before a code that needs it is assigned, and the end
+/// code takes the width a decoder expects after it added the entry of the last data code.
+///
+/// Fast path for long runs of `run_symbol` (the transparent index of a frame that changed
+/// little): the codes of the strings of 1, 2, ... L run symbols form a chain in the dictionary,
+/// kept in `chain`, so inside a run the longest match is found by counting symbols instead of one
+/// (cache-missing) table lookup per pixel. The output is that of plain greedy LZW.
+fn lzw(out: &mut Vec<u8>, pixels: &[u8], min_code_size: u8, run_symbol: Option<u8>) {
     TABLE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let table = slot.get_or_insert_with(LzwTable::new);
@@ -281,16 +298,35 @@ fn lzw(out: &mut Vec<u8>, pixels: &[u8], min_code_size: u8) {
         let mut code_size = first_size;
         let mut next = eoi + 1;
         let mut generation = table.clear();
+        // chain[1..=chain_len] are the codes of 1..=chain_len run symbols.
+        let mut chain_len = 1;
+        if let Some(r) = run_symbol {
+            table.chain[1] = u16::from(r);
+        }
         out.push(min_code_size);
         let mut w = CodeWriter { out, block: [0; 255], block_len: 0, bits: 0, nbits: 0 };
         w.emit(clear_code, code_size);
-        if let Some((&first, rest)) = pixels.split_first() {
+        if let Some(&first) = pixels.first() {
             let mut prefix = u16::from(first);
-            for &k in rest {
+            // The prefix is chain[run] when it is a string of run symbols, else run is 0.
+            let mut run = usize::from(Some(first) == run_symbol);
+            let mut i = 1;
+            while let Some(&k) = pixels.get(i) {
+                if run > 0 && run < chain_len && Some(k) == run_symbol {
+                    // Inside a run: jump along the chain.
+                    let lim = pixels.len().min(i + (chain_len - run));
+                    let len = 1 + run_length(&pixels[i + 1..lim], k);
+                    run += len;
+                    prefix = table.chain[run];
+                    i += len;
+                    continue;
+                }
+                i += 1;
                 let key = usize::from(prefix) << 8 | usize::from(k);
                 let v = table.entries[key];
                 if v & !0xFFF == generation {
                     prefix = (v & 0xFFF) as u16;
+                    run = 0;
                     continue;
                 }
                 w.emit(prefix, code_size);
@@ -299,14 +335,20 @@ fn lzw(out: &mut Vec<u8>, pixels: &[u8], min_code_size: u8) {
                     next = eoi + 1;
                     code_size = first_size;
                     generation = table.clear();
+                    chain_len = 1;
                 } else {
                     if u32::from(next) >= 1 << code_size {
                         code_size += 1;
+                    }
+                    if run > 0 && run == chain_len && Some(k) == run_symbol {
+                        chain_len += 1;
+                        table.chain[chain_len] = next;
                     }
                     table.entries[key] = generation | u32::from(next);
                     next += 1;
                 }
                 prefix = u16::from(k);
+                run = usize::from(Some(k) == run_symbol);
             }
             w.emit(prefix, code_size);
             if u32::from(next) == 1 << code_size && code_size < 12 {
@@ -714,6 +756,14 @@ pub(crate) mod tests {
             let gif = decode(&encode_one(w as u16, h as u16, 256, &pixels, Some(0))).unwrap();
             assert_eq!(gif.frames[0].pixels, pixels, "trial {trial}: {w}x{h}");
             assert_eq!(gif.frames[0].transparent, Some(0));
+            // The run fast path changes nothing in the output (whichever symbol it follows).
+            let lzw_of = |run: Option<u8>| {
+                let mut out = Vec::new();
+                lzw(&mut out, &pixels, 8, run);
+                out
+            };
+            let plain = lzw_of(None);
+            assert!(lzw_of(Some(0)) == plain && lzw_of(Some(7)) == plain, "trial {trial}");
         }
         // A long run costs about sqrt(2n) codes.
         let mut enc = GifEncoder::new(600, 600, &palette(256), Some(0), 0).unwrap();

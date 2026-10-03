@@ -675,17 +675,17 @@ pub(crate) fn render_frames(
             let (mut bx0, mut by0, mut bx1, mut by1) = (width, height, 0usize, 0usize);
             let mut changed = false;
             for r in &p.dirty {
+                let (x0, x1) = (r.x as usize, (r.x + r.w) as usize);
                 for y in r.y as usize..(r.y + r.h) as usize {
-                    let o = y * width;
-                    for x in r.x as usize..(r.x + r.w) as usize {
-                        if data[o + x] != prev[o + x] {
-                            changed = true;
-                            bx0 = bx0.min(x);
-                            bx1 = bx1.max(x);
-                            by0 = by0.min(y);
-                            by1 = by1.max(y);
-                        }
-                    }
+                    let row = y * width;
+                    let (now, before) = (&data[row + x0..row + x1], &prev[row + x0..row + x1]);
+                    let Some(first) = now.iter().zip(before).position(|(a, b)| a != b) else { continue };
+                    let last = now.iter().zip(before).rposition(|(a, b)| a != b).unwrap_or(first);
+                    changed = true;
+                    bx0 = bx0.min(x0 + first);
+                    bx1 = bx1.max(x0 + last);
+                    by0 = by0.min(y);
+                    by1 = by1.max(y);
                 }
             }
             if !changed {
@@ -707,12 +707,21 @@ pub(crate) fn render_frames(
                 let box_pixels = &mut sub[..w * h];
                 box_pixels.fill(0);
                 for r in &p.dirty {
-                    for y in r.y as usize..(r.y + r.h) as usize {
-                        let o = y * width;
-                        for x in r.x as usize..(r.x + r.w) as usize {
-                            let v = data[o + x];
-                            if v != prev[o + x] {
-                                box_pixels[(y - by0) * w + x - bx0] = v;
+                    // Every dirty rectangle holding a change is inside the box, but one without
+                    // any may stick out of it.
+                    let (x0, x1) = ((r.x as usize).max(bx0), ((r.x + r.w) as usize).min(bx1 + 1));
+                    let (y0, y1) = ((r.y as usize).max(by0), ((r.y + r.h) as usize).min(by1 + 1));
+                    if x0 >= x1 {
+                        continue;
+                    }
+                    for y in y0..y1 {
+                        let row = y * width;
+                        let dst = &mut box_pixels[(y - by0) * w + x0 - bx0..][..x1 - x0];
+                        for ((d, &v), &b) in
+                            dst.iter_mut().zip(&data[row + x0..row + x1]).zip(&prev[row + x0..row + x1])
+                        {
+                            if v != b {
+                                *d = v;
                             }
                         }
                     }
