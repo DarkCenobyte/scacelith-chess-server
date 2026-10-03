@@ -89,7 +89,7 @@ Server modules (`crates/server/src`):
 |---|---|---|
 | `clock`, `ids`, `log`, `metrics`, `systemd`, `util`, `config`, `cli`, `sys` | foundations, configuration, command line, the only `unsafe` (libc calls) | foundation |
 | `store`, `journal`, `store::retention` | SQLite schema, writer thread, reader pool, typed API; game journal | store |
-| `security`, `mail` | passwords, TOTP, secret box, keys, proof of work, auth rate counters; SMTP | security |
+| `security`, `mail` | passwords (Argon2id only: no legacy hashes exist), TOTP, secret box, keys, proof of work, auth rate counters; SMTP | security |
 | `net`, `http` (framework) | listener, TLS + reload, TLS gate, IP guard, abuse tracker, limiters, hyper glue, WebSocket codec, metrics endpoint; router, answers, bodies, schema validation, route rates, handler timeout | net |
 | `matching`, `anticheat` (pure) | Elo, matchmaker, challenges, conduct; priors, scoring, UCI engine driver, analyzer | matching |
 | `gifsvc` | render pool, cache, quotas (routes come later) | gif |

@@ -13,6 +13,7 @@ pub mod config;
 pub mod ids;
 pub mod log;
 pub mod metrics;
+pub mod sys;
 pub mod systemd;
 pub mod util;
 

@@ -59,7 +59,6 @@ hmac = "0.13"
 hkdf = "0.13"
 aes-gcm = "0.11"
 argon2 = "0.6"
-scrypt = "0.12"
 serde_json = { version = "1", features = ["preserve_order"] }
 
 [workspace.lints.rust]
