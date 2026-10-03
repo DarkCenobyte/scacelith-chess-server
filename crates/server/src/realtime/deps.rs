@@ -1,0 +1,190 @@
+//! What the realtime layer needs from the parts `app::start` wires to it: the game hosts
+//! (docs/RUST-PORT.md 8.1) and the session tokens (8.3). Each is a trait object, so that the
+//! connection tasks and the lobby never name the concrete types and the tests use doubles.
+
+use std::error::Error;
+use std::future::Future;
+use std::pin::Pin;
+
+use bytes::Bytes;
+use scacelith_protocol::{ClientMsg, ErrorCode};
+
+use super::endpoint::Endpoint;
+use crate::auth::{Auth, SessionInfo};
+use crate::events::NewGame;
+use crate::game::{HostHandle, Hosts};
+use crate::ids::{self, ConnId, GameId, UserId};
+
+/// A boxed future, for the asynchronous methods of the traits below.
+pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+/// The game host actors, routed by the shard of the game id (`ids::shard_of`). Every method but
+/// [`GameHosts::create`] and [`GameHosts::ping`] posts to an actor and returns at once.
+pub trait GameHosts: Send + Sync + 'static {
+    /// A strictly decoded game request (Move, Resign, DrawOffer, DrawAnswer, DrawClaim, Abort,
+    /// Resync, Rematch) for `game`, with the connection it came from and its read time (mono ms).
+    /// Returns false when no host of this server hosts that shard.
+    fn client(&self, game: GameId, user: UserId, msg: ClientMsg, ep: Endpoint, recv_at: f64) -> bool;
+
+    /// A raw `C_Gesture` frame, already decoded and checked by the connection. Returns false when
+    /// no host of this server hosts that shard.
+    fn gesture(&self, game: GameId, user: UserId, frame: Bytes) -> bool;
+
+    /// Binds a connection to a game; the host sends a `GameSnapshot`.
+    fn attach(&self, game: GameId, user: UserId, ep: Endpoint);
+
+    /// Unbinds a connection from a game, if it is still that connection.
+    fn detach(&self, game: GameId, user: UserId, conn: ConnId);
+
+    /// A new round-trip estimate of a player of the game.
+    fn rtt(&self, game: GameId, user: UserId, rtt_ms: u32);
+
+    /// Ends the user's running game on the host of `game` as a forfeit (ban, certain cheat).
+    fn forfeit_user(&self, game: GameId, user: UserId);
+
+    /// Closes the rematch window of a finished game for the user.
+    fn decline_rematch(&self, game: GameId, user: UserId);
+
+    /// Creates a game on the host of shard `preferred` when given and available, else on the
+    /// least loaded one; resolves to the new game id.
+    fn create(&self, preferred: Option<u32>, game: NewGame) -> BoxFuture<Result<GameId, ErrorCode>>;
+
+    /// Cancels a game nobody will join (created after its creator gave up waiting).
+    fn cancel(&self, game: GameId);
+
+    /// Whether a host stalled since `since_mono_ms` (a round trip measured across a stall is not
+    /// a network sample).
+    fn stall_during(&self, since_mono_ms: f64) -> bool;
+
+    /// Resolves to true once every host actor has answered (systemd watchdog).
+    fn ping(&self) -> BoxFuture<bool>;
+}
+
+/// An authenticated session (`auth::SessionInfo`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Session {
+    pub user_id: UserId,
+    pub username: String,
+    pub session_id: i64,
+    pub email_verified: bool,
+    /// SHA-256 of the session token (the key of revocations).
+    pub token_hash: [u8; 32],
+}
+
+/// A failure to check a token (store failure...): the Hello ends with `Internal`.
+pub type ValidateError = Box<dyn Error + Send + Sync>;
+
+/// Checks session tokens (auth).
+pub trait TokenValidator: Send + Sync + 'static {
+    /// The session of `token`, or `None` when the token is unknown, expired or revoked.
+    fn validate(&self, token: String) -> BoxFuture<Result<Option<Session>, ValidateError>>;
+}
+
+impl From<SessionInfo> for Session {
+    fn from(s: SessionInfo) -> Session {
+        Session {
+            user_id: s.user_id,
+            username: s.username,
+            session_id: s.session_id,
+            email_verified: s.email_verified,
+            token_hash: s.token_hash,
+        }
+    }
+}
+
+/// The server's sessions: [`Auth::validate_token`] (answers cached for 30 s at most; revocations
+/// made through the auth service apply at once).
+impl TokenValidator for Auth {
+    fn validate(&self, token: String) -> BoxFuture<Result<Option<Session>, ValidateError>> {
+        let auth = self.clone();
+        Box::pin(async move {
+            match auth.validate_token(&token).await {
+                Ok(session) => Ok(session.map(Session::from)),
+                Err(e) => Err(Box::new(e) as ValidateError),
+            }
+        })
+    }
+}
+
+/// A token validator that knows no token: every Hello ends with `Unauthorized`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoTokens;
+
+impl TokenValidator for NoTokens {
+    fn validate(&self, _token: String) -> BoxFuture<Result<Option<Session>, ValidateError>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+/// The host of a valid game id among the host actors of this process.
+fn host_of(hosts: &Hosts, game: GameId) -> Option<&HostHandle> {
+    if ids::is_game_id(game) { hosts.get(game) } else { None }
+}
+
+/// The game host actors of this process.
+impl GameHosts for Hosts {
+    fn client(&self, game: GameId, user: UserId, msg: ClientMsg, ep: Endpoint, recv_at: f64) -> bool {
+        host_of(self, game).map(|h| h.client(user, msg, ep, recv_at)).is_some()
+    }
+
+    fn gesture(&self, game: GameId, user: UserId, frame: Bytes) -> bool {
+        host_of(self, game).map(|h| h.gesture(game, user, frame)).is_some()
+    }
+
+    fn attach(&self, game: GameId, user: UserId, ep: Endpoint) {
+        if let Some(h) = host_of(self, game) {
+            h.attach(game, user, ep);
+        }
+    }
+
+    fn detach(&self, game: GameId, user: UserId, conn: ConnId) {
+        if let Some(h) = host_of(self, game) {
+            h.detach(game, user, conn);
+        }
+    }
+
+    fn rtt(&self, game: GameId, user: UserId, rtt_ms: u32) {
+        if let Some(h) = host_of(self, game) {
+            h.rtt(game, user, rtt_ms);
+        }
+    }
+
+    fn forfeit_user(&self, game: GameId, user: UserId) {
+        if let Some(h) = host_of(self, game) {
+            h.forfeit_user(user);
+        }
+    }
+
+    fn decline_rematch(&self, game: GameId, user: UserId) {
+        if let Some(h) = host_of(self, game) {
+            h.decline_rematch(game, user);
+        }
+    }
+
+    fn create(&self, preferred: Option<u32>, game: NewGame) -> BoxFuture<Result<GameId, ErrorCode>> {
+        let host = self.pick(preferred).clone();
+        Box::pin(async move { host.create(game).await })
+    }
+
+    fn cancel(&self, game: GameId) {
+        if let Some(h) = host_of(self, game) {
+            h.cancel(game);
+        }
+    }
+
+    fn stall_during(&self, since_mono_ms: f64) -> bool {
+        Hosts::stall_during(self, since_mono_ms)
+    }
+
+    fn ping(&self) -> BoxFuture<bool> {
+        let hosts = self.handles().to_vec();
+        Box::pin(async move {
+            for h in hosts {
+                if h.stats().await.is_none() {
+                    return false;
+                }
+            }
+            true
+        })
+    }
+}

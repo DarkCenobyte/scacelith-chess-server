@@ -11,9 +11,9 @@ contracts are in
 [CONFIG.md](CONFIG.md). The game's side of these calls is described in
 [docs/ONLINE_CLIENT.md](../../docs/ONLINE_CLIENT.md).
 
-This reference describes what the code does (`src/http/server.js`, `src/http/router.js`,
-`src/http/routes/*.js`, `src/auth/*.js`). Defaults are those of a server with an untouched
-configuration; a community server may change them.
+This reference describes what the code does (`crates/server/src/http/` for the pipeline, the
+router and the routes, `crates/server/src/auth/` for accounts and sessions). Defaults are those of
+a server with an untouched configuration; a community server may change them.
 
 ## Contents
 
@@ -52,8 +52,9 @@ configuration; a community server may change them.
   inside and outside `/api/v1` ([section 15](#15-health-endpoints)).
 - A trailing slash is ignored (`/api/v1/info/` is `/api/v1/info`), and path parameters are
   URL-decoded.
-- The Node SDK in `src/client/` (`ApiClient`) wraps these calls for tests, bots and tools. It also
-  solves the proof of work (up to `maxPowBits`, 28 by default; a harder one is returned unsolved).
+- The Rust client SDK `scacelith-client` (`crates/client`, `ApiClient`) wraps these calls for
+  tests, tools and the load generator. It solves no proof of work, so its registration needs a
+  server with `POW_REGISTER_BITS=0`; the game solves them (section 1.6).
 
 The curl examples below use two shell variables:
 
@@ -144,7 +145,7 @@ when the database stayed locked.
 
 Endpoints that check or hash a password can also answer one of these:
 
-- 503 `server_busy`: the worker's password hash queue (`PASSWORD_HASH_QUEUE_MAX`) is full, or the
+- 503 `server_busy`: the server's password hash queue (`PASSWORD_HASH_QUEUE_MAX`) is full, or the
   wait ran out.
 - 429 `rate_limited`: once the queue is half full, this client (an IPv4 address or an IPv6 /48)
   already has `PASSWORD_HASH_WAITERS_PER_SOURCE` hashes waiting.
@@ -191,11 +192,11 @@ Authorization: Bearer sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8
   - signing out (`POST /auth/logout`, `/auth/logout-all`, `DELETE /auth/sessions/:id`);
   - a password change, which revokes the other sessions;
   - a password reset and the deletion of the account, which revoke every session;
-  - an administrator (`bin/admin.js`).
+  - an administrator (`scacelith-server admin user revoke-sessions`).
 
-  A revocation from the API takes effect at once on every worker, and the WebSocket opened with a
-  revoked session is closed (`Notice{SessionRevoked}`, then close 4003). Otherwise a worker may
-  keep using its record of a valid session for up to 30 s.
+  A revocation from the API takes effect at once, and the WebSocket opened with a revoked session
+  is closed (`Notice{SessionRevoked}`, then close 4003). The server caches session lookups for
+  30 s, so a revocation by the admin command, a separate process, takes effect within 30 s.
 - **Scope.** A token belongs to one server and opens its WebSocket too (`Hello.token`,
   [PROTOCOL.md](PROTOCOL.md)). Never send it to another server.
 
@@ -210,12 +211,12 @@ Limits apply to one of two scopes:
 - **Player:** the signed-in account, whatever its address. A limit counted per player on an
   endpoint where the session is optional counts per client for a request without a token.
 
-Each worker process checks a limit as a token bucket. The bucket holds `limit` requests and
-refills continuously at `limit / window`, and `retryAfter` is the time until the next token.
-Limits marked *shared* are also counted for the whole server by the primary process, over a
-sliding window of the same length, so that they hold whatever worker a request reaches. If the
-primary does not answer, the worker's own check still applies. When one of an endpoint's limits
-refuses a request, the tokens that its other limits took for that request are given back.
+The server checks a limit as a token bucket. The bucket holds `limit` requests and refills
+continuously at `limit / window`, and `retryAfter` is the time until the next token. Limits
+marked *shared* are also counted over a sliding window of the same length, so that no window
+holds much more than `limit` requests. Every limit is counted for the whole server. When one of an
+endpoint's limits refuses a request, the tokens that its other limits took for that request are
+given back.
 
 There are three layers: a background ceiling per address that every request meets first, a
 budget per signed-in account, and the limits of each endpoint (table below), among which the
@@ -224,16 +225,14 @@ GIFs.
 
 **Per-address layer.** Before anything else, every request (any path and method, the health
 endpoints and WebSocket upgrades included) takes one token of its client's request budget:
-`HTTP_RATE_PER_IP` (600) per minute for the whole server, and `HTTP_RATE_PER_PREFIX` (default 4 x
-`HTTP_RATE_PER_IP`) for an IPv6 /48 as a whole. Each worker process allows its share,
-max(1, min(L, ceil(2 x L / `WORKERS`))) per minute (all of it with 1 or 2 workers, half of it
-with 4), with a burst of half a minute of that share. A client may also have at most
-`IP_MAX_INFLIGHT` (32) requests in progress in one worker. Beyond either: 429 `rate_limited`
-with `retryAfter` (1 for the requests in progress). This is a ceiling against one address
-saturating the server, loose enough for a class or a mobile operator's shared address, not a
-quota. A client that keeps going after its refusals is blocked: `ABUSE_BLOCK_REFUSALS_PER_MIN`
-(600) refusals in one minute, all workers together, block it for 1 minute, then 4, 16 and 60
-minutes at each new block within 6 hours. These refusals are the 429s of this layer, the 429s
+`HTTP_RATE_PER_IP` (600) per minute for the whole server, with a burst of half a minute, and
+`HTTP_RATE_PER_PREFIX` (default 4 x `HTTP_RATE_PER_IP`) for an IPv6 /48 as a whole. A client may
+also have at most `IP_MAX_INFLIGHT` (32 x `WORKERS` by default) requests in progress. Beyond
+either: 429 `rate_limited` with `retryAfter` (1 for the requests in progress). This is a ceiling
+against one address saturating the server, loose enough for a class or a mobile operator's shared
+address, not a quota. A client that keeps going after its refusals is blocked:
+`ABUSE_BLOCK_REFUSALS_PER_MIN` (600) refusals in one minute block it for 1 minute, then 4, 16 and
+60 minutes at each new block within 6 hours. These refusals are the 429s of this layer, the 429s
 of the endpoint limits counted per client (a refusal of the `auth`, `auth_*` and `reauth`
 limits counts 5; limits counted per player never count), connections refused before TLS and
 malformed requests. A blocked client's requests on connections already open get 429
@@ -244,17 +243,14 @@ README, "Protection against abuse".
 
 **Account budget.** Every request that carries a valid session token (on the endpoints marked
 **session** or **optional** in section 2) also counts against its account: `USER_RATE_PER_MIN`
-(120) requests per minute, all endpoints together, whatever the address. Each worker process
-allows its share, max(1, min(`USER_RATE_PER_MIN`, ceil(2 x `USER_RATE_PER_MIN` / `WORKERS`))) per
-minute (all of it with 1 or 2 workers, half of it with 4), with a burst of half a minute of that
-share. It is counted in each worker only (no round trip to the primary per request), so a client
-spread over every worker gets at most twice the rate. Beyond it: 429 `rate_limited`. The game's busiest use, paging
+(120) requests per minute for the whole server, all endpoints together, whatever the address,
+with a burst of half a minute. Beyond it: 429 `rate_limited`. The game's busiest use, paging
 through the history, is about one request per second.
 
 | Limit | Default | Counted per | Endpoints |
 |---|---|---|---|
-| per address | `HTTP_RATE_PER_IP` (600) / min for the whole server, each worker its share; `IP_MAX_INFLIGHT` (32) requests in progress per worker | client, and each IPv6 /48 (`HTTP_RATE_PER_PREFIX`, default 4 x `HTTP_RATE_PER_IP`) | Every request, the health endpoints and WebSocket upgrades included (see above). |
-| account budget | `USER_RATE_PER_MIN` (120) / min, each worker its share | player | Every request that carries a valid session (see above). |
+| per address | `HTTP_RATE_PER_IP` (600) / min; `IP_MAX_INFLIGHT` (32 x `WORKERS`) requests in progress | client, and each IPv6 /48 (`HTTP_RATE_PER_PREFIX`, default 4 x `HTTP_RATE_PER_IP`) | Every request, the health endpoints and WebSocket upgrades included (see above). |
+| account budget | `USER_RATE_PER_MIN` (120) / min | player | Every request that carries a valid session (see above). |
 | `auth` | `AUTH_RATE_PER_IP` (20) / 10 min, shared | client, and each IPv6 /48 (`AUTH_RATE_PER_PREFIX`, default 5 x `AUTH_RATE_PER_IP`) | `POST /auth/register`, `/auth/login`, `/auth/login/mfa`, `/auth/verify-email/resend`, `/auth/password/forgot`, `/auth/password/reset`, `/auth/sso/google/link`, `/auth/sso/complete`; `POST /verify-email`, `/reset-password`, `/confirm-email-change` |
 | `auth_register` | `AUTH_REGISTER_PER_HOUR` (10) / hour, shared | client, and 3 times that per IPv6 /48 | `POST /auth/register` |
 | `auth_mail` | `AUTH_MAIL_PER_HOUR` (10) / hour, shared | client, and 3 times that per IPv6 /48 | `POST /auth/verify-email/resend` |
@@ -344,7 +340,7 @@ A challenge is valid for 2 minutes and only once, for one endpoint and one clien
 IPv4 address or IPv6 /64). The challenge is signed, so the server keeps nothing about it until
 it comes back with its answer. `reason` says why a proof was refused:
 `required`, `malformed`, `signature`, `endpoint`, `network`, `expired`, `bits`, `work` or
-`replayed`. In Node, `solvePow(challenge, bits)` of `src/client/pow.js` returns the nonce.
+`replayed`. The game's solver is `net::crypto::powSolve` (`src/net/crypto.h` of the game).
 
 ### 1.7 Re-authentication
 
@@ -1483,7 +1479,7 @@ Errors:
 - 400 `invalid_game_id`; 404 `not_found`;
 - 422 `game_too_long`: the game has more than `GIF_MAX_PLIES` (600) half-moves;
 - 429 `rate_limited` with `retryAfter`: the `gif` limit or a render limit;
-- 503 `server_busy` with `retryAfter` (3 to 10 s) and `Retry-After`: the worker's rendering queue
+- 503 `server_busy` with `retryAfter` (3 to 10 s) and `Retry-After`: the server's rendering queue
   is full, or the GIF waited `GIF_QUEUE_TIMEOUT_MS` (10 s) for a free thread. The render limits
   that the request took are given back;
 - 500 `render_failed`: the GIF could not be made (the server logs why);
@@ -1544,19 +1540,19 @@ Errors: those of `GET /games/:id/gif` (with `delayMs` as the `field` of the dela
 
 ### Cost, cache and quotas of the GIFs
 
-A GIF is made on a rendering thread of the worker process, never on the thread that runs the
-games, and at the lowest CPU priority, so it only takes the CPU the games leave: `GIF_THREADS` (1)
-per worker, started with the first GIF and stopped after a minute without one. Up to
-`GIF_QUEUE_MAX` (4) GIFs wait for it, at most `GIF_QUEUE_TIMEOUT_MS` (10 s) each; a render may
-last `GIF_RENDER_TIMEOUT_MS` (30 s). A 40-move game takes a few tens of milliseconds, the longest
-ones up to about a second ([SIZING.md](SIZING.md#animated-gifs)). When the server is busy with
-its games, the GIFs wait for them, and a request that waited too long gets 503 `server_busy`.
+A GIF is made on a rendering thread of its own, never on the threads that run the games, and at
+the lowest CPU priority, so it only takes the CPU the games leave: `GIF_THREADS` threads
+(`WORKERS` by default), started with the first GIF and stopped after a minute without one. Up to
+`GIF_QUEUE_MAX` (4 x `WORKERS` by default) GIFs wait for a thread, at most `GIF_QUEUE_TIMEOUT_MS`
+(10 s) each; a render may last `GIF_RENDER_TIMEOUT_MS` (30 s). Render times are in
+[SIZING.md](SIZING.md#animated-gifs). When the server is busy with its games, the GIFs wait for
+them, and a request that waited too long gets 503 `server_busy`.
 
-Each worker keeps the GIFs it made in a cache of `GIF_CACHE_MB` (32) MB, the least recently used
-going first. A GIF from the cache, or one being made for another request, costs no render: asking
-again for the same game with the same options is cheap (with several workers, a repeat that
-reaches another worker may be made again). The cache keys on everything that changes the picture,
-names included, so a deleted account never reappears from it.
+The server keeps the GIFs it made in a cache of `GIF_CACHE_MB` MB (32 x `WORKERS` by default),
+the least recently used going first. A GIF from the cache, or one being made for another request,
+costs no render: asking again for the same game with the same options is cheap. The cache keys on
+everything that changes the picture, names included, so a deleted account never reappears from
+it.
 
 Every request counts in `gif`, 30 per minute per player for both endpoints. A GIF that has to be
 made also counts in the render limits, for the whole server:
@@ -1682,7 +1678,7 @@ curl -sS "$API/leaderboard?category=3%2B2&limit=10"
 
 - The list holds the top 100 rated records with at least `minGames` (`PROVISIONAL_GAMES`) counted
   games. It leaves out deleted accounts and confirmed cheaters.
-- Each worker computes it again at most every 10 seconds; `updatedAt` says when.
+- The server computes it again at most every 10 seconds; `updatedAt` says when.
 
 Errors: 400 `invalid_category`, 400 `invalid_limit`, 503 `busy`.
 
@@ -1751,14 +1747,14 @@ Both paths work for each endpoint:
 | Endpoint | Answer |
 |---|---|
 | `GET` or `HEAD /healthz`, `/api/v1/healthz` | 200 `{ "status": "ok" }` while the process runs. |
-| `GET` or `HEAD /readyz`, `/api/v1/readyz` | 200 `{ "status": "ready" }` when the worker accepts players; 503 `{ "status": "not_ready" }` while it starts or stops. |
+| `GET` or `HEAD /readyz`, `/api/v1/readyz` | 200 `{ "status": "ready" }` when the server accepts players; 503 `{ "status": "not_ready" }` while it starts or stops. |
 
 On the metrics port (`METRICS_PORT`, 9464 on `METRICS_BIND`, 127.0.0.1 by default; plain HTTP,
 keep it private):
 
 - `GET /healthz`: `ok`.
-- `GET /readyz`: `ready`, or 503 `not ready`, for the whole server (every shard ready, not shutting
-  down).
+- `GET /readyz`: `ready` once the start-up is complete (every shard has replayed its journal and
+  the listeners are bound) and until the shutdown begins; 503 `not ready` otherwise.
 - `GET /metrics`: the Prometheus metrics. With `METRICS_TOKEN` set, it needs
   `Authorization: Bearer <token>`.
 

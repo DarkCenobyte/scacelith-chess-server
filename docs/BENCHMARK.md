@@ -1,451 +1,417 @@
 # Benchmark
 
-`bench/loadgen.js` measures what one Scacelith server holds: authenticated WebSocket connections,
-games at a realistic pace, and the move throughput without think time. It uses Node's built-ins
-only (no npm package), starts its own throw-away server or targets an existing test server, and
-writes a JSON report of every run. This page explains how to run it, what each scenario measures,
-the numbers measured on the development machine, what saturated first, and what they mean for a
-dedicated machine.
+This page compares the Rust server with the Node.js server it replaces, on the same machine, with
+the same settings and the same load generator: how to run the comparison, what each scenario
+measures, the choices made to keep it fair, and the results of 2026-10-03, with two runs of the
+Rust server alone at a realistic pace. [SIZING.md](SIZING.md) derives its unit costs from these
+results. The load study of the Node.js server alone (2026-09) is in the git history of this file
+(for example at commit 08d27f1).
 
-## Quick start
+## Running the comparison
+
+### Quick start
 
 ```sh
 cd dedicated-server
-npm run bench -- --scenario connect --conns 10000             # same as node bench/loadgen.js ...
-node bench/loadgen.js --scenario games --games 5000           # 5,000 games, one move per second each
-node bench/loadgen.js --scenario burst --games 500            # no think time: throughput limit
-node bench/loadgen.js --help                                  # every option
-node bench/table.js bench/results/*.json                      # markdown tables of the reports
+# A checkout of the Node.js server (the last commit before the rewrite), with its dependencies:
+git worktree add ../node-ref 7531830 && (cd ../node-ref/dedicated-server && npm ci)
+
+bench/run.sh --node26 /path/to/node26/bin/node --node-tree ../node-ref/dedicated-server
+bench/run.sh ... --quick                       # same steps, small sizes: checks the set-up in minutes
+bench/run.sh ... --targets rust,node26,node24 --node24 /path/to/node24/bin/node
+bench/run.sh --targets rust --scenarios games -- --steps 1000,4000,8000 --move-interval-ms 5000 --gesture-hz 1
+bench/run.sh --help                            # every option
 ```
 
-A run prints one progress line every 2 s (connections, games, moves/s, move round trip, server and
-load generator CPU, event-loop lag, memory, CPU used by the other processes of the machine), then
-a summary, and writes `bench/results/<scenario>-<time>.json` (ignored by git). A run is bounded
-(`--max-run-s`, 900 s by default); at the end, on an error or on Ctrl-C it stops the server and the
-load processes and deletes the temporary directory.
+The default targets are `rust,node26`; Node 24 is still available as `node24`, and `--targets
+rust` needs no Node.js at all. Options after `--` go to every `scacelith-bench` command of the
+run. `bench/run.sh` builds the release binaries (`cargo build --release -p scacelith-server -p
+scacelith-client`, `CARGO_BUILD_JOBS` jobs, 2 by default), then for each target:
 
-## What the tool does
+1. makes a fresh data directory, runs the migrations and creates the bench accounts with the
+   server's own admin command (`scacelith-server admin bench-accounts`, `node bin/admin.js
+   bench-accounts`: verified accounts with a live session each, 20,000 of them, 600 with
+   `--quick`);
+2. for each scenario, starts the server pinned to the server CPUs (`taskset -c 0,1`), waits until
+   `/api/v1/readyz` and the metrics listener's `/readyz` answer 200 (except for `idle`, which
+   measures that wait), runs `scacelith-bench` pinned to the load CPUs (`taskset -c 2,3`), and
+   stops the server (SIGTERM). Every scenario starts on a freshly started server; the steps of a
+   scenario run one after the other on the same server.
 
-**Its own server** (default). A temporary data directory on the normal disk (the journal fsyncs and
-the SQLite commits are real), a self-signed ECDSA P-256 certificate made with the `openssl` command,
-free ports on 127.0.0.1, `WORKERS` from `--workers` (auto: the number of cores, more when the
-open-file limit requires it, see below), proof of work off, per-IP limits, the challenge limits
-(`CHALLENGE_UNPLAYED_PER_MIN`, `PRIVATE_CODE_FAILURES_PER_MIN`), `MATCH_REPEAT_LIMIT` (a pair of
-accounts plays one rated game after the other) and `MAX_CONNECTIONS` raised to 1,000,000, mail to
-the log, `LOG_LEVEL=warn`. The burst scenario also raises
-`WS_MSG_RATE`/`WS_MSG_BURST` to 1000/2000 (the defaults, 20/40 messages per second per connection,
-would throttle a player who moves without thinking). `--server-env K=V` sets anything else,
-`--reuse-port` sets `LISTEN_REUSE_PORT=true`, `--plain` runs without TLS (`TLS_MODE=off`, to measure
-what TLS costs). The accounts come from `bin/admin.js bench-accounts` (verified accounts with a live
-session each); they are created in a copy of the database on tmpfs and moved into place, because
-account creation is fsync-bound on a real disk (about 3.5 ms per account here; 100,000 accounts
-take 7 s this way).
+Results go to `bench/results/<date>/`: one JSON report per target and scenario
+(`node26-games.json`), the server and load generator logs, the data directories, and
+`summary.md`, the Markdown tables of every report with the machine and the versions. Git keeps
+only `summary.md`. A scenario that fails is listed in the summary and the run goes on.
 
-**An existing test server.** Never a production server: `bench-accounts` refuses to run without
-its explicit flag.
+Requirements: Linux (CPU and memory come from `/proc`), 4 CPUs or more (2 for the server, 2 for
+the load generator; `--server-cpus` and `--load-cpus` choose them), `taskset`, `openssl`, `curl`,
+free ports 18443 and 19464 (`--port`, `--metrics-port`), and an open-file limit (`ulimit -Hn`)
+above 20,000 for the 10,000-connection step. The harness raises the soft limit of both processes
+to the hard one.
+
+**By hand.** `scacelith-bench` targets any test server (never a production one: it needs bench
+accounts and raised limits; [SIZING.md](SIZING.md#validating-on-the-real-machine) lists them):
 
 ```sh
-# on the test server: accounts and their tokens (username<TAB>token per line)
-node bin/admin.js bench-accounts --count 20000 --prefix bench --out tokens.tsv --format tsv --i-know-this-is-a-test-server
-# the test server needs ABUSE_EXEMPT set to the load machines' addresses, MAX_CONNECTIONS_PER_IP
-# (64 by default) above the number of clients per load machine, MATCH_REPEAT_LIMIT (3 by default)
-# above the rated games of one pair in a run (or --rated false), CHALLENGE_UNPLAYED_PER_MIN (5 by
-# default) raised when pairs often retry their challenges, and WS_MSG_RATE / WS_MSG_BURST raised
-# for the burst scenario
-# on the load machine
-node bench/loadgen.js --scenario games --games 10000 --url wss://test.example.org/ws \
-    --ca cert.pem --tokens tokens.tsv --metrics http://test.example.org:9464/metrics --metrics-token TOKEN
+scacelith-bench games --target rust --addr 192.0.2.10:443 --host test.example.org \
+    --tokens tokens.tsv --steps 200 --warmup-s 10 --duration-s 60 --out games.json
+scacelith-bench table results/*.json      # Markdown tables
+scacelith-bench --help                    # every option
 ```
 
-`--metrics` lets the report include the server side (CPU, memory and event-loop lag per shard,
-move processing time, store commits); without it only the client side is measured. To load one
-server from several machines, give each machine its own slice of the tokens file (an even number
-of lines: direct challenges pair consecutive accounts), since an account has one live connection.
+`--ca FILE` pins the server's certificate (the harness passes its self-signed one); without it the
+tool accepts any certificate, which is only acceptable on a test machine. `--server-pid` (a local
+server) adds its CPU and memory to the report.
 
-**The load processes.** The clients are spread over `--procs` processes (auto: at least 2, one
-more per 15,000 clients). Each one speaks RFC 6455 directly over `node:tls` with one shared
-`SecureContext` and a precomputed upgrade request, keeps one fixed-shape object per client, encodes
-and decodes the hot messages (Move, MoveMade, Ping, Pong) at fixed offsets and everything else
-with the generated codec, keeps the think times on one timing wheel, and plays legal random moves
-with the correct `posHash` (both players of a direct challenge live in the same process and share
-one position). Each process uses its own source address (127.1.0.x) against a local server, so
-that 100,000 connections do not run out of ephemeral ports (28,232 per source address here). The
-coordinator samples `/metrics` and, for a local server on Linux, the CPU time of every server and
-load process from `/proc`; the rest of the machine's CPU time is reported as "other processes".
+### One tool, two protocols
 
-**Handshakes in flight.** With native TLS every worker performs at most `MAX_PENDING_HANDSHAKES`
-(128) handshakes at a time, and at most `MAX_PENDING_HANDSHAKES_PER_IP` (4 by default) for one
-source address, and closes the connections beyond that before any TLS work (counted in
-`scacelith_tls_refused_total{reason="handshakes"|"per_ip"}` on the server and as failed
-connections by the tool, which does not retry). A connection takes its slot once its ClientHello
-has arrived; a TLS client sends it at once, so that wait costs the tool nothing. Since each load
-process is a single source address, the tool sets `MAX_PENDING_HANDSHAKES_PER_IP` to
-`MAX_PENDING_HANDSHAKES - 1` on the server it starts, so that only the per-worker cap applies (a
-remote server keeps its own setting). It also lists the loopback addresses in `ABUSE_EXEMPT`, so
-that the protection per address (`IP_CONN_RATE`, `IP_MAX_CONNECTIONS`, `HTTP_RATE_PER_IP` and the
-blocks, SIZING "Protection per address") leaves the load processes alone; a remote test server
-needs the load machines' addresses there. The runs below predate these limits. To measure the raw
-handshake rate again, keep `--inflight` times the load processes below `MAX_PENDING_HANDSHAKES`
-times `WORKERS`, or raise the key with `--server-env MAX_PENDING_HANDSHAKES=100000`; with the
-default, a ramp that opens connections faster than the server completes them measures the gate
-instead.
+The load generator is the Rust client SDK (`crates/client`, `scacelith-bench`): the same TLS
+client (rustls, a full handshake per connection unless `--tls-resume`), the same WebSocket client
+and the same HTTP/1.1 client for both servers. Only the realtime message codec differs:
 
-**Refused connections.** `node bench/gate-cost.js` measures what a connection the TLS gate
-refuses still costs the server: 20,000 connections from a blocked loopback address (reset at
-accept) and 20,000 that send a first record that is not TLS (`bad_hello`), with the CPU time of
-the server process (kernel included) per connection. On the development container (4-vCPU Xeon at
-2.1 GHz) both were 26-30 µs; SIZING "Protection per address" scales it to an OVH vCore. The
-per-address checks alone (a request, a new connection) are timed by the micro-benchmark of
-`test/unit/net.ipguard.test.js`, which prints them with `npm run test:unit`.
+- `--target rust`: protocol v1 (`scacelith.rt1`, [PROTOCOL.md](PROTOCOL.md)) through the SDK's
+  `Connection`;
+- `--target node`: the Node.js server's protocol 3 (`scacelith.v1`) through a small codec of the
+  messages the scenarios use, derived from that server's `src/protocol/schema.js` and isolated in
+  `crates/client/src/bin/bench/proto3.rs`.
 
-**Open files.** The container used here has a hard `nofile` limit of 20,000 per process that
-cannot be raised without `CAP_SYS_RESOURCE`, so the tool uses at least `clients / 15000` server
-workers and load processes (7 of each for 100,000 connections on 4 cores). On a real server raise
-`LimitNOFILE` (systemd) or `ulimit -n` instead; `WORKERS` should then equal the number of cores.
+Both protocols carry the same messages with the same layouts apart from `Hello` and `Welcome`, so
+both servers receive the same bytes for a move, a gesture or a queue join. The REST calls are
+identical.
 
-## Scenarios and what they measure
+### Scenarios
 
-| scenario | load | measures |
+Every scenario warms up, then measures over a fixed window (`--warmup-s`, `--duration-s`); the
+counters, latency histograms and server resources of the report cover the window only.
+
+| scenario | load | figures |
 |---|---|---|
-| `connect` | ramps `--conns` authenticated WSS connections (TCP, TLS 1.3 full handshake, HTTP upgrade, Hello with the session token, Welcome) with `--inflight` handshakes in flight per process, then holds them idle for `--hold-s` with the server heartbeat (every 10 s) and one client Ping per connection every `--ping-interval-ms` (by default the interval the server announces in `Welcome.clientPingMs`, `CLIENT_PING_INTERVAL_MS`, 10 s, as the game does) | connections/s, failures and their reason, handshake (TCP+TLS+101) and Hello->Welcome latency, server CPU per connection, server memory per connection (RSS, V8 heap and external deltas of every server process, from `/metrics`, before and after, no forced GC), idle CPU, heartbeat round trip (client Ping->Pong, and the server's own RTT histogram), connections dropped during the hold |
-| `games` | `--games` pairs start games by direct challenge (ChallengeCreate -> ChallengeAccept) or with `--via queue` through the matchmaking queue, at `--start-rate` games/s, then play legal random moves every `--move-interval-ms` (1000 ms +-50 % by default) per move; a game resigns at `--max-plies` (80) and the pair starts a new one after `--between-games-ms` | move round trip (Move sent -> the mover's own MoveMade) p50/p90/p99/p99.9/max, moves/s, games started and finished, end reasons, rejected moves, errors, game start latency (challenge -> both snapshots), server move processing time (inside the host), CPU and event-loop lag per shard, store commit latency and batch size, relayed frames/s, memory with games |
-| `burst` | like `games` with no think time (each player answers the opponent's move at once) | the throughput limit of the server on the machine, and the latency at that limit |
+| `idle` | none | time to ready: from the server's start (`--spawned-at-ms`, taken by the harness just before it starts the server) to the first 200 of `/api/v1/readyz` and of the metrics listener's `/readyz`; then idle CPU, RSS and PSS |
+| `connections` | authenticated WebSocket connections (TCP, TLS, upgrade, `Hello`/`Welcome` with a session token), `--inflight` (200) handshakes at a time, ramped to each step (1,000, 5,000, 10,000: the connections of a step stay open into the next) and held idle (the connections answer the server's heartbeat) | handshakes per second during the ramp, handshake (TCP + TLS + 101) and `Hello`->`Welcome` latency, failures by class, connections dropped during the hold, idle CPU with the connections, RSS and PSS per connection above the idle footprint, the load generator's CPU during the ramp |
+| `games` | N games (100, 500, 1,000), i.e. 2N bots: one challenges the other, both play uniformly random legal moves, the side to move thinking 1 s +-50 % (`--move-interval-ms`), and both send head gestures at 10 per second (`--gesture-hz`); resignation at ply 80, a new game after 1 s; 3+2, rated. Each step stops its games before the next one starts | move relay (Move sent by the mover -> MoveMade read by the opponent), move confirmation (-> MoveMade read by the mover), gesture relay (Gesture sent -> relayed Gesture read by the opponent), moves/s, relayed gestures/s, errors, server CPU and memory |
+| `matchmaking` | M players (200, 1,000) connected, then all join the casual 3+2 queue at the same instant; White aborts each game at once; one warm-up burst, then 3 measured bursts | time from `QueueJoin` to `GameSnapshot` per player (p50 ... max), burst makespan (start signal -> last snapshot), unmatched players, server CPU |
+| `rest` | 32 keep-alive HTTPS connections sending requests back to back, one window per endpoint: `GET /api/v1/info`, `/leaderboard?category=3+2`, `/games/:id/pgn` (games of 40 plies), `/games/:id/gif` cold (4 connections; a new `delay`/`orientation` per request, so every one is rendered) and cached (8 games with the default options) | requests/s, latency p50/p90/p99/max, errors by status, server CPU and memory |
+| `login` | 16 accounts registered through the API, then `POST /api/v1/auth/login` with them in turn at 8 at a time | logins/s and latency: the password hash is the cost, and both servers use the same one (below) |
 
-Every report holds the machine (CPU model, cores, memory, Node version, `nofile`, `somaxconn`,
-ephemeral port range), the command line, every server setting the tool changed, the per-phase
-counters, histograms and CPU, a 2 s timeline, and the list of limits the tool detected (machine
-CPU saturated, event-loop lag above 50 ms, other processes busy, memory low).
-`--server-cpu-prof DIR` also writes a V8 CPU profile of every server process;
-`node bench/profile-summary.js DIR/*.cpuprofile` prints the hot functions by area and the longest
-event-loop stalls with their stacks.
+**How latencies are taken.** The two ends of a game live in one task of the load generator, so
+a move's relay time is the difference of two instants of one clock: when the mover's `Move` was
+queued for sending, and when the opponent's connection read the `MoveMade` from its socket (the
+WebSocket reader stamps every message as it reads it, before any scheduling of the bot). The
+gesture relay works the same way, the yaw of each gesture carrying a sequence number. Histograms
+are log-linear (exact below 64 µs, then 32 sub-buckets per power of two, about 3 % resolution),
+with the bucket math and quantile definition of the former Node.js load generator
+(`bench/lib/hist.js`), so the figures compare with its own.
 
-## Test machine and conditions
+**Server resources.** CPU is the user plus system time of the server's whole process tree read
+from `/proc/<pid>/stat` at both ends of the window: the Node.js primary and its two shard workers,
+or the single Rust process. Memory is the sum of their RSS, and of their PSS (`smaps_rollup`),
+which splits the pages the Node.js processes share (code, the V8 snapshot) between them: RSS
+counts those several times, PSS once. "CPU %" is percent of one core (200 = both server cores
+busy).
 
-- A 4 vCPU virtual machine (Intel Xeon; the host CPU changed with a container restart: 2.10 GHz for
-  the connect 10k/50k/100k runs of 2026-09-28 and the gesture relay runs of 2026-09-30, 2.80 GHz
-  for all the others), 15.7 GB of memory, no
-  swap, Linux 6.18, Node 22.22.2, `nofile` 20,000 (hard), `somaxconn` 4096.
-- **The load generator runs on the same 4 cores as the server** and used 25 to 50 % of the CPU in
-  the saturated runs (TLS handshakes and records cost the client about as much as the server). The server figures are
-  what it achieved with the rest.
-- **Loopback network**: no latency, no loss, 64 KB MTU. The kernel charges the receiver's TCP
-  processing to the sender's `write` on loopback, so both sides' network stack runs on this machine.
-- **Shared host**: other jobs (compilations, test suites) ran on the same VM, from 0.1 to 3 cores.
-  Each report records their CPU per 2 s window; `--wait-idle-s` waits for a quiet machine before
-  starting, and the "quiet" columns below are medians over the windows in which the other
-  processes used less than 0.3 core. One whole-VM stall of about 4 s was observed (games 10k).
-- Short games: random legal moves, resignation at ply 80, so games end far more often than in real
-  play (up to 12,000 per minute in burst). With `--start-rate 1000` all the games start within a
-  few seconds, so they also end together: those end-of-game waves (thousands of commits, rating
-  updates and new challenges within seconds) are the worst moments of the paced runs.
-- One move per second per game is four to five times the pace of a real 3+2 blitz game (80 plies
-  in about 6 minutes): 10,000 paced games produce the move rate of about 40,000-45,000 real blitz
-  games, with a quarter of their connections.
-- No engine analysis (`ANALYSIS_ENGINE_PATH` unset) and no HTTP API load (login, profiles): the
-  sessions are created beforehand.
+### Fairness choices
 
-## Results
+- **Same machine, same cores, same order.** The server and the load generator are pinned to
+  disjoint CPUs. Each target gets a fresh data directory and every scenario a freshly started
+  server, in the same order for every target. The load generator binary is the same for all
+  targets, and its random choices are seeded (`--seed 1`).
+- **Same TLS.** One self-signed ECDSA P-256 certificate (CA:FALSE) for every server, pinned by the
+  client; TLS 1.3 over loopback with a full handshake per connection (no resumption tickets), so
+  the handshake cost is that of a player connecting for the first time. The servers use their
+  native TLS (`TLS_MODE=native`): OpenSSL in Node.js, rustls in the Rust server.
+- **Same size.** `WORKERS=2` on both. The word does not mean the same thing: the Node.js server
+  runs 2 shard processes plus its primary, the Rust server 2 game shards and 2 runtime threads in
+  one process. The limits that Node.js applies per worker are whole-server limits in the Rust
+  server whose defaults are the Node.js default times `WORKERS`, so both keep their defaults and
+  have the same totals: 2 password hashes at once, 2 GIF render threads, 8 queued renders, a 64 MiB
+  GIF cache, 256 TLS handshake slots. `MAX_PENDING_HANDSHAKES_PER_IP` is set so that the one load
+  address may use every slot (127 per Node.js worker, 255 for the Rust server).
+- **Same password hash.** Argon2id with 64 MiB, 3 passes and 4 lanes on both (Node.js 24.7 and
+  later; the harness checks `crypto.argon2` and records the algorithm in each report's `meta`).
+  The implementations differ: OpenSSL's in Node.js, the `argon2` crate in Rust.
+- **Limits raised for the bench only.** Proof of work off, no e-mail verification, the load address
+  in `ABUSE_EXEMPT`, and these raised: `HTTP_RATE_PER_IP`, `AUTH_RATE_PER_IP`,
+  `AUTH_REGISTER_PER_HOUR`, `AUTH_FAILURES_PER_ACCOUNT`, `USER_RATE_PER_MIN`, `MAX_CONNECTIONS`,
+  `MAX_CONNECTIONS_PER_IP`, `CHALLENGE_UNPLAYED_PER_MIN`, `MATCH_REPEAT_LIMIT`,
+  `CONDUCT_ABANDON_LIMIT`, the four `GIF_*_RENDERS_PER_*`; `WS_MSG_RATE` 100 and `WS_MSG_BURST`
+  200; `GESTURE_RATE` 20 and `GESTURE_BURST` 40 (above the bots' 10 per second); no engine
+  analysis (`ANALYSIS_WORKERS=0`); `LOG_LEVEL=warn`. The full list is `common_env` in
+  `bench/run.sh`.
+- **Per-account limits fixed in the code** (`public_read`: 60 requests per minute for the game
+  routes; `gif`: 30 per minute) cannot be raised, so the authenticated REST requests rotate over
+  the 20,000 accounts. A `429` in a report (`error.429`) means the rotation was too short for the
+  server's throughput: create more accounts. The Node.js server keeps these buckets per worker,
+  the Rust server once per server, which only matters past that point.
+- **Matchmaking** runs in the casual queue (no conduct cooldown after the aborts); both servers
+  pair every `MATCH_TICK_MS` (250 ms by default), which dominates the time to a game.
 
-Every run below was made from `dedicated-server/` with `node bench/loadgen.js` followed by the
-options shown (plus `--label` and, for most runs, `--wait-idle-s 120` to `600`: wait for a quiet
-machine). The full tables (more columns) come from `node bench/table.js bench/results/*.json`.
+### Caveats
 
-### Connections (`connect`)
+- The load generator runs on the same machine, over loopback: no network latency or loss, and the
+  kernel charges the receiving side's TCP work to the sender. The latencies are those of the
+  servers' own processing and scheduling, a lower bound of what players see.
+- Pinning separates the cores, not the caches, memory bandwidth or the kernel's network work. On
+  a shared or virtual machine, other jobs disturb the runs: compare runs made on a quiet machine,
+  and repeat a run that looks off.
+- The load generator must not saturate its own cores, and against the Rust server it can: its TLS
+  handshakes cost about as much as the server's, so the connection ramps of 2026-10-03 ran it at
+  up to 189 % of its 200 %. Its own CPU is reported next to the server's ("load CPU %", "ramp load
+  CPU %", in % of one core), and it warns on stderr when that passes 85 % of the cores it may use:
+  then give it more CPUs (`--load-cpus`), since its queueing shows as server latency and caps the
+  rates. The tables below flag the steps it limited.
+- RSS overstates the Node.js server (shared pages counted in each process); PSS is the fairer
+  memory figure for it. "KiB/conn" divides the growth above the idle footprint by the open
+  connections; a garbage-collected heap makes it noisy at small steps.
+- The REST and login figures include TLS records but not handshakes (keep-alive connections).
+- Bench accounts have no password (they log in only with their tokens), so the login scenario
+  registers its own accounts first; their registration time is reported.
+- The bench clients answer the server's heartbeat but send no `Ping` of their own, and with the
+  sizes of `bench/run.sh` no game ends during a measurement window (a game of 80 plies lasts about
+  80 s at the default pace, longer than the warm-up and the window together): the game client's
+  pings and the churn of games (starts, ends, commits, rating updates) are not in the game
+  figures.
 
-| run | command | connected (failed) | conn/s | handshake p50 / p99 ms | Hello->Welcome p50 / p99 ms | server CPU per connection | server RSS per connection (V8 heap) | server RSS total | idle server CPU | heartbeat RTT p50 / p99 ms |
-|---|---|---|---|---|---|---|---|---|---|---|
-| 10k (2.1 GHz) | `--scenario connect --conns 10000 --hold-s 20` | 10,000 (0) | 810 | 299 / 827 | 79 / 266 | 1.8 ms | 61.5 KB (7.7) | 960 MB | 0.15 core | 1.4 / 13.4 |
-| 50k (2.1 GHz) | `--scenario connect --conns 50000 --hold-s 30` | 50,000 (0) | 569 | 942 / 3,834 | 73 / 1,655 | 2.6 ms | 53.6 KB (6.2) | 2,978 MB | 0.56 core | 5.3 / 162 |
-| 100k (2.1 GHz), 7 workers, 7 load processes | `--scenario connect --conns 100000 --hold-s 30 --max-run-s 950` | 100,000 (0) | 496 | 1,982 / 4,915 | 266 / 2,327 | 3.7 ms | 54.1 KB (5.8) | 5,836 MB | 1.07 cores | 4.7 / 61 |
-| 10k | `--scenario connect --conns 10000 --hold-s 20` | 10,000 (0) | 864 | 356 / 582 | 89 / 223 | 2.5 ms | 60.2 KB (8.1) | 947 MB | 0.27 core | 0.6 / 4.8 |
-| 10k, `LISTEN_REUSE_PORT` | `... --conns 10000 --hold-s 20 --reuse-port` | 10,000 (0) | 962 | 324 / 520 | 79 / 186 | 2.2 ms | 60.3 KB (7.3) | 947 MB | 0.29 core | 0.6 / 4.4 |
-| 10k, no TLS | `... --conns 10000 --hold-s 20 --plain` | 10,000 (0) | 2,320 | 162 / 260 | 6 / 30 | 1.2 ms | 17.8 KB (5.5) | 525 MB | 0.26 core | 0.3 / 2.0 |
-| 10k, TLS session resumption (96 % resumed) | `... --conns 10000 --hold-s 20 --tls-resume` | 10,000 (0) | 888 | 324 / 696 | 81 / 260 | 2.4 ms | 57.8 KB (7.5) | 919 MB | 0.29 core | 0.7 / 9.1 |
-| 20k (other processes 1.2-1.4 cores) | `... --conns 20000 --hold-s 40` | 20,000 (0) | 365 | 909 / 1,556 | 59 / 827 | 3.7 ms | 56.2 KB (7.5) | 1,453 MB | 0.35 core | 3.0 / 22.3 |
-| 20k, server heartbeat only (other processes 1-2.4 cores) | `... --conns 20000 --hold-s 40 --ping-interval-ms 0` | 20,000 (0) | 536 | 422 / 1,589 | 112 / 532 | 2.8 ms | 58.0 KB (7.3) | 1,491 MB | 0.17 core | - |
+### Reading the results
 
-"Server CPU per connection" is the server's CPU time during the ramp divided by the connections
-opened; it includes the heartbeats of the connections already open, which is why it grows with the
-count. The heartbeat RTT is measured by the clients and includes the load generator's own
-event-loop lag. The rows marked 2.1 GHz ran on the slower host (see above).
+Each report (`scacelith-bench` prints it on stdout, `--out` writes it) holds `tool`, `version`,
+`scenario`, `target`, `label`, `meta` (server version, password hash, CPUs), `settings`, `params`
+(the scenario's options) and one entry per step: `headline` (the figures of the Markdown table,
+in order) and `detail` (every counter, every latency summary in ms with `n`, `mean`, `p50`, `p90`,
+`p99`, `p999` and `max`, the server CPU and memory of the window, the load generator's own CPU
+under `loadGenerator`, failures by class).
+`scacelith-bench table FILE...` prints one Markdown table per scenario, one row per run and step.
 
-- **Connection rate: CPU-bound.** During every ramp the machine was 90-99 % busy: the server used
-  1.3-2.2 cores and the load generator 1.0-2.0 cores. A full TLS 1.3 handshake costs the server
-  about 1.1-1.3 ms of CPU (2.2-2.5 ms per connection with TLS against 1.2 ms without), and about
-  as much on the client side. The primary (control plane) used 0.1-0.35 core during the ramps
-  (presence registration, and with `LISTEN_REUSE_PORT=false` the accept and hand-off of every
-  connection: 0.18 core without SO_REUSEPORT against 0.11 core with it, at a similar rate).
-- **Memory: 54-62 KB of server RSS per idle connection**, of which 6-8 KB is V8 heap; without TLS
-  it is 18 KB, so the TLS state (OpenSSL objects and buffers) is about 40 KB per connection. The
-  client side costs about the same (7 load processes held 5.8 GB for 100,000 connections), so
-  100,000 connections used 11.6 GB of the 15.7 GB; about 120,000-130,000 would be the limit of this
-  box with both sides on it.
-- **Idle cost: about 11 µs of server CPU per connection per second** at 100,000 connections
-  (1.07 cores) with the server heartbeat and one client Ping every 10 s, i.e. four small TLS
-  records per connection per 10 s. The client Ping doubles it: 20,000 connections cost 0.35 core
-  with it and 0.17 core with the server heartbeat alone (`--ping-interval-ms 0`), so a client that
-  only answers the heartbeat costs about 5-6 µs per second. The game client pings at the interval
-  the server announces in `Welcome` (`CLIENT_PING_INTERVAL_MS`, 10 s by default, as in these runs).
-  No connection was dropped during any hold.
-- **TLS session resumption does not lower the cost of a connection** (2.4 ms of server CPU with
-  96 % of the sessions resumed, 2.5 ms without): a TLS 1.3 resumption still performs a key
-  exchange, so it saves little here.
+Error counters are named by cause: `fail.<class>` (a connection that did not complete: `timeout`,
+`tls`, `upgrade_503`, `refused_<ErrorCode>`...), `drop.<close code>` (a connection the server
+closed), `error.<status>` (an HTTP answer), `error.challenge_<code>`, `error.move_rejected_<code>`,
+`error.queue_<code>`, `error.server_<code>` (protocol `Error` messages), `error.match_timeout`,
+`error.start_timeout`.
 
-### Games at a realistic pace (`games`) and throughput (`burst`)
+Before comparing two figures, check in the same row that the load generator stayed below about
+170 % ("load CPU %") and that the server's CPU says which side was busy: a server below its 200 %
+with a busy load generator measured the load generator.
 
-| run | command | moves/s (quiet median) | move RTT p50 / p90 / p99 / max ms | quiet p99 ms | server move processing p50 / p99 µs | commit p99 ms | games ended /min | server / load gen cores | machine busy | shard lag p99 max ms |
-|---|---|---|---|---|---|---|---|---|---|---|
-| 1k games, 2k connections | `--scenario games --games 1000` | 998 (1,001) | 0.66 / 1.6 / 13.7 / 75 | 7.7 | 54 / 262 | 91 | 19 | 0.57 / 0.22 | 53 % | 17 |
-| 5k games, 10k connections | `--scenario games --games 5000 --warmup-s 20 --duration-s 90` | 4,867 (4,966) | 1.2 / 6.0 / 27.9 / 237 | 18.2 | 29 / 166 | 25 | 3,315 | 1.57 / 0.63 | 58 % | 36 |
-| 10k games, 20k connections | `--scenario games --games 10000 --warmup-s 20 --duration-s 90` | 9,472 (9,888) | 4.2 / 38.4 / 729 / 1,855 | 57.9 | 21 / 112 | 214 | 6,624 | 2.05 / 1.04 | 81 % | 443 |
-| 20k games, 40k connections | `--scenario games --games 20000 --warmup-s 15 --duration-s 60` | 15,551 (15,809) | 199 / 487 / 877 / 1,841 | 680 | 17 / 93 | 24 | 2,128 | 2.29 / 1.62 | 100 % | 406 |
-| 10k games, staggered starts (130 game ends/s) | `--scenario games --games 10000 --start-rate 125 --warmup-s 20 --duration-s 60` | 9,174 (9,502) | 22.8 / 118 / 244 / 478 | 128 | 20 / 142 | 24 | 7,809 | 2.14 / 1.15 | 95 % | 111 |
-| 10k games via the queue (disturbed: other processes 1.9 cores) | `--scenario games --via queue --games 10000 --warmup-s 20 --duration-s 60` | 6,786 (-) | 122 / 680 / 1,425 / 3,153 | - | 19 / 165 | 73 | 115 | 1.27 / 0.83 | 99 % | 565 |
-| burst, 100 games | `--scenario burst --games 100` | 13,088 (13,614) | 3.7 / 11.1 / 24.8 / 626 | 23.3 | 17 / 98 | 45 | 9,905 | 2.06 / 0.98 | 95 % | 31 |
-| burst, 100 games, no TLS | `--scenario burst --games 100 --plain` | 17,026 (20,250) | 2.3 / 9.1 / 23.8 / 88 | 19.2 | 15 / 95 | 24 | 12,930 | 2.06 / 0.90 | 93 % | 42 |
-| burst, 500 games | `--scenario burst --games 500` | 13,838 (19,443) | 18.2 / 49.7 / 116 / 3,550 | 66.6 | 15 / 87 | 181 | 10,471 | 1.71 / 1.02 | 87 % | 85 |
-| burst, 1000 games | `--scenario burst --games 1000` | 16,532 (19,198) | 38.4 / 89.1 / 150 / 299 | 126 | 15 / 89 | 25 | 12,291 | 2.07 / 1.23 | 99 % | 92 |
+### Where the results are
 
-Paced runs: 3+2 rated games by direct challenge, one move per second per game (+-50 %), started
-at 1,000 games/s. "Move RTT" is measured by the moving client from sending Move to receiving its
-own MoveMade (validation, clock, journal append, both players' frames); "server move processing"
-is the host's own time for one move. No move was rejected and no connection dropped in any run;
-the only errors were a few `AlreadyInGame` answers to a ChallengeAccept sent in the few
-milliseconds between a game's end and its commit (the load generator retries).
+The comparison's results are the `summary.md` files of the runs, committed under
+`bench/results/<date>/` with the machine they were measured on. A `--quick` run is only a check
+of the set-up (sizes of a few hundred clients, windows of a few seconds, and 600 accounts, too few
+for the cached GIF endpoint, which then reports `429`s): do not quote it.
 
-- **10,000 paced games started together**: the server keeps up, 9,500 moves/s with 2 server
-  cores, a median round trip of 2-4 ms and a p99 of 15-60 ms in steady state. The long tail of
-  that run (p99 729 ms over the whole window) comes from two events visible in its timeline: a
-  stall of the whole VM (every process, the load generator's sampling included, stopped for about
-  4 s) and the end-of-game wave (10,000 games started within 10 s all resigned 80 s later: about
-  1,000 game ends and new challenges per second for 10 s, round trip p50 30 ms, p99 300 ms).
-- **Game churn costs CPU too.** With `--start-rate 125` the games start over 80 s, so in the
-  measurement window about 130 games end (commit, rating update) and 130 start (challenge through
-  the primary, snapshots) every second, like a busy real server. The same 10,000 games then used
-  2.14 server cores for 9,200 moves/s and filled the machine (95 % with the load generator and
-  0.5 core of other processes): round trip p50 23 ms, p99 244 ms, max 478 ms, without the long
-  outliers of the synchronized run. From the difference, a game costs roughly 3 ms of server CPU
-  from challenge to commit, besides its moves.
-- **20,000 paced games saturate the machine**: 15,500 of the 20,000 intended moves per second, the
-  4 cores 100 % busy (server 2.3, load generator 1.6), round trip p50 200 ms, p99 880 ms. The
-  server's own move processing stays under 100 µs at p99: the limit is the CPU of the network path,
-  not the chess logic.
-- **Burst: 13,000-20,000 moves/s** with the server on about 2.1 cores (the rest goes to the load
-  generator). Without TLS the same load reaches 20,250 moves/s against 13,600 with TLS in quiet
-  windows (17,000 against 13,100 over the whole window): TLS is a quarter to a third of the
-  server's CPU per move.
-- **Where the shard CPU goes** (V8 profile of one of the 4 shards during the 10k paced run,
-  171 s, 52 % busy): 41 % in `writev` (TLS encryption of the outgoing records and the loopback TCP
-  send, called when `src/net/ws.js` uncorks a connection), 9 % stream plumbing, 7 % Node internals,
-  7 % `src/game`, 5 % `src/cluster` (router and bus), 5 % `src/store` (journal and commits), 4 %
-  `src/chess`, 3 % GC. The longest event-loop stalls were a 71 ms `writev` and 40-50 ms GC pauses.
-- **Relays**: a game is hosted by the shard of the player who created the challenge (or waited
-  longer in the queue), and the opponent's connection is on another shard 3 times out of 4 with 4
-  workers, so 35-51 % of the moves crossed the shard bus; 64-67 % in the staggered and 20k runs,
-  where the overloaded shards made the primary place new games on a third shard (see the notes
-  below).
-- **Latency outliers** besides CPU saturation: finished-game commits run synchronously on the
-  shard's event loop (`synchronous=FULL`, and a wait on the database write lock held by another
-  process, up to `busy_timeout` 5 s), with a p99 of 24-45 ms in most runs and 180-214 ms in two of
-  them; GC pauses of 40-50 ms in the profiled run.
+## Results of 2026-10-03
 
-### Gesture relay
+`bench/run.sh` with its defaults (`bench/results/2026-10-03_165735/summary.md`):
 
-The cost of the live gestures the server relays between the two players of a game (`Gesture`,
-[PROTOCOL.md](PROTOCOL.md#gesture-relay)): `--scenario games --games 1000 --tc 10+5
---move-interval-ms 5000 --max-plies 0 --workers 2 --start-rate 100 --warmup-s 30 --duration-s 150
---gesture-hz N`. That is 2,000 connections, 200 moves/s, no game ending in the window (no churn),
-and every player sending a head gesture (a slow look around) N times per second while in its
-game; the default `GESTURE_RATE` of 4 relays them all. Runs of 2026-09-30 on the 2.10 GHz host
-(the scrypt reference of SIZING.md took 0.42 s there), interleaved, keeping those in which the
-other processes of the machine used about one core or less:
+- Machine: a KVM guest with 4 vCPUs (Intel Xeon Processor @ 2.10 GHz), 15.7 GiB of RAM, Linux
+  6.18.44; the server on CPUs 0 and 1, the load generator on CPUs 2 and 3; `WORKERS=2`; TLS 1.3
+  with an ECDSA P-256 certificate, no resumption.
+- Rust: `scacelith-server` at commit b02f03b, `PASSWORD_HASH_CONCURRENCY=2` (whole server).
+- Node 26: Node.js v26.10.0 running the Node.js server at commit 7531830,
+  `PASSWORD_HASH_CONCURRENCY=1` per worker × 2.
+- Both: Argon2id with m = 64 MiB, t = 3, p = 4.
 
-| gestures per player per second | relayed per second | server cores | load generator cores | other processes, cores | server CPU per relayed gesture |
-|---|---|---|---|---|---|
-| 0 | 0 | 0.140 / 0.128 / 0.145 | 0.08-0.09 | 1.08 / 0.71 / 1.21 | |
-| 2 | 3,995 / 3,994 / 3,993 | 0.373 / 0.347 / 0.405 | 0.20-0.24 | 0.45 / 0.23 / 0.72 | 60 / 53 / 65 µs |
-| 4 | 7,976 / 7,973 | 0.546 / 0.487 | 0.28-0.32 | 0.34 / 0.52 | 52 / 44 µs |
+In the ratio columns, "×" is how many times better the Rust server does: its throughput over the
+Node.js server's, or the Node.js server's cost (CPU, memory, latency) over its own.
 
-The cost per gesture is the server CPU above the runs without gestures of the same series
-(0.134 cores for the first two columns, 0.145 for the third), divided by the gestures relayed per
-second: 44-65 µs, about 55 µs on average, for one small TLS record in, one out, the router, the
-host, and for half of the gestures a hop between the two workers over the bus. With 4 workers
-(three quarters of the gestures cross the bus) one run on a busy machine (3 cores of other
-processes) gave 0.158 cores without gestures and 0.601 at 4 Hz (7,824 relayed per second): 57 µs.
-Runs on a machine saturated by other processes (2.5-3.3 cores) are left out: they gave 36-58 µs,
-and at 4 Hz the load generator fell behind. The move round trip stayed at a p99 of 1-7 ms in the
-kept runs, and no gesture was dropped. Capacity with gestures: [SIZING.md](SIZING.md#gestures), and
-for a dedicated machine [below](#capacity-of-a-dedicated-machine).
+### Idle
 
-## What saturated first
+| | Rust | Node 26 | Ratio |
+|---|---:|---:|---:|
+| Time to ready | 24 ms | 434 ms | 18× |
+| Idle CPU (% of one core) | 1.10 | 2.15 | 2.0× |
+| RSS | 12.9 MiB | 242 MiB | 19× |
+| PSS | 11.2 MiB | 137 MiB | 12× |
+| Processes | 1 | 3 | |
 
-1. **CPU**, in every scenario, with the load generator taking 25-50 % of the same 4 cores: TLS
-   handshakes during the connection ramps (500-960 connections/s with TLS, 2,300 without), and the
-   TLS record writes of the moves and relays in the game scenarios (about 15,500 moves/s at a paced
-   load, 13,000-20,000 in burst).
-2. **Memory** next, for connections: about 55-60 KB of server RSS per idle TLS connection and as
-   much on the client side; 100,000 connections left 4 GB free on this 15.7 GB machine.
-3. The open-file limit (20,000 per process here) and the ephemeral ports (28,000 per source
-   address) were worked around by the tool (more workers, more load processes, one source address
-   each) and never limited a run. No run had a failed connection, a rejected move or a dropped
-   connection.
+A fresh database and an empty journal on both. The Node.js server starts a primary and two worker
+processes, each with its own V8 heap and its own copy of the code; the Rust server is one process.
 
-## Capacity of a dedicated machine
+### Connections
 
-Figures per server core, from the runs above (TLS on, both sides' kernel work on this machine, so
-take them as ±30 %):
+| server | step | open | handshakes/s | handshake p50 ms | handshake p99 ms | hello p99 ms | failed | dropped | idle CPU % | RSS MiB | KiB/conn RSS | KiB/conn PSS | ramp load CPU % |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| rust | 1000 conns | 1000 | 3444 | 36.4 | 95.2 | 59.9 | 0 | 0 | 1.33 | 61.6 | 49.6 | 33.2 | 142 |
+| rust | 5000 conns | 5000 | 5031 | 28.9 | 49.7 | 25.3 | 0 | 0 | 2.40 | 159 | 29.9 | 25.0 | 186 |
+| rust | 10000 conns | 10000 | 4253 | 33.3 | 68.6 | 32.5 | 0 | 0 | 3.66 | 258 | 25.0 | 22.5 | 189 |
+| node26 | 1000 conns | 1000 | 1107 | 162 | 236 | 20.2 | 0 | 0 | 3.06 | 306 | 68.9 | 60.2 | 56.9 |
+| node26 | 5000 conns | 5000 | 1467 | 128 | 162 | 16.0 | 0 | 0 | 4.73 | 476 | 48.6 | 46.6 | 70.4 |
+| node26 | 10000 conns | 10000 | 1448 | 126 | 186 | 19.2 | 0 | 0 | 6.86 | 643 | 41.4 | 40.4 | 77.8 |
 
-| cost | measured |
-|---|---|
-| new connection (TLS 1.3 full handshake, upgrade, Hello) | 2-2.7 ms of CPU (1.2 ms without TLS) |
-| idle connection (10 s server heartbeat + a client Ping every 10 s, the default `CLIENT_PING_INTERVAL_MS`) | about 11 µs of CPU per second (about half without the client Ping) |
-| move (validation, clock, journal, frames to both players, relays) | about 120-160 µs of CPU at a high rate (about 100-120 µs without TLS) |
-| game start and end (challenge through the primary, snapshots, commit, rating update) | about 3 ms of CPU per game (estimated from the staggered run) |
-| relayed gesture (a `Gesture` in from one player and out to the opponent, and a hop over the bus when the two players are on different workers) | 44-65 µs of CPU, about 55 µs |
-| password hash (login, registration, password change; not in the runs above) | 0.5-0.6 s of CPU and 128 MiB (scrypt N=2^17) on a thread-pool thread, at most `PASSWORD_HASH_CONCURRENCY` (1) at once per worker |
-| memory | 55-60 KB per idle connection, 65-85 KB with a game in progress, plus about 350 MB for the processes |
+From the ramps in the JSON reports (server CPU time over the connections opened in each ramp):
 
-For a dedicated 4-core, 16 GB machine running only the server (Linux, `nofile` raised,
-`WORKERS=4`), keeping the CPU under about 70 % for the latency:
+| step | Rust: server CPU during the ramp | Rust: CPU per new connection | Node 26: server CPU during the ramp | Node 26: CPU per new connection | Ratio |
+|---|---:|---:|---:|---:|---:|
+| 1,000 | 129 % | 0.38 ms | 190 % | 1.73 ms | 4.6× |
+| +4,000 | 178 % | 0.36 ms | 190 % | 1.31 ms | 3.7× |
+| +5,000 | 170 % | 0.40 ms | 195 % | 1.35 ms | 3.4× |
 
-- **Without gestures (`GESTURE_RATE=0`): about 100,000 connected players with 30,000-40,000
-  simultaneous blitz games.** 100,000 connections cost about 1.1 cores for their heartbeats (about
-  0.6 if the clients send no Ping of their own); 35,000 games at a 3+2 pace (one ply every 4-5 s
-  per game) are about 7,500 moves/s, i.e. about 1-1.2 cores, and about 90 games end and start per
-  second, about 0.3 core; total about 2-2.6 cores of 4, about 24 µs of CPU per second per connected
-  player. Memory: about 7.5 GB.
-- **With the gesture relay on (the default, `GESTURE_RATE` 4): about 35,000-44,000 connected
-  players with 12,000-15,000 games, or fewer.** The game client sends a gesture at least once a
-  second for the whole game, even while its player sits still, and up to `GESTURE_RATE` per second
-  while the player looks around or moves a piece; the server spends 44-65 µs of CPU relaying each
-  one. Call r the gestures a player in a game sends per second: while the relay is on it lies
-  between about 1 and `GESTURE_RATE`, and only production shows where
-  ([SIZING.md](SIZING.md#gestures)). With 70 % of the players in a game as above, the gestures add
-  0.7 × r × 55 = about 39 × r µs per second per connected player to the 24 µs without them, so the
-  same 2-2.6 cores hold 24 / (24 + 39 × r) of the players: about 38,000 (35,000-44,000 over the
-  measured cost of a gesture) at r = 1, when every player in a game sits still, and about 13,500
-  (12,000-16,000, with 4,000-6,000 games) at r = 4, when every player in a game sends the default
-  rate all the time. At 100,000 players with 35,000 games the gestures alone would take 3-4.5 more
-  cores at r = 1, beyond the machine. SIZING.md's factor for its mix M1 with the 10 s ping,
-  1 / (1 + r), is higher: fewer players in a game (60 %) send gestures, and a player costs more
-  there without them, through moves that cost more at the lower move rate per worker of a small
-  VPS and the fixed costs of the processes (about 23 % of the CPU there).
-- **Without gestures, the first hard limits beyond that are memory (about 150,000-180,000 TLS
-  connections in 16 GB) and the reconnection storm after a restart**: at 2-2.7 ms per
-  handshake, 4 cores accept about
-  1,500-2,000 connections/s, so 100,000 players need about a minute to come back, after a graceful
-  restart as after a crash. The game client spreads that wave: after a shutdown its first attempt
-  waits a random 5 to 35 s, later attempts use full jitter (a random delay between 0.5 s and
-  min(30 s, 2 s x 2^n)), a full server is tried again after 60 to 120 s, and for 10 minutes after
-  losing a connection that had reached `Welcome` the automatic attempts skip the `/api/v1/info`
-  request (one TLS handshake per player instead of two), after a graceful shutdown too: the server
-  id in the `101` answer of the upgrade still tells the client that a restart brought another
-  server (a reinstall) before it sends its session. Players with
-  a game in progress wait 8 s at most between attempts, so that part of the wave stays
-  concentrated. During the storm each worker keeps at most
-  `MAX_PENDING_HANDSHAKES` (128) handshakes in flight and closes the extra connections before any
-  TLS work, so the handshakes it starts finish in time and the refused clients come back later;
-  the kernel queue in front of it is `LISTEN_BACKLOG` (2048), capped by `net.core.somaxconn`.
-  Games in progress give both players `RECOVERY_GRACE_MS` (90 s) to come back, instead of the
-  normal grace of 15 to 60 s, and the clock of the side to move stays stopped until that player
-  is back, `RECOVERY_CLOCK_HOLD_MS` (20 s) at most. On a small machine (2 cores at 2.4 GHz,
-  2.5-3.5 ms per full handshake) 10,000 players need about 30 s of CPU, 15 s on its two cores, to
-  reconnect, after a graceful restart as after a crash: inside the recovery grace, but without the
-  handshake limit every handshake waited for all the others, and a capacity study lost 32 % of a
-  10,000-client herd to the clients' 10 s deadline. A discrete-event model of the wave (not a
-  measurement: the client's delays above, 128 handshake slots per worker, these handshake costs,
-  70 % of the players in a game, 5 s of downtime) brings every player with a game in progress
-  back within the 20 s clock hold on that small machine (99 % within 13-17 s). For 100,000 players
-  on 4 cores only 35-47 % of them are back within the hold (half after 21-30 s, the last after
-  about a minute, all within the 90 s grace): there a player to move loses on their clock the part
-  of their reconnection time beyond the hold, 7-13 s on average over all of them (those back in
-  time lose nothing) and up to about 45 s.
-- The chess logic is not a concern (under 100 µs per move at p99); the primary is not on the move
-  path (under 0.3 core in every run, 0.1-0.35 core during the connection ramps).
+- **What limited each step.** The Node.js server was saturated in every ramp (190-195 % of its
+  200 %) while its load generator idled (57-78 %). Against the Rust server it was the other way:
+  the load generator ran at 186-189 % of its 200 % in the 5,000 and 10,000 steps, with the server
+  at 170-178 %, so those handshake rates are the load generator's ceiling, not the server's. The
+  1,000 step ramps in 0.29 s, too short for a steady figure. The cost per connection is the fair
+  comparison: about 0.36-0.40 ms of server CPU for the Rust server against 1.3-1.7 ms, 3.4 to 4.6
+  times less, so the Rust server would take about 5,000-5,500 handshakes per second on these
+  2 vCPUs with nothing else to do (inferred).
+- **Handshake latency** is queueing at the 200 handshakes the load generator keeps in flight:
+  200 ÷ 5,031 per second is 40 ms, 200 ÷ 1,467 is 136 ms, close to the medians.
+- **`Hello` latency** is higher for the Rust server (p99 25-60 ms against 16-20 ms): the
+  `Welcome` is read by a load generator running near its own limit, whose scheduling delays add
+  to it (inferred); in the Node.js runs the slow server kept the load generator idle.
+- **Memory per connection** at 10,000 connections: 25.0 against 41.4 KiB of RSS (1.7×), 22.5
+  against 40.4 KiB of PSS (1.8×).
+- **Idle connections** cost 2.6 µs per second each above the idle process (3.66 % of a core with
+  10,000), the server's heartbeat once per 10 s; the Node.js server 4.7 µs (1.8×).
+- No connection failed or was dropped.
 
-A machine with more cores scales about linearly with `WORKERS` for moves and idle connections (a
-game lives on one shard; relays between shards cost part of the CPU above), with two shared
-resources to watch: the primary (presence, challenges, matchmaking) and the single SQLite writer
-(every shard commits finished games to the same database file).
+### Games
 
-[SIZING.md](SIZING.md) applies these costs to a small VPS of 2 or 4 vCores, with the memory, disk,
-restart and settings figures that go with it.
+| server | step | live games | moves/s | move relay p50 ms | move relay p99 ms | move confirm p99 ms | gestures/s | gesture p50 ms | gesture p99 ms | errors | CPU % | RSS MiB | load CPU % |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| rust | 100 games | 100 | 103 | 0.19 | 0.54 | 0.52 | 2000 | 0.18 | 0.57 | 0 | 11.7 | 19.5 | 11.8 |
+| rust | 500 games | 500 | 507 | 0.20 | 0.89 | 0.82 | 9999 | 0.20 | 0.78 | 0 | 32.9 | 53.1 | 36.0 |
+| rust | 1000 games | 1000 | 1019 | 0.27 | 1.74 | 1.78 | 19997 | 0.29 | 1.62 | 0 | 55.9 | 82.1 | 59.8 |
+| node26 | 100 games | 100 | 102 | 0.37 | 8.32 | 8.13 | 1999 | 0.31 | 9.34 | 0 | 40.9 | 305 | 13.0 |
+| node26 | 500 games | 500 | 505 | 0.44 | 15.7 | 17.2 | 9995 | 0.47 | 16.3 | 0 | 90.4 | 374 | 36.2 |
+| node26 | 1000 games | 1000 | 1013 | 1.00 | 36.4 | 41.5 | 20006 | 1.10 | 36.4 | 0 | 129 | 508 | 64.6 |
 
-## Server behaviours seen in these runs
+| step | CPU | move relay p99 | gesture relay p99 | RSS |
+|---|---:|---:|---:|---:|
+| 100 games | 3.5× | 15× | 16× | 16× |
+| 500 games | 2.7× | 18× | 21× | 7.0× |
+| 1,000 games | 2.3× | 21× | 22× | 6.2× |
 
-- **Game placement under overload.** A new game goes to the creator's shard unless that shard
-  reports overload (`SHARD_OVERLOAD_LAG_MS`, event-loop p99 above 50 ms); then the primary picks
-  the shard with the fewest games in the last `shard.load` report (sent every 2 s), and every game
-  created before the next report goes to that same shard. On a busy machine every shard's p99 lag
-  hovers around 50 ms (a single 40-50 ms GC pause is enough), so the flag flips from report to
-  report: in the burst 1000 run one shard hosted 433 games against 159-199 for the others, in the
-  staggered run 3,447 against 1,935-2,270, with `--via queue` 3,414 against 1,831-2,470. The moved
-  games usually have no local player, so 64-67 % of the moves crossed the bus instead of 35-41 %,
-  and the "overloaded" shard keeps its connections (the TLS and socket work, most of its CPU)
-  anyway. With `--server-env SHARD_OVERLOAD_LAG_MS=5000` the same runs placed 210-276 and
-  2,322-2,522 games per shard and relayed 39 % and 33 % of the moves (rows below; the machine was
-  busier during those two runs, so their latencies are not comparable).
-  Since these runs the default threshold is 250 ms, and the primary counts the games it places
-  between two reports, so a burst of new games is spread over the shards still eligible (a
-  staggered run with that counting placed 2,437 / 2,522 / 2,460 / 2,396 games).
+- The load is mostly gestures: 10 per second per player, two and a half times the default
+  `GESTURE_RATE`, so 20,000 relayed gestures per second at 1,000 games, against one ply per second
+  per game. The CPU ratio narrows with the load, as the Node.js server's fixed costs weigh less
+  at 1,000 games (inferred).
+- **What limited each step.** Neither server was CPU-bound: the Rust server used at most 56 % of
+  its 200 %, the Node.js server 129 %, and the load generator at most 65 %. The Node.js server's
+  tail latency comes from its shard processes, each a single event loop that a burst of work or a
+  garbage collection holds up (inferred); the Rust server's runtime threads serve any connection,
+  and its p99 stayed under 2 ms.
+- Memory: 82 MiB for 2,000 players in games against 508 MiB.
+- No move was rejected and no game failed to start.
 
-| run | command | games per shard | moves relayed | moves/s | move RTT p50 / p99 ms | other processes |
-|---|---|---|---|---|---|---|
-| burst 1000 | `--scenario burst --games 1000` | 195 / 199 / 159 / 433 | 41 % | 16,532 | 38 / 150 | 0.67 core |
-| burst 1000, threshold 5 s | `... --server-env SHARD_OVERLOAD_LAG_MS=5000` | 240 / 276 / 210 / 253 | 39 % | 10,937 | 58 / 227 | 1.44 cores |
-| 10k staggered | `--scenario games --games 10000 --start-rate 125 --warmup-s 20 --duration-s 60` | 2,270 / 3,447 / 1,935 / 2,211 | 64 % | 9,174 | 23 / 244 | 0.5 core |
-| 10k staggered, threshold 5 s | `... --server-env SHARD_OVERLOAD_LAG_MS=5000` | 2,522 / 2,456 / 2,322 / 2,506 | 33 % | 7,057 | 182 / 893 | 1.53 cores |
+### Matchmaking
 
-- **Commits on the event loop.** During these runs a shard committed its finished games with a
-  synchronous SQLite transaction (`synchronous=FULL`) that may also wait for the write lock of
-  another process; the shard's players waited meanwhile (commit p99 up to 214 ms). The commits now
-  run on a writer thread per shard (`src/store/writer.js`); a 10k staggered run through it
-  committed 15,676 rated games with no error, but its effect on latency was not measured (the host
-  was too busy to compare).
-- **TLS writes.** A quarter to a third of the CPU per move and 40 of the 55-60 KB per connection are
-  TLS; `writev` on uncork (`src/net/ws.js`) is the largest item of the shard profile.
+| server | step | connected | match p50 ms | match p90 ms | match p99 ms | match max ms | makespan ms | unmatched | CPU % |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| rust | 200 players | 200 | 240 | 248 | 248 | 249 | 246 | 0 | 5.60 |
+| rust | 1000 players | 1000 | 219 | 227 | 231 | 237 | 248 | 0 | 21.9 |
+| node26 | 200 players | 200 | 219 | 252 | 252 | 268 | 225 | 0 | 13.0 |
+| node26 | 1000 players | 1000 | 207 | 266 | 274 | 296 | 254 | 0 | 29.4 |
 
-## Going further
+Both servers pair a whole burst in one round: every makespan is about one `MATCH_TICK_MS`
+(250 ms; 225-254 ms). The time to a game is the wait for the next pairing round, so the differences between
+the servers (p50 207-240 ms) are the phase of the tick, not their speed. The Rust server used 2.3
+and 1.3 times less CPU for the bursts (5.6 against 13.0 %, 21.9 against 29.4 %).
 
-- **Give the server the whole machine**: run the load generator on other machines with `--url`,
-  `--tokens` (one slice of the accounts per machine) and `--metrics`. On the same machine 25-50 %
-  of the CPU went to the clients in the saturated runs.
-- **More workers**: `WORKERS` = the number of cores, with `LimitNOFILE` (systemd) or `ulimit -n`
-  above the connections per worker (this container's 20,000 forced 7 workers on 4 cores for
-  100,000 connections). `MAX_CONNECTIONS` is 200,000 by default.
-- **`LISTEN_REUSE_PORT=true`** (Linux): every worker accepts on its own socket and the kernel spreads
-  the connections; the primary no longer accepts and hands out every connection (its CPU during
-  the 10k ramp went from 0.18 to 0.11 core, 962 against 864 connections/s, within the noise of this
-  host). Worth it for high connection rates.
-- **TLS offload**: with `TLS_MODE=proxy` a reverse proxy (HAProxy, nginx) terminates TLS. On a
-  separate machine it removes a quarter to a third of the server's CPU per move, half of the CPU
-  of a new connection and about 40 KB per connection (the `--plain` rows); on the same machine it
-  only moves that cost to the proxy (not measured here).
-- **`SHARD_OVERLOAD_LAG_MS`** (250 ms by default, 50 ms during the runs above): on a machine that
-  runs near its CPU limit, raise it further so that games stay on the creator's shard (see above).
-- **Heartbeat**: `HEARTBEAT_INTERVAL_MS` 10 s -> 20 s halves the server's share of the idle cost,
-  at the price of a slower detection of dead connections (`HEARTBEAT_TIMEOUT_MS`).
-- **Kernel settings** for 100,000+ sockets: `fs.nr_open` and `LimitNOFILE`, `net.core.somaxconn`
-  (4096 here; it caps `LISTEN_BACKLOG`) and `net.ipv4.tcp_max_syn_backlog` (8192) for the
-  reconnection storms, `net.ipv4.ip_local_reserved_ports` for a server port inside the ephemeral
-  range (32768-60999: a custom port such as 44664, not the default 443; a restart can fail with
-  `EADDRINUSE` otherwise; README, kernel settings),
-  `net.ipv4.tcp_mem` and the socket buffer defaults, and on the load machines
-  `net.ipv4.ip_local_port_range` or several source addresses.
-- **`MAX_PENDING_HANDSHAKES`** (128 per worker): enough to keep a core busy with handshakes (at
-  1-3.5 ms each, 128 in flight are 0.1-0.5 s of work) while every started handshake finishes long
-  before a client's deadline. A higher value only helps when the clients are far away (each
-  handshake then waits for round trips, not for the CPU). While a worker sheds load it also sets
-  the rate of new TLS connections let through (half of it per second and per worker). A worker
-  sheds for up to 5 s after an upgrade was refused because the server is full (`MAX_CONNECTIONS`
-  plus a reserve of max(16, 2 %) connections, kept for players with a game in progress), or while
-  it holds 1.2 times its share of `MAX_CONNECTIONS`; at `MAX_CONNECTIONS` itself it does not, and
-  each newcomer completes the handshake and the upgrade before its `ServerFull` at login
-  (`scacelith_ws_hello_total{result="server_full"}`).
-  `MAX_PENDING_HANDSHAKES_PER_IP` (4 per worker for one IPv4 address or IPv6 /48) only matters
-  when many players share one address: raise it for a school or a company network, keeping it
-  well below `MAX_PENDING_HANDSHAKES` (DESIGN.md 5.8).
-- **Several machines**: DESIGN.md section 9 (shard ranges with `SHARD_BASE`, a TCP bus between
-  machines, the control plane as a service, a PostgreSQL store, a layer-4 load balancer in front).
-- **Profiling**: `--server-cpu-prof DIR` and `node bench/profile-summary.js DIR/*.cpuprofile`
-  (`--callers FUNCTION` shows who calls a hot function, `--stalls N` the longest event-loop stalls).
+### REST
+
+| server | step | conns | req/s | p50 ms | p90 ms | p99 ms | max ms | errors | CPU % | RSS MiB | load CPU % |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| rust | info | 32 | 50391 | 0.60 | 0.87 | 1.30 | 24.6 | 0 | 186 | 21.4 | 86.2 |
+| rust | leaderboard | 32 | 73675 | 0.41 | 0.60 | 0.89 | 34.2 | 0 | 182 | 22.8 | 115 |
+| rust | pgn | 32 | 7410 | 3.49 | 8.83 | 11.6 | 20.8 | 0 | 178 | 44.2 | 18.3 |
+| rust | gif-cold | 4 | 213 | 18.2 | 22.3 | 26.4 | 36.9 | 0 | 197 | 153 | 3.33 |
+| rust | gif-cached | 32 | 12130 | 2.53 | 3.30 | 4.67 | 22.8 | 0 | 192 | 183 | 86.8 |
+| node26 | info | 32 | 38012 | 0.76 | 1.17 | 2.03 | 30.1 | 0 | 197 | 417 | 71.8 |
+| node26 | leaderboard | 32 | 39680 | 0.73 | 1.10 | 1.97 | 23.5 | 0 | 196 | 420 | 71.8 |
+| node26 | pgn | 32 | 3480 | 5.06 | 20.2 | 53.8 | 210 | 0 | 130 | 477 | 10.2 |
+| node26 | gif-cold | 4 | 97.6 | 39.4 | 49.7 | 68.6 | 93.6 | 0 | 198 | 670 | 1.73 |
+| node26 | gif-cached | 32 | 9389 | 3.10 | 4.93 | 8.00 | 39.3 | 0 | 197 | 746 | 63.3 |
+
+| endpoint | answer size | requests/s | Rust: CPU per request | Node 26: CPU per request | CPU ratio |
+|---|---:|---:|---:|---:|---:|
+| `info` | 951 B | 1.33× | 37 µs | 52 µs | 1.4× |
+| `leaderboard` | 71 B | 1.86× | 25 µs | 49 µs | 2.0× |
+| `pgn` (40 plies) | 2,084 B | 2.13× | 240 µs | 374 µs | 1.6× |
+| `gif-cold` (40 plies, medium) | 114 KB | 2.18× | 9.2 ms | 20.3 ms | 2.2× |
+| `gif-cached` | 112 KB | 1.29× | 158 µs | 210 µs | 1.3× |
+
+- **What limited each step.** The server's CPU in every window (178-198 % of its 200 %), except
+  the Node.js server's `pgn` window, where it used only 130 %: something else held it back, not
+  investigated. The load generator stayed at or below 115 %.
+- The leaderboard was empty (a 71-byte answer: the bench accounts are all provisional, and the
+  leaderboard leaves provisional ratings out), so that row measures the request path, not the
+  building of a leaderboard.
+- The cold GIFs ran on the 2 render threads of each server; the Rust renderer draws the same
+  pictures as the Node.js one, byte for byte, in 0.45 of its CPU time. The Rust server's RSS rose
+  from 44 to 153 MiB during that window: 2 render threads and the 64 MiB GIF cache, which the
+  cold requests fill.
+- The cached GIFs moved about 1.35 GB/s (12,130 per second × 112 KB) over loopback.
+
+### Login
+
+| server | step | conns | req/s | p50 ms | p90 ms | p99 ms | max ms | errors | CPU % | RSS MiB | load CPU % | register s |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| rust | login | 8 | 11.7 | 680 | 713 | 745 | 748 | 0 | 197 | 97.9 | 0.25 | 1.36 |
+| node26 | login | 8 | 8.70 | 827 | 1196 | 1327 | 1370 | 0 | 195 | 388 | 0.15 | 2.45 |
+
+Both servers hashed 2 passwords at a time with both cores busy, so the figure is the cost of one
+Argon2id hash: 0.168 s of CPU per login for the Rust server (197 % ÷ 11.7 per second), 0.224 s for
+the Node.js server, 1.34 times more logins per second. The latency is the queue: 8 logins in
+flight for 2 hash slots of about 0.17 s each give the Rust server's 680 ms. The Node.js server's
+wider spread (p99 1.33 s) fits its two queues, one per worker, which a login joins by the worker
+its connection reached (inferred). Registering the 16 accounts took 1.36 against 2.45 s.
+
+### Games at a realistic pace (Rust)
+
+Two runs of the Rust server alone, after the comparison, on the same machine:
+
+```sh
+bench/run.sh --targets rust --scenarios games -- --steps 1000,4000,8000 --move-interval-ms 5000 --gesture-hz 1
+bench/run.sh --targets rust --scenarios games -- --steps 1000,4000,8000 --move-interval-ms 5000 --gesture-hz 4
+```
+
+The side to move thinks 5 s +-50 %, so a game makes one ply every 5 s (each player moves about
+every 10 s), as in a 3+2 blitz game. One gesture per second per player is what calm players send
+with the default `GESTURE_IDLE_MS`, four what players who move all the time send at the default
+`GESTURE_RATE`. A game of 80 plies lasts about 400 s, so no game ended during a window. Each step
+stops its games before the next one starts (`bench/results/2026-10-03_171401_rust-games-3+2-pace-1-gesture-hz/`
+and `2026-10-03_171716_rust-games-3+2-pace-4-gesture-hz/`).
+
+| gestures per player per second | step | moves/s | gestures/s | move relay p50 ms | move relay p99 ms | gesture p99 ms | CPU % | RSS MiB | load CPU % |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1,000 games | 205 | 2000 | 0.19 | 0.98 | 0.92 | 14.7 | 91.6 | 13.3 |
+| 1 | 4,000 games | 808 | 7999 | 0.21 | 0.82 | 0.98 | 38.3 | 230 | 35.8 |
+| 1 | 8,000 games | 1610 | 16001 | 0.29 | 1.39 | 1.46 | 64.1 | 409 | 58.7 |
+| 4 | 1,000 games | 205 | 8000 | 0.20 | 1.04 | 1.04 | 30.6 | 97.0 | 29.9 |
+| 4 | 4,000 games | 808 | 32005 | 0.40 | 5.06 | 5.18 | 91.8 | 231 | 85.6 |
+| 4 | 8,000 games | 1608 | 63996 | 1.26 | 114 | 114 | 171 | 408 | 156 |
+
+- **The cost of a gesture.** Between the two runs only the gestures change. At 4,000 games,
+  (91.8 − 38.3) % of a core for 24,006 more gestures per second is 22.3 µs per relayed gesture;
+  at 8,000 games, 22.4 µs (26.4 µs at 1,000 games, where the fixed costs weigh more).
+- **The rest of a game.** A linear fit of the 4,000- and 8,000-game steps of both runs gives
+  0.124 core + 19.9 µs per game per second + 22.4 µs per gesture (within 0.2 % of the four
+  steps); with the 1,000-game steps too, 0.097 core + 23.7 µs + 22.4 µs. So a game without its
+  gestures, at this pace, costs 20-24 µs per second: its plies and the server's heartbeat to both
+  players.
+- **Memory.** 22.7-23.6 KiB more RSS per extra connection between the steps.
+- **Latency.** With one gesture per second the p99 stayed at or below 1.4 ms up to 64 % of one
+  core. With four, it was 1.0 ms at 15 % of the 2 vCPUs, 5.1 ms at 46 % and 114 ms at 86 %.
+- **What limited each step.** None of the one-gesture steps. At four gestures and 8,000 games the
+  server was near saturation (171 % of its 200 %) and the load generator at 156 % (78 % of its
+  2 vCPUs, below its warning): part of the 114 ms may be its own queueing (inferred).
+
+### What limited each step
+
+| scenario | step | Rust server | Node 26 server |
+|---|---|---|---|
+| connections | 1,000 | a ramp of 0.29 s (server 129 %, load generator 142 %) | server CPU (190 %) |
+| connections | 5,000, 10,000 | **the load generator** (186-189 % of its 200 %); server 170-178 % | server CPU (190-195 %) |
+| games | all | nothing (server at most 56 %, load generator at most 60 %) | no CPU limit (at most 129 %); tail latency from its event loops (inferred) |
+| matchmaking | all | `MATCH_TICK_MS` | `MATCH_TICK_MS` |
+| rest | all | server CPU (178-197 %) | server CPU (196-198 %), except `pgn` (130 %, cause not identified) |
+| login | | the 2 hash slots, server CPU (197 %) | the same (195 %) |
+| games at a realistic pace | 8,000 games, 4 gestures per player per second | server CPU near saturation (171 %), load generator at 156 % | |
+
+### Summary
+
+Per unit of server CPU, on these 2 vCPUs, the Rust server relays 2.3 to 3.5 times the game
+traffic of the Node.js server on Node 26, opens 3.4 to 4.6 times the connections, serves 1.3 to
+2.2 times the API requests and 1.34 times the logins (the hash dominates). It needs 1.7 to 1.8
+times less memory per connection, 6 times less with 1,000 games in progress and 19 times less at
+idle, and its tail latency on the move and gesture relay is 15 to 22 times lower.

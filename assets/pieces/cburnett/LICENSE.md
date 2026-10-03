@@ -13,7 +13,7 @@ unchanged. lichess lists the set, its author and its licence in its `COPYING.md`
 
 > public/piece/cburnett | Colin M.L. Burnett | GPLv2+
 
-The dedicated server (GPL-3.0-or-later, see `dedicated-server/package.json`) rasterizes them in
-`src/gif/pieces.js` to draw the boards of the animated GIFs of games (`src/gif/render.js`).
+The dedicated server (GPL-3.0-or-later, see `dedicated-server/Cargo.toml`) embeds them and
+rasterizes them in `crates/gif/src/pieces.rs` to draw the boards of the animated GIFs of games.
 GPLv2+ material may be combined with GPL-3.0-or-later code; the combination is distributed under
 the GPL version 3 or later.
