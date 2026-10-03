@@ -1,0 +1,43 @@
+# cargo-deny (https://embarkstudios.github.io/cargo-deny/): the dependencies' security advisories,
+# licences and sources, checked by the CI (`cargo deny check`).
+
+[graph]
+# The only target the server is built and shipped for (glibc for development, musl for releases).
+targets = ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"]
+all-features = true
+
+[advisories]
+# Every RustSec advisory fails the check, unmaintained crates included, until the dependency is
+# updated or the advisory is listed here with the reason it does not apply.
+unmaintained = "all"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Licences compatible with the server's GPL-3.0-or-later (the workspace's own crates are not
+# published and are left out).
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

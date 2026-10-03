@@ -1,0 +1,55 @@
+# Dependabot version updates: the crates (Cargo.toml, Cargo.lock), the Rust toolchain
+# (rust-toolchain.toml) and the GitHub Actions of .github/workflows, pinned by commit SHA with the
+# version in a comment, which it updates together. Security updates are not delayed by the
+# cooldowns below; every update goes through the CI (tests, cargo-deny, the game's live tests).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    # A new release is only proposed once it is a week old (a compromised release is usually
+    # found and yanked within days), a new major version once it is two weeks old.
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+    # Minor and patch updates of the whole tree in one pull request; each major update in its own.
+    groups:
+      crates:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
+    open-pull-requests-limit: 10
+
+  # The toolchain the server is built and tested with; `rust-version` in Cargo.toml (the minimum)
+  # is raised by hand when the code starts to need a newer one.
+  - package-ecosystem: rust-toolchain
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: toolchain
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: ci
+    open-pull-requests-limit: 5

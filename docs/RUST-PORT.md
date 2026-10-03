@@ -89,10 +89,12 @@ scacelith-chess-server/
   assets/                 GIF fonts and piece set (embedded at build time)
   test/fixtures           shared vectors (Elo, protocol, chess cross-check, the server's PGN files);
                           the game keeps copies of the Elo and protocol vectors and of the PGN files
-  tools/                  generator of the chess cross-check vectors (C++)
+  tools/                  chess cross-check generator (C++), interop check, live-check, rest-diff
   bench/                  benchmark harness (docs/BENCHMARK.md)
   deploy/systemd          example unit and its companion files (docs/DEPLOY.md)
   docs/                   DESIGN, API, PROTOCOL, CONFIG, DEPLOY, SIZING, ANTICHEAT, BENCHMARK, RUST-PORT
+  deny.toml               cargo-deny: advisories, licences, sources
+  .github/                CI, release and CodeQL workflows, Dependabot
 ```
 
 Server modules (`crates/server/src`):
@@ -400,4 +402,4 @@ struct of the services it needs (config, store, auth, report desk, GIF service, 
 * Exit codes: 0 success, 1 failure, 2 usage.
 * Release build: static `x86_64-unknown-linux-musl` binary ([DEPLOY.md](DEPLOY.md), section 1),
   GPL-3.0-or-later, its source in this repository; the release workflow
-  (`.github/workflows/release.yml`) builds it and attests its provenance.
+  (`.github/workflows/release.yml`) builds it, writes its SBOM and attests both.

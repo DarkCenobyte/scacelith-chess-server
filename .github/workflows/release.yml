@@ -1,0 +1,247 @@
+# Release: on a version tag (v0.9.0, v1.0.0-rc.1, ...), the CI runs again on the tagged commit,
+# the static server is built from scratch (no cache) as docs/DEPLOY.md builds it, its build
+# provenance and its SBOM (CycloneDX) are attested (actions/attest) and a GitHub release is
+# published with the files. A manual run builds the branch or tag it is started on; it publishes
+# only from a tag and when asked to, and otherwise keeps the files as workflow artifacts (a dry
+# run).
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the GitHub release (run from a tag only)
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the version and check the tag
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          PUBLISH_INPUT: ${{ github.event_name == 'push' || inputs.publish }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Cargo.toml gives '$version', not a SemVer version"
+            exit 1
+          fi
+          publish=false
+          if [[ "$REF_TYPE" == tag ]]; then
+            if [[ "$REF_NAME" != "v$version" ]]; then
+              echo "::error::tag $REF_NAME does not match the version in Cargo.toml (v$version)"
+              exit 1
+            fi
+            publish=$PUBLISH_INPUT
+          elif [[ "$PUBLISH_INPUT" == true ]]; then
+            echo "::error::a release is only published from a tag (this run is on $REF_NAME)"
+            exit 1
+          fi
+          prerelease=false
+          [[ "$version" == *-* ]] && prerelease=true
+          {
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "Version $version (pre-release: $prerelease, publish: $publish)" >> "$GITHUB_STEP_SUMMARY"
+
+  ci:
+    name: CI
+    needs: version
+    permissions:
+      contents: read
+    uses: $/.github/workflows/ci.yml
+
+  build:
+    name: Static release build
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the musl C compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Install the toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2.87.23
+        with:
+          tool: cargo-cyclonedx@0.5.9
+
+      # A clean build, as docs/DEPLOY.md makes it.
+      - name: Build
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked -p scacelith-server --target "$TARGET"
+
+      - name: Check the binary
+        run: |
+          bin="target/$TARGET/release/scacelith-server"
+          file "$bin"
+          file "$bin" | grep -Eq 'statically linked|static-pie linked'
+          "$bin" version
+          "$bin" version | grep -qF "$VERSION"
+
+      # The dependencies compiled into the server (CycloneDX 1.5, JSON).
+      # (Without SOURCE_DATE_EPOCH: with it, cargo-cyclonedx leaves out the serial number, which
+      # actions/attest needs to recognise a CycloneDX document.)
+      - name: SBOM
+        run: |
+          cargo cyclonedx --manifest-path crates/server/Cargo.toml --format json --spec-version 1.5 \
+            --target "$TARGET" --override-filename sbom
+          jq -e '.bomFormat == "CycloneDX" and .serialNumber and .specVersion' crates/server/sbom.json
+
+      # The archive holds the server, its licence, the README and what docs/DEPLOY.md installs it
+      # with (the configuration template and reference, the systemd files).
+      - name: Package
+        env:
+          COMMIT: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          name="scacelith-server-$VERSION-x86_64-linux-musl"
+          stage=$(mktemp -d)
+          dir="$stage/$name"
+          mkdir -p "$dir/docs" dist
+          cp "target/$TARGET/release/scacelith-server" LICENSE README.md .env.example "$dir/"
+          cp docs/DEPLOY.md docs/CONFIG.md "$dir/docs/"
+          cp -r deploy "$dir/"
+          cat > "$dir/BUILD.txt" <<EOF
+          scacelith-server $VERSION, static x86-64 Linux build ($TARGET)
+          Source: $REPOSITORY ($REF_NAME, commit $COMMIT)
+          Install: docs/DEPLOY.md. Check this download with the GitHub CLI:
+            gh attestation verify $name.tar.gz --repo $GITHUB_REPOSITORY
+          EOF
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" \
+            -C "$stage" -cf - "$name" | gzip -9n > "dist/$name.tar.gz"
+          cp "target/$TARGET/release/scacelith-server" "dist/$name"
+          cp crates/server/sbom.json "dist/scacelith-server-$VERSION.cdx.json"
+          (cd dist && sha256sum -- * > SHA256SUMS)
+          {
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the release files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-files
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  attest:
+    name: Attest the build provenance and the SBOM
+    needs: [version, build]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # the OIDC token that Sigstore signs the attestations with
+      attestations: write # to store the attestations in the repository
+    steps:
+      - name: Download the release files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-files
+          path: dist
+
+      - name: Attest the build provenance of the archive and the binary
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/scacelith-server-*-x86_64-linux-musl
+
+      - name: Attest the SBOM of the binary
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/scacelith-server-*-x86_64-linux-musl
+          sbom-path: dist/scacelith-server-${{ needs.version.outputs.version }}.cdx.json
+
+  publish:
+    name: Publish the GitHub release
+    needs: [version, ci, attest]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # to create the release and upload its files
+    steps:
+      - name: Download the release files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-files
+          path: dist
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.version.outputs.version }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          name="scacelith-server-$VERSION-x86_64-linux-musl"
+          cat > notes.md <<EOF
+          A static x86-64 Linux build of the server, which runs on any distribution (see
+          [docs/DEPLOY.md](https://github.com/$GH_REPO/blob/$TAG/docs/DEPLOY.md)).
+          \`$name.tar.gz\` holds the binary with its licence, the README, the deployment and
+          configuration docs, \`.env.example\` and the systemd files; \`$name\` is the binary alone, and
+          \`scacelith-server-$VERSION.cdx.json\` its software bill of materials (CycloneDX).
+
+          Every file is built by the release workflow from tag \`$TAG\`; the build provenance of the
+          archive and the binary, and the SBOM of the binary, are attested. To check a download with
+          the GitHub CLI:
+
+          \`\`\`sh
+          gh attestation verify $name.tar.gz --repo $GH_REPO
+          gh attestation verify $name --repo $GH_REPO --predicate-type https://cyclonedx.org/bom
+          \`\`\`
+          EOF
+          flags=(--verify-tag --title "scacelith-server $VERSION" --notes-file notes.md --generate-notes)
+          if [[ "$PRERELEASE" == true ]]; then flags+=(--prerelease); else flags+=(--latest); fi
+          gh release create "$TAG" "${flags[@]}" dist/*

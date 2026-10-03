@@ -1,0 +1,269 @@
+# Continuous integration: formatting, Clippy, the docs, the generated files, the tests (the
+# real-engine anti-cheat tests included, with Ubuntu's Stockfish), the dependencies (cargo-deny,
+# dependency review), the static release build, the contract with the game and its live tests,
+# and the workflows' own lint; the commands of the README's "Development" section. The release
+# workflow runs it again on the tagged commit (workflow_call); a weekly run catches new advisories
+# and changes on the game's side.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      game-revision:
+        description: Branch, tag or commit of the game to check the contract against
+        type: string
+        default: master
+  workflow_call:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: short
+  # The build caches are written by pushes to master only; pull requests read them.
+  SAVE_CACHE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+jobs:
+  lint:
+    name: Format, Clippy, docs and generated files
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ env.SAVE_CACHE == 'true' }}
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+
+      - name: Generated protocol files (protogen)
+        run: cargo run --locked -p scacelith-protocol --features gen --bin protogen -- --check
+
+      - name: Generated configuration files (gen-config-docs)
+        run: cargo run --locked -p scacelith-server -- gen-config-docs --check
+
+  test:
+    name: Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The anti-cheat's real-engine tests use Stockfish where distributions install it.
+      - name: Install Stockfish
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends stockfish
+
+      - name: Install the toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ env.SAVE_CACHE == 'true' }}
+
+      - name: Unit, integration and end-to-end tests
+        run: cargo test --workspace --locked
+
+  dependencies:
+    name: Dependencies (cargo-deny)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2.87.23
+        with:
+          tool: cargo-deny@0.20.2
+
+      # Advisories (RustSec), licences, sources and bans, as deny.toml sets them.
+      - name: cargo deny
+        run: cargo deny --locked check
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: low
+
+  static-build:
+    name: Static release build (musl)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the musl C compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Install the toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ env.SAVE_CACHE == 'true' }}
+
+      # As docs/DEPLOY.md builds it.
+      - name: Build
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked -p scacelith-server --target x86_64-unknown-linux-musl
+
+      - name: Check the binary
+        run: |
+          bin=target/x86_64-unknown-linux-musl/release/scacelith-server
+          file "$bin"
+          file "$bin" | grep -Eq 'statically linked|static-pie linked'
+          version=$(cargo metadata --format-version 1 --no-deps --locked |
+            jq -r '.packages[] | select(.name == "scacelith-server") | .version')
+          "$bin" version
+          "$bin" version | grep -qF "$version"
+
+      # A test build of the server for this commit (the official builds come from the release
+      # workflow, built without any cache).
+      - name: Upload the server
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scacelith-server-x86_64-linux-musl-${{ github.sha }}
+          path: target/x86_64-unknown-linux-musl/release/scacelith-server
+          if-no-files-found: error
+          retention-days: 14
+
+  interop:
+    name: Contract and live tests with the game
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: server
+          persist-credentials: false
+
+      # The game's master, or the branch a manual run names (a change made on both sides: run
+      # this workflow on the server's branch with the game's branch as game-revision).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: DarkCenobyte/scacelith-chess
+          ref: ${{ inputs.game-revision || 'master' }}
+          path: game
+          persist-credentials: false
+
+      - name: Install the game's build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build libssl-dev libx11-dev libgl-dev
+
+      - name: Install the toolchain (rust-toolchain.toml)
+        working-directory: server
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: server
+          save-if: ${{ env.SAVE_CACHE == 'true' }}
+
+      # The C++ codec, the game's copy of the protocol, the rating vectors, the PGN files and the
+      # chess cross-check vectors.
+      - name: Contract (tools/interop/check-game.sh)
+        run: server/tools/interop/check-game.sh game
+
+      # The live tests need neither Stockfish nor the coach's voice model (tools/live-check).
+      - name: Build the game's tests
+        run: |
+          cmake -S game -B game/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DSCACELITH_STOCKFISH=OFF -DSCACELITH_SUPERTONIC_DOWNLOAD=OFF
+          ninja -C game/build scacelith_tests
+
+      - name: Build the server and the live-check harness
+        working-directory: server
+        run: cargo build --locked -p scacelith-server -p scacelith-live-check
+
+      - name: Live tests (the game's online client against this server)
+        working-directory: game
+        run: ../server/target/debug/scacelith-live-check build/scacelith_tests
+
+  workflows:
+    name: Workflow lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install zizmor
+        uses: taiki-e/install-action@861a07ce7084f55488e375df125cdc99bba60eb7 # v2.87.23
+        with:
+          tool: zizmor@1.30.1
+
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/$archive"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --format=github --persona=regular .github/

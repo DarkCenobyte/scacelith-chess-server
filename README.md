@@ -60,6 +60,20 @@ game's Options.
   calibrated for (`ANALYSIS_ENGINE_PATH`; see [Moderation and anti-cheat](#moderation-and-anti-cheat)),
   and an SMTP account for e-mail confirmation and password resets.
 
+## Download
+
+Each release on the [Releases page](https://github.com/DarkCenobyte/scacelith-chess-server/releases)
+has the static x86-64 Linux binary, alone (`scacelith-server-<version>-x86_64-linux-musl`) and in
+an archive with this README, the deployment and configuration docs, `.env.example` and the systemd
+files (`scacelith-server-<version>-x86_64-linux-musl.tar.gz`), its software bill of materials
+(CycloneDX, `scacelith-server-<version>.cdx.json`) and `SHA256SUMS`. The release workflow builds
+them from the tag, and their build provenance and the binary's SBOM are attested; to check a
+download with the GitHub CLI:
+
+```sh
+gh attestation verify scacelith-server-0.9.0-x86_64-linux-musl.tar.gz --repo DarkCenobyte/scacelith-chess-server
+```
+
 ## Build
 
 ```sh
@@ -677,6 +691,7 @@ cargo fmt --all --check
 cargo doc --workspace --no-deps
 cargo run -p scacelith-protocol --features gen --bin protogen -- --check   # generated protocol files
 cargo run -p scacelith-server -- gen-config-docs --check                  # .env.example, docs/CONFIG.md
+cargo deny check                                         # advisories, licences, sources (deny.toml)
 ```
 
 The workspace has five crates: `scacelith-server` (the server), `scacelith-protocol` (the realtime
@@ -696,6 +711,22 @@ configuration keys live in `crates/server/src/config/keys.rs`: after a change, r
 `gen-config-docs` (without `--check`). The real-engine analysis tests run when Stockfish is
 installed where distributions put it, or named by `SCACELITH_TEST_ENGINE`, and return at once
 otherwise.
+
+GitHub Actions runs all of these on every push to master and every pull request
+(`.github/workflows/ci.yml`), with the real-engine tests (Ubuntu's Stockfish), the static release
+build, a dependency review of pull requests, the contract with the game and its live tests (against
+the game's master; a manual run of the workflow takes another branch of the game as `game-revision`, for
+a change made on both sides) and a lint of the workflows (actionlint, zizmor); a weekly run catches
+new advisories and changes on the game's side. CodeQL (`.github/workflows/codeql.yml`) scans the Rust code and the workflows. Dependabot
+(`.github/dependabot.yml`) proposes the updates of the crates, the Rust toolchain and the actions,
+each a week after its release.
+
+A release is published by pushing the tag `v` + the workspace version of `Cargo.toml`
+(`v0.9.0`): the release workflow (`.github/workflows/release.yml`) checks that they match, runs the
+CI again on the tagged commit, builds the static binary from scratch, writes its SBOM, attests both
+and publishes the GitHub release (a pre-release when the version has a suffix, such as `-rc.1`).
+Started by hand, it builds the same files and keeps them as workflow artifacts without publishing
+anything, unless it runs on a tag with "Publish" ticked.
 
 Two tools check the server against its clients and its predecessor:
 
