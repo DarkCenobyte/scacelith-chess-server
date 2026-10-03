@@ -1,0 +1,214 @@
+{
+ "templates": {
+  "verification": {
+   "subject": "Confirm your e-mail address for Scacelith Test Server",
+   "text": "Hello alice,\n\nWelcome to Scacelith Test Server. To confirm your e-mail address and start playing online, open\nthis link and press the confirmation button:\n\nhttps://play.example:8443/verify-email?token=AbC\n\nThe link is valid for 24 hours. If you did not sign up, ignore this message:\nwithout the confirmation nothing is created or confirmed.\n\n-- \nScacelith Test Server\nThis is an automatic message; replies are not read.\n"
+  },
+  "passwordReset": {
+   "subject": "Reset your Scacelith Test Server password",
+   "text": "Hello alice,\n\nSomeone (hopefully you) asked to reset the password of your Scacelith Test Server account.\nTo choose a new password, open this link:\n\nhttps://play.example/reset-password?token=xyz\n\nThe link is valid for 60 minutes and can be used once. Resetting the password\nsigns out every device. Two-step verification, if enabled, stays enabled.\n\nIf you did not ask for this, ignore this message: your password does not change.\n\n-- \nScacelith Test Server\nThis is an automatic message; replies are not read.\n"
+  },
+  "registrationAttempt": {
+   "subject": "Someone tried to register on Scacelith Test Server with your e-mail address",
+   "text": "Hello bob,\n\nSomeone tried to create a new Scacelith Test Server account with your e-mail address. Your\naddress already belongs to your account, so no new account was created.\n\nIf it was you, you can simply log in. If you forgot your password, use \"Forgot\npassword\" in the game to receive a reset link.\n\nIf it was not you, you do not need to do anything.\n\n-- \nScacelith Test Server\nThis is an automatic message; replies are not read.\n"
+  },
+  "registrationAttemptEmailChange": {
+   "subject": "Someone tried to use your e-mail address on Scacelith Test Server",
+   "text": "Hello bob,\n\nA player of Scacelith Test Server asked to change the e-mail address of their account to yours.\nYour address already belongs to your account, so it was not given to theirs, and your\naccount did not change.\n\nYou do not need to do anything.\n\n-- \nScacelith Test Server\nThis is an automatic message; replies are not read.\n"
+  },
+  "mfaDisabled": {
+   "subject": "Two-step verification was turned off on Scacelith Test Server",
+   "text": "Hello carol,\n\nTwo-step verification (authenticator codes) was turned off for your Scacelith Test Server\naccount on Mon, 28 Sep 2026 14:03:05 GMT.\n\nIf you did not do this, reset your password at once from the game (\"Forgot password\"),\nthen turn two-step verification on again.\n\n-- \nScacelith Test Server\nThis is an automatic message; replies are not read.\n"
+  },
+  "passwordChangedReset": {
+   "subject": "Your Scacelith Test Server password was changed",
+   "text": "Hello dave,\n\nThe password of your Scacelith Test Server account was reset with an e-mail link on\nMon, 28 Sep 2026 14:03:05 GMT. Every device was signed out.\n\nIf you did not do this, reset your password at once from the game (\"Forgot password\").\n\n-- \nScacelith Test Server\nThis is an automatic message; replies are not read.\n"
+  },
+  "passwordChanged": {
+   "subject": "Your Scacelith Test Server password was changed",
+   "text": "Hello dave,\n\nThe password of your Scacelith Test Server account was changed on\nThu, 01 Jan 1970 00:00:00 GMT. Your other devices were signed out.\n\nIf you did not do this, reset your password at once from the game (\"Forgot password\").\n\n-- \nScacelith Test Server\nThis is an automatic message; replies are not read.\n"
+  },
+  "emailChangeConfirm": {
+   "subject": "Confirm your new e-mail address for Scacelith Test Server",
+   "text": "Hello erin,\n\nYou asked to use this e-mail address for your Scacelith Test Server account. To confirm it, open\nthis link and press the confirmation button:\n\nhttps://h/confirm-email-change?token=T\n\nThe link is valid for 24 hours and can be used once. Until it is used, your account\nkeeps its current address.\n\nIf you did not ask for this, ignore this message: nothing changes.\n\n-- \nScacelith Test Server\nThis is an automatic message; replies are not read.\n"
+  },
+  "emailChangeRequested": {
+   "subject": "A change of your Scacelith Test Server e-mail address was requested",
+   "text": "Hello erin,\n\nOn Mon, 28 Sep 2026 14:03:05 GMT, a change of the e-mail address of your Scacelith Test Server account\nto n***@example.org was requested, with your password. The address changes only if the\nlink sent to the new address is opened within 24 hours; until then, this address stays\nthe one of your account.\n\nIf it was you, there is nothing else to do.\n\nIf it was not you, someone knows your password: change it at once in the game, or reset it\nwith \"Forgot password\". A new password cancels the change of address.\n\n-- \nScacelith Test Server\nThis is an automatic message; replies are not read.\n"
+  },
+  "emailChanged": {
+   "subject": "Your Scacelith Test Server e-mail address was changed",
+   "text": "Hello erin,\n\nThe e-mail address of your Scacelith Test Server account was changed to n***@example.org on\nMon, 28 Sep 2026 14:03:05 GMT.\n\nMessages about your account, password resets included, now go to the new address: this\nis the last one sent to this address.\n\nIf you did not do this, someone else controls your account: contact the administrator of\nScacelith Test Server at once.\n\n-- \nScacelith Test Server\nThis is an automatic message; replies are not read.\n"
+  },
+  "ssoAccountCreated": {
+   "subject": "A Scacelith Test Server account was created with your Google account",
+   "text": "Hello frank,\n\nThe Scacelith Test Server account \"frank\" was created with Google sign-in, with the Google\naccount of this address, on Mon, 28 Sep 2026 14:03:05 GMT.\n\nIf it was you, there is nothing else to do.\n\nIf it was not you, someone else may be signed in to it: sign in with Google in the game,\nuse \"Sign out everywhere\" on the account page, and contact the administrator of Scacelith Test Server.\nNever send anyone the address your browser shows after a sign-in.\n\n-- \nScacelith Test Server\nThis is an automatic message; replies are not read.\n"
+  },
+  "ssoLinked": {
+   "subject": "Google sign-in was added to your Scacelith Test Server account",
+   "text": "Hello grace,\n\nGoogle sign-in was added to your Scacelith Test Server account \"grace\" on\nMon, 28 Sep 2026 14:03:05 GMT, with your password. From now on, the Google account of this address\nsigns in to it without the password.\n\nIf it was you, there is nothing else to do.\n\nIf it was not you, someone knows your password: change it at once in the game, or reset it\nwith \"Forgot password\", then use \"Sign out everywhere\" on the account page and contact the\nadministrator of Scacelith Test Server.\n\n-- \nScacelith Test Server\nThis is an automatic message; replies are not read.\n"
+  }
+ },
+ "messages": [
+  {
+   "from": "Scacelith <no-reply@chess.example.org>",
+   "to": "alice@example.com",
+   "subject": "Confirm",
+   "text": "Hello\nworld",
+   "raw": "From: \"Scacelith\" <no-reply@chess.example.org>\r\nTo: alice@example.com\r\nSubject: Confirm\r\nDate: Mon, 28 Sep 2026 14:03:05 +0000\r\nMessage-ID: <00112233445566778899aabbccddeeff@example.org>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 7bit\r\nAuto-Submitted: auto-generated\r\n\r\nHello\r\nworld"
+  },
+  {
+   "from": "no-reply@example.org",
+   "to": "Bob Example <bob@example.com>",
+   "subject": "Échec et mat ♔ Échec et mat ♔ Échec et mat ♔ Échec et mat ♔ Échec et mat ♔ Échec et mat ♔",
+   "text": "Voilà un message très long avec des caractères accentués et un = signe, éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé\nfin \ttab\t\n.dot\r\nlast",
+   "raw": "From: no-reply@example.org\r\nTo: \"Bob Example\" <bob@example.com>\r\nSubject: =?UTF-8?B?w4ljaGVjIGV0IG1hdCDimZQgw4ljaGVjIGV0IG1hdCDimZQgw4ljaGVjIGV0?=\r\n =?UTF-8?B?IG1hdCDimZQgw4ljaGVjIGV0IG1hdCDimZQgw4ljaGVjIGV0IG1hdCDimZQg?=\r\n =?UTF-8?B?w4ljaGVjIGV0IG1hdCDimZQ=?=\r\nDate: Mon, 28 Sep 2026 14:03:05 +0000\r\nMessage-ID: <00112233445566778899aabbccddeeff@example.org>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\nAuto-Submitted: auto-generated\r\n\r\nVoil=C3=A0 un message tr=C3=A8s long avec des caract=C3=A8res accentu=C3=A9=\r\ns et un =3D signe, =C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=\r\n=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=\r\n=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=\r\n=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=\r\n=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=\r\n=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=\r\n=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9\r\nfin \ttab=09\r\n.dot\r\nlast"
+  },
+  {
+   "from": "Échecs <no-reply@example.org>",
+   "to": "\"Chess Club\" <club@example.org>",
+   "subject": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=c",
+   "raw": "From: =?UTF-8?B?w4ljaGVjcw==?= <no-reply@example.org>\r\nTo: \"Chess Club\" <club@example.org>\r\nSubject: =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4?=\r\n =?UTF-8?B?eA==?=\r\nDate: Mon, 28 Sep 2026 14:03:05 +0000\r\nMessage-ID: <00112233445566778899aabbccddeeff@example.org>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\nAuto-Submitted: auto-generated\r\n\r\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\r\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\r\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\r\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\r\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\r\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\r\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\r\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\r\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\r\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\r\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\r\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\r\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\r\naaaaaaaaaaaaaaaaaaaaaaaa\r\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=\r\n=3Dc"
+  },
+  {
+   "from": "\"Quote \\\" Name\" <q@example.org>",
+   "to": "z@example.org",
+   "subject": "A B",
+   "text": "",
+   "raw": "From: Quote \\\" Name <q@example.org>\r\nTo: z@example.org\r\nSubject: =?UTF-8?B?QcKgQg==?=\r\nDate: Mon, 28 Sep 2026 14:03:05 +0000\r\nMessage-ID: <00112233445566778899aabbccddeeff@example.org>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 7bit\r\nAuto-Submitted: auto-generated\r\n\r\n"
+  },
+  {
+   "from": "n@example.org",
+   "to": "z@example.org",
+   "subject": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+   "text": "😀 emoji line 😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+   "raw": "From: n@example.org\r\nTo: z@example.org\r\nSubject: =?UTF-8?B?8J+YgPCfmIDwn5iA8J+YgPCfmIDwn5iA8J+YgPCfmIDwn5iA8J+YgPCfmIA=?=\r\n =?UTF-8?B?8J+YgPCfmIDwn5iA8J+YgPCfmIDwn5iA8J+YgPCfmIDwn5iA?=\r\nDate: Mon, 28 Sep 2026 14:03:05 +0000\r\nMessage-ID: <00112233445566778899aabbccddeeff@example.org>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\nAuto-Submitted: auto-generated\r\n\r\n=F0=9F=98=80 emoji line =F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=\r\n=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=9F=\r\n=98=80=F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=9F=98=\r\n=80=F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=\r\n=F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=9F=98=80=F0=\r\n=9F=98=80"
+  }
+ ],
+ "qp": [
+  [
+   "",
+   ""
+  ],
+  [
+   "plain",
+   "plain"
+  ],
+  [
+   "a \r\nb\t",
+   "a=20\r\nb=09"
+  ],
+  [
+   "=",
+   "=3D"
+  ],
+  [
+   " ",
+   "=20"
+  ],
+  [
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=",
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=\r\n=3D"
+  ],
+  [
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxé",
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=\r\n=C3=A9"
+  ],
+  [
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  ],
+  [
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=\r\nxx"
+  ],
+  [
+   "éééééééééééééééééééééééééééééééééééééééé",
+   "=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=\r\n=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=\r\n=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=A9=C3=\r\n=A9=C3=A9=C3=A9"
+  ],
+  [
+   "tab\tend\t",
+   "tab\tend=09"
+  ],
+  [
+   "\u0000",
+   "=00=7F"
+  ]
+ ],
+ "words": [
+  [
+   "plain",
+   "plain"
+  ],
+  [
+   "Échec",
+   "=?UTF-8?B?w4ljaGVj?="
+  ],
+  [
+   "éééééééééééééééééééééééééééééé",
+   "=?UTF-8?B?w6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6nDqcOpw6k=?=\r\n =?UTF-8?B?w6nDqcOpw6nDqcOpw6nDqQ==?="
+  ],
+  [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé",
+   "=?UTF-8?B?YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=?=\r\n =?UTF-8?B?w6k=?="
+  ],
+  [
+   "😀😀😀😀😀😀😀😀😀😀😀😀😀",
+   "=?UTF-8?B?8J+YgPCfmIDwn5iA8J+YgPCfmIDwn5iA8J+YgPCfmIDwn5iA8J+YgPCfmIA=?=\r\n =?UTF-8?B?8J+YgPCfmIA=?="
+  ]
+ ],
+ "dates": [
+  [
+   0,
+   "Thu, 01 Jan 1970 00:00:00 +0000",
+   "Thu, 01 Jan 1970 00:00:00 GMT"
+  ],
+  [
+   1790604185000,
+   "Mon, 28 Sep 2026 14:03:05 +0000",
+   "Mon, 28 Sep 2026 14:03:05 GMT"
+  ],
+  [
+   951868799000,
+   "Tue, 29 Feb 2000 23:59:59 +0000",
+   "Tue, 29 Feb 2000 23:59:59 GMT"
+  ],
+  [
+   2147483648000,
+   "Tue, 19 Jan 2038 03:14:08 +0000",
+   "Tue, 19 Jan 2038 03:14:08 GMT"
+  ],
+  [
+   1790882991200,
+   "Thu, 01 Oct 2026 19:29:51 +0000",
+   "Thu, 01 Oct 2026 19:29:51 GMT"
+  ]
+ ],
+ "stuff": [
+  [
+   "a\n.b\r\n..c",
+   "a\r\n..b\r\n...c\r\n.\r\n"
+  ],
+  [
+   "x\r\n",
+   "x\r\n.\r\n"
+  ],
+  [
+   ".",
+   "..\r\n.\r\n"
+  ],
+  [
+   "",
+   "\r\n.\r\n"
+  ],
+  [
+   "a\r\n.\r\nb",
+   "a\r\n..\r\nb\r\n.\r\n"
+  ],
+  [
+   ".\n.\n",
+   "..\r\n..\r\n.\r\n"
+  ]
+ ]
+}
