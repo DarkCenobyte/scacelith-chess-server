@@ -56,6 +56,8 @@ pub(crate) struct LobbyDeps {
     pub limits: Arc<SharedLimits>,
     pub matchmaker: Matchmaker,
     pub challenges: Challenges,
+    /// How long a host may take to create a game ([`CREATE_TIMEOUT`]).
+    pub create_timeout: Duration,
     pub log: Logger,
 }
 
@@ -76,6 +78,7 @@ impl LobbyDeps {
             store,
             hosts,
             limits,
+            create_timeout: CREATE_TIMEOUT,
             log: Logger::root().child("lobby"),
         }
     }
@@ -193,6 +196,7 @@ pub(crate) struct LobbyActor {
     pub(super) store: Store,
     hosts: Arc<dyn GameHosts>,
     limits: Arc<SharedLimits>,
+    create_timeout: Duration,
     pub(super) log: Logger,
     conduct_log: Logger,
     categories: Categories,
@@ -281,6 +285,7 @@ impl LobbyActor {
             store: deps.store,
             hosts: deps.hosts,
             limits: deps.limits,
+            create_timeout: deps.create_timeout,
             log: deps.log,
             presence: Default::default(),
             mm: deps.matchmaker,
@@ -979,6 +984,7 @@ impl LobbyActor {
             hosts: self.hosts.clone(),
             clock: self.clock.clone(),
             config: self.config.clone(),
+            timeout: self.create_timeout,
             log: self.log.clone(),
         };
         self.spawn(async move { Done::Created { token, result: task.run(order, preferred).await } });
@@ -1237,6 +1243,7 @@ struct CreateTask {
     hosts: Arc<dyn GameHosts>,
     clock: SharedClock,
     config: Arc<Config>,
+    timeout: Duration,
     log: Logger,
 }
 
@@ -1285,7 +1292,7 @@ impl CreateTask {
                 Ok(game) => CreateResult::Created(game),
                 Err(code) => CreateResult::Failed(code),
             },
-            () = tokio::time::sleep(CREATE_TIMEOUT) => {
+            () = tokio::time::sleep(self.timeout) => {
                 log_error!(self.log, "game.create failed", { "err": "timeout" });
                 // A game created after the timeout would wait for players nobody attaches: the
                 // host cancels it.

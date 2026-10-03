@@ -12,6 +12,8 @@ pub mod lobby;
 pub(crate) mod metrics;
 pub(crate) mod presence;
 pub(crate) mod reads;
+#[cfg(test)]
+pub(crate) mod testing;
 
 pub use admission::Admissions;
 pub use endpoint::{Endpoint, Outbound};
