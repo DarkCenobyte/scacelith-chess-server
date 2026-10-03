@@ -20,6 +20,7 @@ import { GameHost } from '../game/host.js';
 import { createApiHandler } from '../http/server.js';
 import { configureLogging, logger } from '../log.js';
 import { applyGame } from '../match/elo.js';
+import { TicketKeys } from '../net/ticket-keys.js';
 import { openStore } from '../store/index.js';
 import { openJournal } from '../store/journal.js';
 import { startStoreWriter } from '../store/writer.js';
@@ -34,7 +35,8 @@ export async function main() {
     const log = logger.child(`shard${shard}`);
     const primary = new Ipc(process, { log: log.child('ipc') });
     // Kept until the end of the start-up (a journal replay can take seconds); startShard's handler
-    // replaces this one.
+    // replaces this one before its first await, so every await of the start-up comes before the
+    // check of stopRequested below.
     let stopRequested = false;
     primary.on('shutdown', () => { stopRequested = true; return { ok: true }; });
     const config = await primaryConfig(primary);
@@ -60,6 +62,9 @@ export async function main() {
     // ('game.recovered'), which gives it back to the players as their activeGame.
     const recovered = await host.recover();
     log.info('journal replayed', { games: recovered });
+    // The TLS session-ticket keys every shard shares (native mode), asked for here rather than in
+    // startShard: a 'shutdown' that comes with the reply is seen by the check below.
+    const ticketKeys = config.tlsMode === 'native' ? TicketKeys.take(await primary.request('tls.ticketKeys')) : null;
     const close = async () => {
         auth.close();   // its batched security events, while the store is open
         try { await journal.flush?.(); await journal.close?.(); } catch (e) { log.error('journal close failed', { err: e }); }
@@ -80,7 +85,7 @@ export async function main() {
     const apiHandler = createApiHandler({ config, store, auth, primary, anticheat, log: logger.child('http'), guard });
 
     const s = await startShard({
-        config, shard, serverId, primary, host, auth, anticheat, store, apiHandler, bus, log, guard,
+        config, shard, serverId, primary, host, auth, anticheat, store, apiHandler, bus, log, guard, ticketKeys,
         onStopped: async () => {
             await apiHandler.close();   // the GIF rendering threads (src/http/routes/gif.js)
             await close();

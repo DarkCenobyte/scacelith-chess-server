@@ -10,7 +10,8 @@
 //
 // TLS session-ticket keys (native mode): the shard asks the primary for the current state of the
 // keys every worker shares ('tls.ticketKeys', net/ticket-keys.js) before it listens, so that a
-// restarted shard resumes the sessions of the others and they resume its own.
+// restarted shard resumes the sessions of the others and they resume its own (worker-main.js asks
+// for them before startShard, which then registers its 'shutdown' handler before any await).
 
 import { metrics as defaultRegistry } from '../metrics.js';
 import { WS_SUBPROTOCOL } from '../protocol/index.js';
@@ -66,10 +67,13 @@ export function createShardGuard({ config, primary, log = null, registry = defau
  * @param {boolean} [o.reusePort]
  * @param {() => (void|Promise<void>)} [o.onStopped] called after a graceful stop (close the store, exit)
  * @param {IpGuard} [o.guard] protection per address (the one given to the API handler); created here when absent
+ * @param {TicketKeys|null} [o.ticketKeys] the session-ticket keys every shard shares (native TLS); asked
+ *        for here when absent
  */
 export async function startShard({ config, shard, serverId, primary, host, auth, anticheat = null, store = null, apiHandler = null,
-    bus = null, log, registry = defaultRegistry, reusePort, onStopped = null, guard = null }) {
-    const ticketKeys = config.tlsMode === 'native' ? TicketKeys.take(await primary.request('tls.ticketKeys')) : null;
+    bus = null, log, registry = defaultRegistry, reusePort, onStopped = null, guard = null, ticketKeys = null }) {
+    // The only await before the 'shutdown' handler below, for a caller that gave no keys (tests).
+    const keys = ticketKeys || (config.tlsMode === 'native' ? TicketKeys.take(await primary.request('tls.ticketKeys')) : null);
     const proc = startProcessMetrics({ registry });
     const theGuard = guard || createShardGuard({ config, primary, log: log.child('guard'), registry });
     const theBus = bus || createBus({ config, shard, serverId, log: log.child('bus'), registry });
@@ -91,7 +95,7 @@ export async function startShard({ config, shard, serverId, primary, host, auth,
     let ready = false, draining = false, stopping = null;
     const listeners = new Listeners({
         config, apiHandler, wsServer: wss, log: log.child('listen'), ready: () => ready && !draining, reusePort,
-        full: () => router.isFull(), registry, guard: theGuard, ticketKeys,
+        full: () => router.isFull(), registry, guard: theGuard, ticketKeys: keys,
     });
 
     router.bindPrimary(primary);
