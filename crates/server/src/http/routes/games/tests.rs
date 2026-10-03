@@ -470,7 +470,7 @@ fn casual_think(i: usize) -> u32 {
 }
 
 fn flag_fall_think(i: usize) -> u32 {
-    if i % 2 == 0 {
+    if i.is_multiple_of(2) {
         [7310, 6905, 8120, 7655, 6420, 7880, 7215, 7123][(i - 2) / 2]
     } else {
         900 + (i as u32 * 131) % 700
@@ -478,7 +478,7 @@ fn flag_fall_think(i: usize) -> u32 {
 }
 
 fn flag_fall_draw_think(i: usize) -> u32 {
-    if i % 2 == 0 { 6250 + (i as u32 * 37) % 160 } else { 1100 + (i as u32 * 53) % 900 }
+    if i.is_multiple_of(2) { 6250 + (i as u32 * 37) % 160 } else { 1100 + (i as u32 * 53) % 900 }
 }
 
 fn specs() -> Vec<Spec> {

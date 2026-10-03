@@ -44,11 +44,11 @@ async fn the_players_own_history_with_filters_cursor_total_and_outcome() {
     let mut list = Vec::new();
     for i in 0..30u64 {
         let id = 6_000_000_000_000 + i;
-        let mut g = if i % 2 == 0 { game(id, &me, &op) } else { game(id, &op, &me) };
+        let mut g = if i.is_multiple_of(2) { game(id, &me, &op) } else { game(id, &op, &me) };
         g.status = [W, L, D, W, X][(i % 5) as usize];
         g.reason = if g.status == X { 22 } else { 2 };
-        g.rated = i % 3 != 0 && g.status != X;
-        if i % 7 == 0 {
+        g.rated = !i.is_multiple_of(3) && g.status != X;
+        if i.is_multiple_of(7) {
             (g.category, g.base_ms, g.inc_ms, g.rated) = ("custom".into(), 60_000, 1000, false);
         }
         list.push(g);
