@@ -117,11 +117,13 @@ pub struct Logs {
     count: watch::Sender<usize>,
 }
 
-impl Logs {
-    fn new() -> Logs {
+impl Default for Logs {
+    fn default() -> Logs {
         Logs { lines: Arc::new(Mutex::new(Vec::new())), count: watch::channel(0).0 }
     }
+}
 
+impl Logs {
     fn push(&self, line: &str) {
         let rec = serde_json::from_str::<Value>(line)
             .ok()
@@ -136,7 +138,7 @@ impl Logs {
     }
 
     /// Reads the lines of `stream` until it ends.
-    fn follow(&self, stream: impl AsyncRead + Unpin + Send + 'static) {
+    pub fn follow(&self, stream: impl AsyncRead + Unpin + Send + 'static) {
         let logs = self.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stream).lines();
@@ -342,7 +344,7 @@ impl TestServer {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("cannot run {SERVER_BIN}: {e}"))?;
-        let logs = Logs::new();
+        let logs = Logs::default();
         logs.follow(child.stdout.take().expect("piped stdout"));
         logs.follow(child.stderr.take().expect("piped stderr"));
 
