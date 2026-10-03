@@ -276,6 +276,20 @@ async fn client_close_handshake() {
 }
 
 #[tokio::test]
+async fn an_aborted_connection_ends_without_a_close_frame() {
+    let (mut conn, mut server) = connected().await;
+    conn.send(QueueLeave { seq: 0 }).unwrap();
+    conn.abort();
+    assert!(matches!(server.msg().await, ClientMsg::QueueLeave(_)), "queued messages go first");
+    // The stream ends: no close frame, no more bytes.
+    let mut rest = Vec::new();
+    let read = tokio::time::timeout(WAIT, server.stream.read_to_end(&mut rest)).await.unwrap();
+    assert!(read.is_err() || rest.is_empty(), "nothing after the last message: {rest:?}");
+    let info = tokio::time::timeout(WAIT, conn.wait_closed()).await.unwrap();
+    assert_eq!((info.code, info.closer), (CloseInfo::ABNORMAL, Closer::Transport));
+}
+
+#[tokio::test]
 async fn hello_refused() {
     let (listener, endpoint) = listen().await;
     tokio::spawn(async move {
