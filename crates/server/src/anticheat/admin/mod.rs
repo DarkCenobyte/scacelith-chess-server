@@ -2,7 +2,8 @@
 //! integrity reviews, reports, rating refunds, engine analysis requests, backups and the bench
 //! accounts of test servers. They run on the server host, directly against the database (no
 //! network; WAL mode lets them run while the server is up), with the same commands, options,
-//! outputs and exit codes as the former `scacelith-admin` (`bin/admin.js`).
+//! outputs and exit codes as the former `scacelith-admin` (`bin/admin.js`); only the first line of
+//! the help names the new command.
 //!
 //! Every moderator action is audited: a security event `moderator_action` {action, moderator,
 //! ...}, a security log line `moderator.action`, and `reviewed_by` / `created_by` where the data
@@ -38,7 +39,7 @@ use crate::util::js;
 use super::reports::{Received, recent_report_weight};
 
 /// The help of the commands, printed by `admin --help` and for an unknown command.
-pub const USAGE: &str = r#"Usage: scacelith-admin <command> [options]
+pub const USAGE: &str = r#"Usage: scacelith-server admin <command> [options]
 
 Accounts
   user show <name>                            account, ratings, sanctions, integrity summary (no account:
