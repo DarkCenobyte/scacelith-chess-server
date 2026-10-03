@@ -4,6 +4,7 @@
 //! cheap Argon2id hasher.
 
 mod login;
+mod mfa;
 mod sessions;
 
 use std::sync::Arc;

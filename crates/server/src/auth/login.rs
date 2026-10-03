@@ -372,21 +372,26 @@ impl Inner {
     }
 
     /// Counts a wrong code on the MFA step `h` as it is now (other codes may have been counted
-    /// while this one was checked): the 5th ends it. Returns whether the step is still live and
-    /// the attempts counted.
+    /// while this one was checked), in one transaction: the 5th ends it. Returns whether the step
+    /// is still live and the attempts counted.
     async fn count_mfa_failure(&self, h: &str, issued: &Map<String, Value>) -> AuthResult<(bool, i64)> {
-        let now = self.now();
-        let current = self.store.tokens().get(MFA_LOGIN.into(), h.to_owned()).await?;
-        let live = is_live(current.as_ref(), now);
-        let mut counted = current.as_ref().map_or_else(|| issued.clone(), data_of);
-        let attempts = counted.get("attempts").and_then(Value::as_f64).map_or(0, |a| a as i64) + 1;
-        if live && attempts >= MFA_TOKEN_ATTEMPTS {
-            self.store.tokens().consume(MFA_LOGIN.into(), h.to_owned(), now).await?;
-        } else if live {
-            counted.insert("attempts".into(), attempts.into());
-            self.store.tokens().update(MFA_LOGIN.into(), h.to_owned(), Some(Value::Object(counted))).await?;
-        }
-        Ok((live, attempts))
+        let (now, h, issued) = (self.now(), h.to_owned(), issued.clone());
+        Ok(self
+            .store
+            .write(move |db| {
+                let current = db.tokens().get(MFA_LOGIN, &h)?;
+                let live = is_live(current.as_ref(), now);
+                let mut counted = current.as_ref().map_or(issued, data_of);
+                let attempts = counted.get("attempts").and_then(Value::as_f64).map_or(0, |a| a as i64) + 1;
+                if live && attempts >= MFA_TOKEN_ATTEMPTS {
+                    db.tokens().consume(MFA_LOGIN, &h, now)?;
+                } else if live {
+                    counted.insert("attempts".into(), attempts.into());
+                    db.tokens().update(MFA_LOGIN, &h, Some(&Value::Object(counted)))?;
+                }
+                Ok::<_, StoreError>((live, attempts))
+            })
+            .await?)
     }
 
     /// Stores `new_hash` for `user_id` only while the stored hash is still `expected` (compare
