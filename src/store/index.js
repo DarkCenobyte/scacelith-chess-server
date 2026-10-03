@@ -38,6 +38,8 @@
 //     sessions.enforceLimit(userId, max, now?) -> [tokenHash] revoked (oldest first go);
 //     sessions.listForUser returns the non-revoked sessions (with clientLabel and ip).
 //   - tokens.consume(kind, hash, now) refuses expired tokens as well as consumed ones.
+//     tokens.reserveTry(kind, hash, max, now) adds one to data.tries of a live token in the same
+//     single UPDATE, only while it is below max: the row (tries counted), else null.
 //   - signups (pending signups, migration 007; auth/accounts.js): create({ username, email,
 //     passwordHash, tokenHash, createdAt, expiresAt }) -> id (StoreError 'username_taken' /
 //     'email_taken' when another pending signup has the name or the address; nothing is checked
@@ -685,6 +687,12 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         get(kind, tokenHash) {
             return toToken(st(`SELECT id, kind, user_id, data, created_at, expires_at, consumed_at FROM tokens
                 WHERE kind = ? AND token_hash = ?`).get(kind, tokenHash));
+        },
+        /** Atomic try counter (one UPDATE): the row with data.tries + 1, or null when not live or at `max` tries. */
+        reserveTry(kind, tokenHash, max, now = Date.now()) {
+            return toToken(st(`UPDATE tokens SET data = json_set(coalesce(data, '{}'), '$.tries', coalesce(json_extract(data, '$.tries'), 0) + 1)
+                WHERE kind = ?1 AND token_hash = ?2 AND consumed_at IS NULL AND expires_at > ?4 AND coalesce(json_extract(data, '$.tries'), 0) < ?3
+                RETURNING id, kind, user_id, data, created_at, expires_at, consumed_at`).get(kind, tokenHash, max, ms(now)));
         },
         update(kind, tokenHash, data) {
             return Number(st('UPDATE tokens SET data = ? WHERE kind = ? AND token_hash = ?').run(toJson(data), kind, tokenHash).changes) > 0;

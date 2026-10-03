@@ -162,6 +162,15 @@ export function createFakeStore({ now = Date.now } = {}) {
                 return copy(r);
             },
             get: (kind, tokenHash) => copy(tokens.get(`${kind}:${tokenHash}`)),
+            // Like the real store: one more try on a live token while it has fewer than `max`.
+            reserveTry(kind, tokenHash, max, t) {
+                const r = tokens.get(`${kind}:${tokenHash}`);
+                if (!r || r.usedAt || r.expiresAt <= t) return null;
+                const data = JSON.parse(r.data) || {};
+                if ((data.tries ?? 0) >= max) return null;
+                r.data = JSON.stringify({ ...data, tries: (data.tries ?? 0) + 1 });
+                return copy(r);
+            },
             update(kind, tokenHash, data) { const r = tokens.get(`${kind}:${tokenHash}`); if (r) r.data = JSON.stringify(data); },
             deleteForUser(userId, kind) {
                 let n = 0;
@@ -305,18 +314,19 @@ export const TEST_DEFAULTS = Object.freeze({
 /**
  * Starts the real API handler on 127.0.0.1 with fakes. The client address of a request is the
  * X-Test-Ip header when given (as the proxy layer would set req.clientIp). Two servers given the
- * same `primary`, `store` and `now` stand for two workers of one server.
+ * same `primary`, `store` and `now` stand for two workers of one server. `mailer(config, log)`
+ * makes the mailer (default: createCaptureMailer).
  * @param {{ env?: object, scryptLogN?: number, hasher?: object, oidc?: object, oidcEndpoints?: object,
- *           handlerOptions?: object, primary?: object|null, store?: object, now?: Function }} [opts]
+ *           handlerOptions?: object, primary?: object|null, store?: object, now?: Function, mailer?: Function }} [opts]
  */
 export async function startTestServer({ env = {}, scryptLogN = 10, hasher, oidc, oidcEndpoints, handlerOptions = {}, primary: givenPrimary,
-    store: givenStore, now: givenNow } = {}) {
+    store: givenStore, now: givenNow, mailer: makeMailer = createCaptureMailer } = {}) {
     const config = testConfig({ ...TEST_DEFAULTS, ...env });
     const now = givenNow || createClock();
     const store = givenStore || createFakeStore({ now });
     const primary = givenPrimary === undefined ? createFakePrimary({ now }) : givenPrimary;
     const log = logger.child('test');
-    const mailer = createCaptureMailer(config, log);
+    const mailer = makeMailer(config, log);
     const passwordHasher = hasher || createPasswordHasher({ scrypt: { logN: scryptLogN }, argon2: false });
     const auth = createAuth({
         config, store, primary, log, now, mailer, passwordHasher, oidc,

@@ -1,6 +1,6 @@
 // The real auth module and the real SQLite store (a file in a temporary directory, so that a test
 // can open a second connection to read what is stored) behind the real API handler, for the tests
-// that must see what the store really keeps (account.export, auth.account-view).
+// that must see what the store really keeps (account.export, auth.account-view, auth.sso).
 
 import fs from 'node:fs';
 import http from 'node:http';
@@ -28,9 +28,10 @@ export function applyGame(white, black, score) {
 /**
  * Starts the server pieces; everything is closed and deleted after the test `t`. `primary`: the
  * auth service's IPC client (e.g. auth-fakes.js createFakePrimary, which records the broadcasts).
+ * `oidcEndpoints`: a fake Google (auth-oidc.js), reached over plain HTTP.
  * @returns {Promise<{ config, store, auth, mailer, hasher, now, request, file }>}
  */
-export async function startReal(t, env = {}, { primary = null } = {}) {
+export async function startReal(t, env = {}, { primary = null, oidcEndpoints } = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-realauth-'));
     const file = path.join(dir, 'scacelith.db');
     const config = testConfig({ DB_PATH: file, AUTH_RATE_PER_IP: '10000', HTTP_RATE_PER_IP: '100000', REQUIRE_EMAIL_VERIFICATION: '1',
@@ -43,7 +44,8 @@ export async function startReal(t, env = {}, { primary = null } = {}) {
     const log = logger.child('test');
     const mailer = createCaptureMailer(config, log);
     const hasher = createPasswordHasher({ scrypt: { logN: 10 }, argon2: false });
-    const auth = createAuth({ config, store, primary, log, now, mailer, passwordHasher: hasher });
+    const auth = createAuth({ config, store, primary, log, now, mailer, passwordHasher: hasher,
+        ...(oidcEndpoints ? { oidcEndpoints, oidcAllowHttp: true } : {}) });
     const handler = createApiHandler({ config, store, auth, log, now });
     const server = http.createServer(handler);
     await new Promise((r) => server.listen(0, '127.0.0.1', r));

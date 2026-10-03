@@ -139,7 +139,43 @@ export function emailChanged({ serverName, username, maskedEmail, when }) {
     };
 }
 
+/**
+ * Sent to the address of an account that Google sign-in just created.
+ * @param {{ serverName: string, username: string, when: Date }} v
+ */
+export function ssoAccountCreated({ serverName, username, when }) {
+    return {
+        subject: `A ${serverName} account was created with your Google account`,
+        text: `Hello ${username},\n\n` +
+            `The ${serverName} account "${username}" was created with Google sign-in, with the Google\n` +
+            `account of this address, on ${when.toUTCString()}.\n\n` +
+            'If it was you, there is nothing else to do.\n\n' +
+            'If it was not you, someone else may be signed in to it: sign in with Google in the game,\n' +
+            `use "Sign out everywhere" on the account page, and contact the administrator of ${serverName}.\n` +
+            'Never send anyone the address your browser shows after a sign-in.\n' + sign(serverName),
+    };
+}
+
+/**
+ * Sent to the account's address when Google sign-in is added to an existing account (after its
+ * password, and its second factor when on).
+ * @param {{ serverName: string, username: string, when: Date }} v
+ */
+export function ssoLinked({ serverName, username, when }) {
+    return {
+        subject: `Google sign-in was added to your ${serverName} account`,
+        text: `Hello ${username},\n\n` +
+            `Google sign-in was added to your ${serverName} account "${username}" on\n` +
+            `${when.toUTCString()}, with your password. From now on, the Google account of this address\n` +
+            'signs in to it without the password.\n\n' +
+            'If it was you, there is nothing else to do.\n\n' +
+            'If it was not you, someone knows your password: change it at once in the game, or reset it\n' +
+            'with "Forgot password", then use "Sign out everywhere" on the account page and contact the\n' +
+            `administrator of ${serverName}.\n` + sign(serverName),
+    };
+}
+
 export const templates = {
     verification, passwordReset, registrationAttempt, mfaDisabled, passwordChanged, emailChangeConfirm, emailChangeRequested,
-    emailChanged,
+    emailChanged, ssoAccountCreated, ssoLinked,
 };

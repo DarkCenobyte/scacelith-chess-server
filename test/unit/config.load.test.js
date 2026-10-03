@@ -2,11 +2,13 @@
 // checks between keys and the warnings check-config prints.
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { ConfigError, configWarnings, describe, loadConfig, parseEnvFile, testConfig } from '../../src/config.js';
 
 const SECRET = Buffer.alloc(48, 7).toString('base64');
@@ -117,4 +119,39 @@ test('a quoted .env value followed by a comment keeps its quotes, and check-conf
     assert.equal(w.length, 1);
     assert.match(w[0], /^SERVER_SECRET: the value is quoted and followed by a comment/);
     assert.ok(!w[0].includes(hex), 'the warning never shows the value');
+});
+
+test('Google sign-in: the origin and its tag; warnings for confirmation off, a leftover GOOGLE_REDIRECT_URI and localhost, which check-config prints', (t) => {
+    const sso = { SSO_GOOGLE_ENABLED: '1', GOOGLE_CLIENT_ID: 'id.apps.googleusercontent.com', GOOGLE_CLIENT_SECRET: 'GOCSPX-x', SERVER_PUBLIC_HOST: 'chess.example.org' };
+    const official = testConfig({ SERVER_PUBLIC_HOST: 'Play.Scacelith.Example', PUBLIC_API_PORT: '443', API_PORT: '8443' });
+    assert.deepEqual([official.ssoOrigin, official.ssoRedirectTag], ['play.scacelith.example:443', 'IhcScoV7eDOzTEcSnqPUPt']);
+    assert.equal(testConfig({ SERVER_PUBLIC_HOST: '::1', API_PORT: '8443' }).ssoOrigin, '[::1]:8443');
+    assert.equal(testConfig({ SERVER_PUBLIC_HOST: '[::1]', API_PORT: '8443' }).ssoRedirectTag, 'XToJm0DG5PjciEVmZa9Cho');
+    assert.ok(!('googleRedirectUri' in official));
+
+    assert.deepEqual(configWarnings(testConfig(sso), {}), []);
+    assert.deepEqual(configWarnings(testConfig({ REQUIRE_EMAIL_VERIFICATION: '0', SERVER_PUBLIC_HOST: 'localhost' }), {}), [], 'Google sign-in off');
+    let w = configWarnings(testConfig({ ...sso, REQUIRE_EMAIL_VERIFICATION: '0' }), {});
+    assert.equal(w.length, 1);
+    assert.match(w[0], /^SSO_GOOGLE_ENABLED with REQUIRE_EMAIL_VERIFICATION=false: anyone can register a password account with someone else's e-mail address\./);
+    w = configWarnings(testConfig({ ...sso, SERVER_PUBLIC_HOST: 'localhost', API_PORT: '8443' }), {});
+    assert.deepEqual(w, ['SSO_GOOGLE_ENABLED with SERVER_PUBLIC_HOST=localhost: Google sign-in only works for players who add this server as localhost:8443.']);
+    // GOOGLE_REDIRECT_URI is no key any more: in the environment or the .env file, it is reported, whatever SSO_GOOGLE_ENABLED.
+    const old = 'GOOGLE_REDIRECT_URI is no longer used: Google sign-in now returns to the game on 127.0.0.1. Remove it and use a "Desktop app" OAuth client.';
+    assert.deepEqual(configWarnings(testConfig({ GOOGLE_REDIRECT_URI: 'https://chess.example.org/auth/sso/google/callback' }), {}), [old]);
+    assert.deepEqual(configWarnings(testConfig({ GOOGLE_REDIRECT_URI: '' }), {}), []);
+    const dir = tmpDir(t);
+    fs.writeFileSync(path.join(dir, '.env'), 'GOOGLE_REDIRECT_URI=https://chess.example.org/auth/sso/google/callback\n');
+    assert.deepEqual(configWarnings(loadConfig({ env: { ...BASE, SERVER_SECRET: SECRET }, cwd: dir }), {}), [old]);
+
+    const r = spawnSync(process.execPath, [fileURLToPath(new URL('../../bin/scacelith-server.js', import.meta.url)), 'check-config'], {
+        cwd: os.tmpdir(), encoding: 'utf8',
+        env: { PATH: process.env.PATH, SCACELITH_ENV_FILE: '', SERVER_SECRET: SECRET, TLS_MODE: 'off', ALLOW_INSECURE_DEV: '1', ...sso,
+            SERVER_PUBLIC_HOST: 'localhost', REQUIRE_EMAIL_VERIFICATION: 'false', GOOGLE_REDIRECT_URI: 'https://x/cb' },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const printed = JSON.parse(r.stdout);
+    assert.deepEqual([printed.ssoOrigin, printed.ssoRedirectTag], ['localhost:443', testConfig({ SERVER_PUBLIC_HOST: 'localhost', API_PORT: '443' }).ssoRedirectTag]);
+    for (const re of [/^warning: GOOGLE_REDIRECT_URI is no longer used/m, /^warning: SSO_GOOGLE_ENABLED with REQUIRE_EMAIL_VERIFICATION=false/m,
+        /^warning: SSO_GOOGLE_ENABLED with SERVER_PUBLIC_HOST=localhost/m]) assert.match(r.stderr, re);
 });

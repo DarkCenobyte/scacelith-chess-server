@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ipMatcher } from './net/ip.js';
+import { ssoOriginTag } from './auth/oidc.js';
 
 const KEYS = [];
 function key(name, spec) { KEYS.push({ name, ...spec }); }
@@ -21,7 +22,7 @@ function key(name, spec) { KEYS.push({ name, ...spec }); }
 key('SERVER_NAME', { section: 'server', type: 'string', default: 'Scacelith Community Server', max: 64, maxBytes: 64,
     desc: 'Name shown to players (menus, scoresheet "Event").' });
 key('SERVER_PUBLIC_HOST', { section: 'server', type: 'string', default: 'localhost',
-    desc: 'Public DNS name of the server, used in e-mail links and the Google SSO redirect URI.' });
+    desc: 'Public DNS name of the server, used in e-mail links, and Google sign-in works only for players who added the server under exactly this name and PUBLIC_API_PORT.' });
 key('SERVER_MOTD', { section: 'server', type: 'string', default: '', max: 200,
     desc: 'Short message of the day shown in the online menu.' });
 key('BIND_ADDRESS', { section: 'server', type: 'string', default: '0.0.0.0', desc: 'Address the API and WebSocket listeners bind to.' });
@@ -104,11 +105,11 @@ key('SMTP_USER', { section: 'mail', type: 'string', default: '', desc: 'SMTP use
 key('SMTP_PASSWORD', { section: 'mail', type: 'secretText', default: '', desc: 'SMTP password.' });
 
 // ---- Google single sign-on ---------------------------------------------------------------------------
-key('SSO_GOOGLE_ENABLED', { section: 'sso', type: 'bool', default: false, desc: 'Offers "Sign in with Google" (OpenID Connect, authorization code + PKCE through the system browser).' });
-key('GOOGLE_CLIENT_ID', { section: 'sso', type: 'string', default: '', desc: 'OAuth client ID of a "Web application" client in Google Cloud Console.' });
+key('SSO_GOOGLE_ENABLED', { section: 'sso', type: 'bool', default: false,
+    desc: 'Offers "Sign in with Google" (authorization code + PKCE; Google sends the browser back to the game on 127.0.0.1 and the game hands the code to this server). An existing account is linked only after its password, and its two-step code when on, is entered once in the game.' });
+key('GOOGLE_CLIENT_ID', { section: 'sso', type: 'string', default: '',
+    desc: 'OAuth client ID of a "Desktop app" client (Google Auth Platform > Clients). Not a "Web application" client: Google sends the browser back to the game on 127.0.0.1 and only a Desktop app client accepts that.' });
 key('GOOGLE_CLIENT_SECRET', { section: 'sso', type: 'secretText', default: '', desc: 'OAuth client secret. Never commit it.' });
-key('GOOGLE_REDIRECT_URI', { section: 'sso', type: 'string', default: '',
-    desc: 'Authorized redirect URI registered at Google (default: https://SERVER_PUBLIC_HOST/auth/sso/google/callback, with :PUBLIC_API_PORT after the host when that port is not 443).' });
 
 // ---- Protection per address (background layer, net/ipguard.js) -------------------------------------
 // Every request and every connection, before routing and before TLS; quotas per signed-in account
@@ -487,6 +488,11 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     if (cfg.tlsMode === 'off' && !cfg.allowInsecureDev) errors.push('TLS_MODE=off is refused unless ALLOW_INSECURE_DEV=1 (never on a public server).');
     if (cfg.usernameMin > cfg.usernameMax) errors.push('USERNAME_MIN must not exceed USERNAME_MAX.');
     if (cfg.ssoGoogleEnabled && (!cfg.googleClientId || !cfg.googleClientSecret)) errors.push('SSO_GOOGLE_ENABLED needs GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.');
+    // No longer a key; without this note it would be ignored silently.
+    const oldRedirect = get('GOOGLE_REDIRECT_URI');
+    if (oldRedirect !== undefined && oldRedirect !== '') {
+        notes.push('GOOGLE_REDIRECT_URI is no longer used: Google sign-in now returns to the game on 127.0.0.1. Remove it and use a "Desktop app" OAuth client.');
+    }
     if (cfg.mailTransport === 'smtp' && !cfg.smtpHost) errors.push('MAIL_TRANSPORT=smtp needs SMTP_HOST.');
     if (cfg.analysisDepthFast >= cfg.analysisDepthDeep) errors.push('ANALYSIS_DEPTH_FAST must be lower than ANALYSIS_DEPTH_DEEP.');
     if (cfg.authForgotPerDay < cfg.authForgotPerHour) errors.push('AUTH_FORGOT_PER_DAY must be at least AUTH_FORGOT_PER_HOUR.');
@@ -507,10 +513,11 @@ export function loadConfig({ env = process.env, envFile, cwd = process.cwd() } =
     } else if (Number.isInteger(cfg.recoveryGraceMs)) {
         cfg.recoveryClockHoldMs = Math.min(cfg.recoveryClockHoldMs, cfg.recoveryGraceMs - 1);
     }
-    if (!cfg.googleRedirectUri) {
-        const port = cfg.publicApiPort === 443 ? '' : `:${cfg.publicApiPort}`;
-        cfg.googleRedirectUri = `https://${cfg.serverPublicHost}${port}/auth/sso/google/callback`;
-    }
+    // The origin players reach the API at, and its tag in the Google sign-in redirect (auth/oidc.js).
+    let ssoHost = String(cfg.serverPublicHost).toLowerCase();
+    if (ssoHost.includes(':') && !ssoHost.startsWith('[')) ssoHost = `[${ssoHost}]`;
+    cfg.ssoOrigin = `${ssoHost}:${cfg.publicApiPort}`;
+    cfg.ssoRedirectTag = ssoOriginTag(cfg.ssoOrigin);
     const cats = [];
     for (const c of cfg.ratedCategories) {
         const m = /^(\d{1,3})\+(\d{1,3})$/.exec(c);
@@ -584,6 +591,14 @@ export function configWarnings(cfg, env = process.env) {
         out.push(`HEARTBEAT_TIMEOUT_MS (${cfg.heartbeatTimeoutMs}) is less than HEARTBEAT_INTERVAL_MS (${cfg.heartbeatIntervalMs}) + 2250: `
             + 'healthy idle connections, which only answer the server\'s pings, would be closed as silent (\'timeout\') and reconnect. '
             + 'Raise HEARTBEAT_TIMEOUT_MS (the default is 3 times the interval).');
+    }
+    if (cfg.ssoGoogleEnabled && !cfg.requireEmailVerification) {
+        out.push('SSO_GOOGLE_ENABLED with REQUIRE_EMAIL_VERIFICATION=false: anyone can register a password account with someone else\'s e-mail '
+            + 'address. Google sign-in will not open that account without its password, but the address owner cannot create a Google account '
+            + 'with that address until she takes it back with "Forgot password" (needs MAIL_TRANSPORT=smtp) or you free it.');
+    }
+    if (cfg.ssoGoogleEnabled && String(cfg.serverPublicHost).toLowerCase() === 'localhost') {
+        out.push(`SSO_GOOGLE_ENABLED with SERVER_PUBLIC_HOST=localhost: Google sign-in only works for players who add this server as localhost:${cfg.publicApiPort}.`);
     }
     return out;
 }

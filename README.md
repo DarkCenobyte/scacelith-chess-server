@@ -52,7 +52,7 @@ configuration file in Git. Secrets can also be read from files with the `_FILE` 
 
 | Port | Default | Open to | Purpose |
 |---|---|---|---|
-| `API_PORT` | 443/tcp | the Internet | HTTPS API (`/api/v1/...`), e-mail and Google sign-in pages, and the game WebSocket (`wss://host/ws`) |
+| `API_PORT` | 443/tcp | the Internet | HTTPS API (`/api/v1/...`), the pages of e-mail links, and the game WebSocket (`wss://host/ws`) |
 | `WS_PORT` | same as `API_PORT` | the Internet | set it only to put the WebSocket on its own port |
 | `METRICS_PORT` | 9464/tcp on 127.0.0.1 | your monitoring only | Prometheus metrics, `/healthz`, `/readyz` |
 
@@ -338,12 +338,30 @@ limit, the better layout for a server that expects to be full.
   `SMTP_SECURITY` (`starttls` on 587 by default, `tls` for implicit TLS on 465; with `starttls`
   the upgrade is mandatory). `MAIL_TRANSPORT=log` writes the messages
   to the log instead (tests), `none` disables e-mail (then turn e-mail confirmation off).
-- Google sign-in is optional and off by default. Create an OAuth client of type "Web application"
-  in the Google Cloud console, add the redirect URI
-  `https://<SERVER_PUBLIC_HOST>/auth/sso/google/callback` (`https://<SERVER_PUBLIC_HOST>:<port>/...`
-  when the public port is not 443; the value `check-config` prints as `googleRedirectUri`), then set `SSO_GOOGLE_ENABLED=true`, `GOOGLE_CLIENT_ID` and
-  `GOOGLE_CLIENT_SECRET` (or `GOOGLE_CLIENT_SECRET_FILE`). The client secret stays on the server:
-  the game signs in through the system browser with PKCE and never sees it.
+- Google sign-in is optional and off by default. The game opens Google's page in the system
+  browser, and Google sends the browser back to the game itself, on 127.0.0.1 (no page of this
+  server is involved). The client secret stays on the server: the game never sees it. Google
+  sign-in never opens an existing account without its password: when a player's Google address
+  is the address of an account with a password, the game asks that password (and the two-step
+  code when it is on) once, then links Google to the account. To set it up, in the Google Cloud
+  console:
+  1. open Google Auth Platform (create a project first if needed);
+  2. Branding: the application name, a support address and your domain;
+  3. Audience: user type External, then "Publish app" so that its status is In production (in
+     Testing, only the test users listed there can sign in);
+  4. Data access: the scopes `openid`, `.../auth/userinfo.email` and `.../auth/userinfo.profile`
+     only;
+  5. Clients > Create client > application type **Desktop app**. It has no redirect URI to enter:
+     the game's address on 127.0.0.1 is accepted for this type;
+  6. set `SSO_GOOGLE_ENABLED=true`, `GOOGLE_CLIENT_ID` (the client ID) and the client secret in
+     `GOOGLE_CLIENT_SECRET_FILE` (a file of mode 0600; `GOOGLE_CLIENT_SECRET` also works). Remove
+     `GOOGLE_REDIRECT_URI` if an older `.env` has it (`check-config` says so).
+
+  `SERVER_PUBLIC_HOST` must be the name players type when they add the server (with
+  `PUBLIC_API_PORT`, or `API_PORT`): Google sign-in works only for players who added it under
+  exactly that name and port, and the game refuses it under another name or address. A
+  server set up with a "Web application" client before this version: deploy, check that Google
+  sign-in works, then delete the old Web client.
 - Every server is a separate trust boundary: the game keeps one login per server address and
   never sends a server the credentials or tokens of another one.
 - Players manage their account from the game through the HTTPS API (every endpoint:
@@ -563,6 +581,17 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
 - Upgrading: stop the server, update the code, `node bin/scacelith-server.js migrate` (or just
   `start`, which migrates first). Migrations are checksummed: the server refuses to start if an
   applied migration was modified or is unknown to its version (a downgrade).
+- Release note, migration 008 (Google sign-in returns to the game): Google sign-in used to link a
+  Google account to the account with the same e-mail address, without its password. The
+  migration removes the Google links made that way (those created more than 60 s after their
+  password account) and signs out every device of those accounts; their players type their
+  password once in the game the next time they use Google, which links it again. If you ran the
+  server with `REQUIRE_EMAIL_VERIFICATION=false` and Google sign-in on, review the `sso_linked`
+  security events made before the upgrade (table `security_events`, `kind = 'sso_linked'`):
+  someone could register an account with a player's address, and that player's Google sign-in
+  then opened an account whose password the other person knew. The OAuth client must now be a
+  "Desktop app" client (see [Accounts, e-mail and Google sign-in](#accounts-e-mail-and-google-sign-in)),
+  and `GOOGLE_REDIRECT_URI` is no longer used.
 - A crash loses at most the last journal flush (`JOURNAL_FLUSH_MS`, 50 ms) of moves in progress;
   finished games and rating changes are committed in database transactions.
 - Players come back by themselves after a restart. The game spreads their reconnections over

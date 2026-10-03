@@ -1,14 +1,15 @@
 #!/usr/bin/env node
-// Live interoperability check: the game's C++ OnlineClient against this server, over real TLS.
+// Live interoperability check: the game's C++ OnlineClient against this server, over real TLS
+// (plain HTTP on the loopback for the sso part).
 //
-//   node dedicated-server/tools/live-cpp-check.js [--only=game|account] [path/to/scacelith_tests]
+//   node dedicated-server/tools/live-cpp-check.js [--only=game|account|sso] [path/to/scacelith_tests]
 //                                                      (default build/scacelith_tests)
 //   WINEDEBUG=-all node dedicated-server/tools/live-cpp-check.js [--only=...] wine path/to/scacelith_tests.exe
 //                                                      (the Windows build: WinHTTP)
 //
 // Run it from the root of the source tree the test binary was built from, where the C++ tests
-// expect to run (the live tests write their temporary credential files there). Two parts, one
-// server each:
+// expect to run (the live tests write their temporary credential files there). Three parts, one
+// server each (--only takes a comma-separated list):
 //
 // game     A server (2 shards, self-signed certificate, HTTPS API and WSS on one port as in
 //          production, proof of work on registration), a Node bot that queues in rated 3+2 and
@@ -39,18 +40,42 @@
 //          a direct challenge from the rival (POST /challenge), TOTP codes (GET /totp) and the
 //          server's metrics (GET /metric).
 //
-// The C++ client trusts the server by pinning the SHA-256 of its certificate. The host name it
-// connects to is LIVE_HOST (default localhost: the test certificate names both localhost and
-// 127.0.0.1, but Wine's WinHTTP only matches DNS names).
+// sso      Google sign-in (docs/API.md "Google sign-in"): the account API in this process (real
+//          auth module, SQLite store and API handler, no WebSocket) in plain HTTP on 127.0.0.1,
+//          with Google replaced by the fake provider of test/unit/helpers/auth-oidc.js and e-mail
+//          confirmation on; SERVER_PUBLIC_HOST is LIVE_HOST and the API port the one it listens
+//          on, so that the origin tag is the game's. Then the C++ test `net_live_sso`
+//          (SCACELITH_NET_LIVE_SSO=host:port:control port; its client is a development one,
+//          insecureDev) signs in through its 127.0.0.1 listener; its browser opener asks the
+//          control server for Google's answer (GET /fake-authorize?url=<authUrl>&sub=&email=, a
+//          302 whose Location it opens on the listener). The control server also seeds accounts
+//          (POST /seed-password-account { username, email, password, mfa }, which gives the
+//          authenticator's totpSecret with mfa), gives TOTP codes (GET /totp?secret=) and lists
+//          the Google links stored (GET /links).
+//
+// In the game and account parts the C++ client trusts the server by pinning the SHA-256 of its
+// certificate. The host name it connects to is LIVE_HOST (default localhost: the test certificate
+// names both localhost and 127.0.0.1, but Wine's WinHTTP only matches DNS names).
 // Exit code: 0 when every part passed, else the first failing C++ test's (or 1).
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { startServer } from '../test/integration/helpers/harness.js';
+import { createCaptureMailer, TEST_DEFAULTS } from '../test/unit/helpers/auth-fakes.js';
+import { startFakeOidc } from '../test/unit/helpers/auth-oidc.js';
+import { applyGame } from '../test/unit/helpers/real-auth.js';
+import { createAuth } from '../src/auth/index.js';
+import { testConfig } from '../src/config.js';
+import { createApiHandler } from '../src/http/server.js';
+import { logger } from '../src/log.js';
+import { createPasswordHasher } from '../src/security/password.js';
+import { migrate, openStore } from '../src/store/index.js';
 import { account, connect, challengeGame, Table, closeAll, PASSWORD } from '../test/integration/helpers/players.js';
 import { ApiClient, totpCode } from '../src/client/index.js';
 import { ChessGame } from '../src/chess/index.js';
@@ -58,13 +83,14 @@ import { enums } from '../src/protocol/index.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
-let parts = ['game', 'account'];
+const PARTS = ['game', 'account', 'sso'];
+let parts = PARTS;
 while (args.length && args[0].startsWith('--')) {
     const a = args.shift();
     if (a.startsWith('--only=')) parts = a.slice(7).split(',').filter(Boolean);
     else { console.error(`unknown option ${a}`); process.exit(2); }
 }
-for (const p of parts) if (p !== 'game' && p !== 'account') { console.error(`unknown part ${p}`); process.exit(2); }
+for (const p of parts) if (!PARTS.includes(p)) { console.error(`unknown part ${p}`); process.exit(2); }
 const command = args.length ? args : [path.join(HERE, '../../build/scacelith_tests')];
 const HOST = process.env.LIVE_HOST || 'localhost';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -299,14 +325,58 @@ const metricValue = (text, line) => {
     return m ? Number(m.slice(line.length + 1)) : 0;
 };
 
-/** The control server of the C++ test (plain HTTP on 127.0.0.1). */
-async function controlServer(srv, ctx) {
-    const db = () => {
-        const d = new DatabaseSync(path.join(srv.dir, 'scacelith.db'));
-        d.exec('PRAGMA busy_timeout = 5000');
-        return d;
-    };
-    const routes = {
+/**
+ * A TOTP code of `secret` (base32) the server has not seen used: the current step's, or the next
+ * step's when the current one was handed out already (the server takes one step ahead, and
+ * refuses a step at or before the last one used). `steps`: the last step handed out per secret.
+ */
+function freshTotp(steps, secret) {
+    let step = Math.floor(Date.now() / 30000);
+    const last = steps.get(secret) ?? -1;
+    if (step <= last) step = last + 1;
+    steps.set(secret, step);
+    return { code: totpCode(secret, step * 30000 + 1), step };
+}
+
+/** A second connection to the database of a server (data directory `dir`). */
+function openDb(dir) {
+    const d = new DatabaseSync(path.join(dir, 'scacelith.db'));
+    d.exec('PRAGMA busy_timeout = 5000');
+    return d;
+}
+
+/**
+ * A control server of a C++ test (plain HTTP on 127.0.0.1). `routes` maps 'METHOD /path' to
+ * (query, json body) -> answer, or [status, answer, headers?].
+ */
+async function serveControl(routes) {
+    const server = http.createServer(async (req, res) => {
+        const url = new URL(req.url, 'http://127.0.0.1');
+        const route = routes[`${req.method} ${url.pathname}`];
+        let status = 200, body, headers = {};
+        try {
+            if (!route) { status = 404; body = { error: 'no_route' }; } else {
+                const json = req.method === 'POST' ? await readBody(req) : {};
+                const out = await route(url.searchParams, json);
+                if (Array.isArray(out)) [status, body, headers = {}] = out; else body = out;
+            }
+        } catch (e) {
+            status = 500;
+            body = { error: 'harness', message: e.message };
+        }
+        console.log(`[control] ${req.method} ${url.pathname}${url.search} -> ${status} ${JSON.stringify(body).slice(0, 160)}`);
+        const text = JSON.stringify(body);
+        res.writeHead(status, { ...headers, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(text) });
+        res.end(text);
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { port: server.address().port, close: () => new Promise((r) => server.close(r)) };
+}
+
+/** The control server of the account part's C++ test. */
+function controlServer(srv, ctx) {
+    const db = () => openDb(srv.dir);
+    return serveControl({
         'GET /state': () => ctx.state,
         // ?to=&subject=<regex>&after=<count already seen>
         'GET /mail': async (q) => {
@@ -371,41 +441,11 @@ async function controlServer(srv, ctx) {
                 return { result: 'delivered' };
             } catch { return { result: 'acked_not_delivered' }; }
         },
-        // ?secret=<base32>: a TOTP code the server has not seen used: the current step's, or the
-        // next step's when the current one was handed out already (the server takes one step
-        // ahead, and refuses a step at or before the last one used).
-        'GET /totp': (q) => {
-            const secret = q.get('secret') || '';
-            let step = Math.floor(Date.now() / 30000);
-            const last = ctx.totpSteps.get(secret) ?? -1;
-            if (step <= last) step = last + 1;
-            ctx.totpSteps.set(secret, step);
-            return { code: totpCode(secret, step * 30000 + 1), step };
-        },
+        // ?secret=<base32>
+        'GET /totp': (q) => freshTotp(ctx.totpSteps, q.get('secret') || ''),
         // ?name=<metric line name, labels included>
         'GET /metric': async (q) => ({ value: metricValue(await srv.metrics(), q.get('name') || '') }),
-    };
-    const server = http.createServer(async (req, res) => {
-        const url = new URL(req.url, 'http://127.0.0.1');
-        const route = routes[`${req.method} ${url.pathname}`];
-        let status = 200, body;
-        try {
-            if (!route) { status = 404; body = { error: 'no_route' }; } else {
-                if (req.method === 'POST') await readBody(req);
-                const out = await route(url.searchParams);
-                if (Array.isArray(out)) [status, body] = out; else body = out;
-            }
-        } catch (e) {
-            status = 500;
-            body = { error: 'harness', message: e.message };
-        }
-        console.log(`[control] ${req.method} ${url.pathname}${url.search} -> ${status} ${JSON.stringify(body).slice(0, 160)}`);
-        const text = JSON.stringify(body);
-        res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(text) });
-        res.end(text);
     });
-    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-    return { port: server.address().port, close: () => new Promise((r) => server.close(r)) };
 }
 
 async function accountPart() {
@@ -451,9 +491,141 @@ async function accountPart() {
     return code;
 }
 
+// ---- part 3: Google sign-in ----------------------------------------------------------------------
+
+const SSO_CLIENT_ID = 'live-check.apps.googleusercontent.com';
+const SSO_CLIENT_SECRET = 'GOCSPX-live-check';
+// What Google adds to its redirect besides code, state and iss (the game forwards only those three).
+const GOOGLE_EXTRA = { scope: 'email profile openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile', authuser: '0', prompt: 'consent' };
+
+/**
+ * The account API in this process, as test/unit/helpers/real-auth.js builds it (the real auth
+ * module, SQLite store and API handler, plain HTTP on 127.0.0.1), with the fake Google of
+ * test/unit/helpers/auth-oidc.js. Its origin is LIVE_HOST and the port it listens on, so its tag is
+ * the one the game computes for the server it connects to.
+ */
+async function startSsoServer() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-live-sso-'));
+    let handle = null;
+    const server = http.createServer((req, res) => handle(req, res));
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const apiPort = server.address().port;
+    const idp = await startFakeOidc({ clientId: SSO_CLIENT_ID, clientSecret: SSO_CLIENT_SECRET, now: Date.now });
+    const config = testConfig({
+        ...TEST_DEFAULTS, DB_PATH: path.join(dir, 'scacelith.db'), SERVER_PUBLIC_HOST: HOST, API_PORT: String(apiPort),
+        REQUIRE_EMAIL_VERIFICATION: '1', SSO_GOOGLE_ENABLED: '1', GOOGLE_CLIENT_ID: SSO_CLIENT_ID, GOOGLE_CLIENT_SECRET: SSO_CLIENT_SECRET,
+    });
+    const store = openStore(config, { applyGame });
+    await migrate(store);
+    const log = logger.child('live-sso');
+    const mailer = createCaptureMailer(config, log);
+    const auth = createAuth({ config, store, log, mailer, passwordHasher: createPasswordHasher({ scrypt: { logN: 10 }, argon2: false }),
+        oidcEndpoints: idp.endpoints, oidcAllowHttp: true });
+    handle = createApiHandler({ config, store, auth, log });
+    return {
+        dir, apiPort, config, store, idp, mailer,
+        async stop() {
+            await handle.close();
+            auth.close();
+            await new Promise((r) => { server.closeAllConnections?.(); server.close(r); });
+            await idp.close();
+            store.close();
+            fs.rmSync(dir, { recursive: true, force: true });
+        },
+    };
+}
+
+/** The control server of `net_live_sso`. */
+function ssoControl(srv) {
+    const totpSteps = new Map(), secrets = new Map();
+    const api = () => new ApiClient({ host: '127.0.0.1', port: srv.apiPort, insecure: true });
+    return serveControl({
+        'GET /state': () => ({ host: HOST, apiPort: srv.apiPort, tag: srv.config.ssoRedirectTag, clientId: SSO_CLIENT_ID }),
+        // { username, email, password?, mfa? }: an account whose address is confirmed, as a used
+        // registration link leaves it; without a password, one like a Google-made account. With
+        // mfa: two-step verification turned on through the API; the answer gives its totpSecret.
+        'POST /seed-password-account': async (q, b) => {
+            const { username, email, password = null, mfa = false } = b;
+            if (typeof username !== 'string' || typeof email !== 'string') return [400, { error: 'username_and_email' }];
+            const passwordHash = password ? await createPasswordHasher({ scrypt: { logN: 10 }, argon2: false }).hash(password) : null;
+            srv.store.users.create({ username, email, passwordHash, emailVerified: true });
+            const userId = srv.store.users.byUsername(username).id;
+            if (!mfa) return { userId };
+            if (!password) return [400, { error: 'mfa_needs_password' }];
+            const a = api();
+            try {
+                const l = await a.login(username, password, { clientLabel: 'live harness' });
+                if (l.status !== 200) return [500, { error: 'login', status: l.status, body: l.body }];
+                const setup = await a.post('/account/mfa/totp/setup', { password });
+                if (setup.status !== 200) return [500, { error: 'mfa_setup', status: setup.status, body: setup.body }];
+                const { secret } = setup.body;
+                const on = await a.post('/account/mfa/totp/enable', { code: freshTotp(totpSteps, secret).code });
+                if (on.status !== 200) return [500, { error: 'mfa_enable', status: on.status, body: on.body }];
+                await a.logout();
+                secrets.set(username.toLowerCase(), secret);
+                return { userId, totpSecret: secret };
+            } finally { a.close(); }
+        },
+        // ?username= (an account seeded with mfa) or ?secret=<base32>
+        'GET /totp': (q) => {
+            const secret = q.get('secret') || secrets.get((q.get('username') || '').toLowerCase());
+            return secret ? freshTotp(totpSteps, secret) : [404, { error: 'no_secret' }];
+        },
+        // ?url=<authUrl of a start answer>, then the Google account picked (?sub=&email=&name=,
+        // ?verified=false for an address Google has not confirmed) or ?error=access_denied: the
+        // fake provider's GET /authorize with that URL's query, whose 302 to the redirect URI is
+        // passed on (Location, also given as { location }), with the parameters Google adds.
+        'GET /fake-authorize': async (q) => {
+            const url = q.get('url') || '';
+            Object.assign(srv.idp.state, {
+                consentError: q.get('error') || null,
+                consentClaims: {
+                    sub: q.get('sub') || '1000001', email: q.get('email') || 'live.player@gmail.com',
+                    email_verified: q.get('verified') !== 'false', name: q.get('name') || 'Live Player',
+                },
+            });
+            const at = url.indexOf('?');
+            const res = await new Promise((resolve, reject) => {
+                http.get(`${srv.idp.base}/authorize?${at < 0 ? '' : url.slice(at + 1)}`, (r) => { r.resume(); resolve(r); }).on('error', reject);
+            });
+            if (res.statusCode !== 302) return [400, { error: 'bad_authorization_request', status: res.statusCode }];
+            let location = res.headers.location;
+            if (!q.get('error')) location += `&${new URLSearchParams(GOOGLE_EXTRA)}`;
+            return [302, { location }, { Location: location }];
+        },
+        // The Google links stored (sso_identities), oldest first.
+        'GET /links': () => {
+            const d = openDb(srv.dir);
+            try {
+                return { links: d.prepare(`SELECT s.provider, s.subject, s.user_id AS userId, u.username, s.email, s.created_at AS createdAt
+                    FROM sso_identities s JOIN users u ON u.id = s.user_id ORDER BY s.created_at, s.subject`).all().map((r) => ({ ...r })) };
+            } finally { d.close(); }
+        },
+    });
+}
+
+async function ssoPart() {
+    const srv = await startSsoServer();
+    console.log(`[sso] server on ${HOST}:${srv.apiPort} (plain HTTP, API only, no WebSocket), origin tag ${srv.config.ssoRedirectTag}`);
+    let ctl = null, code = 1;
+    try {
+        ctl = await ssoControl(srv);
+        code = await runCpp('net_live_sso', { SCACELITH_NET_LIVE_SSO: `${HOST}:${srv.apiPort}:${ctl.port}` });
+        console.log(`[sso] C++ test exit code ${code}`);
+        await srv.mailer.idle?.();
+        console.log(`[sso] mails: ${srv.mailer.sent.map((m) => `${m.to} "${m.subject}"`).join(', ') || 'none'}`);
+    } catch (e) {
+        console.error(e);
+    } finally {
+        if (ctl) await ctl.close();
+        await srv.stop();
+    }
+    return code;
+}
+
 let exitCode = 0;
 for (const p of parts) {
-    const c = p === 'game' ? await gamePart() : await accountPart();
+    const c = await { game: gamePart, account: accountPart, sso: ssoPart }[p]();
     console.log(`== ${p}: ${c === 0 ? 'passed' : `FAILED (exit code ${c})`}`);
     if (c !== 0 && exitCode === 0) exitCode = c;
 }
