@@ -1,5 +1,5 @@
 // Administration commands (bin/admin.js): accounts, sanctions, integrity reviews, reports, rating
-// refunds.
+// refunds, engine analysis requests.
 //
 // Every handler takes a Store object (DESIGN 5.5), so the commands run against the database on
 // the server host (no network) and are tested with a fake store. Every moderator action is
@@ -10,7 +10,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { DatabaseSync } from '../store/index.js';
+import { AnalysisPriority, DatabaseSync } from '../store/index.js';
+import { isGameId } from '../util/ids.js';
 import { readIntegrity, writeIntegrity, writeStructured, inTx, parseMaybeJson, levelRank, LEVELS, HOUR_MS, DAY_MS } from './util.js';
 import { CheatBanReason, isCheatingBan, refundVictims, refundWindowStart, victimTotals } from './refunds.js';
 import { reviewPriority, recentReportWeight } from './reports.js';
@@ -45,6 +46,12 @@ Rating refunds (the points the victims of a confirmed cheater lost to them, give
                                               cheating); those already given are skipped
   refunds list [<name>] [--victim NAME] [--limit N]
                                               refunds of a cheater's games, received by a victim, or all
+
+Engine analysis
+  analysis queue <gameId>                     analyse the game before every other one, even one the
+                                              queue left out (casual, short): a waiting job moves
+                                              up, a failed one is tried again; a game being
+                                              analysed or already analysed is left as it is
 
 Reports and anomalies
   reports list [--limit N]                    open reports grouped by reported player, by priority
@@ -530,6 +537,42 @@ function refundsList(ctx) {
     return { data: rows, text };
 }
 
+// ---- engine analysis -----------------------------------------------------------------------------------
+
+const PRIORITY_NAMES = Object.fromEntries(Object.entries(AnalysisPriority).map(([name, p]) => [p, name]));
+
+// A moderator request (DESIGN 6.5): the game is analysed before every other one (priority 'manual',
+// store.analysis.enqueue), whatever the automatic policy decided for it: a game without a job
+// (casual, short, or left out by the policy) is queued too. A job waiting at a lower priority
+// moves up and a failed one is queued again; a game being analysed, already analysed or already
+// requested is left as it is. The job is read and queued in one transaction, so that an
+// engine cannot claim it in between.
+function analysisQueue(ctx) {
+    const idText = ctx.args.positional[2];
+    const id = /^\d+$/.test(String(idText || '')) ? Number(idText) : NaN;
+    if (!isGameId(id)) throw new AdminError('analysis queue <gameId>: the number of a game');
+    if (!ctx.store.games.byId(id)) throw new AdminError(`no game #${id}`);
+    const now = ctx.now();
+    const { previous, queued } = inTx(ctx.store, () => {
+        const job = ctx.store.analysis.job(id);
+        const leave = !!job && (job.status === 'running' || job.status === 'done'
+            || (job.status === 'queued' && job.priority >= AnalysisPriority.manual));
+        if (!leave) ctx.store.analysis.enqueue(id, now);
+        return { previous: job, queued: !leave };
+    });
+    if (queued) audit(ctx, 'analysis_queue', null, { gameId: id, previousStatus: previous?.status ?? null });
+    let text;
+    if (queued) {
+        const was = !previous ? '; it was not in the queue (a casual or short game, or one the queue policy left out)'
+            : previous.status === 'failed' ? `; its analysis had failed (${cell(previous.error)})`
+            : `; it was waiting at priority ${PRIORITY_NAMES[previous.priority] ?? previous.priority}`;
+        text = `Game #${id} queued for engine analysis before every other game${was}.\n`;
+    } else if (previous.status === 'queued') text = `Game #${id} is already queued before every other game.\n`;
+    else if (previous.status === 'running') text = `Game #${id} is being analysed now.\n`;
+    else text = `Game #${id} was already analysed (${iso(previous.finishedAt)}): not queued again.\n`;
+    return { data: { gameId: id, queued, previous }, text };
+}
+
 // ---- bench accounts ------------------------------------------------------------------------------------
 
 /** Default session-token hash (hex SHA-256); bin/admin.js passes the auth module's (security/keys.js sha256Hex). */
@@ -678,6 +721,7 @@ export const COMMANDS = Object.freeze({
     'reports resolve': reportsResolve,
     'refunds apply': refundsApply,
     'refunds list': refundsList,
+    'analysis queue': analysisQueue,
     'anomalies': anomaliesCmd,
     'stats': stats,
     'bench-accounts': benchAccounts,

@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { testConfig } from '../../src/config.js';
+import { fileURLToPath } from 'node:url';
+import { loadConfig, testConfig } from '../../src/config.js';
 import { createAnticheat, startAnalysisProcess } from '../../src/anticheat/index.js';
 import { applyCertainSanction } from '../../src/anticheat/sanction.js';
 import { Population, updatePlayerIntegrity } from '../../src/anticheat/scoring.js';
@@ -203,6 +204,40 @@ process.on('message', (m) => { if (m.type === 'shutdown') { ipc.close(); process
     assert.deepEqual(snapshot.map((m) => [m.name, m.children[0].v]), [['scacelith_anticheat_analysis_engines_shared', 2]]);
     await h.stop(3000);
     assert.equal(await h.metricsSnapshot(), null, 'no process, no metrics');
+});
+
+test('the analysis process runs the configuration the primary loaded, not .env and the secret files as they are at its start', async (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ac-proc-'));
+    let h = null;
+    // The process and its engine run in `dir`: stopped first when an assertion failed.
+    t.after(async () => { await h?.stop(3000); fs.rmSync(dir, { recursive: true, force: true }); });
+    // A UCI engine that starts at once (helpers/fake-uci-engine.js).
+    const engine = path.join(dir, 'engine.sh');
+    const fake = fileURLToPath(new URL('./helpers/fake-uci-engine.js', import.meta.url));
+    fs.writeFileSync(engine, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fake)}\n`, { mode: 0o755 });
+    const envFile = path.join(dir, '.env'), secretFile = path.join(dir, 'secret');
+    const dotEnv = (workers) => `DATA_DIR=${dir}\nANALYSIS_ENGINE_PATH=${engine}\nANALYSIS_WORKERS=${workers}\nSERVER_SECRET_FILE=${secretFile}\n`;
+    fs.writeFileSync(envFile, dotEnv(2));
+    fs.writeFileSync(secretFile, Buffer.alloc(32, 1).toString('base64'));
+    // The server's environment, which the analysis process inherits.
+    const env = { SCACELITH_ENV_FILE: envFile, TLS_MODE: 'off', ALLOW_INSECURE_DEV: '1', MAIL_TRANSPORT: 'none', LOG_LEVEL: 'error', METRICS_PORT: '0' };
+    const config = loadConfig({ env: { ...process.env, ...env } });
+    const store = openStore(config);
+    migrate(store);
+    store.close();
+    // The operator edits .env and removes the secret file, to apply them at the next restart.
+    fs.writeFileSync(envFile, dotEnv(1));
+    fs.rmSync(secretFile);
+    h = startAnalysisProcess(config, { log: quiet, env });
+    let engines = null;
+    for (const end = Date.now() + 15000; engines !== 2 && Date.now() < end;) {
+        const snapshot = await h.metricsSnapshot(500);
+        engines = snapshot?.find((m) => m.name === 'scacelith_anticheat_analysis_engines')?.children[0].v ?? null;
+        if (engines !== 2) await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.equal(engines, 2, 'the ANALYSIS_WORKERS the primary loaded');
+    assert.equal(h.restarts, 0);
+    await h.stop(3000);
 });
 
 test('startAnalysisProcess restarts a crashing worker with backoff and stops cleanly', async (t) => {

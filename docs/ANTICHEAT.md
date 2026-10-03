@@ -120,7 +120,9 @@ is recorded, the player being `confirmed` and under the automatic ban by then.
 ## 3. Engine analysis
 
 `startAnalysisProcess(config)` (primary) forks `bin/analysis-worker.js` at low CPU priority and
-restarts it with exponential backoff (1 s .. 60 s) if it dies. It does nothing when
+restarts it with exponential backoff (1 s .. 60 s) if it dies. The process runs the configuration
+the primary loaded at its start, asked for over IPC as the shards do, so an edit of `.env` or of a
+secret file reaches it only with a restart of the whole server. It does nothing when
 `ANALYSIS_ENGINE_PATH` is empty or `ANALYSIS_WORKERS=0`; timing and reports still work. The
 worker runs `ANALYSIS_WORKERS` engines (one thread each, `ANALYSIS_HASH_MB` of hash, low
 priority), claims rated games of at least `ANALYSIS_MIN_PLIES` from the queue, and for each game:
@@ -162,9 +164,9 @@ the human stand-ins' ACPL 26 % higher than Stockfish 16 at 10/18, and scores 16 
 the statistics never mix them (section 4).
 
 **Queue policy** (docs/DESIGN.md 6.5). The engine takes the highest priority first, then the
-oldest job: a moderator request (priority `manual`, made through the store API
-`store.analysis.enqueue(gameId)`: no `scacelith-admin` command exposes it yet), then a game a
-credible player reported (`cheating` or `other`,
+oldest job: a moderator request (priority `manual`, `scacelith-admin analysis queue <gameId>`,
+which calls `store.analysis.enqueue(gameId)`), then a game a credible player reported (`cheating`
+or `other`,
 stored weight 0.5 or more), then a game with a suspicion signal at its end (either player's
 integrity level above `none`, an open `cheating` or `other` report of weight 0.5 or more against
 either player in the last 30 days, a `suspicious` or `certain` anomaly in that game) or a report
@@ -477,6 +479,7 @@ scacelith-admin integrity confirm <name> --reason TEXT [--hours N] [--refund-sin
 scacelith-admin integrity clear <name> [--reason TEXT] [--dismiss-reports]
 scacelith-admin refunds apply <name> [--since DATE]   # refunds of a confirmed cheater (window: from the latest ban for cheating)
 scacelith-admin refunds list [<name>] [--victim NAME] [--limit N]
+scacelith-admin analysis queue <gameId>      # analysed before every other game, unless running or done
 scacelith-admin reports list | reports resolve <id> actioned|dismissed
 scacelith-admin anomalies <name> | user show|ban|unban|reset-mfa|verify-email|revoke-sessions <name> | stats
 ```
@@ -578,6 +581,9 @@ header of `src/anticheat/index.js`):
   `reports.countFor(reportedId)` (`{ total, open }`) make the 24-hour cap of a new report, the
   30-day report weights and the report counts of `bin/admin.js` cover every report; without them
   they are taken from `forReported`'s rows (the newest 200);
+* `analysis queue` of `bin/admin.js` requires `games.byId(gameId)`, `analysis.job(gameId)` (the
+  game's job with its `status` and `priority`, null without one) and
+  `analysis.enqueue(gameId, now)`;
 * the optional `analysis.request(gameId, 'report' | 'signal', now)` queues a reported game,
   at `report` priority for a credible report and `signal` for a low-credibility one (without it
   a report does not touch the analysis queue);

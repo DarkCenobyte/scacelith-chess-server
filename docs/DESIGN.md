@@ -160,7 +160,13 @@ transaction, its disk writes or the write lock it takes. The anti-cheat writes t
 thread (the anomaly rows, the automatic sanction of a certain cheat and its rating refunds), and
 the thread handles its messages one at a time in the order they were sent: the anomalies flushed
 right before a commit are written before it, without the event loop waiting for either. After
-the commit it sends `RatingUpdate` and tells the primary `game.ended`.
+the commit it sends `RatingUpdate` and tells the primary `game.ended`. At a stop the shard closes
+the thread last: it waits up to 7 s for the requests already sent (the last anomaly batch, a
+sanction), longer than `busy_timeout` (5 s), so that one wait for another process's write lock
+does not lose them, and rejects the ones still unanswered then (logged; finished games stay in
+the journal). The primary kills a worker `SHUTDOWN_GRACE_MS` + 15 s after its `shutdown`: with
+one such lock wait, during the final commits or during the close, the stop ends about 6 s after
+the drain. Only a lock held through several waits lets the kill come first.
 
 When the journal's writes keep failing (a full disk, a read-only or failing `JOURNAL_DIR`
 volume, too many open files), waiting for the journal would keep every finished game out of the
@@ -435,6 +441,7 @@ store.analysis.next(limit, workerId, now) -> [job] ; complete(gameId, features) 
 store.analysis.enqueue(gameId, now) ; request(gameId, 'report' | 'signal', now) -> bool ; backlog() -> { ordinary, priority }
   // enqueue: moderator re-analysis (priority manual); request: a reported game, 'signal' for a low-credibility
   // report (section 6.5); backlog counts each tier up to 100,000
+store.analysis.job(gameId) -> { status, priority, attempts, queuedAt, finishedAt, error } | null
 store.integrity.get(userId) -> { level /* 'none'|'suspected'|'high_confidence'|'confirmed' */, score, evidence, updatedAt, reviewedBy }
 store.integrity.set(userId, fields) ; listFlagged(minLevel, limit) ; populationStats(ratingBucket) / updatePopulation(...)
 store.reports.create({ reporterId, reportedId, gameId, category, comment, weight, at }) -> id
@@ -541,7 +548,7 @@ Shard -> primary:
 
 | type | payload | reply |
 |---|---|---|
-| `config.snapshot` | - | the text of every configuration key the primary loaded at its start (`*_FILE` contents included): the worker's configuration, so that a restarted shard keeps the primary's settings |
+| `config.snapshot` | - | the text of every configuration key the primary loaded at its start (`*_FILE` contents included): the worker's configuration, so that a restarted shard keeps the primary's settings (the analysis process asks for it too) |
 | `tls.ticketKeys` | - | `{ key, day }` (native TLS only, before the shard listens): the current state of the session-ticket keys every worker shares, drawn at random by the primary at its start and moved forward one way each UTC day (`src/net/ticket-keys.js`), so that a restarted shard resumes the others' sessions; the shard overwrites the key it received once copied; `null` in the other TLS modes |
 | `presence.claim` | `{ userId, username, shard, connId }` | `{ ok, activeGame: id or 0, kicked: bool }` or `{ error }` (ServerFull, Banned) |
 | `presence.release` | `{ userId, connId }` | - |
@@ -958,7 +965,8 @@ weighted by the reporter's credibility, never the level itself.
 is bounded and prioritized instead of growing without end. Every job has a priority and the engine
 takes the highest first, then the oldest:
 
-1. `manual`: a moderator asked for the (re-)analysis of a game (`store.analysis.enqueue`);
+1. `manual`: a moderator asked for the (re-)analysis of a game (`store.analysis.enqueue`, through
+   `scacelith-admin analysis queue <gameId>`, which leaves a game being or already analysed alone);
 2. `report`: a credible player reported the game (category `cheating` or `other`, stored weight
    at least 0.5); the report queues it even if the policy had left it out, and re-queues it if
    its analysis had failed. A report of lower weight (a new account, or one beyond the daily cap

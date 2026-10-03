@@ -11,8 +11,7 @@ import { OnceStore, SlidingWindowLimiter } from '../../src/cluster/limits.js';
 import { Presence } from '../../src/cluster/presence.js';
 import { startPrimary } from '../../src/cluster/primary.js';
 import { stopPrimary } from '../../src/cluster/primary-main.js';
-import { shardConfig } from '../../src/cluster/worker-main.js';
-import { describe as describeConfig, loadConfig, testConfig } from '../../src/config.js';
+import { describe as describeConfig, loadConfig, primaryConfig, testConfig } from '../../src/config.js';
 import { Challenges } from '../../src/match/challenges.js';
 import { Matchmaker } from '../../src/match/matchmaker.js';
 import { Registry } from '../../src/metrics.js';
@@ -852,7 +851,7 @@ describe('primary assembly', () => {
         fs.writeFileSync(envFile, `SERVER_MOTD=after\nSERVER_SECRET_FILE=${secretFile}\n`);
         fs.writeFileSync(secretFile, Buffer.alloc(32, 2).toString('base64'));
         assert.equal(loadConfig().serverMotd, 'after');
-        const shard = await shardConfig(new Ipc(workers[0]));
+        const shard = await primaryConfig(new Ipc(workers[0]));
         assert.equal(shard.serverMotd, 'before');
         assert.deepEqual(shard.serverSecret, Buffer.alloc(32, 1));
         assert.deepEqual(describeConfig(shard), describeConfig(config));

@@ -50,7 +50,7 @@ export async function startPrimary({ config, log, fork, matchmaker, challenges, 
     const supervisor = new ShardSupervisor({
         shards: shardNumbers, fork, log: log.child('supervisor'),
         onUp: (s, ipc) => {
-            ipc.on('config.snapshot', () => config.rawValues);     // worker-main.js shardConfig
+            ipc.on('config.snapshot', () => config.rawValues);     // config.js primaryConfig
             ipc.on('tls.ticketKeys', () => ticketKeys?.state() ?? null);   // shard.js startShard
             cp.bind(s, ipc);
         },

@@ -10,8 +10,7 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { startServer, haveOpenssl } from './helpers/harness.js';
 import { account, connect, challengeGame, Table, closeAll } from './helpers/players.js';
-import { enums } from '../../src/protocol/index.js';
-import { CLOSE_SERVER_FULL } from '../../src/cluster/router.js';
+import { enums, CloseCode } from '../../src/protocol/index.js';
 
 const { ErrorCode: EC, GameEventKind: EV } = enums;
 const skip = !haveOpenssl() && 'openssl not available';
@@ -54,7 +53,7 @@ async function attempt(token) {
         await c.close().catch(() => {});
         return 'welcome';
     } catch (e) {
-        if (e.errorCode === EC.ServerFull && e.closeCode === CLOSE_SERVER_FULL) return 'server_full_at_hello';
+        if (e.errorCode === EC.ServerFull && e.closeCode === CloseCode.ServerFull) return 'server_full_at_hello';
         if (e.status === 503) return 'http_503';
         if (/ECONNRESET|before secure TLS connection was established|socket hang up/.test(e.message)) return 'closed_before_tls';
         return `other: ${e.message}`;

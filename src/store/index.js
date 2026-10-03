@@ -77,7 +77,8 @@
 //   - analysis: a job is claimed at most 3 times (ANALYSIS_MAX_ATTEMPTS); a running job claimed (or
 //     renewed by touch(gameId, workerId, now), the worker's heartbeat) more than 10 minutes ago is
 //     re-queued (or failed at the cap) by the next claim; fail() re-queues until the cap and
-//     returns the new status; extra enqueue(gameId, now) (manual re-analysis) and stats().
+//     returns the new status; extra enqueue(gameId, now) (manual re-analysis), job(gameId) (the
+//     game's job, bin/admin.js analysis queue) and stats().
 //   - analysis queue policy (DESIGN.md 6.5): every job has a priority (AnalysisPriority: ordinary,
 //     signal, report, manual) and next() takes the highest first, then the oldest, except that
 //     every ORDINARY_SHARE-th claim of a store takes the oldest ordinary job first (when one
@@ -1272,6 +1273,11 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
                         status === 'failed' ? ms(now) : null, gameId);
                 return status;
             });
+        },
+        /** The game's job: { status, priority, attempts, queuedAt, finishedAt, error }, null without one. */
+        job(gameId) {
+            const r = st('SELECT status, priority, attempts, queued_at, finished_at, error FROM analysis_jobs WHERE game_id = ?').get(gameId);
+            return r ? { status: r.status, priority: r.priority, attempts: r.attempts, queuedAt: r.queued_at, finishedAt: r.finished_at, error: r.error } : null;
         },
         /** Moderator request: (re-)analyses any stored game, before every other job (priority 'manual'). */
         enqueue(gameId, now = Date.now()) {
