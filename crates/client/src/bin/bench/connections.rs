@@ -5,7 +5,9 @@
 //! heartbeat and reads what comes. For each step the report gives the ramp (handshakes per
 //! second, handshake and Hello latency, failures by class), then, after the warm-up, the window
 //! with every connection idle: server CPU, memory and memory per connection (RSS and PSS above
-//! the footprint before the first connection), and connections dropped by the server.
+//! the baseline), and connections dropped by the server. The baseline is the idle footprint after
+//! one warm-up with no connection (a freshly started server still settles: the Node.js server
+//! gives back start-up memory in its first seconds).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -58,6 +60,7 @@ pub async fn run(ctx: &Arc<Ctx>) -> Result<(Value, Vec<Step>), String> {
     let alive = Arc::new(AtomicUsize::new(0));
     let (stop_tx, stop_rx) = watch::channel(false);
     let mut holders = JoinSet::new();
+    tokio::time::sleep(ctx.opts.warmup).await;
     let base = ctx.probe.sample();
     let mut opened = 0;
     let mut steps = Vec::new();

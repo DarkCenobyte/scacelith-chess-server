@@ -49,7 +49,8 @@ async fn burst(
                 return Ok(None);
             }
             Ok(Err(_)) => return Err(()),
-            Ok(Ok((Event::Snapshot(s), at))) if !s.over => break (s, at),
+            // Black's snapshot may come after White already aborted: it then shows the end.
+            Ok(Ok((Event::Snapshot(s), at))) => break (s, at),
             Ok(Ok((Event::Error { r#ref, code }, _))) if r#ref == seq => {
                 stats.add(&format!("error.queue_{code}"), 1);
                 return Ok(None);
@@ -58,6 +59,10 @@ async fn burst(
         }
     };
     let (snap, at) = snapshot;
+    let matched = Some((at.duration_since(sent), at));
+    if snap.over {
+        return Ok(matched);
+    }
     if snap.you_white {
         conn.send(Cmd::Abort { game: snap.game }).map_err(drop)?;
     }
@@ -73,7 +78,7 @@ async fn burst(
             Ok(Ok(_)) => {}
         }
     }
-    Ok(Some((at.duration_since(sent), at)))
+    Ok(matched)
 }
 
 async fn player(
