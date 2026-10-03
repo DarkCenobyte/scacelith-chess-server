@@ -182,8 +182,7 @@ async fn flood_until_blocked(srv: &TestServer) -> (Flood, Option<Instant>) {
 }
 
 #[tokio::test]
-async fn a_flooding_address_is_refused_then_blocked_before_tls_others_keep_working_and_its_next_block_is_4_times_longer()
- {
+async fn a_flooding_address_is_refused_then_blocked_before_tls_and_its_next_block_is_4_times_longer() {
     let srv = server().await;
     let [a, b] = accounts(&srv, ["alice", "bobby"]).await;
     let alice_client = connect(&srv, &a.token).await.expect("alice connects");

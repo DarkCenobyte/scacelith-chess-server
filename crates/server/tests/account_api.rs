@@ -294,8 +294,7 @@ fn can_drop_privileges() -> bool {
 }
 
 #[tokio::test]
-async fn without_cap_net_bind_service_the_default_port_443_fails_with_the_fixes_in_the_log_and_exits_non_zero()
- {
+async fn without_cap_net_bind_service_port_443_fails_with_the_fixes_in_the_log_and_exits_non_zero() {
     if !can_drop_privileges() {
         eprintln!(
             "skipped: needs root (to run the server as nobody), setpriv and ip_unprivileged_port_start > 443"
