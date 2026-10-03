@@ -329,7 +329,8 @@ impl Session {
             self.fatal(0, ErrorCode::ProtocolViolation);
             return;
         }
-        self.ctx.anomalies.sanction_certain(self.user, game, "forged_type");
+        // First: the ban holds before the forfeit or the close can reach the client.
+        self.ctx.anomalies.sanction_certain(self.user, game, "forged_type", self.ep.conn_id());
         let mut shards = Vec::new();
         for &g in &self.games {
             let shard = ids::shard_of(g);

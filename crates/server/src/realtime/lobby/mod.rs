@@ -2,6 +2,18 @@
 //! presence, the matchmaking queues, challenges and private codes, conduct cooldowns, game
 //! creation and placement, rematches, the ban cache and the rating refund notices.
 //!
+//! A ban counts from the moment the anti-cheat decides it: a sanction being written
+//! ([`SanctionEvents::sanction_pending`]) holds its player out as a ban does (claims, requests
+//! and game creations refused with the ban's answers, the game forfeited, the other connections
+//! kicked) until the stored ban replaces the hold ([`SanctionEvents::sanction_applied`]), or for
+//! a minute at most. A client that reconnects right after the sanction's close finds the hold:
+//! the hold is posted (its send done) before the host or connection task that detected the cheat
+//! queues the forfeit, the `Error{CheatDetected}` and the 4302 close, which the writer task takes
+//! after them (the outbound queue's lock); the client's next connection posts its claim after it
+//! read them, so after the hold's send, and the inbox, one FIFO queue for all its senders, hands
+//! the hold over first. The connection the cheat came from is spared by the hold: the lobby may
+//! handle the hold before that connection's owner closes it, with `CheatDetected`.
+//!
 //! The connection tasks post their claims, releases and lobby requests; the game hosts, auth and
 //! the anti-cheat post events through [`Lobby`], which implements [`HostEvents`],
 //! [`SessionEvents`] and [`SanctionEvents`]. The actor answers each lobby request with exactly one
@@ -34,10 +46,13 @@ use tokio::task::JoinHandle;
 
 use self::actor::LobbyActor;
 pub(crate) use self::actor::LobbyDeps;
+#[cfg(test)]
+pub(crate) use self::actor::SANCTION_HOLD_MS;
 use super::link::ConnLink;
 use crate::anticheat::notices::RefundEvent;
 use crate::events::{
-    GameEnded, HostEvents, IncidentKind, RematchRequest, SanctionApplied, SanctionEvents, SessionEvents,
+    GameEnded, HostEvents, IncidentKind, RematchRequest, SanctionApplied, SanctionEvents, SanctionPending,
+    SessionEvents,
 };
 use crate::ids::{ConnId, GameId, UserId};
 use crate::matching::ColorPref;
@@ -142,6 +157,7 @@ pub(crate) enum LobbyMsg {
         user: UserId,
         token_hashes: Option<Vec<[u8; 32]>>,
     },
+    SanctionPending(SanctionPending),
     SanctionApplied(SanctionApplied),
     RefundsPending,
     /// A result of the refund notices' background work.
@@ -262,6 +278,10 @@ impl SessionEvents for Lobby {
 }
 
 impl SanctionEvents for Lobby {
+    fn sanction_pending(&self, pending: SanctionPending) {
+        self.post(LobbyMsg::SanctionPending(pending));
+    }
+
     fn sanction_applied(&self, sanction: SanctionApplied) {
         self.post(LobbyMsg::SanctionApplied(sanction));
     }

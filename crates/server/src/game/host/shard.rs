@@ -1032,9 +1032,10 @@ impl Shard {
         }
     }
 
-    /// Reports an anomaly; a certain cheat (with `AUTO_SANCTION_CERTAIN_CHEATS`) forfeits the
-    /// cheater's game at the arrival of the request that revealed it, gets a fatal
-    /// `Error{CheatDetected}`, the sanction and the connection closed with 4302.
+    /// Reports an anomaly; a certain cheat (with `AUTO_SANCTION_CERTAIN_CHEATS`) gets the
+    /// sanction first (the ban holds before anything of it reaches the client), then forfeits the
+    /// cheater's game at the arrival of the request that revealed it, a fatal
+    /// `Error{CheatDetected}` and the connection closed with 4302.
     #[allow(clippy::too_many_arguments)]
     fn handle_anomaly(
         &mut self,
@@ -1052,6 +1053,7 @@ impl Shard {
         if !self.settings.auto_sanction || !is_certain(kind, pos_matched) {
             return;
         }
+        self.anomalies.sanction_certain(user, game, kind, ep.as_ref().map_or(0, Endpoint::conn_id));
         if let Some(side) = side
             && let Some(entry) = self.rooms.get_mut(&game)
             && !entry.room.is_over()
@@ -1062,7 +1064,6 @@ impl Shard {
         if let Some(frame) = error_frame(ErrorCode::CheatDetected, seq, true, game) {
             send(ep.as_ref(), &frame);
         }
-        self.anomalies.sanction_certain(user, game, kind);
         if let Some(ep) = ep {
             ep.close(close::CHEAT_DETECTED, "cheat detected");
         }

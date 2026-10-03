@@ -279,7 +279,7 @@ impl AnomalySink for RecordingAnomalies {
         self.anomalies.lock().push(anomaly);
     }
 
-    fn sanction_certain(&self, user: UserId, game: GameId, kind: &'static str) {
+    fn sanction_certain(&self, user: UserId, game: GameId, kind: &'static str, _conn: ConnId) {
         self.sanctions.lock().push((user, game, kind));
     }
 }

@@ -192,22 +192,16 @@ async fn an_illegal_move_in_a_synchronised_position_is_a_certain_cheat_forfeit_c
     banned(&srv, cheater.token()).await;
 }
 
-/// Waits until a connection with `token` is refused as banned. The ban is written a moment after
-/// the sanction's close: a connection in between is still accepted (it sees the forfeited game).
+/// A connection with `token` is refused as banned: the ban holds from the moment the cheat is
+/// detected, before the sanction's close reaches the client (while the ban is being written).
 async fn banned(srv: &TestServer, token: &str) {
-    eventually(Duration::from_secs(10), "the ban", || async {
-        match connect(srv, token).await {
-            Ok(mut early) => {
-                early.close().await;
-                None
-            }
-            Err(err) => {
-                assert_eq!(refusal(&err), Some(ErrorCode::Banned), "{err}");
-                Some(())
-            }
+    match connect(srv, token).await {
+        Ok(mut admitted) => {
+            admitted.close().await;
+            panic!("a connection right after the sanction's close is admitted");
         }
-    })
-    .await;
+        Err(err) => assert_eq!(refusal(&err), Some(ErrorCode::Banned), "{err}"),
+    }
 }
 
 #[tokio::test]
