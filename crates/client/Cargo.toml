@@ -10,7 +10,7 @@ publish.workspace = true
 
 [[bin]]
 name = "scacelith-bench"
-path = "src/bin/bench.rs"
+path = "src/bin/bench/main.rs"
 
 [dependencies]
 scacelith-protocol.workspace = true
