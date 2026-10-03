@@ -11,11 +11,24 @@
 //! implement on their connection, and every result they must persist is returned as data
 //! ([`scoring::Observation`], [`integrity::LevelUpdate`]).
 
+pub mod admin;
 pub mod analysis;
 pub mod integrity;
+pub mod notices;
 pub mod num;
+pub mod players;
 pub mod priors;
+pub mod refunds;
+pub mod reports;
+pub mod sanction;
 pub mod scoring;
+pub mod service;
+pub mod worker;
+
+pub use service::{Anticheat, Classification, SanctionResult, classify};
+pub use worker::{AnalysisPool, PoolStats};
 
 #[cfg(test)]
 mod synthetic;
+#[cfg(test)]
+pub(crate) mod testing;

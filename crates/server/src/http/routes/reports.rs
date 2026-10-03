@@ -33,9 +33,9 @@ pub const REPORTED_MAX: usize = 24;
 // ------------------------------------------------------------------------------------------------
 // Adapter to the anti-cheat reports service.
 //
-// The reports service (`handleReport` / `canReport` of the Node server's anticheat/reports.js) is
-// written by the anti-cheat module. Until it is merged, the routes reach it through this trait,
-// which the server implements over that service when it builds the routes.
+// The routes reach the reports service (`handleReport` / `canReport` of the Node server's
+// anticheat/reports.js) through this trait. `crate::anticheat::reports::Reports` implements it;
+// the server passes that service to the routes as `Arc<dyn ReportDesk>` when it builds them.
 // ------------------------------------------------------------------------------------------------
 
 /// What the reports service did with a report.
