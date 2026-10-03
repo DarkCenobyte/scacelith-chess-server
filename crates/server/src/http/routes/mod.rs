@@ -1,5 +1,5 @@
-//! The `/api/v1` endpoints (DESIGN 5.9, docs/API.md). Owners: auth (auth, account, MFA, SSO,
-//! export) and routes (info, players, leaderboard, games, account games, reports, GIF), wave 2.
+//! The `/api/v1` endpoints (DESIGN 5.9, docs/API.md): auth, account, two-step verification,
+//! Google sign-in and export; info, players, leaderboard, games, account games, reports and GIFs.
 
 pub mod account;
 pub mod account_export;

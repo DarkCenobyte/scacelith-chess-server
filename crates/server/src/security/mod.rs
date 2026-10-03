@@ -12,7 +12,7 @@
 //! * [`encoding`]: the encodings of the former server (lenient base64, JavaScript whitespace,
 //!   `encodeURIComponent`).
 //!
-//! Owner: security. See docs/RUST-PORT.md.
+//! See docs/RUST-PORT.md.
 
 pub mod encoding;
 pub mod keys;

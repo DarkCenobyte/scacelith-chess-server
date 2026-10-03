@@ -374,7 +374,6 @@ fn derive<'a>(
         }
     }
     v.set("DATA_DIR", Val::Text(path::to_text(&data_dir)));
-    let run_dir = path::join(&data_dir, "run");
 
     let api_port = v.int("API_PORT");
     if let (None, Some(p)) = (v.int("WS_PORT"), api_port) {
@@ -556,7 +555,7 @@ fn derive<'a>(
             None => errors.push(format!("RATED_CATEGORIES: \"{c}\" is not minutes+seconds (e.g. 3+2).")),
         }
     }
-    Derived { run_dir, sso_origin, sso_redirect_tag, categories, load_notes: std::mem::take(notes) }
+    Derived { sso_origin, sso_redirect_tag, categories, load_notes: std::mem::take(notes) }
 }
 
 /// `m+s` with 1 to 3 digits each, minutes 1 to 180, increment 0 to 180 seconds.

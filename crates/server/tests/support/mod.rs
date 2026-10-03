@@ -1,5 +1,5 @@
 //! Shared support of the black-box integration tests: the real server binary in a child process
-//! ([`server`]), players over the client SDK ([`players`]) and plain HTTP requests ([`web`]).
+//! ([`server`]), players over the client SDK ([`mod@players`]) and plain HTTP requests ([`web`]).
 //! Each test file uses part of it.
 #![allow(dead_code, unused_imports, unused_macros)]
 

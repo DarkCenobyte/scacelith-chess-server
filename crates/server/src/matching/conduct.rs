@@ -11,7 +11,7 @@
 //!   full 24 h without any incident; the decay is applied (and persisted) at the next incident,
 //!   the only moment the level is used;
 //! * direct challenges and casual games stay possible: the lobby checks the cooldown before a
-//!   rated queue join only.
+//!   rated queue join and a rated rematch only.
 //!
 //! The incidents and the cooldown live in the store so that they survive restarts. The store
 //! side is the [`ConductStore`] trait, which the store implements on one transaction: the lobby

@@ -1,7 +1,7 @@
 //! SQLite store: schema and migrations, the single writer thread (FIFO, `BEGIN IMMEDIATE`), the
 //! reader pool, and the typed API of every table (users, sessions, tokens, signups, ratings,
 //! games, conduct, sanctions, anomalies, analysis queue, integrity, reports, refunds), plus the
-//! retention purge. Owner: store. See docs/RUST-PORT.md section 6 and DESIGN 5.5, 7.
+//! retention purge. See docs/RUST-PORT.md section 6 and DESIGN 5.5, 7.
 //!
 //! # Shape
 //!

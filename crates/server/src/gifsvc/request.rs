@@ -64,8 +64,7 @@ pub fn handler_timeout_ms(config: &Config) -> u64 {
     u64::try_from(config.gif_queue_timeout_ms + config.gif_render_timeout_ms + 5000).unwrap_or(0)
 }
 
-/// A rate limit of the GIF routes, as the HTTP framework's route rates take it (Node spec
-/// `{key, limit, windowMs, by, shared, prefixLimit}`).
+/// A rate limit of the GIF routes, as the HTTP framework's route rates take it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuotaSpec {
     /// Bucket name (bucket keys `<key>:u<userId>` or `<key>:<address key>`, metric label).

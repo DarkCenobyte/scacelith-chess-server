@@ -1,4 +1,4 @@
-//! Post-game engine analysis (DESIGN 6.6, docs/ANTICHEAT.md): the UCI engine driver
+//! Post-game engine analysis (DESIGN 6.5, docs/ANTICHEAT.md): the UCI engine driver
 //! ([`engine`]), the analysis of one game into per-player features ([`analyzer`]), protocol move
 //! and record column helpers ([`moves`]) and the statistics helpers shared with the scoring model
 //! ([`stats`]). The analysis queue worker that claims jobs, runs one engine per loop and stores

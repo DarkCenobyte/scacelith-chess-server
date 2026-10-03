@@ -1,5 +1,5 @@
 //! `/api/v1/auth/*` (except Google sign-in, [`super::sso`]); the pages of the e-mail links are in
-//! [`crate::http::pages`] (DESIGN.md 5.9, docs/API.md). Owner: auth.
+//! [`crate::http::pages`] (DESIGN.md 5.9, docs/API.md).
 //!
 //! | endpoint | answer |
 //! |---|---|

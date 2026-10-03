@@ -671,6 +671,16 @@ configuration keys live in `crates/server/src/config/keys.rs`: after a change, r
 installed where distributions put it, or named by `SCACELITH_TEST_ENGINE`, and return at once
 otherwise.
 
+Two tools check the server against its clients and its predecessor:
+
+* `tools/live-check` (`scacelith-live-check`) runs the game's own C++ online client tests, Linux
+  and Windows (Wine) builds, against a server started for each part, over real TLS
+  ([its README](tools/live-check/README.md));
+* `tools/rest-diff` (`scacelith-rest-diff`) replays the same scenarios against the former Node.js
+  server and this one and reports every difference in the HTTPS API answers; the accepted ones,
+  each with its reason, are in `tools/rest-diff/accepted.txt`
+  ([its README](tools/rest-diff/README.md)).
+
 ## License
 
 The dedicated server is free software under the GNU General Public License, version 3 or (at your

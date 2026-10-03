@@ -1,9 +1,8 @@
 //! Anti-cheat: anomalies, automatic sanctions, rating refunds and their notices, reports, the
 //! statistical model (priors, scoring, integrity levels), the Stockfish analysis pool and the
-//! administration commands. Owners: matching (pure parts), anticheat (wave 2). See
-//! docs/RUST-PORT.md.
+//! administration commands. See docs/RUST-PORT.md.
 //!
-//! The pure parts (DESIGN 6.6, docs/ANTICHEAT.md) hold no store and no socket: [`analysis`]
+//! The pure parts (DESIGN 6.5, docs/ANTICHEAT.md) hold no store and no socket: [`analysis`]
 //! drives a UCI engine and turns a finished game into per-player features, [`priors`] and
 //! [`scoring`] turn a player's features into a proposed integrity level with its evidence, and
 //! [`integrity`] applies the memory rules to the stored record. The store-side services call

@@ -12,7 +12,7 @@
 //! Unknown accounts: [`PasswordHasher::verify_dummy`] does the same work on a fixed dummy hash, so
 //! that a login for an unknown user costs as much as one with a wrong password.
 //!
-//! The functions here are blocking (one hash is about a third of a second of CPU and 64 MiB):
+//! The functions here are blocking (one hash is about half a second of CPU and 64 MiB):
 //! they run on blocking threads behind the hash limiter (see [`super::LimitedHasher`]), never on a
 //! runtime thread.
 

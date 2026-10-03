@@ -1,5 +1,5 @@
 //! The HTML pages of the e-mail links (`/verify-email`, `/reset-password`,
-//! `/confirm-email-change`) and their layout. Owner: auth (wave 2).
+//! `/confirm-email-change`) and their layout.
 //!
 //! Pages register with [`Router::page`]. The layout's message page also renders the errors of
 //! page routes: hand [`layout::error_page_renderer`] to [`crate::http::ApiBuilder::page_renderer`].

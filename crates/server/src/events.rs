@@ -59,7 +59,7 @@ pub struct RematchRequest {
     pub game: NewGame,
 }
 
-/// A suspicious or certain protocol or game event of one player (DESIGN 6.6). Stored in the
+/// A suspicious or certain protocol or game event of one player (DESIGN 6.5). Stored in the
 /// anomalies table; feeds the analysis queue and, for certain cheats, the automatic sanction.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Anomaly {

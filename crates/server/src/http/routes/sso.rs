@@ -1,6 +1,6 @@
 //! Google sign-in (DESIGN.md 5.9; the flow is described in the auth service). Off (404
 //! `sso_disabled`) unless `SSO_GOOGLE_ENABLED`. Google sends the browser back to the game's own
-//! listener on 127.0.0.1, never to this server. Owner: auth.
+//! listener on 127.0.0.1, never to this server.
 //!
 //! | endpoint | answer |
 //! |---|---|

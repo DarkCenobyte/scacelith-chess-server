@@ -1,4 +1,4 @@
-//! Small helpers shared by several modules. Owner: foundation.
+//! Small helpers shared by several modules.
 //!
 //! * [`js`]: JavaScript-compatible number formatting (`String(n)`), `Math.round`, `toFixed`,
 //!   `trim` and UTF-16 lengths, so answers and logs read as the former Node.js server's did.

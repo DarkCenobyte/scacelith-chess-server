@@ -28,7 +28,7 @@ pub mod flags {
     pub const RECOVERED: i64 = 2;
     /// Ended by forfeit.
     pub const FORFEIT: i64 = 4;
-    /// The clock was pressed by hand at least once.
+    /// The clock was pressed by hand (automatic press off for the game).
     pub const MANUAL_CLOCK: i64 = 8;
 }
 

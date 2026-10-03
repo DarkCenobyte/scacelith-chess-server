@@ -8,7 +8,7 @@
 //! that resolves to true or false once the message is handled (it never fails); callers normally
 //! drop it. The queue is bounded (500 messages) and at most 2 messages are in flight.
 //!
-//! Owner: security. See docs/RUST-PORT.md.
+//! See docs/RUST-PORT.md.
 
 pub mod message;
 pub mod smtp;

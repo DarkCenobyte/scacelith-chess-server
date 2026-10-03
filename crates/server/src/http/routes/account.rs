@@ -1,5 +1,5 @@
 //! `/api/v1/account/*` (DESIGN.md 5.9, docs/API.md): every route needs a session. The e-mail
-//! change link's pages are in [`crate::http::pages`]. Owner: auth.
+//! change link's pages are in [`crate::http::pages`].
 //!
 //! | endpoint | answer |
 //! |---|---|

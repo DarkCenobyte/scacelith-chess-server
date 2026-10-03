@@ -40,7 +40,6 @@ pub use keys::{KEYS, KeySpec, Kind, OBSOLETE, Section, spec};
 pub use load::{LoadOptions, decode_secret, default_pending_per_group, load};
 
 use std::fmt;
-use std::path::PathBuf;
 
 use serde_json::{Map, Value};
 
@@ -385,7 +384,6 @@ impl FieldValue for Option<SecretText> {
 
 /// Values computed at load time that are not keys.
 struct Derived {
-    run_dir: PathBuf,
     sso_origin: String,
     sso_redirect_tag: String,
     categories: Vec<Category>,
@@ -404,8 +402,6 @@ macro_rules! config_struct {
                 #[doc = concat!("`", $key, "` (docs/CONFIG.md).")]
                 pub $field: $ty,
             )+
-            /// Directory for runtime files (`DATA_DIR/run`).
-            pub run_dir: PathBuf,
             /// `SERVER_PUBLIC_HOST:PUBLIC_API_PORT` as players type it (lower case, IPv6 in
             /// brackets): the origin of Google sign-in.
             pub sso_origin: String,
@@ -427,7 +423,6 @@ macro_rules! config_struct {
             fn from_values(mut v: load::Values, d: Derived) -> Config {
                 Config {
                     $($field: FieldValue::from_val(v.take($key), $key),)+
-                    run_dir: d.run_dir,
                     sso_origin: d.sso_origin,
                     sso_redirect_tag: d.sso_redirect_tag,
                     categories: d.categories,
@@ -601,12 +596,11 @@ config_struct! {
 
 impl Config {
     /// The configuration without secrets, as `check-config` prints it: every key in table order
-    /// (camel case, effective values, secrets as `<set>`/`<unset>`), then `runDir`, `ssoOrigin`,
+    /// (camel case, effective values, secrets as `<set>`/`<unset>`), then `ssoOrigin`,
     /// `ssoRedirectTag` and `categories`.
     pub fn describe(&self) -> Value {
         let mut out = Map::new();
         self.describe_keys(&mut out);
-        out.insert("runDir".into(), Value::String(crate::util::path::to_text(&self.run_dir)));
         out.insert("ssoOrigin".into(), Value::String(self.sso_origin.clone()));
         out.insert("ssoRedirectTag".into(), Value::String(self.sso_redirect_tag.clone()));
         let categories = self

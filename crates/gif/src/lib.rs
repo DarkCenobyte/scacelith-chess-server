@@ -1,5 +1,5 @@
 //! Animated GIF of a chess game: a 2D board seen from above, the game played move by move, with
-//! the players, the result and the last move around it. Owner: gif. GPL-3.0-or-later.
+//! the players, the result and the last move around it. GPL-3.0-or-later.
 //!
 //! The output is byte-identical to the former Node.js server's renderer (`src/gif/*.js` at commit
 //! 7531830): the same palette, anti-aliased pieces (the cburnett SVG set, rasterized here with the

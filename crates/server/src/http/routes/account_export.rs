@@ -1,6 +1,6 @@
 //! `POST /api/v1/account/export {password, code?, recoveryCode?}`: everything the server keeps
 //! about the signed-in player's account, as one JSON document to save (docs/API.md), with
-//! `Content-Disposition: attachment; filename="scacelith-account-<username>.json"`. Owner: auth.
+//! `Content-Disposition: attachment; filename="scacelith-account-<username>.json"`.
 //!
 //! Re-authentication as for `POST /account/delete` (the password, plus an authenticator or a
 //! recovery code when two-step verification is on): 403 `invalid_password` | `mfa_code_required`

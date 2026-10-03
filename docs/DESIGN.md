@@ -1135,6 +1135,11 @@ instances. Capacity on one machine: SIZING.md.
   interface.
 * Unit tests live next to the code (a `tests` module, or a `tests.rs` beside the module), black-box
   tests in `crates/*/tests` (chess rules, perft, PGN, the C++ cross-check).
+* `crates/server/tests` runs whole servers through the public interfaces only (`scacelith-client`
+  over TLS): multiplayer games, the account API, GIFs, admission, abuse limits, refunds after a
+  ban and the analysis engines.
+* `tools/live-check` drives the game's C++ online client tests (Linux and Wine) against a live
+  server; `tools/rest-diff` compares every HTTPS API answer with the former Node.js server's.
 * `realtime::e2e` starts a whole server (store, hosts and journals, lobby, auth, anti-cheat, API,
   listeners) on a loopback port and drives it with minimal WebSocket clients: pairing and a game to
   its rating update, reconnection, replacement, revoked sessions, bans and certain cheats, slow

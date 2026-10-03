@@ -1,7 +1,7 @@
 //! Accounts and authentication (DESIGN.md sections 3, 5.9 and 8): sessions, passwords,
 //! registration, e-mail confirmation and change, password reset and change, two-step verification
 //! (TOTP and recovery codes), Google sign-in, brute-force defences, proof of work and security
-//! events. Owner: auth. See docs/RUST-PORT.md section 8.
+//! events. See docs/RUST-PORT.md section 8.
 //!
 //! ```ignore
 //! let auth = Auth::new(AuthDeps::new(config, store, mailer, session_events))?;

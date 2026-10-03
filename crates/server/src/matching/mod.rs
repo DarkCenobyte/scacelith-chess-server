@@ -1,6 +1,6 @@
 //! Pure matchmaking logic owned by the lobby actor: FIDE Elo ([`elo`]), the matchmaker queues
 //! ([`matchmaker`]), direct challenges and private codes ([`challenges`]) and conduct cooldowns
-//! ([`conduct`]). DESIGN 5.4, 6.3, 6.4 and 6.6. Owner: matching (docs/RUST-PORT.md).
+//! ([`conduct`]). DESIGN 5.4, 6.3, 6.4 and 6.6.
 //!
 //! Every type here is a plain state machine: no timer, no I/O, no lock. Time is passed in as
 //! integer milliseconds (`now`), random draws come from injected sources, and the store

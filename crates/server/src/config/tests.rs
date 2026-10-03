@@ -750,9 +750,9 @@ fn check_config_prints_every_key_in_table_order_then_the_derived_values() {
     let obj = d.as_object().unwrap();
     let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
     let mut want: Vec<String> = KEYS.iter().map(|k| camel_case(k.name)).collect();
-    want.extend(["runDir", "ssoOrigin", "ssoRedirectTag", "categories"].map(String::from));
+    want.extend(["ssoOrigin", "ssoRedirectTag", "categories"].map(String::from));
     assert_eq!(keys, want);
-    assert_eq!(keys.len(), 158);
+    assert_eq!(keys.len(), 157);
     assert_eq!(d["serverSecret"], "<set>");
     assert_eq!(d["mfaEncryptionKey"], "<unset>");
     assert_eq!(d["smtpPassword"], "<set>");
@@ -784,7 +784,6 @@ fn derived_paths_instance_and_errors() {
     assert_eq!(c.data_dir, format!("{root}/state"));
     assert_eq!(c.db_path, format!("{root}/state/scacelith.db"));
     assert_eq!(c.journal_dir, format!("{root}/state/journal"));
-    assert_eq!(c.run_dir, PathBuf::from(format!("{root}/state/run")));
     assert_eq!(c.instance_id, crate::sys::hostname(), "INSTANCE_ID defaults to the host name");
     let d = load_with(
         &[("SERVER_SECRET", &s), ("DB_PATH", "/srv/db.sqlite"), ("TLS_CERT_FILE", "tls/c.pem")],

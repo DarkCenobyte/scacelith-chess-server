@@ -1,7 +1,7 @@
 //! Realtime connections: the per-connection task (Hello, rate buckets, heartbeats, dispatch),
 //! outbound queues with slow-consumer handling, the lobby actor (presence, matchmaking,
-//! challenges, conduct, rematches, sanctions and notices) and the drain at shutdown. Owner:
-//! realtime (wave 2). See docs/RUST-PORT.md.
+//! challenges, conduct, rematches, sanctions and notices) and the drain at shutdown. See
+//! docs/RUST-PORT.md.
 //!
 //! `app::start` wires it: [`Lobby::channel`] first (the game hosts announce the games they
 //! recover into its inbox), the lobby actor once the hosts run, then [`Realtime`], whose

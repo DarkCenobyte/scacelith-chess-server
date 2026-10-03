@@ -1,6 +1,6 @@
 //! Game journal of one host shard: append-only segments, group flush, compaction snapshots,
-//! recovery at start and the commit gate's failure accounting. Owner: store. See
-//! docs/RUST-PORT.md (6.3) and DESIGN.md (5.6).
+//! recovery at start and the commit gate's failure accounting. See docs/RUST-PORT.md (6.3) and
+//! DESIGN.md (5.6).
 //!
 //! Crash safety of the games in progress without a database write per move. One journal per
 //! shard, `JOURNAL_DIR/shard-<n>/segment-<seq>.log`, in the native format of [`mod@format`]
