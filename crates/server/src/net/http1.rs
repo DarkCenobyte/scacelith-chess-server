@@ -14,7 +14,8 @@
 //!   handler's own timeouts answer it);
 //! * hyper's own answers to unparsable requests are replaced by the raw `400` / `431` answers;
 //!   requests llhttp would refuse but hyper accepts (unknown or lower-case methods, a head over
-//!   8192 bytes counted as URL + header names + values) get the same raw answers. These client
+//!   8192 bytes counted as URL + header names + values, more than 64 header lines) get the same
+//!   raw answers. These client
 //!   errors count in `scacelith_http_client_errors_total{reason}` and 1 toward a block of the peer
 //!   (unless it is a trusted proxy);
 //! * a connection the server closes after an answer keeps reading (and discarding) for 2 s, 1 s
@@ -31,8 +32,7 @@
 //! connection, a request asking for it, a draining server).
 //!
 //! Known differences with Node's llhttp: header lines ending in a bare LF are accepted (httparse
-//! is lenient there), a head of more than 100 header lines is refused `431` (llhttp keeps 2000,
-//! Node's API saw the first 64), and pipelined requests are answered one after the other.
+//! is lenient there), and pipelined requests are answered one after the other.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -79,6 +79,9 @@ pub const SEND_TIMEOUT: Duration = Duration::from_secs(60);
 pub const MAX_REQUESTS_PER_CONNECTION: u32 = 1000;
 /// Largest request head, counted as Node does: URL + header names + header values.
 pub const MAX_HEADER_SIZE: usize = 8192;
+/// Header lines of a request head: Node's API sets `server.maxHeadersCount = 64`, and its
+/// parser refuses a head with more (`431`). hyper itself refuses more than 100.
+pub const MAX_HEADER_LINES: usize = 64;
 /// hyper's read buffer: a raw head larger than this is refused 431 by hyper itself.
 const MAX_BUF: usize = MAX_HEADER_SIZE + 1024;
 /// A raw error answer and the connection behind it last this long at most.
@@ -1034,7 +1037,7 @@ impl HttpListener {
         if method == Method::CONNECT {
             return Err(ClosedWithoutAnswer);
         }
-        if node_head_size(&req) >= MAX_HEADER_SIZE {
+        if node_head_size(&req) >= MAX_HEADER_SIZE || req.headers().len() > MAX_HEADER_LINES {
             return Ok(self.raw_error(&st, ClientError::TooLarge));
         }
         let is_upgrade = has_token(req.headers(), header::CONNECTION, "upgrade")

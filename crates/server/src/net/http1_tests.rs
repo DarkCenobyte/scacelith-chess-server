@@ -503,6 +503,41 @@ async fn unknown_methods_and_heads_node_refuses_get_raw_answers() {
 }
 
 #[tokio::test]
+async fn a_head_of_more_than_64_header_lines_gets_the_raw_431() {
+    let s = setup(Options::default());
+    let head = |lines: usize, target: &str, extra: &str| {
+        let more: String = (1..lines).map(|i| format!("Cookie: c{i}=1\r\n")).collect();
+        format!("GET {target} HTTP/1.1\r\nHost: x\r\n{extra}{more}\r\n")
+    };
+    let mut c = connect(&s.edge, "127.0.0.1");
+    let w = request(&mut c, &head(64, "/healthz", "")).await;
+    assert_eq!(w.status, 200, "64 header lines, the Host line included");
+    for (text, what) in [
+        (head(65, "/healthz", ""), "65 header lines"),
+        (head(100, "/api/v1/x", ""), "100 header lines (hyper's own limit is 100)"),
+        (
+            head(
+                61,
+                "/ws",
+                "Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n",
+            ),
+            "a WebSocket upgrade with 65 header lines",
+        ),
+    ] {
+        let mut c = connect(&s.edge, "127.0.0.1");
+        c.io.write_all(text.as_bytes()).await.expect("write");
+        let answer = until_closed(&mut c.io, Duration::from_secs(3)).await.expect("closed");
+        assert_eq!(
+            String::from_utf8_lossy(&answer),
+            String::from_utf8_lossy(ClientError::TooLarge.raw_answer()),
+            "{what}"
+        );
+    }
+    assert_eq!(s.edge.client_errors(ClientError::TooLarge), 3);
+    assert_eq!(reports(&s.guard), [(local(), 3.0)], "each one counts toward a block");
+}
+
+#[tokio::test]
 async fn node_answers_missing_host_and_unknown_expect_itself() {
     let s = setup(Options::default());
     let mut c = connect(&s.edge, "127.0.0.1");
