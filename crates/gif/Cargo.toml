@@ -1,0 +1,22 @@
+[package]
+name = "scacelith-gif"
+description = "Animated GIF of a chess game (renderer and encoder) for the Scacelith server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The chess rules come from the caller (the `Rules` trait), so this crate does not depend on
+# scacelith-chess.
+[dependencies]
+libm.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true
+hex.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

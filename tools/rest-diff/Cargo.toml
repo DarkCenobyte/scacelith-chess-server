@@ -1,0 +1,33 @@
+[package]
+name = "scacelith-rest-diff"
+description = "Differential test of the HTTPS API: the former Node.js server and the Rust server side by side"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rest-diff"
+path = "src/main.rs"
+
+[dependencies]
+scacelith-client.workspace = true
+scacelith-protocol.workspace = true
+scacelith-chess.workspace = true
+tokio.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pki-types.workspace = true
+rcgen.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+base64.workspace = true
+hex.workspace = true
+bytes.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,36 @@
+[package]
+name = "scacelith-live-check"
+description = "Live interoperability check: the game's C++ online client against this server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "scacelith-live-check"
+path = "src/main.rs"
+
+[dependencies]
+# The embedded server of the Google sign-in part, and what the shared test support of the
+# server's integration tests (crates/server/tests/support) uses: the journal reader, the PoW
+# solver, the TOTP codes, the password hasher.
+scacelith-server = { path = "../../crates/server" }
+scacelith-client.workspace = true
+scacelith-protocol.workspace = true
+scacelith-chess.workspace = true
+tokio.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+ring.workspace = true
+base64.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+rcgen.workspace = true
+
+[lints]
+workspace = true

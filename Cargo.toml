@@ -1,0 +1,107 @@
+# Scacelith dedicated server (Rust). GPL-3.0-or-later, see ../LICENSE.
+#
+# Crates:
+#   scacelith-protocol  realtime protocol v1: generated codec, constants, and the `protogen` tool
+#                       that writes the Rust codec, the game's C++ codec, docs/PROTOCOL.md tables
+#                       and the golden vectors from protocol/scacelith-v1.json
+#   scacelith-chess     chess rules, SAN/UCI/FEN, PGN reader and writer (mirror of the game's rules)
+#   scacelith-gif       animated GIF of a game (renderer and encoder, byte-identical to the
+#                       former Node.js server)
+#   scacelith-server    the server binary (`scacelith-server`): HTTPS API, realtime WebSocket,
+#                       games, accounts, ratings, anti-cheat, administration CLI
+#   scacelith-client    Rust client SDK used by the integration tests and the load generator
+#                       (`scacelith-bench`)
+#   scacelith-live-check  tools/live-check: the game's C++ online client (its live tests) against
+#                       this server (`scacelith-live-check`)
+#   scacelith-rest-diff tools/rest-diff: differential test of the HTTPS API against the former
+#                       Node.js server (`rest-diff`)
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/protocol",
+    "crates/chess",
+    "crates/gif",
+    "crates/server",
+    "crates/client",
+    "tools/live-check",
+    "tools/rest-diff",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/DarkCenobyte/scacelith-chess"
+publish = false
+
+[workspace.dependencies]
+scacelith-protocol = { path = "crates/protocol" }
+scacelith-chess = { path = "crates/chess" }
+scacelith-gif = { path = "crates/gif" }
+scacelith-client = { path = "crates/client" }
+
+tokio = { version = "1.53", features = ["rt-multi-thread", "net", "time", "signal", "io-util", "sync", "macros", "process", "fs"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http = "1"
+http-body-util = "0.1"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+rustls-pki-types = "1.15"
+webpki-roots = "1.0"
+ring = "0.17"
+socket2 = { version = "0.6", features = ["all"] }
+bytes = "1.12"
+arc-swap = "1.9"
+parking_lot = "0.12"
+indexmap = "2.14"
+libc = "0.2"
+hex = "0.4"
+subtle = "2.6"
+base64 = "0.23"
+getrandom = "0.4"
+unicode-normalization = "0.1"
+libm = "0.2"
+rusqlite = { version = "0.40", features = ["bundled"] }
+sha1 = "0.11"
+sha2 = "0.11"
+hmac = "0.13"
+hkdf = "0.13"
+aes-gcm = "0.11"
+argon2 = "0.6"
+zeroize = "1.8"
+serde_json = { version = "1", features = ["preserve_order"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["ring"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "allow"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "allow"
+
+[profile.dev]
+debug = "line-tables-only"
+
+# Dependencies are optimized even in debug builds: password hashing, TLS and SQLite are far too
+# slow unoptimized for the test suites.
+[profile.dev.package."*"]
+opt-level = 2
+
+# The chess rules and the GIF renderer run in the debug tests of every crate that uses them.
+[profile.dev.package.scacelith-chess]
+opt-level = 2
+
+[profile.dev.package.scacelith-gif]
+opt-level = 2
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+strip = "debuginfo"
