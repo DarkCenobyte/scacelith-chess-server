@@ -201,7 +201,7 @@ EnvironmentFile=/etc/scacelith/scacelith.env
 ExecStart=/usr/bin/node bin/scacelith-server.js start
 ExecReload=/bin/kill -HUP $MAINPID
 KillSignal=SIGTERM
-TimeoutStopSec=30
+TimeoutStopSec=45
 Restart=on-failure
 LimitNOFILE=1048576
 # Port 443 (below 1024) without running as root: this capability only, nothing else.
@@ -220,8 +220,11 @@ With `DATA_DIR=/var/lib/scacelith` in the environment file. `LimitNOFILE` must e
 `MAX_CONNECTIONS`. `AmbientCapabilities=CAP_NET_BIND_SERVICE` lets the `scacelith` account listen
 on 443; `CapabilityBoundingSet` keeps every other capability away from the process, and
 `NoNewPrivileges` still applies (the capability is given at the start, not gained later). Leave
-both lines out when `API_PORT` is 1024 or above. This unit is an example: adapt the paths to your
-installation.
+both lines out when `API_PORT` is 1024 or above. `TimeoutStopSec` must be at least
+`SHUTDOWN_GRACE_MS` + 15 s (what the server gives its workers for their last database writes before
+it kills them) + a few seconds to close the database: 45 s covers the default `SHUTDOWN_GRACE_MS`
+(3 s) with room to spare; raise it with `SHUTDOWN_GRACE_MS`, or systemd kills the server before
+its stop is over. This unit is an example: adapt the paths to your installation.
 
 ### Anti-cheat engine
 
