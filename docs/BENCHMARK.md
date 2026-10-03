@@ -1,125 +1,197 @@
 # Benchmark
 
-`bench/loadgen.js` measures what one Scacelith server holds: authenticated WebSocket connections,
-games at a realistic pace, and the move throughput without think time. It uses Node's built-ins
-only (no npm package), starts its own throw-away server or targets an existing test server, and
-writes a JSON report of every run. This page explains how to run it, what each scenario measures,
-the numbers measured on the development machine, what saturated first, and what they mean for a
-dedicated machine.
+This page compares the Rust server with the Node.js server it replaces, on the same machine, with
+the same settings and the same load generator: how to reproduce the comparison, what each scenario
+measures, and the choices made to keep it fair. The second half keeps the earlier load study of
+the Node.js server alone ([The Node.js server study](#the-nodejs-server-study-2026-09)), whose
+figures [SIZING.md](SIZING.md) builds on.
 
-## Quick start
+## Comparing the Rust and Node.js servers
+
+### Quick start
 
 ```sh
 cd dedicated-server
-npm run bench -- --scenario connect --conns 10000             # same as node bench/loadgen.js ...
-node bench/loadgen.js --scenario games --games 5000           # 5,000 games, one move per second each
-node bench/loadgen.js --scenario burst --games 500            # no think time: throughput limit
-node bench/loadgen.js --help                                  # every option
-node bench/table.js bench/results/*.json                      # markdown tables of the reports
+# A checkout of the Node.js server (the last commit before the rewrite), with its dependencies:
+git worktree add ../node-ref 7531830 && (cd ../node-ref/dedicated-server && npm ci)
+
+bench/run.sh --node24 /path/to/node24/bin/node --node26 /path/to/node26/bin/node \
+             --node-tree ../node-ref/dedicated-server
+bench/run.sh ... --quick                       # same steps, small sizes: checks the set-up in minutes
+bench/run.sh ... --targets rust --scenarios games,rest
+bench/run.sh --help                            # every option
 ```
 
-A run prints one progress line every 2 s (connections, games, moves/s, move round trip, server and
-load generator CPU, event-loop lag, memory, CPU used by the other processes of the machine), then
-a summary, and writes `bench/results/<scenario>-<time>.json` (ignored by git). A run is bounded
-(`--max-run-s`, 900 s by default); at the end, on an error or on Ctrl-C it stops the server and the
-load processes and deletes the temporary directory.
+`bench/run.sh` builds the release binaries (`cargo build --release -p scacelith-server -p
+scacelith-client`, `CARGO_BUILD_JOBS` jobs, 2 by default), then for each target (`rust`, `node24`,
+`node26`):
 
-## What the tool does
+1. makes a fresh data directory, runs the migrations and creates the bench accounts with the
+   server's own admin command (`scacelith-server admin bench-accounts`, `node bin/admin.js
+   bench-accounts`: verified accounts with a live session each, 20,000 of them, 600 with
+   `--quick`);
+2. for each scenario, starts the server pinned to the server CPUs (`taskset -c 0,1`), waits until
+   `/api/v1/readyz` and the metrics listener's `/readyz` answer 200 (except for `idle`, which
+   measures that wait), runs `scacelith-bench` pinned to the load CPUs (`taskset -c 2,3`), and
+   stops the server (SIGTERM). Every scenario starts on a freshly started server.
 
-**Its own server** (default). A temporary data directory on the normal disk (the journal fsyncs and
-the SQLite commits are real), a self-signed ECDSA P-256 certificate made with the `openssl` command,
-free ports on 127.0.0.1, `WORKERS` from `--workers` (auto: the number of cores, more when the
-open-file limit requires it, see below), proof of work off, per-IP limits, the challenge limits
-(`CHALLENGE_UNPLAYED_PER_MIN`, `PRIVATE_CODE_FAILURES_PER_MIN`), `MATCH_REPEAT_LIMIT` (a pair of
-accounts plays one rated game after the other) and `MAX_CONNECTIONS` raised to 1,000,000, mail to
-the log, `LOG_LEVEL=warn`. The burst scenario also raises
-`WS_MSG_RATE`/`WS_MSG_BURST` to 1000/2000 (the defaults, 20/40 messages per second per connection,
-would throttle a player who moves without thinking). `--server-env K=V` sets anything else,
-`--reuse-port` sets `LISTEN_REUSE_PORT=true`, `--plain` runs without TLS (`TLS_MODE=off`, to measure
-what TLS costs). The accounts come from `bin/admin.js bench-accounts` (verified accounts with a live
-session each); they are created in a copy of the database on tmpfs and moved into place, because
-account creation is fsync-bound on a real disk (about 3.5 ms per account here; 100,000 accounts
-take 7 s this way).
+Results go to `bench/results/<date>/`: one JSON report per target and scenario
+(`node24-games.json`), the server and load generator logs, the data directories, and
+`summary.md`, the Markdown tables of every report with the machine and the versions. Git keeps
+only `summary.md`. A scenario that fails is listed in the summary and the run goes on.
 
-**An existing test server.** Never a production server: `bench-accounts` refuses to run without
-its explicit flag.
+Requirements: Linux (CPU and memory come from `/proc`), 4 CPUs or more (2 for the server, 2 for
+the load generator; `--server-cpus` and `--load-cpus` choose them), `taskset`, `openssl`, `curl`,
+free ports 18443 and 19464 (`--port`, `--metrics-port`), and an open-file limit (`ulimit -Hn`)
+above 20,000 for the 10,000-connection step. The harness raises the soft limit of both processes
+to the hard one.
+
+**By hand.** `scacelith-bench` targets any test server (never a production one: it needs bench
+accounts and raised limits):
 
 ```sh
-# on the test server: accounts and their tokens (username<TAB>token per line)
-node bin/admin.js bench-accounts --count 20000 --prefix bench --out tokens.tsv --format tsv --i-know-this-is-a-test-server
-# the test server needs ABUSE_EXEMPT set to the load machines' addresses, MAX_CONNECTIONS_PER_IP
-# (64 by default) above the number of clients per load machine, MATCH_REPEAT_LIMIT (3 by default)
-# above the rated games of one pair in a run (or --rated false), CHALLENGE_UNPLAYED_PER_MIN (5 by
-# default) raised when pairs often retry their challenges, and WS_MSG_RATE / WS_MSG_BURST raised
-# for the burst scenario
-# on the load machine
-node bench/loadgen.js --scenario games --games 10000 --url wss://test.example.org/ws \
-    --ca cert.pem --tokens tokens.tsv --metrics http://test.example.org:9464/metrics --metrics-token TOKEN
+scacelith-bench games --target node --addr 192.0.2.10:443 --host test.example.org \
+    --tokens tokens.tsv --steps 200 --warmup-s 10 --duration-s 60 --out games.json
+scacelith-bench table results/*.json      # Markdown tables
+scacelith-bench --help                    # every option
 ```
 
-`--metrics` lets the report include the server side (CPU, memory and event-loop lag per shard,
-move processing time, store commits); without it only the client side is measured. To load one
-server from several machines, give each machine its own slice of the tokens file (an even number
-of lines: direct challenges pair consecutive accounts), since an account has one live connection.
+`--ca FILE` pins the server's certificate (the harness passes its self-signed one); without it the
+tool accepts any certificate, which is only acceptable on a test machine. `--server-pid` (a local
+server) adds its CPU and memory to the report.
 
-**The load processes.** The clients are spread over `--procs` processes (auto: at least 2, one
-more per 15,000 clients). Each one speaks RFC 6455 directly over `node:tls` with one shared
-`SecureContext` and a precomputed upgrade request, keeps one fixed-shape object per client, encodes
-and decodes the hot messages (Move, MoveMade, Ping, Pong) at fixed offsets and everything else
-with the generated codec, keeps the think times on one timing wheel, and plays legal random moves
-with the correct `posHash` (both players of a direct challenge live in the same process and share
-one position). Each process uses its own source address (127.1.0.x) against a local server, so
-that 100,000 connections do not run out of ephemeral ports (28,232 per source address here). The
-coordinator samples `/metrics` and, for a local server on Linux, the CPU time of every server and
-load process from `/proc`; the rest of the machine's CPU time is reported as "other processes".
+### One tool, two protocols
 
-**Handshakes in flight.** With native TLS every worker performs at most `MAX_PENDING_HANDSHAKES`
-(128) handshakes at a time, and at most `MAX_PENDING_HANDSHAKES_PER_IP` (4 by default) for one
-source address, and closes the connections beyond that before any TLS work (counted in
-`scacelith_tls_refused_total{reason="handshakes"|"per_ip"}` on the server and as failed
-connections by the tool, which does not retry). A connection takes its slot once its ClientHello
-has arrived; a TLS client sends it at once, so that wait costs the tool nothing. Since each load
-process is a single source address, the tool sets `MAX_PENDING_HANDSHAKES_PER_IP` to
-`MAX_PENDING_HANDSHAKES - 1` on the server it starts, so that only the per-worker cap applies (a
-remote server keeps its own setting). It also lists the loopback addresses in `ABUSE_EXEMPT`, so
-that the protection per address (`IP_CONN_RATE`, `IP_MAX_CONNECTIONS`, `HTTP_RATE_PER_IP` and the
-blocks, SIZING "Protection per address") leaves the load processes alone; a remote test server
-needs the load machines' addresses there. The runs below predate these limits. To measure the raw
-handshake rate again, keep `--inflight` times the load processes below `MAX_PENDING_HANDSHAKES`
-times `WORKERS`, or raise the key with `--server-env MAX_PENDING_HANDSHAKES=100000`; with the
-default, a ramp that opens connections faster than the server completes them measures the gate
-instead.
+The load generator is the Rust client SDK (`crates/client`, `scacelith-bench`): the same TLS
+client (rustls, a full handshake per connection unless `--tls-resume`), the same WebSocket client
+and the same HTTP/1.1 client for both servers. Only the realtime message codec differs:
 
-**Refused connections.** `node bench/gate-cost.js` measures what a connection the TLS gate
-refuses still costs the server: 20,000 connections from a blocked loopback address (reset at
-accept) and 20,000 that send a first record that is not TLS (`bad_hello`), with the CPU time of
-the server process (kernel included) per connection. On the development container (4-vCPU Xeon at
-2.1 GHz) both were 26-30 µs; SIZING "Protection per address" scales it to an OVH vCore. The
-per-address checks alone (a request, a new connection) are timed by the micro-benchmark of
-`test/unit/net.ipguard.test.js`, which prints them with `npm run test:unit`.
+- `--target rust`: protocol v1 (`scacelith.rt1`, [PROTOCOL.md](PROTOCOL.md)) through the SDK's
+  `Connection`;
+- `--target node`: the Node.js server's protocol 3 (`scacelith.v1`) through a small codec of the
+  messages the scenarios use, derived from that server's `src/protocol/schema.js` and isolated in
+  `crates/client/src/bin/bench/proto3.rs`.
 
-**Open files.** The container used here has a hard `nofile` limit of 20,000 per process that
-cannot be raised without `CAP_SYS_RESOURCE`, so the tool uses at least `clients / 15000` server
-workers and load processes (7 of each for 100,000 connections on 4 cores). On a real server raise
-`LimitNOFILE` (systemd) or `ulimit -n` instead; `WORKERS` should then equal the number of cores.
+Both protocols carry the same messages with the same layouts apart from `Hello` and `Welcome`, so
+both servers receive the same bytes for a move, a gesture or a queue join. The REST calls are
+identical.
 
-## Scenarios and what they measure
+### Scenarios
 
-| scenario | load | measures |
+Every scenario warms up, then measures over a fixed window (`--warmup-s`, `--duration-s`); the
+counters, latency histograms and server resources of the report cover the window only.
+
+| scenario | load | figures |
 |---|---|---|
-| `connect` | ramps `--conns` authenticated WSS connections (TCP, TLS 1.3 full handshake, HTTP upgrade, Hello with the session token, Welcome) with `--inflight` handshakes in flight per process, then holds them idle for `--hold-s` with the server heartbeat (every 10 s) and one client Ping per connection every `--ping-interval-ms` (by default the interval the server announces in `Welcome.clientPingMs`, `CLIENT_PING_INTERVAL_MS`, 10 s, as the game does) | connections/s, failures and their reason, handshake (TCP+TLS+101) and Hello->Welcome latency, server CPU per connection, server memory per connection (RSS, V8 heap and external deltas of every server process, from `/metrics`, before and after, no forced GC), idle CPU, heartbeat round trip (client Ping->Pong, and the server's own RTT histogram), connections dropped during the hold |
-| `games` | `--games` pairs start games by direct challenge (ChallengeCreate -> ChallengeAccept) or with `--via queue` through the matchmaking queue, at `--start-rate` games/s, then play legal random moves every `--move-interval-ms` (1000 ms +-50 % by default) per move; a game resigns at `--max-plies` (80) and the pair starts a new one after `--between-games-ms` | move round trip (Move sent -> the mover's own MoveMade) p50/p90/p99/p99.9/max, moves/s, games started and finished, end reasons, rejected moves, errors, game start latency (challenge -> both snapshots), server move processing time (inside the host), CPU and event-loop lag per shard, store commit latency and batch size, relayed frames/s, memory with games |
-| `burst` | like `games` with no think time (each player answers the opponent's move at once) | the throughput limit of the server on the machine, and the latency at that limit |
+| `idle` | none | time to ready: from the server's start (`--spawned-at-ms`, taken by the harness just before it starts the server) to the first 200 of `/api/v1/readyz` and of the metrics listener's `/readyz` (every shard ready); then idle CPU, RSS and PSS |
+| `connections` | authenticated WebSocket connections (TCP, TLS, upgrade, `Hello`/`Welcome` with a session token), `--inflight` (200) handshakes at a time, ramped to each step (1,000, 5,000, 10,000) and held idle (the connections answer the server's heartbeat) | handshakes per second during the ramp, handshake (TCP + TLS + 101) and `Hello`->`Welcome` latency, failures by class, connections dropped during the hold, idle CPU with the connections, RSS and PSS per connection above the idle footprint |
+| `games` | N games (100, 500, 1,000), i.e. 2N bots: one challenges the other, both play uniformly random legal moves, the side to move thinking 1 s +-50 %, and both send head gestures at 10 per second; resignation at ply 80, a new game after 1 s; 3+2, rated | move relay (Move sent by the mover -> MoveMade read by the opponent), move confirmation (-> MoveMade read by the mover), gesture relay (Gesture sent -> relayed Gesture read by the opponent), moves/s, relayed gestures/s, errors, server CPU and memory |
+| `matchmaking` | M players (200, 1,000) connected, then all join the casual 3+2 queue at the same instant; White aborts each game at once; one warm-up burst, then 3 measured bursts | time from `QueueJoin` to `GameSnapshot` per player (p50 ... max), burst makespan (start signal -> last snapshot), unmatched players, server CPU |
+| `rest` | 32 keep-alive HTTPS connections sending requests back to back, one window per endpoint: `GET /api/v1/info`, `/leaderboard?category=3+2`, `/games/:id/pgn`, `/games/:id/gif` cold (4 connections; a new `delay`/`orientation` per request, so every one is rendered) and cached (8 games with the default options) | requests/s, latency p50/p90/p99/max, errors by status, server CPU and memory |
+| `login` | 16 accounts registered through the API, then `POST /api/v1/auth/login` with them in turn at 8 at a time | logins/s and latency: the password hash is the cost, and both servers use the same one (below) |
 
-Every report holds the machine (CPU model, cores, memory, Node version, `nofile`, `somaxconn`,
-ephemeral port range), the command line, every server setting the tool changed, the per-phase
-counters, histograms and CPU, a 2 s timeline, and the list of limits the tool detected (machine
-CPU saturated, event-loop lag above 50 ms, other processes busy, memory low).
-`--server-cpu-prof DIR` also writes a V8 CPU profile of every server process;
-`node bench/profile-summary.js DIR/*.cpuprofile` prints the hot functions by area and the longest
-event-loop stalls with their stacks.
+**How latencies are taken.** The two ends of a game live in one task of the load generator, so
+a move's relay time is the difference of two instants of one clock: when the mover's `Move` was
+queued for sending, and when the opponent's connection read the `MoveMade` from its socket (the
+WebSocket reader stamps every message as it reads it, before any scheduling of the bot). The
+gesture relay works the same way, the yaw of each gesture carrying a sequence number. Histograms
+are log-linear (exact below 64 µs, then 32 sub-buckets per power of two, about 3 % resolution),
+with the bucket math and quantile definition of the former `bench/lib/hist.js`, so the figures are
+comparable with [the study below](#the-nodejs-server-study-2026-09).
 
-## Test machine and conditions
+**Server resources.** CPU is the user plus system time of the server's whole process tree read
+from `/proc/<pid>/stat` at both ends of the window: the Node.js primary and its two shard workers,
+or the single Rust process. Memory is the sum of their RSS, and of their PSS (`smaps_rollup`),
+which splits the pages the Node.js processes share (code, the V8 snapshot) between them: RSS
+counts those several times, PSS once. "CPU %" is percent of one core (200 = both server cores
+busy).
+
+### Fairness choices
+
+- **Same machine, same cores, same order.** The server and the load generator are pinned to
+  disjoint CPUs. Each target gets a fresh data directory and every scenario a freshly started
+  server, in the same order for every target. The load generator binary is the same for all
+  three, and its random choices are seeded (`--seed 1`).
+- **Same TLS.** One self-signed ECDSA P-256 certificate (CA:FALSE) for every server, pinned by the
+  client; TLS 1.3 over loopback with a full handshake per connection (no resumption tickets), so
+  the handshake cost is that of a player connecting for the first time. The servers use their
+  native TLS (`TLS_MODE=native`): OpenSSL in Node.js, rustls in the Rust server.
+- **Same size.** `WORKERS=2` on both. The word does not mean the same thing: the Node.js server
+  runs 2 shard processes plus its primary, the Rust server 2 game shards and 2 runtime threads in
+  one process. The limits that Node.js applies per worker are whole-server limits in the Rust
+  server whose defaults are the Node.js default times `WORKERS`, so both keep their defaults and
+  have the same totals: 2 password hashes at once, 2 GIF render threads, 8 queued renders, a 64 MiB
+  GIF cache, 256 TLS handshake slots. `MAX_PENDING_HANDSHAKES_PER_IP` is set so that the one load
+  address may use every slot (127 per Node.js worker, 255 for the Rust server).
+- **Same password hash.** Argon2id with 64 MiB, 3 passes and 4 lanes on both (Node.js 24.7 and
+  later; the harness checks `crypto.argon2` and records the algorithm in each report's `meta`).
+  The implementations differ: OpenSSL's in Node.js, the `argon2` crate in Rust.
+- **Limits raised for the bench only.** Proof of work off, no e-mail verification, the load address
+  in `ABUSE_EXEMPT`, and these raised: `HTTP_RATE_PER_IP`, `AUTH_RATE_PER_IP`,
+  `AUTH_REGISTER_PER_HOUR`, `AUTH_FAILURES_PER_ACCOUNT`, `USER_RATE_PER_MIN`, `MAX_CONNECTIONS`,
+  `MAX_CONNECTIONS_PER_IP`, `CHALLENGE_UNPLAYED_PER_MIN`, `MATCH_REPEAT_LIMIT`,
+  `CONDUCT_ABANDON_LIMIT`, the four `GIF_*_RENDERS_PER_*`; `WS_MSG_RATE` 100 and `WS_MSG_BURST`
+  200; `GESTURE_RATE` 20 and `GESTURE_BURST` 40 (above the bots' 10 per second); no engine
+  analysis (`ANALYSIS_WORKERS=0`); `LOG_LEVEL=warn`. The full list is `common_env` in
+  `bench/run.sh`.
+- **Per-account limits fixed in the code** (`public_read`: 60 requests per minute for the game
+  routes; `gif`: 30 per minute) cannot be raised, so the authenticated REST requests rotate over
+  the 20,000 accounts. A `429` in a report (`error.429`) means the rotation was too short for the
+  server's throughput: create more accounts. The Node.js server keeps these buckets per worker,
+  the Rust server once per server, which only matters past that point.
+- **Matchmaking** runs in the casual queue (no conduct cooldown after the aborts); both servers
+  pair every `MATCH_TICK_MS` (250 ms by default), which dominates the time to a game.
+
+### Caveats
+
+- The load generator runs on the same machine, over loopback: no network latency or loss, and the
+  kernel charges the receiving side's TCP work to the sender. The latencies are those of the
+  servers' own processing and scheduling, a lower bound of what players see.
+- Pinning separates the cores, not the caches, memory bandwidth or the kernel's network work. On
+  a shared or virtual machine, other jobs disturb the runs: compare runs made on a quiet machine,
+  and repeat a run that looks off.
+- The load generator must not saturate its own cores: at the largest steps (10,000 TLS
+  handshakes, 2,000 bots with 20,000 gestures per second) check the load CPUs with `top` during
+  the run, or give it more CPUs (`--load-cpus`).
+- RSS overstates the Node.js server (shared pages counted in each process); PSS is the fairer
+  memory figure for it. "KiB/conn" divides the growth above the idle footprint by the open
+  connections; a garbage-collected heap makes it noisy at small steps.
+- The REST and login figures include TLS records but not handshakes (keep-alive connections).
+- Bench accounts have no password (they log in only with their tokens), so the login scenario
+  registers its own accounts first; their registration time is reported.
+
+### Reading the results
+
+Each report (`scacelith-bench` prints it on stdout, `--out` writes it) holds `tool`, `version`,
+`scenario`, `target`, `label`, `meta` (server version, password hash, CPUs), `settings`, `params`
+(the scenario's options) and one entry per step: `headline` (the figures of the Markdown table,
+in order) and `detail` (every counter, every latency summary in ms with `n`, `mean`, `p50`, `p90`,
+`p99`, `p999` and `max`, the server CPU and memory of the window, failures by class).
+`scacelith-bench table FILE...` prints one Markdown table per scenario, one row per run and step.
+
+Error counters are named by cause: `fail.<class>` (a connection that did not complete: `timeout`,
+`tls`, `upgrade_503`, `refused_<ErrorCode>`...), `drop.<close code>` (a connection the server
+closed), `error.<status>` (an HTTP answer), `error.challenge_<code>`, `error.move_rejected_<code>`,
+`error.queue_<code>`, `error.server_<code>` (protocol `Error` messages), `error.match_timeout`,
+`error.start_timeout`.
+
+### Where the results are
+
+The comparison's results are the `summary.md` files of the runs, committed under
+`bench/results/<date>/` with the machine they were measured on. A `--quick` run is only a check
+of the set-up (sizes of a few hundred clients, windows of a few seconds, and 600 accounts, too few
+for the cached GIF endpoint, which then reports `429`s): do not quote it.
+
+## The Node.js server study (2026-09)
+
+This is the load study made on the Node.js server alone before the rewrite, kept for its figures
+([SIZING.md](SIZING.md) derives its unit costs from them). It used the Node.js load generator
+`bench/loadgen.js`, which went away with the Node.js tree: it is in the history (commit 7531830,
+`dedicated-server/bench/`), and the commands below are its own. Its numbers were taken on Node 22
+with the load generator sharing the server's cores, so they are not comparable one to one with
+the comparison above.
+
+### Test machine and conditions
 
 - A 4 vCPU virtual machine (Intel Xeon; the host CPU changed with a container restart: 2.10 GHz for
   the connect 10k/50k/100k runs of 2026-09-28 and the gesture relay runs of 2026-09-30, 2.80 GHz
@@ -144,13 +216,13 @@ event-loop stalls with their stacks.
 - No engine analysis (`ANALYSIS_ENGINE_PATH` unset) and no HTTP API load (login, profiles): the
   sessions are created beforehand.
 
-## Results
+### Results
 
 Every run below was made from `dedicated-server/` with `node bench/loadgen.js` followed by the
 options shown (plus `--label` and, for most runs, `--wait-idle-s 120` to `600`: wait for a quiet
 machine). The full tables (more columns) come from `node bench/table.js bench/results/*.json`.
 
-### Connections (`connect`)
+#### Connections (`connect`)
 
 | run | command | connected (failed) | conn/s | handshake p50 / p99 ms | Hello->Welcome p50 / p99 ms | server CPU per connection | server RSS per connection (V8 heap) | server RSS total | idle server CPU | heartbeat RTT p50 / p99 ms |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -191,7 +263,7 @@ event-loop lag. The rows marked 2.1 GHz ran on the slower host (see above).
   96 % of the sessions resumed, 2.5 ms without): a TLS 1.3 resumption still performs a key
   exchange, so it saves little here.
 
-### Games at a realistic pace (`games`) and throughput (`burst`)
+#### Games at a realistic pace (`games`) and throughput (`burst`)
 
 | run | command | moves/s (quiet median) | move RTT p50 / p90 / p99 / max ms | quiet p99 ms | server move processing p50 / p99 µs | commit p99 ms | games ended /min | server / load gen cores | machine busy | shard lag p99 max ms |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -249,7 +321,7 @@ milliseconds between a game's end and its commit (the load generator retries).
   process, up to `busy_timeout` 5 s), with a p99 of 24-45 ms in most runs and 180-214 ms in two of
   them; GC pauses of 40-50 ms in the profiled run.
 
-### Gesture relay
+#### Gesture relay
 
 The cost of the live gestures the server relays between the two players of a game (`Gesture`,
 [PROTOCOL.md](PROTOCOL.md#gesture-relay)): `--scenario games --games 1000 --tc 10+5
@@ -277,7 +349,7 @@ and at 4 Hz the load generator fell behind. The move round trip stayed at a p99 
 kept runs, and no gesture was dropped. Capacity with gestures: [SIZING.md](SIZING.md#gestures), and
 for a dedicated machine [below](#capacity-of-a-dedicated-machine).
 
-## What saturated first
+### What saturated first
 
 1. **CPU**, in every scenario, with the load generator taking 25-50 % of the same 4 cores: TLS
    handshakes during the connection ramps (500-960 connections/s with TLS, 2,300 without), and the
@@ -290,7 +362,7 @@ for a dedicated machine [below](#capacity-of-a-dedicated-machine).
    each) and never limited a run. No run had a failed connection, a rejected move or a dropped
    connection.
 
-## Capacity of a dedicated machine
+### Capacity of a dedicated machine
 
 Figures per server core, from the runs above (TLS on, both sides' kernel work on this machine, so
 take them as ±30 %):
@@ -371,7 +443,7 @@ resources to watch: the primary (presence, challenges, matchmaking) and the sing
 [SIZING.md](SIZING.md) applies these costs to a small VPS of 2 or 4 vCores, with the memory, disk,
 restart and settings figures that go with it.
 
-## Server behaviours seen in these runs
+### Server behaviours seen in these runs
 
 - **Game placement under overload.** A new game goes to the creator's shard unless that shard
   reports overload (`SHARD_OVERLOAD_LAG_MS`, event-loop p99 above 50 ms); then the primary picks
@@ -405,7 +477,7 @@ restart and settings figures that go with it.
 - **TLS writes.** A quarter to a third of the CPU per move and 40 of the 55-60 KB per connection are
   TLS; `writev` on uncork (`src/net/ws.js`) is the largest item of the shard profile.
 
-## Going further
+### Going further
 
 - **Give the server the whole machine**: run the load generator on other machines with `--url`,
   `--tokens` (one slice of the accounts per machine) and `--metrics`. On the same machine 25-50 %
