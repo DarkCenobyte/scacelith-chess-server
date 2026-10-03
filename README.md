@@ -627,7 +627,9 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
 ## Moderation
 
 `node bin/admin.js` (also `npm exec scacelith-admin`) works on the database directly: user
-lookup, bans, MFA reset, session revocation, the integrity list and evidence, reports. Run it
+lookup, bans, MFA reset, session revocation, the integrity list and evidence, reports, and the
+account of a pending signup whose confirmation mail never arrived (`user verify-email <name>`,
+which does what the link would). Run it
 with the same `.env`. See `node bin/admin.js` for the commands and
 [docs/ANTICHEAT.md](docs/ANTICHEAT.md) for how suspicion levels are computed. Certain cheats
 (a move for someone else's game, out of turn or illegal in a position both sides agree on, a

@@ -121,6 +121,51 @@ test('user reset-mfa, verify-email, revoke-sessions', async () => {
     assert.deepEqual(moderatorEvents(store).map((e) => e.detail.action), ['reset_mfa', 'verify_email', 'revoke_sessions']);
 });
 
+test('user show / verify-email reach the pending signup that holds a name (its confirmation mail never arrived)', async (t) => {
+    const store = openStore(testConfig({ DB_PATH: ':memory:' }));
+    t.after(() => store.close());
+    migrate(store);
+    const signup = (username, email, over = {}) => store.signups.create({ username, email, passwordHash: `scrypt$${username}`,
+        tokenHash: `link-${username}`, createdAt: NOW - 3600000, expiresAt: NOW + 3600000, ...over });
+    signup('Alice_1', 'alice@example.org');
+    const show = await run(store, ['user', 'show', 'alice_1', '--json']);
+    assert.equal(show.code, 0, show.err);
+    assert.deepEqual(show.json, { pendingSignup: { username: 'Alice_1', email: 'alice@example.org', createdAt: NOW - 3600000,
+        expiresAt: NOW + 3600000, link: true } });
+    assert.ok(!show.out.includes('scrypt$'));
+    assert.match((await run(store, ['user', 'show', 'alice_1'])).out, /^Pending signup Alice_1: no account until its link is used/);
+
+    // The account is created as the link would: its address verified, the signup's password, the signup gone.
+    const r = await run(store, ['user', 'verify-email', 'alice_1', '--by', 'mod-ben']);
+    assert.equal(r.code, 0, r.err);
+    const u = store.users.byUsername('alice_1');
+    assert.deepEqual([u.username, u.email, u.emailVerified, u.passwordHash, u.createdAt], ['Alice_1', 'alice@example.org', true, 'scrypt$Alice_1', NOW]);
+    assert.match(r.out, new RegExp(`Account Alice_1 \\(#${u.id}\\) created`));
+    assert.equal(store.signups.byUsername('alice_1'), null);
+    const events = store.security.forUser(u.id).map((e) => [e.kind, e.detail?.action ?? null, e.detail?.moderator ?? null]);
+    assert.deepEqual(events.sort(), [['moderator_action', 'confirm_signup', 'mod-ben'], ['register', null, null]]);
+    // Then the account itself, as before.
+    assert.match((await run(store, ['user', 'verify-email', 'alice_1'])).out, /E-mail address of Alice_1 marked verified/);
+    assert.equal((await run(store, ['user', 'show', 'alice_1', '--json'])).json.user.id, u.id);
+
+    // A signup whose address has an account (no link) or another account took meanwhile: dropped, nothing created.
+    signup('Bob_2', 'Alice@Example.org', { tokenHash: null });
+    assert.match((await run(store, ['user', 'show', 'bob_2'])).out, /no link \(the address had an account/);
+    const taken = await run(store, ['user', 'verify-email', 'bob_2', '--json']);
+    assert.deepEqual([taken.code, taken.json], [0, { status: 'taken' }]);
+    assert.equal(store.users.byUsername('bob_2'), null);
+    assert.equal(store.signups.byUsername('bob_2'), null, 'the name is free again');
+
+    // An expired signup holds nothing: no such user.
+    signup('Cleo_3', 'cleo@example.org', { expiresAt: NOW });
+    for (const cmd of ['show', 'verify-email']) {
+        const x = await run(store, ['user', cmd, 'cleo_3']);
+        assert.deepEqual([x.code, x.err], [1, 'error: no user named "cleo_3"\n'], cmd);
+    }
+    assert.equal(store.users.byUsername('cleo_3'), null);
+    assert.notEqual(store.signups.byUsername('cleo_3'), null, 'left to the retention purge');
+});
+
 test('integrity list / show / confirm / clear', async () => {
     const { store, bob, eve } = world();
     store.integrity.set(bob, { level: 'suspected', score: 3.8, evidence: { statistics: { model: 1, computedAt: NOW, level: 'suspected', score: 3.8, groups: { Q: 3.8, E: 2, J: 0, T: 0.4 }, reasons: ['Move quality Q=3.80 over 12 games'], windows: { all: { games: 12 } } } }, updatedAt: NOW });

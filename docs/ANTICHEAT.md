@@ -525,6 +525,14 @@ run in their own transaction after the ban, and if they fail (a database error) 
 its `moderator_action` records the error, and the command exits with an error that gives the
 `refunds apply` to run.
 
+Pending signups: with `REQUIRE_EMAIL_VERIFICATION` a registration has no account until the link
+mailed to its address is used (the signup holds its username for 24 h). When that mail never
+arrives, `user show <name>` shows the pending signup that holds the name (address, times, whether
+it has a link), and `user verify-email <name>` does what the link would: the account is created,
+its address verified (`moderator_action` `confirm_signup`). When another account has the username
+or the address (always so for a signup without a link: its address already had an account), the
+signup is dropped and nothing is created.
+
 ## 7. False positives: what the model does about them
 
 * Strong players have high accuracy: z-scores are relative to peers of the same rating and time

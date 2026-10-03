@@ -4,6 +4,7 @@ import { solvePow, POW_TTL_MS } from '../../src/security/pow.js';
 import { StoreError } from '../../src/store/index.js';
 import { linkIn, startTestServer } from './helpers/auth-fakes.js';
 import { startReal } from './helpers/real-auth.js';
+import { runAdmin } from '../../src/anticheat/admin.js';
 
 const REG = '/api/v1/auth/register';
 const good = (over = {}) => ({ username: 'Alice_1', email: 'Alice@Example.com', password: 'ivory rook takes e5', ...over });
@@ -346,6 +347,21 @@ test('the link of a pending signup whose username or address another account too
     }
     assert.equal(s.store.users.byUsername('Alice_1'), null);
     assert.equal(s.store.users.byEmail('bob@example.com'), null);
+});
+
+test('a confirmation mail that never arrives: the operator creates the account (admin user verify-email), then login', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    assert.equal((await s.request('POST', REG, { body: good() })).status, 202);
+    let out = '';
+    const admin = (cmd) => runAdmin(['user', cmd, 'alice_1'], { store: s.store, now: s.now, out: { write: (x) => { out += x; } }, err: { write: (x) => { out += x; } } });
+    assert.equal(await admin('show'), 0);
+    assert.match(out, /Pending signup Alice_1: .*\n {2}e-mail alice@example\.com, link stored/);
+    assert.equal(await admin('verify-email'), 0, out);
+    assert.equal(s.store.signups.byUsername('alice_1'), null);
+    const ok = await s.login('alice_1', 'ivory rook takes e5');
+    assert.equal(ok.user.username, 'Alice_1');
+    assert.equal(s.store.users.byUsername('alice_1').emailVerified, true);
 });
 
 test('accounts created unconfirmed before pending signups keep their links and answers', async (t) => {
