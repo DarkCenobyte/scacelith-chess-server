@@ -227,7 +227,7 @@ async fn an_email_change_logs_in_with_the_new_address_and_refuses_an_address_tak
     let id = h.create_user("alice").await;
     let token = h.token("alice", PW).await;
     let link_to = async |to: &str| {
-        let mail = h.sent().await.into_iter().filter(|m| m.to == to).last().expect("a mail");
+        let mail = h.sent().await.into_iter().rfind(|m| m.to == to).expect("a mail");
         token_of(&link_in(&mail.text).unwrap()).unwrap()
     };
     let confirm =

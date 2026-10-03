@@ -5,6 +5,7 @@
 
 mod account;
 mod email_change;
+mod hashcap;
 mod login;
 mod mfa;
 mod password;
