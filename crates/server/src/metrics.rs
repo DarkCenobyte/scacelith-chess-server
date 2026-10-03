@@ -1,4 +1,4 @@
-//! Prometheus metrics (DESIGN 8).
+//! Prometheus metrics (DESIGN 4; their endpoint: DESIGN 5.7).
 //!
 //! Metrics are registered once (usually in a `static` built with [`std::sync::LazyLock`]) and
 //! updated with atomics, so the hot paths never lock. Registering the same name and kind twice
