@@ -114,8 +114,8 @@ pub fn detail_fields(kind: &str) -> Option<&'static [&'static str]> {
 }
 
 /// The summary of a game in the player's history (`GET /account/games`, owned by the routes
-/// module): the export lists its games with it.
-pub type HistorySummary = fn(&GameSummary, UserId) -> Value;
+/// module: `account_games::history_summary`): the export lists its games with it.
+pub type HistorySummary = fn(&GameSummary, UserId) -> Map<String, Value>;
 
 /// What the export endpoint needs.
 #[derive(Clone)]
@@ -302,7 +302,7 @@ pub async fn build_account_export(d: &ExportRouteDeps, user: &User, now: i64) ->
             .store
             .read(move |db| db.games().list_for_user(id, before, GAMES_PAGE, &GameFilter::default()))
             .await?;
-        list.extend(page.iter().map(|g| (d.history_summary)(g, id)));
+        list.extend(page.iter().map(|g| Value::Object((d.history_summary)(g, id))));
         match page.last() {
             Some(last) if page.len() as i64 == GAMES_PAGE => before = Some(last.id),
             _ => break,
@@ -419,6 +419,60 @@ mod tests {
         assert_eq!(e.unwrap()["detail"], Value::Null);
     }
 
+    /// The vectors of the former server's test (account.export.test.js).
+    #[test]
+    fn event_details_keep_only_the_listed_fields_and_moderator_actions_are_reduced_or_left_out() {
+        let at = |kind: &str, at: i64, ip: Option<&str>, detail: Option<Value>| SecurityEvent {
+            id: 1,
+            kind: kind.into(),
+            user_id: Some(7),
+            ip: ip.map(str::to_owned),
+            at,
+            detail,
+        };
+        let e = at("login", 1, Some("192.0.2.1"), Some(json!({"method": "password", "extra": "x"})));
+        assert_eq!(
+            exported_event(&e),
+            Some(json!({"kind": "login", "at": 1, "ip": "192.0.2.1", "detail": {"method": "password"}}))
+        );
+        let e = at("some_future_kind", 1, None, Some(json!({"secret": "x"})));
+        assert_eq!(
+            exported_event(&e),
+            Some(json!({"kind": "some_future_kind", "at": 1, "ip": null, "detail": null}))
+        );
+        let text = |t: &str| Some(Value::String(t.into()));
+        let e = at("login", 1, None, text(r#"{"method":"google","x":1}"#));
+        assert_eq!(
+            exported_event(&e).unwrap()["detail"],
+            json!({"method": "google"}),
+            "detail stored as JSON text"
+        );
+        assert_eq!(exported_event(&at("login", 1, None, text("not json"))).unwrap()["detail"], Value::Null);
+        let ban = json!({"action": "ban", "moderator": "mod_x", "reason": "r", "hours": 24});
+        assert_eq!(
+            exported_event(&at("moderator_action", 2, None, Some(ban))),
+            Some(json!({"kind": "moderator_action", "at": 2, "ip": null, "detail": {"action": "ban"}}))
+        );
+        let confirm = json!({"action": "integrity_confirm", "previousLevel": "suspected", "score": 0.8});
+        assert_eq!(exported_event(&at("moderator_action", 2, None, Some(confirm))), None);
+        assert_eq!(exported_event(&at("moderator_action", 2, None, None)), None);
+        // A refund's event would name its game (and so the cheater): ratingRefunds has its points.
+        let refund =
+            json!({"refundId": 1, "gameId": 9, "cheaterId": 4, "category": "3+2", "points": 7, "by": "mod"});
+        assert_eq!(exported_event(&at("rating_refund", 3, None, Some(refund))), None);
+        assert_eq!(detail_fields("rating_refund"), None);
+        // The IP only for what the account holder did; a future kind has none.
+        let ip_of = |kind: &str, detail: Option<Value>| {
+            exported_event(&at(kind, 4, Some("198.51.100.7"), detail)).unwrap()["ip"].clone()
+        };
+        assert_eq!(ip_of("login_failed", Some(json!({"failures": 2}))), Value::Null);
+        assert_eq!(ip_of("password_reset_requested", None), Value::Null);
+        assert_eq!(ip_of("some_future_kind", None), Value::Null);
+        assert_eq!(ip_of("password_changed", None), json!("198.51.100.7"));
+        assert!(IP_KINDS.contains(&"login"));
+        assert!(!IP_KINDS.contains(&"login_failed") && !IP_KINDS.contains(&"register_existing_email"));
+    }
+
     #[test]
     fn refunds_add_up_per_day_and_category() {
         let refund = |category: &str, points: i64, created_at: i64| Refund {
@@ -450,6 +504,20 @@ mod tests {
                 json!({"day": DAY_MS, "category": "3+2", "points": 9}),
             ]
         );
+        let list = [
+            refund("3+2", 4, DAY_MS * 3 + 5),
+            refund("3+2", 6, DAY_MS * 4 - 1),
+            refund("1+0", 2, DAY_MS * 3),
+            refund("3+2", 1, DAY_MS * 9),
+        ];
+        assert_eq!(
+            refunds_per_day(&list),
+            vec![
+                json!({"day": DAY_MS * 9, "category": "3+2", "points": 1}),
+                json!({"day": DAY_MS * 3, "category": "1+0", "points": 2}),
+                json!({"day": DAY_MS * 3, "category": "3+2", "points": 10}),
+            ]
+        );
     }
 
     #[test]
@@ -457,5 +525,7 @@ mod tests {
         assert_eq!(export_file_name("Alice_9.x-y"), "scacelith-account-Alice_9.x-y.json");
         assert_eq!(export_file_name("a b/c\"é"), "scacelith-account-a_b_c__.json");
         assert_eq!(export_file_name("😀"), "scacelith-account-__.json");
+        assert_eq!(export_file_name("Al_ice-9"), "scacelith-account-Al_ice-9.json");
+        assert_eq!(export_file_name("a\"b/c"), "scacelith-account-a_b_c.json");
     }
 }

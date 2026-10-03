@@ -5,10 +5,12 @@
 
 mod account;
 mod email_change;
+mod export;
 mod fake_oidc;
 mod hashcap;
 mod limits;
 mod login;
+mod logs;
 mod mfa;
 mod password;
 mod register;
@@ -20,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use http::Method;
 use parking_lot::Mutex;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::{Auth, AuthDeps, OidcOptions};
 use crate::clock::{Clock, ManualClock, SharedClock};
@@ -35,7 +37,10 @@ use crate::ids::UserId;
 use crate::log::Logger;
 use crate::mail::{CustomTransport, Mailer, MailerOptions, OutgoingMail};
 use crate::security::password::{Argon2Hasher, Argon2Params, HashFailure, PasswordHasher, Verified};
-use crate::store::{GameSummary, NewUser, SecurityEvent, Store, StoreOptions, User};
+use crate::store::{
+    GameOutcome, GameSummary, NewUser, RatingFn, RatingRecord, SecurityEvent, SideOutcome, Store,
+    StoreOptions, User, status,
+};
 
 /// The password of the test accounts.
 pub(crate) const PW: &str = "correct horse battery";
@@ -108,9 +113,24 @@ impl Setup {
     }
 }
 
-/// The summary of a game in the export (the real one belongs to the routes module).
-fn test_history_summary(g: &GameSummary, user: UserId) -> Value {
-    json!({ "id": g.id, "category": g.category, "color": if g.white_id == user { "white" } else { "black" } })
+/// The summary of a game in the export: a few fields of the real one, which belongs to the
+/// routes module (`account_games::history_summary`).
+fn test_history_summary(g: &GameSummary, user: UserId) -> Map<String, Value> {
+    let white = g.white_id == user;
+    let outcome = match (g.status, white) {
+        (status::DRAW, _) => "draw",
+        (status::ABORTED, _) => "aborted",
+        (status::WHITE_WINS, true) | (status::BLACK_WINS, false) => "win",
+        _ => "loss",
+    };
+    let summary = json!({
+        "id": g.id, "category": g.category, "baseMs": g.base_ms, "color": if white { "white" } else { "black" },
+        "outcome": outcome,
+    });
+    match summary {
+        Value::Object(m) => m,
+        _ => Map::new(),
+    }
 }
 
 /// A test server: the auth service, its routes and pages, and what they talk to.
@@ -129,6 +149,31 @@ pub(crate) struct Harness {
 /// The cheap hasher of the tests.
 pub(crate) fn test_hasher() -> Arc<dyn PasswordHasher> {
     Arc::new(Argon2Hasher::new(Argon2Params { memory_kib: 64, passes: 1, lanes: 1, ..Argon2Params::DEFAULT }))
+}
+
+/// The rating function of the test store: each side moves by `(score - 0.5) * 20` (K 20), every
+/// game counted (the real one, of the matching module, is wired by the server).
+fn test_rating() -> RatingFn {
+    Arc::new(|w: &RatingRecord, b: &RatingRecord, score: f64| {
+        let side = |r: &RatingRecord, s: f64| {
+            let after = r.rating + ((s - 0.5) * 20.0).round() as i64;
+            let mut rec = *r;
+            rec.rating = after;
+            rec.games += 1;
+            rec.counted_games += 1;
+            rec.rated = true;
+            rec.peak = rec.peak.max(after);
+            if s == 1.0 {
+                rec.wins += 1;
+            } else if s == 0.0 {
+                rec.losses += 1;
+            } else {
+                rec.draws += 1;
+            }
+            SideOutcome { before: r.rating, after, k: Some(20), record: rec }
+        };
+        GameOutcome { white: side(w, score), black: side(b, 1.0 - score) }
+    })
 }
 
 /// A one-shot hook of a [`CountingHasher`].
@@ -232,6 +277,7 @@ impl Harness {
                 let options = StoreOptions {
                     path: Some(setup.db_path.unwrap_or_else(|| ":memory:".into())),
                     clock: Some(shared.clone()),
+                    rating: Some(test_rating()),
                     ..StoreOptions::default()
                 };
                 let store = Store::open(&config, options).await.expect("an in-memory store");

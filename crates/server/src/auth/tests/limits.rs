@@ -138,7 +138,7 @@ async fn the_rates_of_the_auth_family_keys_windows_48_ceilings_shared_and_refusa
             config,
             store: h.store.clone(),
             auth: h.auth.clone(),
-            history_summary: |g, u| json!({ "id": g.id, "user": u }),
+            history_summary: |_, _| serde_json::Map::new(),
             log: Logger::root().child("http"),
         },
     );
