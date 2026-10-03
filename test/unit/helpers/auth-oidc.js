@@ -2,9 +2,8 @@
 // PKCE S256 + client secret + the redirect URI of the code's authorization request), JWKS
 // endpoint with Cache-Control, RS256 ID tokens signed with a locally generated key. The browser
 // step is simulated by authorize() / authorizeError(), which read the authorization URL the server
-// built and return the query Google would send the browser back with, and by GET /authorize (the
-// same, answered with Google's 302 to the loopback redirect URI, for the C++ live check:
-// tools/live-cpp-check.js).
+// built and return the query Google would send the browser back with (tools/live-cpp-check.js
+// turns it into Google's 302 to the loopback redirect URI for the C++ live check).
 
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -24,8 +23,7 @@ export const ISSUER = 'https://accounts.google.com';
  */
 export async function startFakeOidc({ clientId, clientSecret, now }) {
     const keyPair = () => crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
-    // consentClaims / consentError: what GET /authorize answers (the account picked, or a refusal).
-    const state = { kid: 'k1', ...keyPair(), jwksFetches: 0, tokenCalls: [], tamper: null, extraKeys: [], consentClaims: null, consentError: null };
+    const state = { kid: 'k1', ...keyPair(), jwksFetches: 0, tokenCalls: [], tamper: null, extraKeys: [] };
     const codes = new Map();
 
     // The checks of Google's consent page on an authorization request.
@@ -56,17 +54,6 @@ export async function startFakeOidc({ clientId, clientSecret, now }) {
                 const keys = [{ ...state.publicKey.export({ format: 'jwk' }), kid: state.kid, alg: 'RS256', use: 'sig' }, ...state.extraKeys];
                 return json(200, { keys }, { 'Cache-Control': 'public, max-age=3600, must-revalidate' });
             }
-            if (req.method === 'GET' && url.pathname === '/authorize') {
-                const q = url.searchParams;
-                let answer;
-                try {
-                    answer = state.consentError ? refusal(q, state.consentError) : consent(q, state.consentClaims);
-                } catch {
-                    return json(400, { error: 'invalid_request' });
-                }
-                res.writeHead(302, { Location: `${q.get('redirect_uri')}?${new URLSearchParams(answer)}` });
-                return res.end();
-            }
             if (req.method === 'POST' && url.pathname === '/token') {
                 const f = Object.fromEntries(new URLSearchParams(Buffer.concat(chunks).toString()));
                 state.tokenCalls.push(f);
@@ -93,7 +80,6 @@ export async function startFakeOidc({ clientId, clientSecret, now }) {
 
     return {
         state,
-        base,
         endpoints: {
             authorizationEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
             tokenEndpoint: `${base}/token`,
