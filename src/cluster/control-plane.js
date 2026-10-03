@@ -32,8 +32,9 @@
 // AUTO_PRESS_CLOCK, for the queue, the challenges and the private games alike; a rematch keeps the
 // value of the game it follows, so a change of the setting applies to the games created after it.
 //
-// Colours: the matchmaker keeps each player's colour balance (DESIGN 5.4). A queue game counts at
-// its pairing (given back when the game cannot be created), any other game once it is created.
+// Colours: the matchmaker keeps each player's colour balance (DESIGN 5.4) over the queue games
+// only. A queue game counts at its pairing (given back when the game cannot be created); the
+// challenges, private codes and rematches do not count (their colours are chosen, drawn or swapped).
 //
 // A queue pairing whose game cannot be created puts both players back in the queue with their
 // waiting time, and the matchmaker does not pair the same two again for PAIR_RETRY_DELAY_MS.
@@ -284,7 +285,7 @@ export class ControlPlane {
 
     _busy(userId) { return this.activeGames.has(userId) || this.starting.has(userId); }
 
-    // The matchmaker's colour balances (DESIGN 5.4) count the games made outside the queue too.
+    // Records colours in the matchmaker's balances (header, colours): gives back a failed pairing.
     _recordColors(whiteId, blackId) {
         try { this.mm.recordColors?.(whiteId, blackId); } catch (e) { this.log?.error?.('mm.recordColors failed', { err: e }); }
     }
@@ -367,7 +368,6 @@ export class ControlPlane {
         }
         const gameId = r.gameId;
         this._created.labels(source).inc();
-        if (source !== 'queue') this._recordColors(spec.white.userId, spec.black.userId);   // the pairing counted a queue game
         if (spec.rated) {
             try { this.mm.recordPairing?.(spec.white.userId, spec.black.userId, this.now()); } catch (e) { this.log?.error?.('mm.recordPairing failed', { err: e }); }
         }

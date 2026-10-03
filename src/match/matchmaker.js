@@ -45,7 +45,8 @@
 //     games made outside the queue too (challenges, private codes, rematches), and refuses them
 //     past the limit (repeatLimited()).
 //   * join({ colorBalance }) overrides the balance tracked here; without it the matchmaker uses its
-//     own record, updated at each pairing (and by recordColors() for games made elsewhere).
+//     own record, updated at each pairing only (the primary gives a pairing whose game could not be
+//     created back with recordColors(); the games made outside the queue do not count).
 //   * join({ recentOpponents }) is an optional iterable of user ids the player must not be paired
 //     with (for instance from store.games.countBetween after a restart); it applies in both
 //     directions and in the queue it was given for.
@@ -462,7 +463,8 @@ export class Matchmaker {
     colorBalanceOf(userId) { return this.balances.get(userId) || 0; }
 
     /**
-     * Records the colours of a game created outside the matchmaker (challenge, rematch).
+     * Records the colours of one game in the balances. The primary calls it with the colours
+     * reversed to give back a pairing whose game could not be created.
      * @param {number} whiteId
      * @param {number} blackId
      */

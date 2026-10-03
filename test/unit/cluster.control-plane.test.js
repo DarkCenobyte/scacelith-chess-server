@@ -235,7 +235,7 @@ describe('control plane: matchmaking', () => {
         assert.equal(shards.requests[0].shard, 1);
     });
 
-    it('colours alternate over queue games, a failed creation gives them back, challenges and rematches count', async () => {
+    it('colours alternate over queue games, a failed creation gives them back, challenges and rematches do not count', async () => {
         const { cp, shards, mm, clock, online } = setup({ realMatchmaker: true });
         const a = online(1, 'alice', 0), b = online(2, 'bob', 1);
         const whites = [];
@@ -262,21 +262,47 @@ describe('control plane: matchmaking', () => {
         cp.mmLeave({ userId: 1 }); cp.mmLeave({ userId: 2 });
         shards.create = null;
         clock.advance(PAIR_RETRY_DELAY_MS);
-        // Alice White in a challenge: Black in the next queue game.
+        // Alice White in a challenge: the balances do not move, the next queue game is drawn.
         const c = cp.challengeCreate({ from: a, target: 'bob', baseSec: 300, incSec: 0, rated: false, color: enums.ColorPref.White });
         const acc = await cp.challengeAccept({ id: c.id, by: b });
         assert.equal(acc.ok, true);
-        assert.deepEqual([mm.colorBalanceOf(1), mm.colorBalanceOf(2)], [1, -1]);
+        assert.deepEqual([mm.colorBalanceOf(1), mm.colorBalanceOf(2)], [0, 0]);
         cp.gameEnded({ gameId: acc.gameId, whiteId: 1, blackId: 2 });
         await playQueueGame();
-        assert.equal(whites.at(-1), 2);
-        // Alice Black in a rematch: White in the next queue game.
+        assert.equal(whites.at(-1), 1);
+        // Alice Black in a rematch: no count either, the next queue game gives her Black after her White.
         const rm = await cp.gameRematch({ gameId: acc.gameId, white: 2, black: 1, category: '5+0', baseMs: 300000, incMs: 0, rated: false });
         assert.equal(rm.ok, true);
-        assert.deepEqual([mm.colorBalanceOf(1), mm.colorBalanceOf(2)], [-1, 1]);
+        assert.deepEqual([mm.colorBalanceOf(1), mm.colorBalanceOf(2)], [1, -1]);
         cp.gameEnded({ gameId: rm.gameId, whiteId: 2, blackId: 1 });
         await playQueueGame();
-        assert.equal(whites.at(-1), 1);
+        assert.equal(whites.at(-1), 2);
+    });
+
+    it('a player who took White in many challenges still alternates colours in the queue', async () => {
+        const { cp, shards, clock, online } = setup({ realMatchmaker: true });
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1);
+        for (let i = 0; i < 5; i++) {
+            const c = cp.challengeCreate({ from: a, target: 'bob', baseSec: 300, incSec: 0, rated: false, color: enums.ColorPref.White });
+            const acc = await cp.challengeAccept({ id: c.id, by: b });
+            assert.equal(acc.ok, true);
+            cp.gameEnded({ gameId: acc.gameId, whiteId: 1, blackId: 2 });
+        }
+        // Fresh opponents each time (balance 0): a draw, then the other colour, and so on.
+        let colours = '';
+        for (let i = 0; i < 6; i++) {
+            const fresh = online(10 + i, `fresh${i}`, 1);
+            cp.mmJoin({ ...a, category: '5+0', rated: false, rating: 1500 }, 0);
+            cp.mmJoin({ ...fresh, category: '5+0', rated: false, rating: 1500 }, 1);
+            clock.advance(250);
+            shards.clear();
+            cp.matchTick();
+            await tick();
+            const { white, black } = shards.requests[0].payload.spec;
+            colours += white.userId === 1 ? 'W' : 'B';
+            cp.gameEnded({ gameId: shards.of('game.attach')[0].payload.gameId, whiteId: white.userId, blackId: black.userId });
+        }
+        assert.equal(colours, 'WBWBWB');
     });
 
     it('a rated pairing counts toward MATCH_REPEAT_LIMIT only once its game exists', async () => {
