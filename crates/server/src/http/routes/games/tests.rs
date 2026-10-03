@@ -665,7 +665,8 @@ fn fixture_games() -> Vec<(&'static str, &'static str, Game)> {
         .collect()
 }
 
-/// The files `tools/gen-pgn-fixtures.js` writes: each PGN, then `index.json`.
+/// The files of tests/data/server-pgn (written by the former server's `tools/gen-pgn-fixtures.js`):
+/// each PGN, then `index.json`.
 fn render_fixtures() -> Vec<(String, String)> {
     let config = fixture_config();
     let tenths = |v: &[u32]| v.iter().map(|&ms| ms / 100 * 100).collect::<Vec<_>>();
@@ -690,7 +691,7 @@ fn render_fixtures() -> Vec<(String, String)> {
     out.push((
         "index.json".into(),
         format!(
-            "{{\n  \"generator\": \"dedicated-server/tools/gen-pgn-fixtures.js (GET /api/v1/games/:id/pgn)\",\n  \"games\": [\n{}\n  ]\n}}\n",
+            "{{\n  \"generator\": \"the former Node.js server (tools/gen-pgn-fixtures.js, GET /api/v1/games/:id/pgn); reproduced byte for byte by dedicated-server/crates/chess/tests/pgn_write.rs\",\n  \"games\": [\n{}\n  ]\n}}\n",
             index.join(",\n")
         ),
     ));
