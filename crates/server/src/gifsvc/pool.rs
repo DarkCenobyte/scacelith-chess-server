@@ -598,8 +598,14 @@ pub(crate) mod tests {
         )
     }
 
-    async fn settle() {
-        tokio::time::sleep(Duration::from_millis(30)).await;
+    /// Waits until the pool's counters satisfy `ready` (the spawned requests reached the pool),
+    /// polling: a fixed sleep is not enough on a loaded machine.
+    async fn until(p: &RenderPool, ready: impl Fn(&PoolStats) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready(&p.stats()) {
+            assert!(Instant::now() < deadline, "pool never reached the expected state: {:?}", p.stats());
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
     }
 
     fn is_busy(r: &Result<Bytes, GifError>, text: &str) -> bool {
@@ -639,14 +645,14 @@ pub(crate) mod tests {
             let p = p.clone();
             async move { p.render(job("sleep:300")).await }
         });
-        settle().await;
+        until(&p, |s| s.running == 1).await;
         let queued: Vec<_> = (0..2)
             .map(|_| {
                 let p = p.clone();
                 tokio::spawn(async move { p.render(job("")).await })
             })
             .collect();
-        settle().await;
+        until(&p, |s| s.queued == 2).await;
         assert!(is_busy(&p.render(job("")).await, "queue full"));
         let s = p.stats();
         assert_eq!((s.running, s.queued, s.rejected_full), (1, 2, 1));
@@ -670,7 +676,7 @@ pub(crate) mod tests {
                 r
             }
         });
-        settle().await;
+        until(&p, |s| s.running == 1).await;
         assert!(is_busy(&p.render(job("")).await, "no thread free within 100 ms"));
         first.await.unwrap().unwrap();
         p.render(job("")).await.unwrap();
@@ -722,7 +728,7 @@ pub(crate) mod tests {
                 tokio::spawn(async move { p.render(job("sleep:250")).await })
             })
             .collect();
-        settle().await;
+        until(&p, |s| s.running == 2).await;
         assert_eq!(p.stats().running, 2);
         assert!(is_busy(&p.render(job("")).await, "queue full"));
         for b in both {
@@ -736,16 +742,17 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn close_refuses_running_and_waiting_jobs_as_busy_and_new_ones() {
         let p = pool(1, 4, 15_000, 30_000, None);
-        let jobs: Vec<_> = ["sleep:500", ""]
-            .into_iter()
-            .map(|what| {
-                let p = p.clone();
-                tokio::spawn(async move { p.render(job(what)).await })
-            })
-            .collect();
-        settle().await;
+        let spawn = |what: &'static str| {
+            let p = p.clone();
+            tokio::spawn(async move { p.render(job(what)).await })
+        };
+        // One at a time: the waiting job must not take the thread first.
+        let running = spawn("sleep:500");
+        until(&p, |s| s.running == 1).await;
+        let waiting = spawn("");
+        until(&p, |s| s.queued == 1).await;
         p.close();
-        for j in jobs {
+        for j in [running, waiting] {
             assert!(is_busy(&j.await.unwrap(), "closed"));
         }
         assert!(is_busy(&p.render(job("")).await, "closed"));

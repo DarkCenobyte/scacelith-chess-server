@@ -1,0 +1,152 @@
+# Scacelith dedicated server: example systemd unit.
+#
+# Install it as /etc/systemd/system/scacelith-server.service and follow docs/DEPLOY.md: the
+# system account and directories (sysusers.d/ and tmpfiles.d/ next to this file), the environment
+# file (scacelith-server.env.example), the TLS certificate and its renewal hook.
+#
+# Needs systemd 253 or later for Type=notify-reload; docs/DEPLOY.md gives the two lines to change
+# for an older systemd. Adapt it with a drop-in (systemctl edit scacelith-server) rather than by
+# editing this file, so that a newer copy of the example can replace it.
+# Check the sandbox with: systemd-analyze security scacelith-server.service
+
+[Unit]
+Description=Scacelith dedicated server
+Documentation=https://github.com/DarkCenobyte/scacelith-chess/blob/master/dedicated-server/docs/DEPLOY.md
+# BIND_ADDRESS may name an address that only exists once the network is configured, and the
+# server resolves its SMTP relay by name.
+Wants=network-online.target
+After=network-online.target
+# Give up after 10 starts within 5 minutes: a server that keeps failing (a broken configuration
+# exits with 1 at once) reaches it in about a minute with RestartSec=5s. Manual starts count too;
+# "systemctl reset-failed scacelith-server" clears the counter.
+StartLimitIntervalSec=5min
+StartLimitBurst=10
+
+[Service]
+# The server tells systemd its state through sd_notify: READY=1 once the database is migrated,
+# the games in progress are recovered from the journal and the ports are bound; STOPPING=1 when
+# a graceful stop begins; RELOADING=1 then READY=1 around a reload; STATUS= lines for
+# "systemctl status". With notify-reload, "systemctl reload" sends SIGHUP (the server re-reads
+# its TLS certificate and key) and waits for the READY=1 that ends the reload.
+Type=notify-reload
+# Only the main process may send notifications (the analysis engines it starts may not).
+NotifyAccess=main
+ExecStart=/usr/local/bin/scacelith-server start
+
+# A dedicated, static system account (sysusers.d/scacelith-server.conf). Not DynamicUser=: the
+# operator runs the administration commands and the database backups as this same account, so
+# that every file SQLite creates (the -wal and -shm files of a database opened while the server
+# runs) stays owned by it, and the TLS key is readable through its group.
+User=scacelith
+Group=scacelith
+# Files the server creates (the database, the journal) are readable by the scacelith account
+# only: they hold e-mail addresses and recent IP addresses.
+UMask=0077
+
+# The configuration: environment variables only. The file is read by systemd as root; keep it
+# readable by root and the scacelith group only (0640), so that administration commands run as
+# scacelith can use it too (SCACELITH_ENV_FILE, see docs/DEPLOY.md).
+EnvironmentFile=/etc/scacelith/scacelith-server.env
+# No .env file is read from the working directory: everything comes from the file above.
+# (Variables set by EnvironmentFile= override this line.)
+Environment=SCACELITH_ENV_FILE=
+
+# /var/lib/scacelith, owned by scacelith, mode 0750: DATA_DIR in the environment file (the SQLite
+# database with its WAL, the game journal). The only directory the service may write to, besides
+# its private /tmp and /dev/shm.
+StateDirectory=scacelith
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/scacelith
+
+# The TLS certificate and key (TLS_CERT_FILE, TLS_KEY_FILE) live in /etc/scacelith/tls/, owned by
+# root with group scacelith (directory 0750, key 0640): the service reads them through its group
+# and cannot change them. The certbot deploy hook next to this file copies a renewed certificate
+# there and runs "systemctl reload scacelith-server"; the server also checks both files every
+# 10 s. A certificate that fails to load is refused and the current one stays in use.
+
+# Port 443 without root: CAP_NET_BIND_SERVICE is the only capability the process holds, given at
+# the start (ambient) and the only one it could ever hold (bounding set). With API_PORT and
+# WS_PORT at 1024 or above, empty both lines (AmbientCapabilities= and CapabilityBoundingSet=).
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# Neither the server nor the processes it starts can gain privileges (setuid binaries, file
+# capabilities).
+NoNewPrivileges=yes
+
+# ---- Sandbox ----------------------------------------------------------------------------------
+# The whole file system is read-only, except the StateDirectory, the private /tmp and /dev/shm.
+ProtectSystem=strict
+# /home, /root and /run/user are invisible.
+ProtectHome=yes
+# A private /tmp and /var/tmp. The Stockfish engines of the anti-cheat share their network
+# through /tmp/stockfish-<uid>/: they all run inside this unit, so they share this /tmp.
+PrivateTmp=yes
+# A minimal /dev: null, zero, random, urandom, tty, shm... and no physical device.
+PrivateDevices=yes
+# Nothing written by the service can be executed: the binaries come from read-only paths.
+NoExecPaths=/var/lib/scacelith /tmp /var/tmp -/dev/shm
+# /proc/sys, /sys and the other kernel tunables are read-only (the server only reads them).
+ProtectKernelTunables=yes
+# No kernel module loading, no access to the kernel log buffer.
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+# The cgroup tree is read-only.
+ProtectControlGroups=yes
+# The system clock and the hardware clock cannot be changed.
+ProtectClock=yes
+# The host name and domain name cannot be changed.
+ProtectHostname=yes
+# The processes of other users are invisible in /proc. Not ProcSubset=pid: the metrics read
+# /proc/stat (the boot time, for the process start time) and the SMTP client reads
+# /proc/sys/kernel/hostname.
+ProtectProc=invisible
+# Only IPv4, IPv6 and Unix sockets (the notification socket, the engines' shared network).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# No new namespaces (containers, user namespaces).
+RestrictNamespaces=yes
+# No realtime scheduling. Lowering priorities stays allowed: the GIF renderers and the engines
+# run at nice 19.
+RestrictRealtime=yes
+# The service cannot create setuid or setgid files.
+RestrictSUIDSGID=yes
+# No writable and executable memory at the same time (no JIT is used by the server or Stockfish).
+MemoryDenyWriteExecute=yes
+# The execution domain (personality) cannot be changed.
+LockPersonality=yes
+# System V and POSIX IPC objects of the scacelith account are removed when the service stops.
+RemoveIPC=yes
+# Native system calls only (no 32-bit compatibility calls).
+SystemCallArchitectures=native
+# The system calls of ordinary services, minus the privileged ones (setuid, chroot, chown,
+# clock and module calls...). A call outside the list fails with EPERM instead of killing the
+# process.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+# Not PrivateUsers=: inside a user namespace CAP_NET_BIND_SERVICE no longer allows binding 443.
+
+# ---- Limits, timeouts and restarts ------------------------------------------------------------
+# Open files (soft and hard limit): one per connection, so keep it well above MAX_CONNECTIONS
+# (200,000 by default), which also covers the database, journal and engine descriptors.
+LimitNOFILE=1048576
+# Up to READY=1: migrations (an upgrade may bring long ones) and the replay of the game journal.
+TimeoutStartSec=5min
+# A graceful stop (SIGTERM): the players get the ServerShutdown notice, connections drain for
+# SHUTDOWN_GRACE_MS (3 s by default, at most 120 s), then the final database commits, the journal
+# flush and the database close. 45 s leaves about 40 s after the default grace: when you raise
+# SHUTDOWN_GRACE_MS, raise this by as much. If it runs out, systemd kills the server; the games
+# in progress then come back from the journal at the next start.
+TimeoutStopSec=45s
+# SIGTERM goes to the server alone, which drains and closes its analysis engines; whatever is
+# still running in the unit gets SIGKILL once the server has exited.
+KillMode=mixed
+# The server sends WATCHDOG=1 every half of this; a server that stops sending is killed with
+# SIGABRT and restarted (Restart=on-failure). The watchdog runs from READY=1.
+WatchdogSec=30s
+# Restart after a crash, a non-zero exit, a watchdog timeout or a start timeout; not after a
+# clean stop (exit code 0).
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

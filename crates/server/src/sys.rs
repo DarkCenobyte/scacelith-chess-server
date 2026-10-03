@@ -9,18 +9,18 @@ use std::io;
 pub fn set_current_thread_nice(nice: i32) -> io::Result<()> {
     // SAFETY: gettid has no preconditions and returns the caller's thread id.
     let tid = unsafe { libc::gettid() };
-    set_priority(libc::PRIO_PROCESS, tid as libc::id_t, nice)
+    set_priority(tid as libc::id_t, nice)
 }
 
 /// Lowers the scheduling priority of another process (for example a Stockfish child).
 pub fn set_process_nice(pid: u32, nice: i32) -> io::Result<()> {
-    set_priority(libc::PRIO_PROCESS, pid as libc::id_t, nice)
+    set_priority(pid as libc::id_t, nice)
 }
 
-fn set_priority(which: libc::__priority_which_t, who: libc::id_t, nice: i32) -> io::Result<()> {
+fn set_priority(who: libc::id_t, nice: i32) -> io::Result<()> {
     // SAFETY: setpriority only reads its integer arguments; on Linux PRIO_PROCESS with a thread
     // id applies to that thread alone.
-    let rc = unsafe { libc::setpriority(which, who, nice) };
+    let rc = unsafe { libc::setpriority(libc::PRIO_PROCESS, who, nice) };
     if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
