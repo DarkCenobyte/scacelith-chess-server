@@ -18,7 +18,7 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use super::SessionInfo;
-use super::error::AuthResult;
+use super::error::{AuthError, AuthResult};
 use super::tokens::{SESSION_PREFIX, is_prefixed_token};
 use crate::clock::SharedClock;
 use crate::config::Config;
@@ -132,6 +132,32 @@ impl Sessions {
         client_label: Option<&str>,
         ip: Option<&str>,
     ) -> AuthResult<NewSessionToken> {
+        self.open(user, client_label, ip, None)
+            .await?
+            .ok_or_else(|| AuthError::internal("an unconditional session was not opened"))
+    }
+
+    /// Opens a session for `user` like [`Sessions::create`], but only while the account is active
+    /// and its stored password hash is still `proven`, the hash its login's password matched, in
+    /// the same transaction: a password reset or change that landed after the check wins (its
+    /// revocation cannot miss the new session). `None` when it did.
+    pub(crate) async fn create_if_current(
+        &self,
+        user: &User,
+        client_label: Option<&str>,
+        ip: Option<&str>,
+        proven: &str,
+    ) -> AuthResult<Option<NewSessionToken>> {
+        self.open(user, client_label, ip, Some(proven.to_owned())).await
+    }
+
+    async fn open(
+        &self,
+        user: &User,
+        client_label: Option<&str>,
+        ip: Option<&str>,
+        proven: Option<String>,
+    ) -> AuthResult<Option<NewSessionToken>> {
         let t = self.now();
         let token = random_token(SESSION_PREFIX);
         let token_hash = sha256_hex(&token);
@@ -146,19 +172,29 @@ impl Sessions {
             ip: ip.filter(|s| !s.is_empty()).map(str::to_owned),
         };
         let (user_id, max) = (user.id, self.max_per_user);
-        let (session_id, revoked) = self
+        let opened = self
             .store
             .write(move |db| {
+                if let Some(proven) = &proven {
+                    let current = db.users().by_id(user_id)?;
+                    let unchanged = current.is_some_and(|u| {
+                        u.status == UserStatus::Active && u.password_hash.as_deref() == Some(proven.as_str())
+                    });
+                    if !unchanged {
+                        return Ok(None);
+                    }
+                }
                 let id = db.sessions().create(&session)?;
                 let revoked = db.sessions().enforce_limit(user_id, max, t)?;
-                Ok::<_, store::StoreError>((id, revoked))
+                Ok::<_, store::StoreError>(Some((id, revoked)))
             })
             .await?;
+        let Some((session_id, revoked)) = opened else { return Ok(None) };
         let others: Vec<String> = revoked.into_iter().filter(|h| *h != token_hash).collect();
         if !others.is_empty() {
             self.broadcast(user.id, Some(others));
         }
-        Ok(NewSessionToken { token, token_hash, expires_at, session_id })
+        Ok(Some(NewSessionToken { token, token_hash, expires_at, session_id }))
     }
 
     /// Reads the session of `hash` (an entry to cache).

@@ -46,6 +46,16 @@ static POW: LazyLock<CounterVec> = LazyLock::new(|| {
     metrics::counter_vec("scacelith_auth_pow_total", "Proof-of-work answers", &["endpoint", "result"])
 });
 
+/// The password hash a login proved, and its answer when that hash is no longer the stored one
+/// as the session opens (a password reset or change that landed meanwhile wins).
+#[derive(Clone, Copy)]
+pub(crate) struct ProvenPassword<'a> {
+    /// The stored hash the password matched.
+    pub hash: &'a str,
+    /// The answer when it changed.
+    pub stale: fn() -> AuthError,
+}
+
 /// The digest of a stored password hash kept in an MFA step instead of the hash itself.
 pub(crate) fn password_hash_digest(hash: Option<&str>) -> String {
     sha256_hex(hash.unwrap_or(""))
@@ -156,8 +166,15 @@ impl Inner {
         client_label: Option<&str>,
         ip: Option<&str>,
         method: &str,
+        proven: Option<ProvenPassword<'_>>,
     ) -> AuthResult<Value> {
-        let s = self.sessions.create(user, client_label, ip).await?;
+        let s = match proven {
+            None => self.sessions.create(user, client_label, ip).await?,
+            Some(p) => match self.sessions.create_if_current(user, client_label, ip, p.hash).await? {
+                Some(s) => s,
+                None => return Err((p.stale)()),
+            },
+        };
         let update = UserUpdate { last_login_at: Some(Some(self.now())), ..UserUpdate::default() };
         // Informative only: the session is open whatever happens to this write.
         let _ = self.store.users().update(user.id, update).await;
@@ -180,7 +197,12 @@ impl Inner {
         extra: Option<Map<String, Value>>,
     ) -> AuthResult<Value> {
         if !user.mfa_enabled {
-            return self.session_answer(user, client_label, ip, method).await;
+            let proven = user
+                .password_hash
+                .as_deref()
+                .filter(|_| method == "password")
+                .map(|hash| ProvenPassword { hash, stale: AuthError::invalid_credentials });
+            return self.session_answer(user, client_label, ip, method, proven).await;
         }
         let token = random_token(MFA_PREFIX);
         let mut data = Map::new();
@@ -368,7 +390,14 @@ impl Inner {
         }
         let method =
             format!("{}+totp", str_field(&data, "method").filter(|m| !m.is_empty()).unwrap_or("password"));
-        self.session_answer(&fresh, str_field(&data, "clientLabel"), ip, &method).await
+        // The first factor was a password (the step holds its hash's digest): it must still be
+        // the stored one when the session opens.
+        let proven = fresh
+            .password_hash
+            .as_deref()
+            .filter(|_| data.contains_key("pwh"))
+            .map(|hash| ProvenPassword { hash, stale: invalid_mfa_token });
+        self.session_answer(&fresh, str_field(&data, "clientLabel"), ip, &method, proven).await
     }
 
     /// Counts a wrong code on the MFA step `h` as it is now (other codes may have been counted

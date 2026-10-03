@@ -28,7 +28,7 @@ use serde_json::{Map, Value, json};
 use super::accounts::username_held;
 use super::error::{AuthError, AuthResult};
 use super::identity::{check_username, normalize_email, normalize_opt_email, suggest_username};
-use super::login::{PasswordCheck, password_hash_digest};
+use super::login::{PasswordCheck, ProvenPassword, password_hash_digest};
 use super::oidc::{OidcClient, pkce_challenge};
 use super::tokens::{
     SSO_ATTEMPT, SSO_LINK, SSO_PREFIX, SSO_TICKET, SSO_TTL_MS, data_of, is_live, is_prefixed_token, str_field,
@@ -457,8 +457,10 @@ impl Inner {
             return self.finish_login(&current, client_label, ip, PROVIDER, Some(extra)).await;
         }
         self.sso_link_proven(&current, &proven.to_value(), ip, false).await?;
+        let checked = current.password_hash.clone();
         let fresh = self.store.users().by_id(current.id).await?.unwrap_or(current);
-        self.session_answer(&fresh, client_label, ip, "google+password").await
+        let proven = checked.as_deref().map(|hash| ProvenPassword { hash, stale: expired });
+        self.session_answer(&fresh, client_label, ip, "google+password", proven).await
     }
 
     /// `POST /auth/sso/complete`: creates the account of a first Google sign-in.
@@ -538,6 +540,6 @@ impl Inner {
             Template::SsoAccountCreated { username: &user.username, when_ms: self.now() },
             user.email.as_deref(),
         );
-        self.session_answer(&user, p.client_label.as_deref(), ip, PROVIDER).await
+        self.session_answer(&user, p.client_label.as_deref(), ip, PROVIDER, None).await
     }
 }
