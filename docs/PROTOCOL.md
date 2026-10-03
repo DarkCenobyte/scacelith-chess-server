@@ -19,7 +19,7 @@ described in `docs/API.md`.
 | Minor version (`minor`) | 0 |
 | Capability bits (`caps`) | none defined |
 | WebSocket subprotocol | `scacelith.rt1` |
-| Schema fingerprint | `0x498a5fd9` (informational) |
+| Schema fingerprint | `0x05d4f428` (informational) |
 | `MaxClientMessage` | 512 |
 | `MaxServerMessage` | 65536 |
 | `MaxPlies` | 1200 |
@@ -198,8 +198,9 @@ published ranges; the experimental ranges are never published, and a published p
 3. **Welcome.** The server answers `Welcome`: the negotiated `minor` and `caps`, `serverTime` (a
    first estimate of the server clock), the account (`userId`, `username`), `serverName`, the
    heartbeat and client ping intervals, the rate limits (`maxMsgPerSec`, `msgBurst`,
-   `gestureRate`, `gestureBurst`) and `activeGame`. An older connection of the same account is
-   closed at that moment with `Notice{ReplacedByNewConnection}` and a fatal `Error{Replaced}`.
+   `gestureRate`, `gestureBurst`), the gesture keepalive (`gestureIdleMs`) and `activeGame`. An
+   older connection of the same account is closed at that moment with
+   `Notice{ReplacedByNewConnection}` and a fatal `Error{Replaced}`.
 4. **Game in progress.** When `activeGame` is not 0, a `GameSnapshot` of that game follows
    `Welcome`; the client rebuilds the board and the clocks from it.
 5. **Heartbeats.** The server sends `Ping{nonce, serverTime}` about every `Welcome.heartbeatMs`
@@ -364,11 +365,17 @@ published ranges; the experimental ranges are never published, and a published p
   before the clock press (`placed`, games without `autoPress`). It is never authoritative: only
   `Move` plays a move.
 * **Sending.** A client sends `Gesture{seq, game, ply, ...}` for its game in progress when its
-  state changes, and at least once a second even when nothing changed, on both players' turns,
-  as long as the game exists (the rematch window included). It always sends the whole state (a
-  lost gesture heals with the next one), at most `Welcome.gestureRate` per second with bursts of
-  `Welcome.gestureBurst` (`GESTURE_RATE` 4 and `GESTURE_BURST` 8). When `gestureRate` is 0 the
-  server relays nothing and the client sends none. A gesture takes the next `seq` like any message.
+  state changes, and at least once every `Welcome.gestureIdleMs` even when nothing changed, on
+  both players' turns, as long as the game exists (the rematch window included). It always sends
+  the whole state (a lost gesture heals with the next one), at most `Welcome.gestureRate` per
+  second with bursts of `Welcome.gestureBurst` (`GESTURE_RATE` 4 and `GESTURE_BURST` 8). When
+  `gestureRate` is 0 the server relays nothing, `gestureIdleMs` is 0 and the client sends none. A
+  gesture takes the next `seq` like any message.
+* **Keepalive.** `gestureIdleMs` is the server's `GESTURE_IDLE_MS` (1000 ms by default, 1000 to
+  10000). A client clamps it to 1000 .. 10000 ms, so that both players of a game derive the same
+  interval from it. The keepalives of players who sit still are most of the relay's work in a
+  calm game: a longer interval saves server CPU, and receivers then take longer to notice that
+  the gestures stopped (below).
 * **ply** is the number of plies played when the current state of the hand (`touch`, `aim`,
   `placed`, `Promoting`) began: while a move is being prepared, the ply of that move. A change of
   the head alone keeps it.
@@ -380,6 +387,11 @@ published ranges; the experimental ranges are never published, and a published p
   receiver's game has exactly `ply` plies and it is the sender's turn: an earlier ply is stale,
   a later one is ahead of a `MoveMade` not received yet. Gestures come from the other client: a
   receiver checks the hand against its own position before showing it.
+* **Silence.** The keepalive tells a receiver an opponent who sits still from one whose gestures
+  stopped coming. The game client follows the head of the latest gesture for 2.5 x
+  `gestureIdleMs` (the clamped interval; 2.5 s at the default) and puts a piece held live back
+  after 5 x `gestureIdleMs` without a gesture; a move placed on the board waits 5 x
+  `gestureIdleMs` for its `MoveMade` once the gestures show something else, then is taken back.
 * **Silent drops.** Gestures have a token bucket of their own, apart from the message rate limit.
   A gesture beyond `gestureRate` is dropped without an `Error` (its `seq` still counts). Only a
   gross excess closes the connection (`Flood`): more than max(50, 10 x `gestureBurst`,
@@ -495,7 +507,7 @@ fixed) and bounds. Sizes include the type byte.
 | `0x26` | [Resync](#26-resync) | c2s | 13 | Ask for the game's GameSnapshot. |
 | `0x27` | [Rematch](#27-rematch) | c2s | 14 | After the end: accept = true offers (or accepts) a rematch with colours swapped, accept = false declines or withdraws. |
 | `0x28` | [C_Gesture](#28-c-gesture) | c2s | 29 | The player's live, cosmetic state in game `game`, relayed to the opponent byte for byte (server Gesture) and never answered, stored or looked at beyond decoding. |
-| `0x80` | [Welcome](#80-welcome) | s2c | 52..139 | Hello accepted. |
+| `0x80` | [Welcome](#80-welcome) | s2c | 54..141 | Hello accepted. |
 | `0x81` | [Error](#81-error) | s2c | 15 | A request was refused. |
 | `0x82` | [S_Ping](#82-s-ping) | s2c | 13 | Heartbeat, about every Welcome.heartbeatMs: answer with the client Pong at once. |
 | `0x83` | [S_Pong](#83-s-pong) | s2c | 13 | Answer to the client Ping. |
@@ -714,7 +726,7 @@ After the end: accept = true offers (or accepts) a rematch with colours swapped,
 <a id="28-c-gesture"></a>
 #### `0x28` C_Gesture (c2s, 29 bytes)
 
-The player's live, cosmetic state in game `game`, relayed to the opponent byte for byte (server Gesture) and never answered, stored or looked at beyond decoding. Sent when it changes and at least once a second, paced by Welcome.gestureRate and gestureBurst.
+The player's live, cosmetic state in game `game`, relayed to the opponent byte for byte (server Gesture) and never answered, stored or looked at beyond decoding. Sent when it changes and at least every Welcome.gestureIdleMs, paced by Welcome.gestureRate and gestureBurst.
 
 | Offset | Field | Type | Bounds | Meaning |
 |---|---|---|---|---|
@@ -730,7 +742,7 @@ The player's live, cosmetic state in game `game`, relayed to the opponent byte f
 | 28 | `lean` | `u8` | 0..100 | lean towards the board, percent |
 
 <a id="80-welcome"></a>
-#### `0x80` Welcome (s2c, 52 to 139 bytes)
+#### `0x80` Welcome (s2c, 54 to 141 bytes)
 
 Hello accepted. Its first three fields (proto, minor, caps) are frozen for every version. When activeGame != 0 a GameSnapshot of that game follows.
 
@@ -750,6 +762,7 @@ Hello accepted. Its first three fields (proto, minor, caps) are frozen for every
 | ... | `activeGame` | `id53` | < 2^53 | the player's game in progress (0 = none) |
 | ... | `gestureRate` | `u16` | 0..60 | gestures per second the server relays, sustained (0 = no relay: send none) |
 | ... | `gestureBurst` | `u16` | 0..120 | gesture burst above gestureRate (0 when gestureRate is 0) |
+| ... | `gestureIdleMs` | `u16` |  | longest time a client lets pass without sending a gesture for its game in progress while nothing changes, ms (GESTURE_IDLE_MS; 0 when gestureRate is 0; a client clamps it to 1000..10000) |
 
 <a id="81-error"></a>
 #### `0x81` Error (s2c, 15 bytes)

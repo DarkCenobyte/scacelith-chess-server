@@ -350,7 +350,7 @@ async fn welcomes_a_valid_token_and_releases_the_presence_on_close() {
     assert_eq!(w.server_name, rig.config().server_name);
     assert_eq!((w.heartbeat_ms, w.client_ping_ms), (1000, 25000));
     assert_eq!((w.max_msg_per_sec, w.msg_burst), (20, 40));
-    assert_eq!((w.gesture_rate, w.gesture_burst), (4, 8));
+    assert_eq!((w.gesture_rate, w.gesture_burst, w.gesture_idle_ms), (4, 8, 1000));
     assert!((w.server_time - rig.clock.mono_ms()).abs() < 1000.0, "the clock of the game hosts");
     // The server is full while alice is online...
     let (mut b, _) = (rig.connect(), ());
@@ -976,9 +976,18 @@ async fn closes_a_slow_consumer_4303_without_an_error() {
 
 #[tokio::test(start_paused = true)]
 async fn announces_no_gesture_relay_when_the_rate_is_zero() {
-    let rig = Rig::new(&[("GESTURE_RATE", "0"), ("GESTURE_BURST", "20")]).await;
+    let rig = Rig::new(&[("GESTURE_RATE", "0"), ("GESTURE_BURST", "20"), ("GESTURE_IDLE_MS", "5000")]).await;
     let (_c, w) = rig.login(ALICE).await;
-    assert_eq!((w.gesture_rate, w.gesture_burst), (0, 0));
+    assert_eq!((w.gesture_rate, w.gesture_burst, w.gesture_idle_ms), (0, 0, 0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn announces_the_gesture_keepalive_of_the_configuration() {
+    for idle in [1000u16, 2500, 10_000] {
+        let rig = Rig::new(&[("GESTURE_RATE", "2"), ("GESTURE_IDLE_MS", &idle.to_string())]).await;
+        let (_c, w) = rig.login(ALICE).await;
+        assert_eq!((w.gesture_rate, w.gesture_idle_ms), (2, idle));
+    }
 }
 
 #[tokio::test(start_paused = true)]

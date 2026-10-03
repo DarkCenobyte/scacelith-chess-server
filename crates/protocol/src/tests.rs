@@ -270,6 +270,25 @@ fn negative_zero_and_full_caps() {
     assert_eq!(ServerMsg::decode(&welcome.to_vec().unwrap()), Ok(Some(ServerMsg::Welcome(welcome))));
 }
 
+/// `gestureIdleMs` closes the Welcome of minor 0: its last two bytes, little-endian, any u16 (a
+/// client clamps it); a Welcome that stops before it is truncated.
+#[test]
+fn welcome_ends_with_the_gesture_keepalive() {
+    let welcome = Welcome {
+        username: "u".into(),
+        gesture_rate: 4,
+        gesture_burst: 8,
+        gesture_idle_ms: 0xbeef,
+        ..Welcome::default()
+    };
+    let bytes = welcome.to_vec().unwrap();
+    assert_eq!(bytes[bytes.len() - 6..], [4, 0, 8, 0, 0xef, 0xbe]);
+    assert_eq!(Welcome::decode_exact(&bytes), Ok(welcome.clone()));
+    let widest = Welcome { gesture_idle_ms: u16::MAX, ..welcome };
+    assert_eq!(Welcome::decode_exact(&widest.to_vec().unwrap()), Ok(widest));
+    assert_eq!(Welcome::decode(&bytes[..bytes.len() - 2]).unwrap_err().defect(), Defect::Truncated);
+}
+
 #[test]
 fn hello_of_any_minor() {
     let hello = Hello { seq: 1, proto: 1, minor: 0, token: "t".repeat(16), ..Hello::default() };

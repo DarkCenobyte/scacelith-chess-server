@@ -427,6 +427,17 @@ fn protection_per_address_defaults() {
 }
 
 #[test]
+fn gesture_keepalive_defaults_to_one_second_within_one_to_ten() {
+    assert_eq!(ok(&[]).gesture_idle_ms, 1000);
+    assert_eq!(ok(&[("GESTURE_IDLE_MS", "10000")]).gesture_idle_ms, 10_000);
+    assert!(err(&[("GESTURE_IDLE_MS", "999")]).contains("GESTURE_IDLE_MS: at least 1000"));
+    assert!(err(&[("GESTURE_IDLE_MS", "10001")]).contains("GESTURE_IDLE_MS: at most 10000"));
+    let off = ok(&[("GESTURE_RATE", "0"), ("GESTURE_IDLE_MS", "4000")]);
+    assert_eq!(off.gesture_idle_ms, 4000, "accepted with the relay off (Welcome then says 0)");
+    assert_eq!(spec("GESTURE_IDLE_MS").unwrap().section, Section::Limits);
+}
+
+#[test]
 fn http_rate_per_prefix_zero_means_four_times_http_rate_per_ip() {
     assert_eq!(ok(&[("HTTP_RATE_PER_IP", "100")]).http_rate_per_prefix, 400);
     assert_eq!(ok(&[("HTTP_RATE_PER_IP", "100"), ("HTTP_RATE_PER_PREFIX", "100")]).http_rate_per_prefix, 100);
@@ -752,7 +763,7 @@ fn check_config_prints_every_key_in_table_order_then_the_derived_values() {
     let mut want: Vec<String> = KEYS.iter().map(|k| camel_case(k.name)).collect();
     want.extend(["ssoOrigin", "ssoRedirectTag", "categories"].map(String::from));
     assert_eq!(keys, want);
-    assert_eq!(keys.len(), 157);
+    assert_eq!(keys.len(), 158);
     assert_eq!(d["serverSecret"], "<set>");
     assert_eq!(d["mfaEncryptionKey"], "<unset>");
     assert_eq!(d["smtpPassword"], "<set>");

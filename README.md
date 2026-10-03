@@ -640,14 +640,16 @@ with its own accounts, data and ports ([docs/DEPLOY.md](docs/DEPLOY.md), section
 and memory: [docs/SIZING.md](docs/SIZING.md); load tests (`bench/run.sh`, the `scacelith-bench`
 load generator) and their results: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
-On a small machine, two settings are the idle cost you control, both announced to the game in
+On a small machine, three settings are the idle cost you control, all announced to the game in
 `Welcome`. `CLIENT_PING_INTERVAL_MS` (10 s) is how often the game pings the server for its ping
 indicator and its estimate of the server clock; each ping costs server CPU for every connected
 player. `GESTURE_RATE` (4 per second) bounds the live gestures (the head, the piece in hand and
-where it is aimed) a client sends during a game, at least once a second even while its player
-sits still, and the server relays each one to the opponent. Lower `GESTURE_RATE` to 2 or 1, or to
-0 to turn the relay off, when the peak nears the machine's capacity
-([docs/SIZING.md](docs/SIZING.md#gestures)).
+where it is aimed) a client sends during a game, and the server relays each one to the opponent.
+`GESTURE_IDLE_MS` (1 s) is the longest a client waits between two gestures while its player sits
+still: these keepalives are most of the relay's work in a calm game. Raise `GESTURE_IDLE_MS` (up
+to 10 s; the opponent's robot then notices later that the gestures stopped), lower
+`GESTURE_RATE` to 2 or 1, or set it to 0 to turn the relay off, when the peak nears the machine's
+capacity ([docs/SIZING.md](docs/SIZING.md#gestures)).
 
 ## Development
 

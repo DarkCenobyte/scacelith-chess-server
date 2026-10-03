@@ -705,6 +705,19 @@ pub static KEYS: &[KeySpec] = &[
     .default("8")
     .range(1, 120),
     key(
+        "GESTURE_IDLE_MS",
+        Limits,
+        Int,
+        "Longest time a client lets pass without sending a gesture for its game in progress while nothing \
+         changes (its player sits still), announced in Welcome. These keepalive gestures are most of the \
+         relay's server CPU in a calm game (docs/SIZING.md): a longer interval saves it, but the game clients' \
+         timeouts follow it, so they take longer to notice that the opponent's gestures stopped (the \
+         opponent's robot stops following their head 2.5 intervals after their last gesture, and puts a piece \
+         held live back after 5). Not used when GESTURE_RATE is 0.",
+    )
+    .default("1000")
+    .range(1000, 10_000),
+    key(
         "HTTP_BODY_LIMIT",
         Limits,
         Int,

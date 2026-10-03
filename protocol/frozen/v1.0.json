@@ -1063,6 +1063,10 @@
           "max": 120,
           "name": "gestureBurst",
           "type": "u16"
+        },
+        {
+          "name": "gestureIdleMs",
+          "type": "u16"
         }
       ],
       "id": 128,

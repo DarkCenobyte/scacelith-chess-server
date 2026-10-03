@@ -169,6 +169,7 @@ pub(crate) async fn run(
         active_game,
         gesture_rate: s.gesture_rate as u16,
         gesture_burst: if s.gesture_rate > 0.0 { s.gesture_burst as u16 } else { 0 },
+        gesture_idle_ms: if s.gesture_rate > 0.0 { s.gesture_idle_ms } else { 0 },
     };
     let welcome = match welcome.to_bytes() {
         Ok(frame) => frame,
