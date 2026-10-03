@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Live interoperability check: the game's C++ OnlineClient against this server, over real TLS.
+// Live interoperability check: the game's C++ OnlineClient against this server, over real TLS
+// (plain HTTP on the loopback for the sso part).
 //
 //   node dedicated-server/tools/live-cpp-check.js [--only=game|account|sso] [path/to/scacelith_tests]
 //                                                      (default build/scacelith_tests)
@@ -40,20 +41,21 @@
 //          server's metrics (GET /metric).
 //
 // sso      Google sign-in (docs/API.md "Google sign-in"): the account API in this process (real
-//          auth module, SQLite store and API handler, no WebSocket) over native TLS, with Google
-//          replaced by the fake provider of test/unit/helpers/auth-oidc.js and e-mail confirmation
-//          on; SERVER_PUBLIC_HOST is LIVE_HOST and the API port the one it listens on, so that the
-//          origin tag is the game's. Then the C++ test `net_live_sso` (SCACELITH_NET_LIVE_SSO=
-//          host:port:control port, the certificate's SHA-256 in SCACELITH_NET_LIVE_SSO_PIN and in
-//          GET /state) signs in through its 127.0.0.1 listener; its browser opener asks the
+//          auth module, SQLite store and API handler, no WebSocket) in plain HTTP on 127.0.0.1,
+//          with Google replaced by the fake provider of test/unit/helpers/auth-oidc.js and e-mail
+//          confirmation on; SERVER_PUBLIC_HOST is LIVE_HOST and the API port the one it listens
+//          on, so that the origin tag is the game's. Then the C++ test `net_live_sso`
+//          (SCACELITH_NET_LIVE_SSO=host:port:control port; its client is a development one,
+//          insecureDev) signs in through its 127.0.0.1 listener; its browser opener asks the
 //          control server for Google's answer (GET /fake-authorize?url=<authUrl>&sub=&email=, a
 //          302 whose Location it opens on the listener). The control server also seeds accounts
-//          (POST /seed-password-account { username, email, password, mfa }), gives TOTP codes
-//          (GET /totp?username=) and lists the Google links stored (GET /links).
+//          (POST /seed-password-account { username, email, password, mfa }, which gives the
+//          authenticator's totpSecret with mfa), gives TOTP codes (GET /totp?secret=) and lists
+//          the Google links stored (GET /links).
 //
-// The C++ client trusts the server by pinning the SHA-256 of its certificate. The host name it
-// connects to is LIVE_HOST (default localhost: the test certificate names both localhost and
-// 127.0.0.1, but Wine's WinHTTP only matches DNS names).
+// In the game and account parts the C++ client trusts the server by pinning the SHA-256 of its
+// certificate. The host name it connects to is LIVE_HOST (default localhost: the test certificate
+// names both localhost and 127.0.0.1, but Wine's WinHTTP only matches DNS names).
 // Exit code: 0 when every part passed, else the first failing C++ test's (or 1).
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -64,7 +66,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { makeCertificate, startServer } from '../test/integration/helpers/harness.js';
+import { startServer } from '../test/integration/helpers/harness.js';
 import { createCaptureMailer, TEST_DEFAULTS } from '../test/unit/helpers/auth-fakes.js';
 import { startFakeOidc } from '../test/unit/helpers/auth-oidc.js';
 import { applyGame } from '../test/unit/helpers/real-auth.js';
@@ -498,15 +500,14 @@ const GOOGLE_EXTRA = { scope: 'email profile openid https://www.googleapis.com/a
 
 /**
  * The account API in this process, as test/unit/helpers/real-auth.js builds it (the real auth
- * module, SQLite store and API handler), with the fake Google of test/unit/helpers/auth-oidc.js
- * reached over plain HTTP, behind native TLS on 127.0.0.1. Its origin is LIVE_HOST and the port it
- * listens on, so its tag is the one the game computes for the server it connects to.
+ * module, SQLite store and API handler, plain HTTP on 127.0.0.1), with the fake Google of
+ * test/unit/helpers/auth-oidc.js. Its origin is LIVE_HOST and the port it listens on, so its tag is
+ * the one the game computes for the server it connects to.
  */
 async function startSsoServer() {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scacelith-live-sso-'));
-    const tls = makeCertificate(dir);
     let handle = null;
-    const server = https.createServer({ cert: fs.readFileSync(tls.cert), key: fs.readFileSync(tls.key) }, (req, res) => handle(req, res));
+    const server = http.createServer((req, res) => handle(req, res));
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
     const apiPort = server.address().port;
     const idp = await startFakeOidc({ clientId: SSO_CLIENT_ID, clientSecret: SSO_CLIENT_SECRET, now: Date.now });
@@ -522,7 +523,7 @@ async function startSsoServer() {
         oidcEndpoints: idp.endpoints, oidcAllowHttp: true });
     handle = createApiHandler({ config, store, auth, log });
     return {
-        dir, apiPort, ca: tls.ca, config, store, idp, mailer,
+        dir, apiPort, config, store, idp, mailer,
         async stop() {
             await handle.close();
             auth.close();
@@ -535,14 +536,14 @@ async function startSsoServer() {
 }
 
 /** The control server of `net_live_sso`. */
-function ssoControl(srv, pin) {
+function ssoControl(srv) {
     const totpSteps = new Map(), secrets = new Map();
-    const api = () => new ApiClient({ host: '127.0.0.1', port: srv.apiPort, ca: srv.ca, servername: 'localhost' });
+    const api = () => new ApiClient({ host: '127.0.0.1', port: srv.apiPort, insecure: true });
     return serveControl({
-        'GET /state': () => ({ host: HOST, apiPort: srv.apiPort, pin, tag: srv.config.ssoRedirectTag, clientId: SSO_CLIENT_ID }),
+        'GET /state': () => ({ host: HOST, apiPort: srv.apiPort, tag: srv.config.ssoRedirectTag, clientId: SSO_CLIENT_ID }),
         // { username, email, password?, mfa? }: an account whose address is confirmed, as a used
         // registration link leaves it; without a password, one like a Google-made account. With
-        // mfa: two-step verification turned on through the API; the answer gives its secret.
+        // mfa: two-step verification turned on through the API; the answer gives its totpSecret.
         'POST /seed-password-account': async (q, b) => {
             const { username, email, password = null, mfa = false } = b;
             if (typeof username !== 'string' || typeof email !== 'string') return [400, { error: 'username_and_email' }];
@@ -562,7 +563,7 @@ function ssoControl(srv, pin) {
                 if (on.status !== 200) return [500, { error: 'mfa_enable', status: on.status, body: on.body }];
                 await a.logout();
                 secrets.set(username.toLowerCase(), secret);
-                return { userId, secret };
+                return { userId, totpSecret: secret };
             } finally { a.close(); }
         },
         // ?username= (an account seeded with mfa) or ?secret=<base32>
@@ -605,12 +606,11 @@ function ssoControl(srv, pin) {
 
 async function ssoPart() {
     const srv = await startSsoServer();
-    const pin = pinOf(srv);
-    console.log(`[sso] server on ${HOST}:${srv.apiPort} (API only, no WebSocket), certificate SHA-256 ${pin}, origin tag ${srv.config.ssoRedirectTag}`);
+    console.log(`[sso] server on ${HOST}:${srv.apiPort} (plain HTTP, API only, no WebSocket), origin tag ${srv.config.ssoRedirectTag}`);
     let ctl = null, code = 1;
     try {
-        ctl = await ssoControl(srv, pin);
-        code = await runCpp('net_live_sso', { SCACELITH_NET_LIVE_SSO: `${HOST}:${srv.apiPort}:${ctl.port}`, SCACELITH_NET_LIVE_SSO_PIN: pin });
+        ctl = await ssoControl(srv);
+        code = await runCpp('net_live_sso', { SCACELITH_NET_LIVE_SSO: `${HOST}:${srv.apiPort}:${ctl.port}` });
         console.log(`[sso] C++ test exit code ${code}`);
         await srv.mailer.idle?.();
         console.log(`[sso] mails: ${srv.mailer.sent.map((m) => `${m.to} "${m.subject}"`).join(', ') || 'none'}`);
