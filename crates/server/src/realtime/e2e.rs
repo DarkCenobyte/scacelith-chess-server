@@ -42,33 +42,12 @@ struct TestServer {
 impl TestServer {
     async fn start(overrides: &[(&str, &str)]) -> TestServer {
         let dir = Arc::new(TempDir::new("e2e"));
-        let data = dir.path().display().to_string();
-        let (db, journal) = (dir.file("scacelith.db"), dir.file("journal"));
-        let grace = GRACE_MS.to_string();
-        let mut keys = vec![
-            ("DATA_DIR", data.as_str()),
-            ("DB_PATH", db.as_str()),
-            ("JOURNAL_DIR", journal.as_str()),
-            ("BIND_ADDRESS", "127.0.0.1"),
-            ("API_PORT", "0"),
-            ("ANALYSIS_WORKERS", "0"),
-            ("SHUTDOWN_GRACE_MS", grace.as_str()),
-            ("MATCH_TICK_MS", "50"),
-        ];
-        keys.extend_from_slice(overrides);
-        let config = Arc::new(test_config(&keys).expect("a valid configuration"));
+        let config = Arc::new(config_in(&dir, overrides));
         TestServer::launch(config, dir).await
     }
 
     async fn launch(config: Arc<Config>, dir: Arc<TempDir>) -> TestServer {
-        let hasher =
-            Argon2Hasher::new(Argon2Params { memory_kib: 64, passes: 1, lanes: 1, ..Argon2Params::DEFAULT });
-        let options = LaunchOptions {
-            password_hasher: Some(Arc::new(hasher)),
-            process_metrics: false,
-            ..LaunchOptions::default()
-        };
-        let instance = Instance::launch(config.clone(), options).await.expect("the server starts");
+        let instance = Instance::launch(config.clone(), options()).await.expect("the server starts");
         instance.announce_ready();
         let addr = instance.address(ListenerKind::ApiWs).expect("one port for the API and the WebSocket");
         TestServer { instance: Some(instance), addr, config, _dir: dir }
@@ -147,6 +126,37 @@ impl TestServer {
         let config = self.config.clone();
         let dir = self._dir.clone();
         *self = TestServer::launch(config, dir).await;
+    }
+}
+
+/// The configuration of a test server in `dir`: loopback, a port of the system's choice, no
+/// engine analysis, a short drain.
+fn config_in(dir: &TempDir, overrides: &[(&str, &str)]) -> Config {
+    let data = dir.path().display().to_string();
+    let (db, journal) = (dir.file("scacelith.db"), dir.file("journal"));
+    let grace = GRACE_MS.to_string();
+    let mut keys = vec![
+        ("DATA_DIR", data.as_str()),
+        ("DB_PATH", db.as_str()),
+        ("JOURNAL_DIR", journal.as_str()),
+        ("BIND_ADDRESS", "127.0.0.1"),
+        ("API_PORT", "0"),
+        ("ANALYSIS_WORKERS", "0"),
+        ("SHUTDOWN_GRACE_MS", grace.as_str()),
+        ("MATCH_TICK_MS", "50"),
+    ];
+    keys.extend_from_slice(overrides);
+    test_config(&keys).expect("a valid configuration")
+}
+
+/// The launch options of the tests: a cheap password hash, no process metrics sampler.
+fn options() -> LaunchOptions {
+    let hasher =
+        Argon2Hasher::new(Argon2Params { memory_kib: 64, passes: 1, lanes: 1, ..Argon2Params::DEFAULT });
+    LaunchOptions {
+        password_hasher: Some(Arc::new(hasher)),
+        process_metrics: false,
+        ..LaunchOptions::default()
     }
 }
 
@@ -602,5 +612,21 @@ async fn drains_at_the_shutdown_and_gives_the_game_back_after_the_restart() {
     assert_eq!(w.active_game, game);
     let ServerMsg::GameSnapshot(s) = again.until("GameSnapshot").await else { unreachable!() };
     assert_eq!((s.game, s.moves.len(), s.status), (game, 1, GameStatus::Ongoing));
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn a_port_in_use_fails_the_start_and_stops_what_was_started() {
+    let taken = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a port");
+    let port = taken.local_addr().unwrap().port().to_string();
+    let dir = Arc::new(TempDir::new("e2e"));
+    let config = Arc::new(config_in(&dir, &[("API_PORT", port.as_str())]));
+    let err = Instance::launch(config, options()).await.expect_err("the port is taken");
+    assert!(err.to_string().starts_with("listeners: "), "{err}");
+    // The store was closed and the journals left in order: the next start on the directory works.
+    let server = TestServer::launch(Arc::new(config_in(&dir, &[])), dir).await;
+    let (_, w) = server.login(&server.account("alice").await).await;
+    assert_eq!(w.username, "alice");
+    let mut server = server;
     server.stop().await;
 }

@@ -8,15 +8,18 @@
 //!
 //! # Start-up ([`Instance::launch`])
 //!
-//! `STATUS=starting`, then in order: the data directory, the store (opened with the Elo rules of
-//! [`crate::matching::elo`], migrated, its server id read), the retention purge, the mailer, the
-//! GIF service, the anti-cheat services (anomalies and sanctions, reports, the engine analysis
-//! pool), the lobby's inbox, the game hosts (`STATUS=recovering N games`: each shard replays its
-//! journal and announces the games it recovers into the lobby's inbox), the lobby actor, the auth
-//! service, the realtime connections, the HTTP API, and the listeners, bound last. The server
-//! serves from there on; `/readyz`, `READY=1` and `STATUS=ready` follow, then the watchdog
-//! keep-alive starts. A stop signal received during the start-up stops the server once it is
-//! started, before `READY=1`; a second one exits at once with 1.
+//! `STATUS=starting`, then in order: the checks of the shard range and of `ABUSE_EXEMPT`, the
+//! process metrics, the open file limit, the data directory, the store (opened with the Elo rules
+//! of [`crate::matching::elo`], migrated, its server id read), the lobby's inbox, the mailer and
+//! the auth service (which announces revoked sessions into that inbox), the background jobs
+//! (retention purge, analysis queue gauges, engine analysis pool), the GIF service, the anti-cheat
+//! services (anomalies and sanctions, reports), the game hosts (`STATUS=recovering N games`: each
+//! shard replays its journal and announces the games it recovers into the lobby's inbox), the
+//! lobby actor, the realtime connections, the HTTP API, and the listeners, bound last. A failure
+//! stops what was started (final commits, store closed) and exits with 1. The server serves from
+//! the bind on; `/readyz`, `READY=1` and `STATUS=ready` follow, then the watchdog keep-alive
+//! starts. A stop signal received during the start-up stops the server once it is started,
+//! before `READY=1`; a second one exits at once with 1.
 //!
 //! # Signals ([`run`])
 //!
@@ -432,10 +435,8 @@ pub(crate) struct Instance {
     log: Logger,
     server_id: String,
     store: Store,
-    retention: RetentionScheduler,
-    backlog: JoinHandle<()>,
+    background: Background,
     mailer: Mailer,
-    pool: AnalysisPool,
     hosts: Arc<Hosts>,
     recovered: usize,
     lobby: Lobby,
@@ -469,6 +470,10 @@ impl Instance {
             log_warn!(log, "configuration works against the design", { "warning": warning });
         }
         let clock = options.clock.clone();
+        let shards = shard_range(&config)?;
+        let guard = IpGuard::new(&config, clock.clone(), Logger::root().child("guard"))
+            .map_err(StartError::at("ABUSE_EXEMPT"))?;
+        let guard = Arc::new(guard);
         let process = options.process_metrics.then(metrics::start_process_metrics);
         let nofile = match crate::sys::raise_nofile_limit() {
             Ok(limit) => Some(limit),
@@ -485,22 +490,41 @@ impl Instance {
             .map_err(StartError::at("data directory"))?;
 
         let store = open_store(&config, clock.clone()).await?;
-        let (migrations, server_id) = migrate_store(&store).await?;
+        let (migrations, server_id) = match migrate_store(&store).await {
+            Ok(migrated) => migrated,
+            Err(e) => {
+                store.close().await;
+                return Err(e);
+            }
+        };
         log_info!(log, "database ready", {
             "path": store.path(), "applied": migrations.applied, "version": migrations.version, "serverId": server_id,
         });
-        let retention = RetentionScheduler::for_store(&store, &config);
-        let backlog = spawn_backlog_gauges(store.clone());
-        let limits = Arc::new(SharedLimits::new(clock.clone()));
+        // The lobby's handle exists before its actor: the auth service announces revoked
+        // sessions into its inbox, and the hosts the games they recover.
+        let (lobby, inbox) = Lobby::channel();
         let mailer = Mailer::new(&config, Logger::root().child("mail"));
+        let mut auth_deps =
+            AuthDeps::new(config.clone(), store.clone(), mailer.clone(), Arc::new(lobby.clone()));
+        auth_deps.clock = clock.clone();
+        auth_deps.password_hasher = options.password_hasher.clone();
+        let auth = match Auth::new(auth_deps) {
+            Ok(auth) => auth,
+            Err(e) => {
+                store.close().await;
+                return Err(StartError::at("auth service")(e));
+            }
+        };
+        let mut background = Background {
+            retention: RetentionScheduler::for_store(&store, &config),
+            backlog: spawn_backlog_gauges(store.clone()),
+            pool: AnalysisPool::start(&config, store.clone(), clock.clone()),
+        };
+        let limits = Arc::new(SharedLimits::new(clock.clone()));
         let gifs = GifService::new(&config, Arc::new(GameRenderer::<ChessRules>::new()));
         let anticheat = Anticheat::new(&config, store.clone(), clock.clone());
         let reports: Arc<dyn ReportDesk> = Arc::new(Reports::new(&config, store.clone()));
-        let pool = AnalysisPool::start(&config, store.clone(), clock.clone());
 
-        // The hosts announce the games they recover into the lobby's inbox; the actor reads them
-        // once it starts.
-        let (lobby, inbox) = Lobby::channel();
         let events = Arc::new(HostEventsOf { lobby: lobby.clone(), recovered: AtomicUsize::new(0) });
         let host_deps = HostDeps {
             config: config.clone(),
@@ -509,12 +533,18 @@ impl Instance {
             events: events.clone(),
             anomalies: Arc::new(anticheat.clone()),
         };
-        let shards = shard_range(&config)?;
         systemd::status("recovering games");
         let status = spawn_recovery_status(events.clone());
         let started = Hosts::start(host_deps, shards).await;
         status.abort();
-        let hosts = Arc::new(started.map_err(StartError::at("game hosts"))?);
+        let hosts = match started {
+            Ok(hosts) => Arc::new(hosts),
+            Err(e) => {
+                background.stop().await;
+                store.close().await;
+                return Err(StartError::at("game hosts")(e));
+            }
+        };
         let recovered = events.recovered.load(Ordering::Relaxed);
         let game_hosts: Arc<dyn GameHosts> = hosts.clone();
         let lobby_deps =
@@ -522,11 +552,6 @@ impl Instance {
         let lobby_task = inbox.start(lobby_deps);
         anticheat.set_sanction_events(Arc::new(lobby.clone()));
 
-        let mut auth_deps =
-            AuthDeps::new(config.clone(), store.clone(), mailer.clone(), Arc::new(lobby.clone()));
-        auth_deps.clock = clock.clone();
-        auth_deps.password_hasher = options.password_hasher.clone();
-        let auth = Auth::new(auth_deps).map_err(StartError::at("auth service"))?;
         let tokens: Arc<dyn TokenValidator> = Arc::new(auth.clone());
         let realtime = Realtime::new(RealtimeDeps {
             config: config.clone(),
@@ -539,10 +564,6 @@ impl Instance {
         });
 
         let readiness = Readiness::new();
-        let guard = Arc::new(
-            IpGuard::new(&config, clock.clone(), Logger::root().child("guard"))
-                .map_err(StartError::at("ABUSE_EXEMPT"))?,
-        );
         let router = api_routes(&config, &store, &auth, reports, gifs);
         let api = Api::builder(config.clone(), router)
             .clock(clock.clone())
@@ -560,20 +581,30 @@ impl Instance {
             clock: clock.clone(),
             log: Logger::root().child("ws"),
         };
-        let ws = WsEndpoint::new(&config, settings, realtime.on_connection())
-            .admission(admissions.clone())
-            .upgrade_header(SERVER_ID_HEADER, &server_id)
-            .map_err(StartError::at("server id header"))?;
-        let parts = ServerParts {
-            api: api.clone(),
-            ws,
-            guard,
-            readiness: readiness.clone(),
-            full: Some(admissions.full_signal()),
+        let bound = async {
+            let ws = WsEndpoint::new(&config, settings, realtime.on_connection())
+                .admission(admissions.clone())
+                .upgrade_header(SERVER_ID_HEADER, &server_id)
+                .map_err(StartError::at("server id header"))?;
+            let full = Some(admissions.full_signal());
+            let parts = ServerParts { api: api.clone(), ws, guard, readiness: readiness.clone(), full };
+            Server::bind(&config, parts, Logger::root().child("listen"))
+                .await
+                .map_err(StartError::at("listeners"))
         };
-        let server = Server::bind(&config, parts, Logger::root().child("listen"))
-            .await
-            .map_err(StartError::at("listeners"))?;
+        let server = match bound.await {
+            Ok(server) => server,
+            Err(e) => {
+                // Nothing was served: the recovered games stay in the journals for the next start.
+                hosts.shutdown().await;
+                lobby.stop();
+                background.stop().await;
+                api.close().await;
+                auth.close().await;
+                store.close().await;
+                return Err(e);
+            }
+        };
         let addresses = server.addresses();
         let tls = server.tls().is_some();
         let net = server.handle();
@@ -591,10 +622,8 @@ impl Instance {
             log,
             server_id,
             store,
-            retention,
-            backlog,
+            background,
             mailer,
-            pool,
             hosts,
             recovered,
             lobby,
@@ -655,10 +684,8 @@ impl Instance {
             config,
             log,
             store,
-            retention,
-            backlog,
+            mut background,
             mailer,
-            mut pool,
             hosts,
             lobby,
             lobby_task,
@@ -678,10 +705,7 @@ impl Instance {
         systemd::status("draining");
         net.shutdown();
         lobby.stop_timers();
-        let background = async {
-            tokio::join!(pool.stop(), retention.stop());
-        };
-        let ((), drained) = tokio::join!(background, realtime.drain(grace));
+        let ((), drained) = tokio::join!(background.stop(), realtime.drain(grace));
         if !drained {
             log_warn!(log, "connections still open after the drain", { "connections": realtime.connections() });
         }
@@ -699,13 +723,28 @@ impl Instance {
         if let Err(e) = serving.await {
             log_error!(log, "listeners failed", { "err": e.to_string() });
         }
-        backlog.abort();
         auth.close().await;
         store.close().await;
         if let Some(p) = process {
             p.stop();
         }
         log_info!(log, "stopped");
+    }
+}
+
+/// The background jobs on the store: the retention purge, the analysis queue gauges and the
+/// engine analysis.
+struct Background {
+    retention: RetentionScheduler,
+    backlog: JoinHandle<()>,
+    pool: AnalysisPool,
+}
+
+impl Background {
+    /// Stops every job (the engines are closed; the store can be closed afterwards).
+    async fn stop(&mut self) {
+        self.backlog.abort();
+        tokio::join!(self.pool.stop(), self.retention.stop());
     }
 }
 
