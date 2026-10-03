@@ -4,8 +4,11 @@
 //! realtime (wave 2). See docs/RUST-PORT.md.
 
 pub mod admission;
+pub mod deps;
 pub mod endpoint;
+pub(crate) mod link;
 pub(crate) mod metrics;
+pub(crate) mod presence;
 
 pub use admission::Admissions;
 pub use endpoint::{Endpoint, Outbound};
