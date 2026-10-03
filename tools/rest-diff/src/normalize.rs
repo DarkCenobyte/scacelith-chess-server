@@ -114,6 +114,10 @@ fn error_class(e: &str) -> String {
         "connection closed without an answer".into()
     } else if e.starts_with("read:") && (e.contains("reset") || e.contains("Connection reset")) {
         "connection reset".into()
+    } else if (e.starts_with("connect:") || e.starts_with("TLS:")) && e.contains("reset") {
+        // A reset right after the TCP handshake: whether the client sees it on `connect` or on
+        // the first TLS read is a matter of timing on the client's side.
+        "connection reset before TLS".into()
     } else if e.starts_with("write:") {
         "connection closed while sending".into()
     } else if e.starts_with("body cut") {

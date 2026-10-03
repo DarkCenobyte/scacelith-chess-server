@@ -97,8 +97,6 @@ pub struct Mail {
 pub struct Server {
     /// Which implementation.
     pub kind: Kind,
-    /// HTTPS (or plain, in proxy mode) API port.
-    pub api_port: u16,
     /// Data directory.
     pub dir: PathBuf,
     /// How to reach the API.
@@ -204,16 +202,8 @@ impl Server {
         if let Some(e) = child.stderr.take() {
             spawn_reader(e, lines.clone());
         }
-        let mut server = Server {
-            kind,
-            api_port,
-            dir: dir.to_path_buf(),
-            target,
-            env,
-            programs: programs.clone(),
-            child,
-            lines,
-        };
+        let mut server =
+            Server { kind, dir: dir.to_path_buf(), target, env, programs: programs.clone(), child, lines };
         server.wait_ready().await?;
         Ok(server)
     }
@@ -257,15 +247,10 @@ impl Server {
         text
     }
 
-    /// Number of log lines so far (a mark for [`Server::mails_since`]).
-    pub fn log_mark(&self) -> usize {
-        self.lines.lock().expect("log lines lock").len()
-    }
-
-    /// Every mail logged after the mark `since`.
-    pub fn mails_since(&self, since: usize) -> Vec<Mail> {
+    /// Every mail logged so far.
+    pub fn mails(&self) -> Vec<Mail> {
         let lines = self.lines.lock().expect("log lines lock");
-        lines[since.min(lines.len())..]
+        lines
             .iter()
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
             .filter(|v| v.get("msg").and_then(|m| m.as_str()) == Some("mail (log transport)"))
@@ -273,16 +258,6 @@ impl Server {
                 let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
                 Mail { to: field("to"), subject: field("subject"), text: field("text") }
             })
-            .collect()
-    }
-
-    /// Log records (parsed) after the mark `since` whose message is `msg`.
-    pub fn log_records(&self, since: usize, msg: &str) -> Vec<serde_json::Value> {
-        let lines = self.lines.lock().expect("log lines lock");
-        lines[since.min(lines.len())..]
-            .iter()
-            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .filter(|v| v.get("msg").and_then(|m| m.as_str()) == Some(msg))
             .collect()
     }
 

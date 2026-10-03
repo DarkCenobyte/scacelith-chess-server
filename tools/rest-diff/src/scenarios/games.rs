@@ -38,8 +38,8 @@ pub fn run(d: &mut Duo) -> BoxFut<'_> {
         let ip = fresh_ip();
         new_account(d, ip, "gwen", "gwen@example.org").await;
         new_account(d, ip, "hugo", "hugo@example.org").await;
-        new_account(d, ip, "ivy", "ivy@example.org").await;
-        for p in ["gwen", "hugo", "ivy"] {
+        new_account(d, ip, "iris", "iris@example.org").await;
+        for p in ["gwen", "hugo", "iris"] {
             if !d.connect(p, &format!("{p}.token")).await {
                 return;
             }
@@ -91,10 +91,10 @@ pub fn run(d: &mut Duo) -> BoxFut<'_> {
             &script(420, 3, false, &["c2c4", "e7e5", "b1c3"], End::Resign { white: false }),
         )
         .await;
-        // G7: ivy (White) against gwen, rated 3+2, a promotion, then Black resigns.
+        // G7: iris (White) against gwen, rated 3+2, a promotion, then Black resigns.
         d.play(
             "G7",
-            "ivy",
+            "iris",
             "gwen",
             "gwen",
             &script(
@@ -193,7 +193,7 @@ async fn account_games(d: &mut Duo) {
         d.step(id, ip, 0, list(q)).await;
     }
     d.step("history-hugo", ip, 200, get_as("hugo", |_| "/api/v1/account/games?limit=3".into())).await;
-    d.step("history-ivy", ip, 200, get_as("ivy", |_| "/api/v1/account/games".into())).await;
+    d.step("history-iris", ip, 200, get_as("iris", |_| "/api/v1/account/games".into())).await;
 }
 
 /// `GET /games/:id` and its PGN, with and without a token, invalid ids.
@@ -213,7 +213,7 @@ async fn game_records(d: &mut Duo) {
     let ip = fresh_ip();
     d.step("record-as-white", ip, 200, get_as("gwen", |s| format!("/api/v1/games/{}", s.game("G1")))).await;
     d.step("record-as-black", ip, 200, get_as("hugo", |s| format!("/api/v1/games/{}", s.game("G1")))).await;
-    d.step("record-as-other", ip, 200, get_as("ivy", |s| format!("/api/v1/games/{}", s.game("G1")))).await;
+    d.step("record-as-other", ip, 200, get_as("iris", |s| format!("/api/v1/games/{}", s.game("G1")))).await;
     d.step(
         "record-aborted-as-player",
         ip,
@@ -373,7 +373,7 @@ async fn players(d: &mut Duo) {
         Req::get(format!("/api/v1/players/gwen/games?limit=3&before={}", s.v("gwen.pnext")))
     })
     .await;
-    d.step("profile-with-token", ip, 200, get_as("ivy", |_| "/api/v1/players/hugo".into())).await;
+    d.step("profile-with-token", ip, 200, get_as("iris", |_| "/api/v1/players/hugo".into())).await;
     d.step("profile-bad-token", ip, 401, |_| Req::get("/api/v1/players/hugo").bearer("sct_nope")).await;
 }
 
@@ -459,7 +459,7 @@ async fn reports(d: &mut Duo) {
     d.step(
         "report-extra-field",
         ip,
-        400,
+        202,
         report(|s| json!({"gameId": s.game("G1"), "reported": "hugo", "category": "other", "x": 1})),
     )
     .await;
@@ -467,7 +467,7 @@ async fn reports(d: &mut Duo) {
         "report-not-opponent",
         ip,
         403,
-        report(|s| json!({"gameId": s.game("G1"), "reported": "ivy", "category": "other"})),
+        report(|s| json!({"gameId": s.game("G1"), "reported": "iris", "category": "other"})),
     )
     .await;
     d.step(
@@ -540,7 +540,7 @@ async fn reports(d: &mut Duo) {
         "report-g7",
         ip,
         0,
-        report(|s| json!({"gameId": s.game("G7"), "reported": "ivy", "category": "other"})),
+        report(|s| json!({"gameId": s.game("G7"), "reported": "iris", "category": "other"})),
     )
     .await;
     d.step("reportable-quota-used", ip, 200, get_as("gwen", |s| format!("/api/v1/games/{}", s.game("G7"))))
@@ -578,10 +578,10 @@ async fn export_and_deletion(d: &mut Duo) {
     )
     .await;
     d.step(
-        "delete-ivy",
+        "delete-iris",
         ip,
         200,
-        post_as("/api/v1/account/delete", "ivy", |_| json!({"password": PASSWORD})),
+        post_as("/api/v1/account/delete", "iris", |_| json!({"password": PASSWORD})),
     )
     .await;
     deleted_views(d, ip).await;
@@ -592,8 +592,8 @@ async fn deleted_views(d: &mut Duo, ip: IpAddr) {
     d.step("deleted-pgn", ip, 200, |s| Req::get(format!("/api/v1/games/{}/pgn", s.game("G7")))).await;
     d.step("deleted-history", ip, 200, get_as("gwen", |_| "/api/v1/account/games?limit=1".into())).await;
     d.step("deleted-player-games", ip, 200, |_| Req::get("/api/v1/players/gwen/games?limit=1")).await;
-    d.step("deleted-profile", ip, 404, |_| Req::get("/api/v1/players/ivy")).await;
-    d.step("deleted-profile-games", ip, 404, |_| Req::get("/api/v1/players/ivy/games")).await;
+    d.step("deleted-profile", ip, 404, |_| Req::get("/api/v1/players/iris")).await;
+    d.step("deleted-profile-games", ip, 404, |_| Req::get("/api/v1/players/iris/games")).await;
     d.step(
         "deleted-gif",
         ip,

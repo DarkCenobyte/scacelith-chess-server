@@ -84,7 +84,7 @@ impl Side {
         let taken = self.mails_taken.get(to).copied().unwrap_or(0);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let mails: Vec<Mail> = self.server.mails_since(0).into_iter().filter(|m| m.to == to).collect();
+            let mails: Vec<Mail> = self.server.mails().into_iter().filter(|m| m.to == to).collect();
             if let Some(m) = mails.get(taken) {
                 self.mails_taken.insert(to.to_string(), taken + 1);
                 return Some(m.clone());
@@ -98,7 +98,7 @@ impl Side {
 
     fn mails_pending(&self, to: &str) -> usize {
         let taken = self.mails_taken.get(to).copied().unwrap_or(0);
-        self.server.mails_since(0).iter().filter(|m| m.to == to).count().saturating_sub(taken)
+        self.server.mails().iter().filter(|m| m.to == to).count().saturating_sub(taken)
     }
 }
 
@@ -108,16 +108,6 @@ pub struct Pair {
     pub node: Resp,
     /// The Rust server's answer.
     pub rust: Resp,
-}
-
-impl Pair {
-    /// The answer of the side `kind`.
-    pub fn of(&self, kind: Kind) -> &Resp {
-        match kind {
-            Kind::Node => &self.node,
-            Kind::Rust => &self.rust,
-        }
-    }
 }
 
 /// Both servers and the record of the run.
@@ -316,13 +306,6 @@ impl Duo {
                 side.vars.insert(key.to_string(), v);
             }
         }
-    }
-
-    /// Sets `key` on both sides to a value computed from the side.
-    pub fn set(&mut self, key: &str, f: impl Fn(&Side) -> String) {
-        let (a, b) = (f(&self.node), f(&self.rust));
-        self.node.vars.insert(key.to_string(), a);
-        self.rust.vars.insert(key.to_string(), b);
     }
 
     /// Takes the next mail to `to` on both servers, compares subject and text, and saves the

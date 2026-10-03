@@ -36,30 +36,6 @@ impl J {
         }
     }
 
-    /// The string value, if this is a string.
-    pub fn as_str(&self) -> Option<&str> {
-        match self {
-            J::Str(s, _) => Some(s),
-            _ => None,
-        }
-    }
-
-    /// The number as a `u64`, if this is a non-negative integer.
-    pub fn as_u64(&self) -> Option<u64> {
-        match self {
-            J::Num(n) => n.parse().ok(),
-            _ => None,
-        }
-    }
-
-    /// The number as an `f64`.
-    pub fn as_f64(&self) -> Option<f64> {
-        match self {
-            J::Num(n) => n.parse().ok(),
-            _ => None,
-        }
-    }
-
     /// The items, if this is an array.
     pub fn as_array(&self) -> Option<&[J]> {
         match self {

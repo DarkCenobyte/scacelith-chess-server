@@ -1,0 +1,40 @@
+# Accepted deviations: `step glob | aspect prefix (or *) | reason`, one per line.
+# The glob matches the step id `profile/scenario/step`, the prefix the difference as the report
+# names it. Every line says where the deviation is documented. "Intended" lines are deviations by
+# design; "Node bug" lines are Node behaviours no client can rely on, which the Rust server does
+# not copy.
+
+# The realtime protocol is new by design: /info announces protocol v1 (RUST-PORT.md section 7).
+* | body $.protocol. | intended: /info announces realtime protocol v1, scacelith.rt1 (RUST-PORT.md section 7)
+* | body $.supported[ | intended: the WebSocket refusal lists scacelith.rt1 (RUST-PORT.md section 7)
+main/basics/info-head | header content-length | intended: HEAD /info has no body to compare; its length follows the protocol v1 block, "scacelith.rt1" being one character longer (RUST-PORT.md section 7)
+
+# hyper writes header names in title case; names are case-insensitive (RFC 9110 section 5.1).
+* | header name case www-authenticate | intended: hyper writes Www-Authenticate, header names are case-insensitive (net/http1.rs known differences)
+
+# serde_json refuses nesting deeper than 128 levels; JSON.parse nests on. Both answer 400.
+main/http-edge/body-json-deep* | body | intended: nesting over 128 levels is invalid_json, a 400 either way (http/json.rs parse)
+
+# Parser corner cases where hyper's behaviour is kept (RUST-PORT.md section 1, net/http1.rs).
+main/http-edge/raw-http10* | protocol | intended: hyper answers HTTP/1.0 with an HTTP/1.0 status line (net/http1.rs known differences)
+main/http-edge/raw-bare-lf | * | intended: httparse accepts header lines ending in a bare LF (net/http1.rs known differences)
+main/http-edge/raw-fragment | * | intended: hyper drops a #fragment, Node routes it as part of the path; clients never send one (net/http1.rs known differences)
+main/http-edge/raw-raw-quote-in-query | * | intended: the http crate refuses a raw " in a target, raw 400 (net/http1.rs known differences)
+main/http-edge/raw-http2-preface | * | intended: hyper closes on the HTTP/2 preface without an answer, Node sends the raw 400 (net/http1.rs known differences)
+main/http-edge/body-limit-on-get | connection | intended: hyper closes the connection after an answer when an unread body is still on its way; Node discards it and keeps the connection (net/http1.rs known differences)
+main/http-edge/body-limit-on-get | header connection | intended: unread body still on its way, Connection: close (net/http1.rs known differences)
+main/http-edge/body-on-unknown-path | connection | intended: unread body still on its way, the connection ends after the answer (net/http1.rs known differences)
+main/http-edge/body-on-unknown-path | header connection | intended: unread body still on its way, Connection: close (net/http1.rs known differences)
+main/http-edge/body-on-405 | connection | intended: unread body still on its way, the connection ends after the answer (net/http1.rs known differences)
+main/http-edge/body-on-405 | header connection | intended: unread body still on its way, Connection: close (net/http1.rs known differences)
+
+# A head over 16 KiB: Node destroys the socket while the client still writes (the client gets a
+# reset before the raw 431); the Rust listener keeps reading 1 s after a raw answer so that it
+# arrives (net/http1.rs module docs, DESIGN.md 5.6).
+main/http-edge/header-17k | * | intended: Node's raw 431 is lost to a reset, the Rust one arrives (net/http1.rs: reads for 1 s after a raw answer)
+main/http-edge/header-64k | * | intended: Node's raw 431 is lost to a reset, the Rust one arrives (net/http1.rs: reads for 1 s after a raw answer)
+main/http-edge/header-200k | * | intended: Node's raw 431 is lost to a reset, the Rust one arrives (net/http1.rs: reads for 1 s after a raw answer)
+main/http-edge/headers-3000 | * | intended: Node's raw 431 is lost to a reset, the Rust one arrives (net/http1.rs: reads for 1 s after a raw answer)
+
+# Node bugs the Rust server does not copy.
+main/http-edge/raw-http09 | * | Node bug: llhttp takes a request line without a version and Node answers it as HTTP/1.1; HTTP/0.9 has no headers, the Rust server sends the raw 400 (net/http1.rs known differences)

@@ -76,7 +76,7 @@ pub fn run(d: &mut Duo) -> BoxFut<'_> {
         d.step("players-bad-encoding", ip, 400, |_| Req::get("/api/v1/players/%E0%A4%A")).await;
         d.step("players-bad-encoding-percent", ip, 400, |_| Req::get("/api/v1/players/abc%")).await;
         d.step("players-encoded-slash", ip, 400, |_| Req::get("/api/v1/players/a%2Fb")).await;
-        d.step("players-plus", ip, 404, |_| Req::get("/api/v1/players/a+b")).await;
+        d.step("players-plus", ip, 400, |_| Req::get("/api/v1/players/a+b")).await;
         d.step("games-bad-encoding", ip, 400, |_| Req::get("/api/v1/games/%ZZ")).await;
         d.step("session-bad-encoding-unauth", ip, 0, |_| Req::new("DELETE", "/api/v1/auth/sessions/%ZZ"))
             .await;

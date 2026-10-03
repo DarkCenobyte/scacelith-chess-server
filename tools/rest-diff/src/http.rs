@@ -40,8 +40,6 @@ pub struct Req {
     pub raw: Option<Vec<u8>>,
     /// Send on a new connection (and close it after the answer).
     pub fresh: bool,
-    /// Do not add `Content-Length` (the scenario writes its own framing headers).
-    pub no_length: bool,
     /// After the answer, wait to see whether the server closes the connection.
     pub watch_close: bool,
 }
@@ -56,7 +54,6 @@ impl Req {
             body: Vec::new(),
             raw: None,
             fresh: false,
-            no_length: false,
             watch_close: false,
         }
     }
@@ -119,12 +116,6 @@ impl Req {
         self
     }
 
-    /// Without the automatic `Content-Length`.
-    pub fn no_length(mut self) -> Req {
-        self.no_length = true;
-        self
-    }
-
     /// A one-line summary for the report.
     pub fn summary(&self) -> String {
         if let Some(raw) = &self.raw {
@@ -161,7 +152,7 @@ impl Req {
             head.push_str(&format!("{k}: {v}\r\n"));
         }
         let body_method = matches!(self.method.as_str(), "POST" | "PUT" | "PATCH" | "DELETE");
-        if !self.no_length && (!self.body.is_empty() || body_method) {
+        if !self.body.is_empty() || body_method {
             head.push_str(&format!("Content-Length: {}\r\n", self.body.len()));
         }
         head.push_str("\r\n");
@@ -225,8 +216,6 @@ pub struct Resp {
     pub closed: Option<bool>,
     /// The transport failure when no complete answer came.
     pub error: Option<String>,
-    /// Wall time of the answer (ms since the epoch).
-    pub at_ms: f64,
 }
 
 impl Resp {
@@ -347,7 +336,7 @@ impl Client {
 
 /// A failed exchange: no complete answer.
 pub fn failure(e: String) -> Resp {
-    Resp { error: Some(e), at_ms: now_ms(), ..Resp::default() }
+    Resp { error: Some(e), ..Resp::default() }
 }
 
 /// Wall time in ms since the epoch.
@@ -458,7 +447,7 @@ async fn read_answer(conn: &mut Conn, head_only: bool) -> Result<Resp, (String, 
             headers.push((line.to_string(), String::new()));
         }
     }
-    let mut resp = Resp { status, reason, version, headers, at_ms: now_ms(), ..Resp::default() };
+    let mut resp = Resp { status, reason, version, headers, ..Resp::default() };
     if (100..200).contains(&status) && status != 101 {
         // An interim answer: the real one follows.
         return Box::pin(read_answer(conn, head_only)).await;

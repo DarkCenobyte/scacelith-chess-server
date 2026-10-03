@@ -86,6 +86,7 @@ kind, so that a value of the wrong format stays visible (`normalize.rs`):
 | UUIDs (`serverId`), proof-of-work challenges, TOTP secrets, recovery codes | masked |
 | `Date` header | masked |
 | PGN `[%clk]`, `[%emt]`, `UTCTime` | masked |
+| transport failures | by class: no answer, reset before TLS (on `connect` or the handshake), reset while reading, closed while sending, body cut short |
 
 ### The report
 
@@ -105,6 +106,10 @@ kind, so that a value of the wrong format stays visible (`normalize.rs`):
 `step glob | aspect prefix (or *) | reason`. The glob matches the step id (`*` for any run of
 characters), the aspect prefix the difference (`body $.protocol.`, `header name case`,
 `status`...). A matched difference is reported as accepted with its reason, not as open.
+Each reason starts with `intended:` (a deviation by design, with the place that documents it)
+or `Node bug:` (a Node behaviour no client can rely on, which the Rust server does not copy).
+Keep the globs narrow: a rule that matches more steps than the deviation it describes would
+hide a regression.
 
 ## Profiles
 
