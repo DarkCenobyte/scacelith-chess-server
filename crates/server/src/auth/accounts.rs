@@ -375,6 +375,9 @@ impl Inner {
     /// Whether a confirmation link (an account's, or a pending signup's) is live
     /// (`GET /verify-email`).
     pub(crate) async fn peek_verification(&self, token: &str) -> AuthResult<bool> {
+        if !is_link_token(token) {
+            return Ok(false);
+        }
         if self.peek_token(EMAIL_VERIFY, token).await?.is_some() {
             return Ok(true);
         }

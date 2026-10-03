@@ -25,6 +25,7 @@
 mod accounts;
 mod error;
 mod events;
+pub(crate) mod http;
 mod identity;
 mod login;
 mod mfa;
