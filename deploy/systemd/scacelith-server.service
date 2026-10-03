@@ -32,6 +32,9 @@ Type=notify-reload
 # Only the main process may send notifications (the analysis engines it starts may not).
 NotifyAccess=main
 ExecStart=/usr/local/bin/scacelith-server start
+# Logs: one JSON record per line on standard output, which systemd connects to the journal by
+# default (standard error, plain text before logging starts, too). The server recognises the
+# journal from JOURNAL_STREAM and starts each line with its priority (<3> error ... <7> debug).
 
 # A dedicated, static system account (sysusers.d/scacelith-server.conf). Not DynamicUser=: the
 # operator runs the administration commands and the database backups as this same account, so
