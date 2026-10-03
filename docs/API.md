@@ -150,8 +150,9 @@ Endpoints that check or hash a password can also answer one of these:
   already has `PASSWORD_HASH_WAITERS_PER_SOURCE` hashes waiting.
 
 Both errors carry a random `retryAfter` of 5 to 15 s. Nothing was changed and no failed attempt
-was counted, and a reset link stays valid. The 429 also gives back the rate-limit tokens that the
-request took.
+was counted (except on [`POST /auth/sso/google/link`](#post-authssogooglelink), whose try of the
+ticket and failure of the account were taken before the hash), and a reset link stays valid. The
+429 also gives back the rate-limit tokens that the request took.
 
 The HTML pages (section 14) answer their errors as HTML pages with the same status codes.
 
@@ -600,7 +601,8 @@ gone. Errors:
 - 401 `invalid_code`;
 - 403 `banned`, 403 `email_unverified`;
 - after the password step of a Google link (`POST /auth/sso/google/link`) only: 410
-  `sso_expired` (the account changed meanwhile) and 409 `sso_already_linked`.
+  `sso_expired` (the account changed meanwhile), 409 `sso_already_linked`, and 503 `server_busy`
+  with `retryAfter: 1` (the store stayed locked: nothing was linked; start again from the game).
 
 ```sh
 curl -sS "$API/auth/login/mfa" -H 'Content-Type: application/json' \

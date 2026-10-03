@@ -20,11 +20,12 @@
 // address or an IPv6 /48) may have at most PASSWORD_HASH_WAITERS_PER_SOURCE hashes waiting. A
 // refused hash fails the request before the account changed, with 503 server_busy (queue full or
 // wait expired) or 429 rate_limited (too many waiting from that source), each with a random
-// Retry-After of 5 to 15 s: no failed login is counted and a reset link stays valid (a proof of
-// work already given is spent, as for any answer). The 429 of a source also gives the request's
-// auth rate tokens back (errors.js hashRateLimited, http/server.js). A new password hash is only
-// written while the stored one is still the hash the request checked (svc.setPasswordHashIf,
-// svc.stillCurrent), so a reset always wins a race.
+// Retry-After of 5 to 15 s: no failed login is counted (except by the password step of a Google
+// link, whose try of the ticket and failure of the account were taken before the hash, login.js)
+// and a reset link stays valid (a proof of work already given is spent, as for any answer). The 429
+// of a source also gives the request's auth rate tokens back (errors.js hashRateLimited,
+// http/server.js). A new password hash is only written while the stored one is still the hash the
+// request checked (svc.setPasswordHashIf, svc.stillCurrent), so a reset always wins a race.
 
 import { createAccounts } from './accounts.js';
 import { AuthError, hashRateLimited, serverBusy } from './errors.js';

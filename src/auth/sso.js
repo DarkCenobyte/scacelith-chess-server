@@ -237,6 +237,7 @@ export function createSso(svc) {
             throw err;
         }
         if (!store.tokens.consume('sso_link', h, now())) throw expired();
+        // usablePassword is implied by the match (a '!' or missing hash never matches): a safeguard.
         if (current.status !== 'active' || normalizeEmail(current.email) !== d.email || !usablePassword(current)) throw expired();
         login.checkAccountAllowed(current, { addressProven: true });
         // The hash the password matched now (after a rehash): the MFA step and linkProven check it.

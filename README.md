@@ -585,7 +585,11 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
   Google account to the account with the same e-mail address, without its password. The
   migration removes the Google links made that way (those created more than 60 s after their
   password account) and signs out every device of those accounts; their players type their
-  password once in the game the next time they use Google, which links it again. If you ran the
+  password once in the game the next time they use Google, which links it again while the
+  account's address is the Google address. When it is not (it changed since the link, in the
+  account or at Google), Google sign-in offers a new account instead (or answers that
+  registration is closed): the player should not create it, but sign in with the password,
+  change the account's address to the Google address, then use Google. If you ran the
   server with `REQUIRE_EMAIL_VERIFICATION=false` and Google sign-in on, review the `sso_linked`
   security events made before the upgrade (table `security_events`, `kind = 'sso_linked'`):
   someone could register an account with a player's address, and that player's Google sign-in
@@ -627,7 +631,9 @@ Changing `SERVER_SECRET` logs nobody out, but it invalidates the recovery codes 
 ## Moderation
 
 `node bin/admin.js` (also `npm exec scacelith-admin`) works on the database directly: user
-lookup, bans, MFA reset, session revocation, the integrity list and evidence, reports. Run it
+lookup, bans, MFA reset, session revocation, the integrity list and evidence, reports, and the
+account of a pending signup whose confirmation mail never arrived (`user verify-email <name>`,
+which does what the link would). Run it
 with the same `.env`. See `node bin/admin.js` for the commands and
 [docs/ANTICHEAT.md](docs/ANTICHEAT.md) for how suspicion levels are computed. Certain cheats
 (a move for someone else's game, out of turn or illegal in a position both sides agree on, a

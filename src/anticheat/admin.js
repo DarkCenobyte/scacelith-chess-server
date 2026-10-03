@@ -22,12 +22,15 @@ export class AdminError extends Error {}
 export const USAGE = `Usage: scacelith-admin <command> [options]
 
 Accounts
-  user show <name>                            account, ratings, sanctions, integrity summary
+  user show <name>                            account, ratings, sanctions, integrity summary (no account:
+                                              the pending signup that holds the name)
   user ban <name> --hours N --reason TEXT     ban for anything but cheating, no refunds (applies at the
                                               next connection or game) [--revoke-sessions]
   user unban <name>                           lift the active bans
   user reset-mfa <name>                       disable TOTP, delete recovery codes, log out everywhere
-  user verify-email <name>                    mark the e-mail address verified
+  user verify-email <name>                    mark the e-mail address verified (no account: create the
+                                              account of the pending signup that holds the name, as
+                                              its link would)
   user revoke-sessions <name>                 log the account out everywhere
 
 Integrity
@@ -119,6 +122,15 @@ function requireUser(ctx, name) {
     return u;
 }
 
+// The live pending signup (auth/accounts.js, migration 007) that holds `name` when no account has
+// it, or null: with REQUIRE_EMAIL_VERIFICATION a registration has no account until its link is
+// used, and user show / user verify-email reach the signup instead.
+function signupInstead(ctx, name) {
+    if (!name || !ctx.store.signups || ctx.store.users.byUsername(name)) return null;
+    const p = ctx.store.signups.byUsername(name);
+    return p && p.expiresAt > ctx.now() ? p : null;
+}
+
 function intFlag(ctx, name, { min, max, def } = {}) {
     const v = ctx.args.flags[name];
     if (v === undefined || v === true) {
@@ -202,6 +214,15 @@ function pushReview(ev, entry) {
 // ---- user ------------------------------------------------------------------------------------------
 
 function userShow(ctx) {
+    const p = signupInstead(ctx, ctx.args.positional[2]);
+    if (p) {
+        const signup = { username: p.username, email: p.email, createdAt: p.createdAt, expiresAt: p.expiresAt, link: !!p.tokenHash };
+        return { data: { pendingSignup: signup },
+            text: `Pending signup ${p.username} (no account yet)\n`
+                + `  e-mail ${p.email}, ${p.tokenHash ? 'link stored (user verify-email creates the account, as the link would)'
+                    : 'no link: the address had an account, whose owner got a notice'}\n`
+                + `  signed up ${iso(p.createdAt)}, holds the name until ${iso(p.expiresAt)}\n` };
+    }
     const u = requireUser(ctx, ctx.args.positional[2]);
     const s = ctx.store, now = ctx.now();
     const ratings = safe(() => s.ratings.forUser(u.id), []);
@@ -271,10 +292,45 @@ function userResetMfa(ctx) {
 }
 
 function userVerifyEmail(ctx) {
-    const u = requireUser(ctx, ctx.args.positional[2]);
+    const name = ctx.args.positional[2];
+    const confirmed = signupInstead(ctx, name) ? confirmSignup(ctx, name) : null;
+    if (confirmed) return confirmed;
+    const u = requireUser(ctx, name);
     ctx.store.users.update(u.id, { emailVerified: true });
     audit(ctx, 'verify_email', u.id, {});
     return { data: { ok: true }, text: `E-mail address of ${u.username} marked verified.\n` };
+}
+
+// What the link of the pending signup holding `name` does (auth/accounts.js confirmSignup): its
+// account is created, its address verified, and the signup deleted, in one transaction. A signup
+// without a link (its address had an account), or one whose username or address another account
+// has now, is dropped and nothing is created. null: the signup is gone (its link was just used).
+function confirmSignup(ctx, name) {
+    const s = ctx.store;
+    const r = inTx(s, () => {
+        const p = signupInstead(ctx, name);
+        if (!p) return null;
+        s.signups.delete(p.id);
+        if (!p.tokenHash || s.users.byEmail(p.email)) return { p, id: null };
+        try {
+            return { p, id: s.users.create({ username: p.username, email: p.email, passwordHash: p.passwordHash, emailVerified: true, createdAt: ctx.now() }) };
+        } catch (err) {
+            if (err && (err.code === 'username_taken' || err.code === 'email_taken')) return { p, id: null };
+            throw err;
+        }
+    });
+    if (!r) return null;
+    const { p, id } = r;
+    if (!id) {
+        audit(ctx, 'confirm_signup', null, { username: p.username, status: 'taken' });
+        return { data: { status: 'taken' },
+            text: `Pending signup ${p.username} dropped, no account created: its e-mail address had an account, or another account has its username or its address now.\n` };
+    }
+    ctx.log?.security?.('register', { userId: id });
+    writeStructured((rows) => s.security.insertBatch(rows), [{ kind: 'register', userId: id, ip: null, detail: null, at: ctx.now() }], ['detail']);
+    audit(ctx, 'confirm_signup', id, { username: p.username, status: 'confirmed' });
+    return { data: { status: 'confirmed', userId: id },
+        text: `Account ${p.username} (#${id}) created from its pending signup, e-mail address ${p.email} verified.\n` };
 }
 
 function userRevokeSessions(ctx) {

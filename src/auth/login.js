@@ -14,11 +14,12 @@
 //    trigger, every login needs a proof of work (POW_LOGIN_BITS) for the next 5 minutes.
 //  * Unknown account, wrong password and account without password (Google-only) all do the same
 //    hashing work, in the same per-worker hash queue (a refusal there is 503 server_busy, or 429
-//    rate_limited for a source with too many waiting, for all of them and counts no failure), and
-//    give the same `invalid_credentials` answer after the same time: a failed check is padded to
-//    the slowest recent check (security/password.js checkPassword), so a stored hash of another
-//    algorithm than the dummy's does not tell that the account exists. `email_unverified` and
-//    `banned` are only answered after the password matched.
+//    rate_limited for a source with too many waiting, for all of them, and counts no failure except
+//    at the password step of a Google link, above), and give the same `invalid_credentials` answer
+//    after the same time: a failed check is padded to the slowest recent check
+//    (security/password.js checkPassword), so a stored hash of another algorithm than the dummy's
+//    does not tell that the account exists. `email_unverified` and `banned` are only answered after
+//    the password matched.
 //  * A matching outdated hash is upgraded only when a hash slot is free at once, and only while the
 //    stored hash is unchanged; a login whose password a reset replaced during the check fails.
 //  * The MFA step: an `mfa_` token (5 min, 5 wrong codes at most, single use) and a per-account
