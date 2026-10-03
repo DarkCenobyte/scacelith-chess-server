@@ -271,6 +271,52 @@ pub fn resolve_client_ip(peer: IpAddr, xff: Option<&str>, trusted: &IpMatcher) -
     last
 }
 
+/// How a listener finds the client address of a connection or request: the peer itself, or,
+/// behind trusted proxies (`TLS_MODE=proxy`), the `X-Forwarded-For` walk.
+#[derive(Debug, Clone, Default)]
+pub struct ClientAddress {
+    trusted: Option<IpMatcher>,
+}
+
+impl ClientAddress {
+    /// The peer is the client.
+    pub fn direct() -> ClientAddress {
+        ClientAddress { trusted: None }
+    }
+
+    /// Requests come through the proxies of `trusted`.
+    pub fn behind(trusted: IpMatcher) -> ClientAddress {
+        ClientAddress { trusted: Some(trusted) }
+    }
+
+    /// The mode of `config`: behind `TRUSTED_PROXIES` in proxy mode, else direct.
+    pub fn from_config(config: &crate::config::Config) -> Result<ClientAddress, IpListError> {
+        if config.tls_mode == crate::config::TlsMode::Proxy {
+            Ok(ClientAddress::behind(IpMatcher::new(&config.trusted_proxies)?))
+        } else {
+            Ok(ClientAddress::direct())
+        }
+    }
+
+    /// The client address of a request from `peer` carrying `xff`.
+    pub fn resolve(&self, peer: IpAddr, xff: Option<&str>) -> IpAddr {
+        match &self.trusted {
+            Some(t) => resolve_client_ip(peer, xff, t),
+            None => canonical(peer),
+        }
+    }
+
+    /// Whether `peer` is a trusted proxy (its malformed requests are not held against it).
+    pub fn is_trusted_peer(&self, peer: IpAddr) -> bool {
+        self.trusted.as_ref().is_some_and(|t| t.matches(canonical(peer)))
+    }
+
+    /// Whether requests come through proxies.
+    pub fn is_proxy(&self) -> bool {
+        self.trusted.is_some()
+    }
+}
+
 struct LogIpState {
     mode: LogIp,
     secret: Vec<u8>,
