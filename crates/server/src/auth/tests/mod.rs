@@ -5,12 +5,15 @@
 
 mod account;
 mod email_change;
+mod fake_oidc;
 mod hashcap;
+mod limits;
 mod login;
 mod mfa;
 mod password;
 mod register;
 mod sessions;
+mod sso;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -92,6 +95,10 @@ pub(crate) struct Setup {
     pub clock: Option<Arc<ManualClock>>,
     /// A database file instead of a private in-memory database.
     pub db_path: Option<String>,
+    /// The store of another server of the test (the same accounts under another configuration).
+    pub store: Option<Store>,
+    /// The configured mail transport instead of the one that keeps the messages.
+    pub real_mailer: bool,
 }
 
 impl Setup {
@@ -127,12 +134,13 @@ pub(crate) fn test_hasher() -> Arc<dyn PasswordHasher> {
 /// A one-shot hook of a [`CountingHasher`].
 type Hook = Mutex<Option<Box<dyn FnOnce() + Send>>>;
 
-/// A hasher that counts its hashes and can run a hook once, before its next hash or after its
+/// A hasher that counts its hashes and verifications and can run a hook once, before its next hash or after its
 /// next verification (to land a change while a request hashes or right after it checked a
 /// password).
 pub(crate) struct CountingHasher {
     inner: Arc<dyn PasswordHasher>,
     hashes: AtomicUsize,
+    checks: AtomicUsize,
     hook: Hook,
     verify_hook: Hook,
 }
@@ -143,6 +151,7 @@ impl CountingHasher {
         Arc::new(CountingHasher {
             inner: test_hasher(),
             hashes: AtomicUsize::new(0),
+            checks: AtomicUsize::new(0),
             hook: Mutex::new(None),
             verify_hook: Mutex::new(None),
         })
@@ -151,6 +160,11 @@ impl CountingHasher {
     /// New hashes so far.
     pub(crate) fn hashes(&self) -> usize {
         self.hashes.load(Ordering::SeqCst)
+    }
+
+    /// Verifications so far (of stored hashes and dummy ones).
+    pub(crate) fn checks(&self) -> usize {
+        self.checks.load(Ordering::SeqCst)
     }
 
     /// Runs `hook` on the blocking thread of the next hash, before it.
@@ -179,6 +193,7 @@ impl PasswordHasher for CountingHasher {
     }
 
     fn verify(&self, stored: &str, password: &str) -> Result<Verified, HashFailure> {
+        self.checks.fetch_add(1, Ordering::SeqCst);
         let verified = self.inner.verify(stored, password);
         let hook = self.verify_hook.lock().take();
         if let Some(hook) = hook {
@@ -188,6 +203,7 @@ impl PasswordHasher for CountingHasher {
     }
 
     fn verify_dummy(&self, password: &str) -> Result<(), HashFailure> {
+        self.checks.fetch_add(1, Ordering::SeqCst);
         self.inner.verify_dummy(password)
     }
 }
@@ -210,17 +226,19 @@ impl Harness {
         let config = Arc::new(test_config(&pairs).expect("a valid test configuration"));
         let clock = setup.clock.unwrap_or_else(|| ManualClock::new(1_000_000.0, START_MS));
         let shared: SharedClock = clock.clone() as Arc<dyn Clock>;
-        let store = Store::open(
-            &config,
-            StoreOptions {
-                path: Some(setup.db_path.unwrap_or_else(|| ":memory:".into())),
-                clock: Some(shared.clone()),
-                ..StoreOptions::default()
-            },
-        )
-        .await
-        .expect("an in-memory store");
-        store.migrate().await.expect("migrations");
+        let store = match setup.store {
+            Some(store) => store,
+            None => {
+                let options = StoreOptions {
+                    path: Some(setup.db_path.unwrap_or_else(|| ":memory:".into())),
+                    clock: Some(shared.clone()),
+                    ..StoreOptions::default()
+                };
+                let store = Store::open(&config, options).await.expect("an in-memory store");
+                store.migrate().await.expect("migrations");
+                store
+            }
+        };
 
         let mails = Arc::new(Mutex::new(Vec::new()));
         let kept = mails.clone();
@@ -228,10 +246,11 @@ impl Harness {
             kept.lock().push(m);
             Box::pin(async { Ok(()) })
         });
+        let transport = (!setup.real_mailer).then_some(transport);
         let mailer = Mailer::with_options(
             &config,
             Logger::root().child("mail"),
-            MailerOptions { transport: Some(transport), clock: shared.clone(), ..MailerOptions::default() },
+            MailerOptions { transport, clock: shared.clone(), ..MailerOptions::default() },
         );
 
         let revoked = Arc::new(Revocations::default());
