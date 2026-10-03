@@ -12,6 +12,7 @@ pub mod limits;
 mod linked;
 pub mod listener;
 pub mod metrics_server;
+pub mod server;
 pub mod tls;
 pub mod upgrade;
 pub mod ws;
