@@ -15,6 +15,9 @@ use super::db::{Db, SharedCtx};
 use super::error::{Result, StoreError};
 use crate::log_error;
 
+/// The most reader connections of a store.
+pub(crate) const MAX_READERS: usize = 64;
+
 /// Reader connections of a file database.
 pub(crate) struct Readers {
     conns: Mutex<Vec<Connection>>,
@@ -24,7 +27,7 @@ pub(crate) struct Readers {
 }
 
 impl Readers {
-    /// Opens `n` connections (at least one). Blocking.
+    /// Opens `n` connections (at least one, [`MAX_READERS`] at most). Blocking.
     pub(crate) fn open(
         path: &DbPath,
         role: Role,
@@ -32,7 +35,7 @@ impl Readers {
         n: usize,
         ctx: SharedCtx,
     ) -> Result<Readers> {
-        let n = n.clamp(1, 64);
+        let n = n.clamp(1, MAX_READERS);
         let conns = (0..n).map(|_| conn::open(path, role, tuning)).collect::<Result<Vec<_>>>()?;
         Ok(Readers { conns: Mutex::new(conns), permits: Arc::new(Semaphore::new(n)), size: n as u32, ctx })
     }

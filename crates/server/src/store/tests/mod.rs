@@ -22,4 +22,18 @@ mod smoke {
         assert_eq!(u.email.as_deref(), Some("Alice@Example.org"));
         store.close().await;
     }
+
+    #[tokio::test]
+    async fn db_cache_mb_is_shared_evenly_by_the_writer_and_the_readers() {
+        let dir = TempDir::new("db-cache");
+        let mut config = config();
+        config.db_cache_mb = 100;
+        let opts = crate::store::StoreOptions { readers: Some(4), ..options(None) };
+        let store = file_store_with(&dir, &config, opts).await;
+        // In KiB when negative: 100 MiB for 5 connections.
+        let writer = store.write(|db| db.count("PRAGMA cache_size", [])).await.unwrap();
+        let reader = store.read(|db| db.count("PRAGMA cache_size", [])).await.unwrap();
+        assert_eq!((writer, reader), (-20 * 1024, -20 * 1024));
+        store.close().await;
+    }
 }

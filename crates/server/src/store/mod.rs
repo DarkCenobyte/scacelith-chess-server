@@ -110,7 +110,7 @@ use crate::log::Logger;
 use crate::log_security;
 use conn::{DbPath, Role, Tuning};
 use db::Ctx;
-use readers::Readers;
+use readers::{MAX_READERS, Readers};
 use writer::{CLOSE_TIMEOUT, Writer};
 
 /// A uniform draw in `[0, 1)` (the analysis sampling; injectable for tests).
@@ -199,9 +199,10 @@ impl Store {
             refund_window_ms: config.rating_refund_days.max(0) * 86_400_000,
             claims: AtomicU64::new(0),
         });
-        let tuning = Tuning { cache_mb: config.db_cache_mb, mmap_mb: config.db_mmap_mb };
         let readonly = options.readonly;
-        let n_readers = options.readers.unwrap_or(4);
+        let n_readers = options.readers.unwrap_or(4).clamp(1, MAX_READERS);
+        let connections = usize::from(!readonly) + if path == DbPath::Memory { 0 } else { n_readers };
+        let tuning = Tuning::shared(config.db_cache_mb, config.db_mmap_mb, connections);
         let (c, p) = (ctx.clone(), path.clone());
         let (writer, readers) =
             tokio::task::spawn_blocking(move || -> Result<(Option<Writer>, Option<Arc<Readers>>)> {
