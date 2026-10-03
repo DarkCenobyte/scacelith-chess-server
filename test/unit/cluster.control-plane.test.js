@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { AbuseTracker } from '../../src/cluster/abuse.js';
-import { ControlPlane } from '../../src/cluster/control-plane.js';
+import { ControlPlane, PAIR_RETRY_DELAY_MS } from '../../src/cluster/control-plane.js';
 import { Ipc, IpcTimeoutError, channelPair } from '../../src/cluster/ipc.js';
 import { OnceStore, SlidingWindowLimiter } from '../../src/cluster/limits.js';
 import { Presence } from '../../src/cluster/presence.js';
@@ -262,6 +262,7 @@ describe('control plane: matchmaking', () => {
         assert.deepEqual([mm.colorBalanceOf(1), mm.colorBalanceOf(2)], [0, 0], 'the failed game counts for nobody');
         cp.mmLeave({ userId: 1 }); cp.mmLeave({ userId: 2 });
         shards.create = null;
+        clock.advance(PAIR_RETRY_DELAY_MS);
         // Alice White in a challenge: Black in the next queue game.
         const c = cp.challengeCreate({ from: a, target: 'bob', baseSec: 300, incSec: 0, rated: false, color: enums.ColorPref.White });
         const acc = await cp.challengeAccept({ id: c.id, by: b });
@@ -286,7 +287,7 @@ describe('control plane: matchmaking', () => {
         cp.mmJoin({ ...b, category: '5+0', rated: true, rating: 1500 }, 1);
         shards.create = () => ({ error: E.Internal });
         for (let i = 0; i <= cfg.matchRepeatLimit; i++) {
-            clock.advance(250);
+            clock.advance(PAIR_RETRY_DELAY_MS);
             shards.clear();
             cp.matchTick();
             await tick();
@@ -294,10 +295,112 @@ describe('control plane: matchmaking', () => {
             assert.equal(mm.repeatCount(1, 2), 0);
         }
         shards.create = null;
-        clock.advance(250);
+        clock.advance(PAIR_RETRY_DELAY_MS);
         cp.matchTick();
         await tick();
         assert.equal(cp.activeGames.size, 2);
+        assert.equal(mm.repeatCount(1, 2), 1);
+    });
+
+    it('a pairing whose game could not be created is not made again for PAIR_RETRY_DELAY_MS; other pairings go on', async () => {
+        const { cp, shards, clock, online } = setup({ realMatchmaker: true });
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1), c = online(3, 'carl', 1);
+        const players = (r) => [r.payload.spec.white.userId, r.payload.spec.black.userId].sort();
+        const round = async (ms) => {
+            clock.advance(ms);
+            shards.clear();
+            cp.matchTick();
+            await tick();
+            return shards.requests.filter((r) => r.type === 'game.create').map(players);
+        };
+        cp.mmJoin({ ...a, category: '5+0', rated: true, rating: 1500 }, 0);
+        cp.mmJoin({ ...b, category: '5+0', rated: true, rating: 1500 }, 1);
+        shards.create = () => ({ error: E.Internal });
+        assert.deepEqual(await round(250), [[1, 2]]);
+        assert.deepEqual([...cp.queued.keys()].sort(), [1, 2], 'both back in the queue');
+        assert.deepEqual(await round(250), [], 'not at the next tick');
+        assert.deepEqual(await round(PAIR_RETRY_DELAY_MS - 500), []);
+        assert.deepEqual(await round(250), [[1, 2]], 'again once the delay is over');
+        // Held, either of them takes another opponent at once.
+        cp.mmJoin({ ...c, category: '5+0', rated: true, rating: 1500 }, 1);
+        shards.create = null;
+        const [pair] = await round(250);
+        assert.equal(pair.length, 2);
+        assert.ok(pair.includes(3), `paired with carl: ${pair}`);
+        assert.equal(cp.activeGames.size, 2);
+    });
+
+    it('MATCH_REPEAT_LIMIT counts rated challenges, private games and rematches, and refuses them past it; unrated games stay free', async () => {
+        const { cp, ch, shards, mm, clock, online } = setup({ realMatchmaker: true });
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1), c = online(3, 'carl', 1);
+        const tc = { baseSec: 300, incSec: 0 }, rated = { ...tc, rated: true };
+        const end = (gameId) => cp.gameEnded({ gameId, whiteId: 1, blackId: 2 });
+        const rematch = (gameId, isRated) => cp.gameRematch({ gameId, white: 2, black: 1, category: '5+0', baseMs: 300000, incMs: 0, rated: isRated });
+        const created = () => shards.requests.filter((r) => r.type === 'game.create').length;
+        // Three rated games: a direct challenge, a private game, a rematch.
+        const c1 = cp.challengeCreate({ from: a, target: 'bob', ...rated });
+        const g1 = await cp.challengeAccept({ id: c1.id, by: b });
+        assert.equal(g1.ok, true);
+        assert.equal(mm.repeatCount(1, 2), 1);
+        end(g1.gameId);
+        const p2 = cp.challengeCreate({ from: a, target: '', ...rated });
+        const g2 = await cp.challengeJoinCode({ code: p2.code, by: b });
+        assert.equal(g2.ok, true);
+        assert.equal(mm.repeatCount(1, 2), 2);
+        end(g2.gameId);
+        const pending = cp.challengeCreate({ from: b, target: 'alice', ...rated });
+        assert.equal(pending.ok, true, 'two rated games: a third may be offered');
+        const g3 = await rematch(g2.gameId, true);
+        assert.equal(g3.ok, true);
+        assert.equal(mm.repeatCount(1, 2), 3);
+        end(g3.gameId);
+        // The limit is reached: no more rated games between them, however made.
+        shards.clear();
+        assert.deepEqual(await cp.challengeAccept({ id: pending.id, by: a }), { error: E.UserUnavailable }, 'offered before, accepted after');
+        assert.deepEqual(shards.frames().map((f) => [f.connId, f.name, f.msg.state]), [[20, 'ChallengeStatus', CS.Unavailable]]);
+        shards.clear();
+        assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', ...rated }), { error: E.UserUnavailable });
+        assert.deepEqual(shards.frames(), [], 'nothing reaches the target');
+        // A wrong time control keeps its own error.
+        assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', baseSec: 420, incSec: 1, rated: true }), { error: E.RatedRequiresOfficialTc });
+        assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', baseSec: 5, incSec: 0, rated: true }), { error: E.InvalidTimeControl });
+        const p4 = cp.challengeCreate({ from: b, target: '', ...rated });
+        shards.clear();
+        assert.deepEqual(await cp.challengeJoinCode({ code: p4.code, by: a }), { error: E.UserUnavailable });
+        assert.equal(ch.getCode(p4.code)?.id, p4.id, 'the private game stays pending');
+        assert.deepEqual(shards.frames(), [], 'and its creator is told nothing');
+        assert.equal(cp.limiter.peek('joincode:u1'), 0, 'not a wrong code');
+        // The code stays valid for anyone else.
+        const g4 = await cp.challengeJoinCode({ code: p4.code, by: c });
+        assert.equal(g4.ok, true);
+        cp.gameEnded({ gameId: g4.gameId, whiteId: 2, blackId: 3 });
+        shards.clear();
+        assert.deepEqual(await rematch(g3.gameId, true), { error: E.RematchUnavailable });
+        cp.mmJoin({ ...a, category: '5+0', rated: true, rating: 1500 }, 0);
+        cp.mmJoin({ ...b, category: '5+0', rated: true, rating: 1500 }, 1);
+        assert.deepEqual([...cp.queued.keys()].sort(), [1, 2]);
+        clock.advance(250);
+        cp.matchTick();
+        await tick();
+        assert.deepEqual([...cp.queued.keys()].sort(), [1, 2], 'both still waiting');
+        cp.mmLeave({ userId: 1 }); cp.mmLeave({ userId: 2 });
+        assert.equal(created(), 0, 'no game was created');
+        // Unrated games stay free, and other opponents are not concerned.
+        const g5 = await cp.challengeAccept({ id: cp.challengeCreate({ from: a, target: 'bob', ...tc, rated: false }).id, by: b });
+        assert.equal(g5.ok, true);
+        end(g5.gameId);
+        const g6 = await rematch(g5.gameId, false);
+        assert.equal(g6.ok, true);
+        end(g6.gameId);
+        const g8 = await cp.challengeJoinCode({ code: cp.challengeCreate({ from: a, target: '', ...tc, rated: false }).code, by: b });
+        assert.equal(g8.ok, true);
+        end(g8.gameId);
+        assert.equal(cp.challengeCreate({ from: a, target: 'carl', ...rated }).ok, true);
+        assert.equal(mm.repeatCount(1, 2), 3);
+        // The games leave the count after MATCH_REPEAT_WINDOW_MS.
+        clock.advance(cfg.matchRepeatWindowMs);
+        const g7 = await cp.challengeAccept({ id: cp.challengeCreate({ from: b, target: 'alice', ...rated }).id, by: a });
+        assert.equal(g7.ok, true);
         assert.equal(mm.repeatCount(1, 2), 1);
     });
 
@@ -421,6 +524,23 @@ describe('control plane: challenges', () => {
         assert.deepEqual(await cp.challengeJoinCode({ code: r2.code, by: e }), { error: E.RateLimited });
         clock.advance(120000);
         assert.equal((await cp.challengeJoinCode({ code: r2.code, by: e })).ok, true);
+    });
+
+    it('both limits are settings: CHALLENGE_UNPLAYED_PER_MIN (5) and PRIVATE_CODE_FAILURES_PER_MIN (10), at least 1', async () => {
+        assert.deepEqual([cfg.challengeUnplayedPerMin, cfg.privateCodeFailuresPerMin], [5, 10]);
+        for (const k of ['CHALLENGE_UNPLAYED_PER_MIN', 'PRIVATE_CODE_FAILURES_PER_MIN']) {
+            assert.throws(() => testConfig({ [k]: '0' }), new RegExp(`${k}: at least 1`));
+            assert.throws(() => testConfig({ [k]: 'many' }), new RegExp(`${k}: integer expected`));
+        }
+        const { cp, online } = setup({ config: testConfig({ CHALLENGE_UNPLAYED_PER_MIN: '2', PRIVATE_CODE_FAILURES_PER_MIN: '3' }) });
+        const a = online(1, 'alice', 0), b = online(2, 'bob', 1);
+        for (let i = 0; i < 2; i++) {
+            const c = cp.challengeCreate({ from: a, target: 'bob', baseSec: 60, incSec: 0, rated: false });
+            assert.deepEqual(cp.challengeCancel({ id: c.id, userId: 1 }), { ok: true });
+        }
+        assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', baseSec: 60, incSec: 0, rated: false }), { error: E.ChallengeLimit });
+        for (let i = 0; i < 3; i++) assert.deepEqual(await cp.challengeJoinCode({ code: 'XXXXXX', by: b }), { error: E.CodeInvalid });
+        assert.deepEqual(await cp.challengeJoinCode({ code: 'XXXXXX', by: b }), { error: E.RateLimited });
     });
 
     it('private game: a code, joined by anyone with it', async () => {

@@ -54,9 +54,10 @@
 //     the games that entered the rating; a record stored without them counts all its games when
 //     rated, those of its unrated phase otherwise); a missing record is unrated at INITIAL_RATING.
 //     A rating function that returns records without `rated` (tests) rates and counts every game.
-//     `provisional` (forUser, the RatingChange objects) is: unrated, or fewer than
-//     PROVISIONAL_GAMES counted games. finishBatch also stores the K factor of each side's change
-//     (games.white_k / black_k, 0 when the K formula did not apply), which the refunds read.
+//     `provisional` (forUser, the RatingChange objects) is match/elo.js's isProvisional: unrated,
+//     or fewer than PROVISIONAL_GAMES counted games. finishBatch also stores the K factor of each
+//     side's change (games.white_k / black_k, 0 when the K formula did not apply), which the
+//     refunds read.
 //   - refunds (anticheat/refunds.js): applyForCheater({ cheaterId, since, now, sanctionId, source,
 //     by }) gives back, in one transaction, to each opponent of the cheater the rating points they
 //     lost (a K-formula change: k > 0, or NULL for the games finished before migration 004) in a
@@ -163,6 +164,7 @@ import { createRequire } from 'node:module';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { logger } from '../log.js';
+import { isProvisional } from '../match/elo.js';
 import { enums } from '../protocol/schema.js';
 import { SIGNAL_JOBS_PER_PLAYER, countCommit, mBusy } from './commit-metrics.js';
 
@@ -769,8 +771,6 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         rated: !!r.rated, countedGames: r.counted_games ?? (r.rated ? r.games : r.unrated_games), unratedGames: r.unrated_games,
         unratedOpponents: r.unrated_opponents, unratedHalfPoints: r.unrated_half_points,
     });
-    // Shown as "1500?": unrated, or fewer than PROVISIONAL_GAMES counted games (K = 40).
-    const provisionalOf = (rec) => !rec.rated || rec.countedGames < provisionalGames;
     function readRating(userId, category) {
         const r = st(`SELECT ${RATING_COLS} FROM ratings WHERE user_id = ? AND category = ?`).get(userId, category);
         return r ? toRating(r) : defaultRating();
@@ -791,7 +791,7 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             return st(`SELECT category, ${RATING_COLS}, updated_at FROM ratings WHERE user_id = ? ORDER BY category`).all(userId)
                 .map((r) => {
                     const rec = toRating(r);
-                    return { category: r.category, ...rec, provisional: provisionalOf(rec), updatedAt: r.updated_at };
+                    return { category: r.category, ...rec, provisional: isProvisional(rec, config), updatedAt: r.updated_at };
                 });
         },
         leaderboard(category, limit = 100, minGames = provisionalGames) {
@@ -864,8 +864,8 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
         const w = readRating(row.white_id, row.category);
         const b = readRating(row.black_id, row.category);
         return {
-            white: { before: row.white_before, after: row.white_after, games: w.games, provisional: provisionalOf(w) },
-            black: { before: row.black_before, after: row.black_after, games: b.games, provisional: provisionalOf(b) },
+            white: { before: row.white_before, after: row.white_after, games: w.games, provisional: isProvisional(w, config) },
+            black: { before: row.black_before, after: row.black_after, games: b.games, provisional: isProvisional(b, config) },
         };
     }
 
@@ -972,9 +972,9 @@ function createStore(db, config, { readonly, applyGame, log, file, random }) {
             writeRating(r.blackId, r.category, bRec, now);
             changes = {
                 white: { before: Math.round(res.white.before ?? w.rating), after: wRec.rating, games: wRec.games,
-                    provisional: provisionalOf(wRec) },
+                    provisional: isProvisional(wRec, config) },
                 black: { before: Math.round(res.black.before ?? b.rating), after: bRec.rating, games: bRec.games,
-                    provisional: provisionalOf(bRec) },
+                    provisional: isProvisional(bRec, config) },
             };
             k = [kOf(res.white), kOf(res.black)];
         }

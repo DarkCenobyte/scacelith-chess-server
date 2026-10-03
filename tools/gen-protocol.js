@@ -1183,9 +1183,14 @@ the generator. The HTTPS account API is described in \`docs/DESIGN.md\` section 
   beyond it, so that such a player can reach \`Hello\`.
 * A client that does not read its messages (more than \`WS_SEND_BUFFER_LIMIT\` bytes queued) is closed
   with 4303 (\`SlowConsumer\`); it reconnects and resynchronises from the snapshot.
-* Challenges, private games and queue joins have their own limits (\`ChallengeLimit\`, also after 5
-  direct challenges withdrawn or declined in a minute; \`RateLimited\` for \`ChallengeJoinCode\` after
-  10 wrong codes in a minute; \`MatchmakingCooldown\` with \`Notice{MatchmakingCooldown, arg = until}\`).`,
+* Challenges, private games and queue joins have their own limits (\`ChallengeLimit\`, also after
+  \`CHALLENGE_UNPLAYED_PER_MIN\` (5) direct challenges withdrawn or declined in a minute;
+  \`RateLimited\` for \`ChallengeJoinCode\` after \`PRIVATE_CODE_FAILURES_PER_MIN\` (10) wrong codes in
+  a minute; \`MatchmakingCooldown\` with \`Notice{MatchmakingCooldown, arg = until}\`). Two players who
+  played \`MATCH_REPEAT_LIMIT\` (3) rated games together within \`MATCH_REPEAT_WINDOW_MS\` (an hour),
+  whatever made them, are no longer paired by the rated queue, and their rated challenges and private
+  games are refused with \`UserUnavailable\` (a refused \`ChallengeJoinCode\` leaves the code valid),
+  their rated rematches with \`RematchUnavailable\`.`,
 
     errors: `* \`Error{ref, code, fatal, game}\`: \`ref\` is the \`seq\` of the refused request (0 when none), \`game\`
   the game concerned (0 when none). \`fatal\` = the server closes the connection right after it, with

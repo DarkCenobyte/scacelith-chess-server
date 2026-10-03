@@ -216,9 +216,8 @@ export class Challenges {
      * @returns {{ok: true, challenge: object, game: object} | {error: number}}
      */
     joinCode(code, by, now = this.now()) {
-        const norm = normalizeCode(code);
-        const c = norm && this.byCode.get(norm);
-        if (!c || !by || c.expiresAt <= now) return { error: ErrorCode.CodeInvalid };
+        const c = this.getCode(code, now);
+        if (!c || !by) return { error: ErrorCode.CodeInvalid };
         if (by.userId === c.from.userId) return { error: ErrorCode.CannotChallengeSelf };
         return this._start(c, by);
     }
@@ -306,6 +305,17 @@ export class Challenges {
      * @param {number} [now]
      */
     get(id, now = this.now()) { return this._live(id, now); }
+
+    /**
+     * The pending, unexpired private game of a code (as typed), or null; the code stays usable.
+     * @param {string} code
+     * @param {number} [now]
+     */
+    getCode(code, now = this.now()) {
+        const norm = normalizeCode(code);
+        const c = norm && this.byCode.get(norm);
+        return c && c.expiresAt > now ? c : null;
+    }
 
     /**
      * The user left (disconnected): outgoing challenges are cancelled, incoming ones become

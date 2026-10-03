@@ -218,6 +218,34 @@ test('ratings over many games: provisional flag, peak, leaderboard filters', () 
     store.close();
 });
 
+test('provisional is elo.isProvisional: the store\'s former rule at every PROVISIONAL_GAMES threshold (commit, re-commit, forUser)', () => {
+    // The rule the store had before.
+    const former = (rec, provisionalGames) => !rec.rated || rec.countedGames < provisionalGames;
+    for (const pg of [0, 1, 10, 30, 100]) {
+        // The rating function hands back the record under test for both sides.
+        let next = null;
+        const fixed = (w, b) => ({ white: { before: w.rating, after: 1500, record: { ...next } }, black: { before: b.rating, after: 1500, record: { ...next } } });
+        const store = openStore(testConfig({ DB_PATH: ':memory:', PROVISIONAL_GAMES: String(pg) }), { applyGame: fixed });
+        migrate(store);
+        const [a, b] = ['Ann', 'Ben'].map((n) => store.users.create({ username: n, email: `${n}@example.org` }));
+        for (const counted of new Set([0, pg - 1, pg, pg + 1].filter((n) => n >= 0))) {
+            for (const rated of [false, true]) {
+                next = { rating: 1500, games: counted + 3, wins: 0, draws: 0, losses: 0, peak: 1500, reachedSenior: false, rated, countedGames: counted };
+                const expected = former(next, pg);
+                const why = `PROVISIONAL_GAMES ${pg}, ${counted} counted, rated ${rated}`;
+                const g = record(a, b);
+                const [res] = store.games.finishBatch([g]);
+                assert.equal(res.ratings.white.provisional, expected, why);
+                assert.equal(res.ratings.black.provisional, expected, why);
+                const [again] = store.games.finishBatch([g]);
+                assert.equal(again.ratings.white.provisional, expected, `${why}, re-commit`);
+                assert.equal(store.ratings.forUser(a)[0].provisional, expected, `${why}, forUser`);
+            }
+        }
+        store.close();
+    }
+});
+
 test('FIDE ratings through the store: unrated phase, first rating, K factor stored, unrated records off the leaderboard', () => {
     const store = openStore(testConfig({ DB_PATH: ':memory:' }), { applyGame: fideApplyGame });
     migrate(store);

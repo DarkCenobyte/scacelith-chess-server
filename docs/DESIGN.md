@@ -364,12 +364,15 @@ new Matchmaker({ config, now })
 mm.join({ userId, username, category, rated, rating, provisional, shard, connId, colorBalance, joinedAt }) -> { ok } | { error: ErrorCode }
 mm.leave(userId) -> bool ; mm.has(userId) ; mm.statusOf(userId, now) -> QueueStatus fields
 mm.tick(now) -> [{ category, rated, white: entry, black: entry }]
-mm.recordPairing(a, b, now)  // repeat limit bookkeeping (the primary, once a rated queue game exists)
+mm.recordPairing(a, b, now)  // repeat limit bookkeeping (the primary, once a rated game exists: queue, challenge, private code, rematch)
+mm.repeatLimited(a, b, now) -> bool  // MATCH_REPEAT_LIMIT reached: the primary refuses their rated challenges, private games and rematches
+mm.holdPair(a, b, until)     // a and b are not paired together before `until` (the primary, after their game could not be created)
 // challenges.js (primary)
 new Challenges({ config, now })
 ch.create({ from: {userId, username, rating, provisional, shard, connId}, target /* username | '' */, baseSec, incSec, rated, color }) -> { ok, challenge } | { error }
 ch.accept(id, by /* player */) -> { ok, challenge } | { error } ; ch.decline(id, userId) ; ch.cancel(id, userId)
-ch.joinCode(code, by) -> { ok, challenge } | { error } ; ch.expire(now) -> [challenge] ; ch.forUser(userId)
+ch.joinCode(code, by) -> { ok, challenge } | { error } ; ch.getCode(code) -> challenge | null  // the code stays usable
+ch.expire(now) -> [challenge] ; ch.forUser(userId)
 // conduct.js (primary; persistent counters in store.conduct)
 conduct.record(userId, kind /* 'abandon'|'abort'|'noshow' */, now) ; conduct.cooldownUntil(userId, now) -> ms | 0
 ```
@@ -379,7 +382,8 @@ Official categories come from `cfg.categories`; `categoryOf(baseMs, incMs)` retu
 ### 5.5 Store (`src/store/index.js`)
 
 `openStore(config, { readonly = false, applyGame }) -> Store` (`applyGame` is
-`match/elo.js`'s, passed in by the bootstrap so the store does not import the match module). Synchronous (`node:sqlite`). WAL,
+`match/elo.js`'s, passed in by the bootstrap; the store imports only elo.js's `isProvisional`, the
+rule of the provisional mark). Synchronous (`node:sqlite`). WAL,
 `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=5000`. Prepared statements cached. All
 times are epoch ms integers. `migrate(store)` applies `migrations/NNN_*.sql` in order inside
 transactions, recorded in `schema_migrations`.
@@ -865,8 +869,8 @@ rules before sending, so steps 6 and 7 only happen with a modified client.
 * `Resign` at any time while the game runs. `Abort` only before the sender's own first move
   (conduct counter `abort`).
 * `Rematch` within 60 s after the end: both accept -> the primary creates a new game (colours
-  swapped, same time control and rated flag, conduct and bans checked). It expires when either
-  player leaves (disconnects or joins a queue).
+  swapped, same time control and rated flag, conduct, bans and `MATCH_REPEAT_LIMIT` checked). It
+  expires when either player leaves (disconnects or joins a queue).
 
 ### 6.4 Disconnections, abandonment, rage quit, server restart
 
@@ -1084,7 +1088,7 @@ the reasons an unban takes nothing back: docs/ANTICHEAT.md, rating refunds.
 | Games in progress (moves, clocks, offers) | memory of the host shard + journal | journal flushed every `JOURNAL_FLUSH_MS` | replayed; at most `JOURNAL_FLUSH_MS` of moves lost (clients resend: stale ply / resync); both players get `RECOVERY_GRACE_MS` to come back, and the clock of the side to move waits for its player (`RECOVERY_CLOCK_HOLD_MS` at most, 6.4) |
 | Sanctions, anomalies (certain), integrity levels, reports | SQLite | sanctions immediately; anomalies batched (1 s) | kept (a batch in flight may be lost for `info` anomalies) |
 | Rating refunds (6.6) | SQLite | with the ban that triggers them (their own transaction), or with a game recorded during the ban; `notified_at` once the notice is written | kept; the notices not marked are sent again after a restart |
-| Presence, queues, challenges, private codes, rate-limit counters | primary memory | - | lost: clients reconnect and re-queue |
+| Presence, queues, challenges, private codes, rate-limit counters, repeat-limit counts | primary memory | - | lost: clients reconnect and re-queue |
 | Security events (failed logins...) | SQLite | batched (1 s) | kept, purged after `RETENTION_SECURITY_DAYS` |
 
 **Retention purge.** Personal data is not kept longer than it is needed. The primary runs

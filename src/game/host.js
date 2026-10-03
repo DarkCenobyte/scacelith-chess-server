@@ -128,6 +128,7 @@
 import { performance } from 'node:perf_hooks';
 import { encode, enums, MSG, CloseCode } from '../protocol/index.js';
 import { logger } from '../log.js';
+import { categoryOf } from '../match/elo.js';
 import { metrics as processMetrics } from '../metrics.js';
 import { GameIdAllocator } from '../util/ids.js';
 import { now as clockNow } from './clock.js';
@@ -299,7 +300,7 @@ export class GameHost {
     createGame(spec) {
         const t = this.now();
         const baseMs = Math.floor(spec.baseMs), incMs = Math.floor(spec.incMs);
-        const category = spec.category || this._categoryOf(baseMs, incMs);
+        const category = spec.category || categoryOf(baseMs, incMs, this.config);
         const id = Number.isSafeInteger(spec.id) && spec.id > 0 ? spec.id : this.ids.next(Math.floor(t));
         if (this.rooms.has(id)) throw new Error(`GameHost: game ${id} exists`);
         const room = new GameRoom({
@@ -719,12 +720,6 @@ export class GameHost {
     }
 
     // ---- internals -----------------------------------------------------------------------------
-
-    _categoryOf(baseMs, incMs) {
-        const cats = this.config.categories || [];
-        for (const c of cats) if (c.baseMs === baseMs && c.incMs === incMs) return c.id;
-        return 'custom';
-    }
 
     _bind(entry, color, endpoint, sendSnapshot, t = this.now(), from = this.stallStart(t), te = t - this.stallCredit(t, from)) {
         const room = entry.room;

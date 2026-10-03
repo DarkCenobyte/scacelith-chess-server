@@ -179,6 +179,8 @@ test('challenges: expiry', () => {
     // A private code: 15 minutes.
     const q = ch.create({ from: bob, target: '', baseSec: 180, incSec: 2, rated: true, color: 0 }, 100000).challenge;
     assert.equal(q.expiresAt, 100000 + cfg.privateGameTtlMs);
+    assert.equal(ch.getCode(q.code, q.expiresAt - 1), q);
+    assert.equal(ch.getCode(q.code, q.expiresAt), null);
     assert.deepEqual(ch.joinCode(q.code, alice, q.expiresAt), { error: ErrorCode.CodeInvalid });
     out = ch.expire(q.expiresAt);
     assert.deepEqual(out.map((c) => c.id), [q.id]);
@@ -207,13 +209,17 @@ test('challenges: private games with a code', () => {
     assert.deepEqual(ch.joinCode('ZZZZZZ' === c.code ? 'YYYYYY' : 'ZZZZZZ', bob), { error: ErrorCode.CodeInvalid });
     assert.deepEqual(ch.joinCode('0O1IL0', bob), { error: ErrorCode.CodeInvalid });
     assert.deepEqual(ch.joinCode(undefined, bob), { error: ErrorCode.CodeInvalid });
-    // Case, spaces and dashes are ignored.
+    // Case, spaces and dashes are ignored; getCode() finds the game and leaves the code usable.
     const typed = ` ${c.code.slice(0, 3).toLowerCase()}-${c.code.slice(3)} `;
+    assert.equal(ch.getCode(typed), c);
+    assert.equal(ch.getCode('0O1IL0'), null);
+    assert.equal(ch.getCode(undefined), null);
     const j = ch.joinCode(typed, bob);
     assert.equal(j.ok, true);
     assert.equal(j.game.black.userId, alice.userId);
     assert.equal(j.game.white.userId, bob.userId);
     assert.equal(j.game.rated, true);
+    assert.equal(ch.getCode(c.code), null);
     assert.deepEqual(ch.joinCode(c.code, carol), { error: ErrorCode.CodeInvalid });
     // The creator may cancel a private game by id.
     const c2 = ch.create({ from: alice, target: '', baseSec: 300, incSec: 3, rated: false, color: 0 }).challenge;
