@@ -1,0 +1,120 @@
+/* The top bar of the reference pages and the language picker page. */
+:root {
+  --bar-height: 48px;
+  --ink: #2a2622;
+  --brass: #8a5a1c;
+  --paper: #f6f2ea;
+  color-scheme: light;
+}
+
+html, body {
+  margin: 0;
+  background: #fff;
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Noto Sans Arabic",
+    "Hiragino Sans", "Yu Gothic UI", "Microsoft YaHei", "Microsoft JhengHei", Arial, sans-serif;
+}
+
+.site-bar {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 30;
+  height: var(--bar-height);
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px;
+  background: #2b2520;
+  color: #f3ead9;
+  border-bottom: 2px solid var(--brass);
+}
+.site-home {
+  color: #e8c98f;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-decoration: none;
+}
+.site-home:hover { text-decoration: underline; }
+.site-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 15px;
+}
+.site-lang { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.site-lang select {
+  font: inherit;
+  padding: 4px 6px;
+  border-radius: 4px;
+  border: 1px solid #6b5a44;
+  background: #3a322a;
+  color: #f3ead9;
+}
+#redoc { padding-top: var(--bar-height); }
+
+@media (max-width: 600px) {
+  .site-title { display: none; }
+  .site-lang > span { display: none; }
+}
+
+/* Right to left (Arabic): Redoc's three-column layout stays as it is (it does not mirror), the
+   text reads right to left, and code stays left to right. */
+[dir="rtl"] #redoc { direction: ltr; }
+[dir="rtl"] #redoc .redoc-markdown,
+[dir="rtl"] #redoc h1,
+[dir="rtl"] #redoc h2,
+[dir="rtl"] #redoc h3,
+[dir="rtl"] #redoc h5,
+[dir="rtl"] #redoc .menu-content label,
+[dir="rtl"] #redoc .menu-content li > label span:not([type]) {
+  direction: rtl;
+  text-align: right;
+}
+[dir="rtl"] #redoc code,
+[dir="rtl"] #redoc pre,
+[dir="rtl"] #redoc [class*="redoc-json"] {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+[dir="rtl"] #redoc pre { text-align: left; }
+/* The operation badge sits on the right in a right-to-left menu: move its gap to the text side. */
+[dir="rtl"] #redoc .menu-content li > label span[type] { margin-right: 0; margin-left: 6px; }
+
+/* The language picker page. */
+body.picker main {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 48px 16px;
+  line-height: 1.6;
+}
+body.picker h1 { font-size: 28px; margin: 0 0 12px; }
+body.picker a { color: var(--brass); }
+.languages {
+  list-style: none;
+  padding: 0;
+  margin: 24px 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+.languages a {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid #e2d8c6;
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  text-decoration: none;
+  height: 100%;
+  box-sizing: border-box;
+}
+.languages a:hover, .languages a:focus-visible { border-color: var(--brass); }
+.languages .name { font-weight: 600; font-size: 17px; }
+.languages .title { font-size: 13px; color: #6b5f52; }
+.languages .preferred a { border-color: var(--brass); box-shadow: 0 0 0 1px var(--brass); }
+.source { font-size: 14px; color: #6b5f52; }

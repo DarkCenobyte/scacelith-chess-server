@@ -1,0 +1,3 @@
+# Work files of tools/build.py --todo
+i18n/*.todo.json
+__pycache__/

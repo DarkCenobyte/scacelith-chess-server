@@ -1,0 +1,5465 @@
+openapi: 3.1.1
+info:
+  title: Scacelith 伺服器 HTTPS API
+  version: "0.9.0"
+  summary: 每一台 Scacelith 伺服器（官方伺服器與社群伺服器）共用的 HTTPS API。
+  description: |-
+    每一台 Scacelith 伺服器，包括官方的 `caissa.scacelith.com` 與任何社群伺服器，都提供這個 HTTPS API。對局本身以外的一切功能，遊戲都透過它進行：註冊與登入（含雙重驗證與 Google 登入）、帳號頁面、對局紀錄、PGN 下載與對局的 GIF 動畫、已登入的裝置、資料下載、刪除帳號，以及檢舉。
+
+    即時對弈（配對、挑戰、著法、棋鐘）則經由同一台伺服器的 WebSocket（`wss://<host>/ws`）進行，並以本 API 的工作階段權杖開啟；相關說明請見 `PROTOCOL.md`，不在本文件範圍內。
+
+    下文所列的預設值，是指未修改任何設定的伺服器；社群伺服器可能會調整這些值（所有設定項目請見 `CONFIG.md`）。
+
+    ## 基礎 URL、連接埠與傳輸
+
+    - 官方伺服器：`https://caissa.scacelith.com/api/v1`，TCP 連接埠 443。
+    - 社群伺服器：`https://<SERVER_PUBLIC_HOST>[:<port>]/api/v1`。`API_PORT` 預設為 443；位於 NAT 或代理伺服器之後時，棋手連線所用的連接埠是 `PUBLIC_API_PORT`。
+    - 遊戲的 WebSocket 預設位於同一個連接埠（可用 `WS_PORT` 改到其他連接埠；`GET /info` 會告訴用戶端它在哪裡）。
+    - 採用 TLS 之上的 HTTP/1.1。設為 `TLS_MODE=proxy` 時，由伺服器前方的反向代理伺服器終止 TLS。`TLS_MODE=off`（純 HTTP）僅供本機開發使用。
+    - 從電子郵件中的連結開啟的 HTML 頁面（`/verify-email`、`/reset-password`、`/confirm-email-change`）位於伺服器的根路徑，不在 `/api/v1` 之下。健康檢查端點在根路徑與 `/api/v1` 之下都會回應。Google 登入在伺服器上沒有任何頁面：Google 會將瀏覽器直接導回遊戲本身，位址為 `127.0.0.1`。
+    - 結尾的斜線會被忽略（`/api/v1/info/` 等同於 `/api/v1/info`），路徑參數會經過 URL 解碼（不是有效 URL 編碼的參數會得到 400 `invalid_request`）。
+
+    ## 要求
+
+    - **JSON 本文**：`POST`、`PUT` 與 `DELETE` 要求以 `Content-Type: application/json` 傳送一個 JSON 物件。UTF-8 以外的 `charset` 會被拒絕，其他任何內容類型也一樣（415 `unsupported_media_type`）。空白本文視同 `{}`，而這正是不帶參數的端點所接受的內容（`POST /auth/logout`、`POST /auth/logout-all`、`DELETE /auth/sessions/{id}`）。
+    - **大小與時間**：本文上限為 `HTTP_BODY_LIMIT` 位元組（預設為 16,384；`POST /gif` 另有 135,168 位元組的上限），超過時回應 413 `payload_too_large`。本文必須在 10 秒內送達，否則回應 408 `request_timeout`。發生這兩種錯誤後，伺服器都會關閉連線。
+    - **嚴格的結構描述**：端點不認得的欄位會被拒絕，未標示為選用的欄位皆為必填，型別與長度也都會檢查。任何一項不符都會回應 400 `invalid_request`，並以 `field` 指出該欄位（巢狀欄位以點號連接，例如 `pow.nonce`）。字串不得包含控制字元。長度以 UTF-16 程式碼單位計算，因此基本多語言平面以外的字元（例如表情符號）算作兩個。不是 JSON 的本文會回應 400 `invalid_json`。`POST /gif` 與 `POST /reports` 會自行檢查本文（請見各端點的說明）。
+    - **查詢字串**：同一個參數只採用第一次出現的值，未知的參數會被忽略，`+` 會解碼為空格：因此接受時限類別的端點，`3%2B2` 與 `3+2` 兩種寫法都接受。
+    - **方法**：`HEAD` 即不含本文的 `GET`。對既有路徑使用 `OPTIONS` 會回應 204，並附上 `Allow` 標頭。該路徑不支援的其他任何方法都會回應 405 `method_not_allowed`，並附上 `Allow`。
+    - **要求目標**：長度不得超過 4096 個字元（414 `uri_too_long`）。完全無法剖析的要求，或是標頭過大、送達過慢的要求，會得到內容為空的 400、431 或 408 回應，並且連線會被關閉。
+    - **不支援 CORS**：本 API 服務的是遊戲，而不是網頁。伺服器從不傳送任何 `Access-Control-*` 標頭，因此網頁無法讀取回應；又因為只接受 JSON 本文，跨網站的寫入必須先經過預檢要求，而預檢一定會失敗。
+
+    ## 回應與錯誤
+
+    - 回應皆為 UTF-8 編碼的 JSON，但 PGN 下載（`application/x-chess-pgn`）、GIF 動畫（`image/gif`）與 HTML 頁面除外。時間皆為自 1970-01-01 UTC 起算的毫秒數。ID 皆為整數。對局 ID 最多 16 位數，但一律小於 2^53，因此 JSON 數值（雙精度浮點數）可以精確表示。
+    - API 的每個回應都帶有 `Cache-Control: no-store`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`X-Frame-Options: DENY`、`Cross-Origin-Resource-Policy: same-origin` 與 `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`（HTML 頁面另有自己的政策）。設為 `TLS_MODE=native` 時，還會帶有 `Strict-Transport-Security: max-age=31536000`。
+    - 從伺服器備妥回應的那一刻起，用戶端必須在 60 秒內讀取完畢，這只對大型回應（GIF、資料匯出、很長的 PGN）有影響。伺服器準備回應所花的時間，既不計入這 60 秒，也不計入「連續 30 秒沒有任何位元組進出即關閉連線」的時限。
+
+    錯誤只有一種格式（`Error` 結構描述）：
+
+    ```json
+    { "error": "snake_case_code", "message": "An English sentence.", "retryAfter": 30 }
+    ```
+
+    `message` 供記錄使用，或作為備用文字；用戶端應依據 `error` 決定要顯示的內容。`retryAfter`（秒）只會出現在經過一段時間即會解除的拒絕中，此時回應也會帶有相同值的 `Retry-After` 標頭；唯一的例外是讀取對局紀錄、對局、棋手與排行榜時的 503 `busy`，它只有這個欄位。部分錯誤會附加其他欄位：`field`（輸入無效）、`reason`（`weak_password`、`pow_required`）、`pow`（`pow_required`）、`until`（`banned`）、`line` 與 `column`（`invalid_pgn`）。
+
+    任何端點都可能回傳的錯誤：
+
+    | 狀態 | `error` | 時機 |
+    |---|---|---|
+    | 400 | `invalid_request` | 本文不符合端點的結構描述（由 `field` 指出位置）、要求目標或 `Content-Length` 格式錯誤、路徑參數不是有效的 URL 編碼，或本文被截斷。 |
+    | 400 | `invalid_json` | 本文不是 JSON。 |
+    | 401 | `unauthorized` | 需要工作階段的端點沒有收到 `Authorization` 標頭。 |
+    | 401 | `invalid_token` | 權杖格式錯誤、已過期、已撤銷，或屬於已刪除的帳號；在工作階段為選用的端點上也是如此。 |
+    | 404 | `not_found` | 沒有這個端點。部分端點也會使用此錯誤：找不到該對局、棋手或工作階段。 |
+    | 405 | `method_not_allowed` | 該路徑只支援其他方法（請見 `Allow`）。 |
+    | 408 | `request_timeout` | 本文未在 10 秒內送達。 |
+    | 413 | `payload_too_large` | 本文超過 `HTTP_BODY_LIMIT`（`POST /gif` 為 135,168 位元組）。 |
+    | 414 | `uri_too_long` | 要求目標超過 4096 個字元。 |
+    | 415 | `unsupported_media_type` | 本文不是 `application/json`，或其字元集不是 UTF-8。 |
+    | 429 | `rate_limited` | 觸及速率限制（請見下文）：附有 `retryAfter` 與 `Retry-After` 標頭。 |
+    | 500 | `internal_error` | 非預期的失敗。伺服器會將其記錄下來。 |
+    | 503 | `timeout` | 伺服器未在 30 秒內回應（使用預設設定時，匯出為 60 秒，GIF 為 45 秒）。 |
+    | 503 | `server_busy` | 查詢工作階段或變更帳號時發現資料庫遭到鎖定（`retryAfter` 為 1），或密碼雜湊佇列已滿（請見下文）。 |
+
+    讀取端點（對局紀錄、對局、棋手、排行榜）與匯出在資料庫持續鎖定時，會回應 503 `busy` 並附上 `retryAfter: 1`。
+
+    會檢查或雜湊密碼的端點，還可能回應下列其中一種錯誤，兩者都附有 5 至 15 秒之間的隨機 `retryAfter`：
+
+    - 503 `server_busy`：伺服器的密碼雜湊佇列（`PASSWORD_HASH_QUEUE_MAX`）已滿，或等候逾時。
+    - 429 `rate_limited`：佇列已達半滿，而此用戶端（一個 IPv4 位址或一個 IPv6 /48）已有 `PASSWORD_HASH_WAITERS_PER_SOURCE` 個雜湊在等候。這個 429 會退還該要求所取用的速率限制權杖。
+
+    此時不會有任何變更，也不會計入失敗嘗試（`POST /auth/sso/google/link` 除外，它的票證嘗試次數與帳號失敗次數在雜湊之前就已計入），重設連結也依然有效。
+
+    HTML 頁面會以 HTML 頁面回應錯誤，狀態碼相同。
+
+    ## 驗證
+
+    需要工作階段的端點，從 `Authorization` 標頭接受 Bearer 權杖（`bearerAuth` 配置）：
+
+    ```
+    Authorization: Bearer sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8
+    ```
+
+    - **取得權杖**：權杖（`sct_` 後接 43 個 base64url 字元）來自 `POST /auth/login`（啟用雙重驗證時，再接著 `POST /auth/login/mfa`）、`POST /auth/sso/google/finish` 與 `POST /auth/sso/google/link`（Google 登入），以及 `POST /auth/sso/complete`。它們都會回應 `{ token, expiresAt, user }`。伺服器只儲存權杖的 SHA-256 雜湊值。
+    - **必要的工作階段**：缺少標頭時回應 401 `unauthorized`，並附上 `WWW-Authenticate: Bearer realm="scacelith"`。權杖無效時回應 401 `invalid_token`，並附上 `WWW-Authenticate: Bearer realm="scacelith", error="invalid_token"`。用戶端收到 `invalid_token` 時，應捨棄該權杖並重新登入。
+    - **選用的工作階段**：在 `GET /games/{id}`、`GET /games/{id}/pgn`、`GET /players/{username}` 與 `GET /players/{username}/games` 上，工作階段為選用。沒有標頭時，這些端點回應公開的內容；若有傳送標頭，其中的權杖就必須有效。
+    - **有效期限**：工作階段在以下兩者中較早到來的時間點結束：登入後 `SESSION_MAX_DAYS`（90）天（即 `expiresAt`），或連續 `SESSION_IDLE_DAYS`（30）天未使用。每次使用都會延後閒置期限；伺服器最多每 5 分鐘寫入一次新值。一個帳號最多保留 `MAX_SESSIONS_PER_USER`（10）個工作階段：超過此數量時，新的登入會撤銷最舊的工作階段。
+    - **撤銷**：登出（`POST /auth/logout`、`POST /auth/logout-all`、`DELETE /auth/sessions/{id}`）會撤銷工作階段；變更密碼（撤銷其他工作階段）、重設密碼與刪除帳號（撤銷所有工作階段），以及管理員，也會撤銷工作階段。透過 API 撤銷會立即生效，以已撤銷工作階段開啟的 WebSocket 也會被關閉。伺服器會將工作階段的查詢結果快取 30 秒，因此透過管理命令（一個獨立的處理程序）進行的撤銷，會在 30 秒內生效。
+    - **範圍**：權杖只屬於一台伺服器，也可用來開啟該伺服器的 WebSocket。切勿將它傳送給其他伺服器。
+
+    ## 速率限制與其他節流機制
+
+    限制套用於以下兩種範圍之一。**用戶端**：一個 IPv4 位址，或一個 IPv6 /64（在代理模式下，位址取自 `TRUSTED_PROXIES` 位址所傳送的 `X-Forwarded-For`）；部分限制除了個別計算每個 /64 網路之外，還會將每個 IPv6 /48 視為整體來計算。**棋手**：已登入的帳號，不論其位址為何；在工作階段為選用的端點上，按棋手計算的限制，對未帶權杖的要求改按用戶端計算。
+
+    每項限制都是一個權杖桶，可容納 `limit` 個要求，並以 `limit / window` 的速率持續補充；`retryAfter` 是距離下一個權杖的時間。標示為*共用*的限制，還會以等長的滑動視窗計算，使任何一個視窗內的要求數都不會明顯超過 `limit`。每項限制都以整台伺服器為範圍計算。當端點的某一項限制拒絕要求時，該要求在其他限制中取用的權杖會被退還。拒絕時回應 429 `rate_limited`，並附上 `retryAfter` 與 `Retry-After`。
+
+    - **每位址層**：每個要求（任何路徑與方法，包括健康檢查端點與 WebSocket 升級）都會先從其用戶端的額度中取用一個權杖：每分鐘 `HTTP_RATE_PER_IP`（600）個，突發上限相當於半分鐘的量；IPv6 /48 則為 `HTTP_RATE_PER_PREFIX`（4 x `HTTP_RATE_PER_IP`）。每個用戶端同時進行中的要求也最多只能有 `IP_MAX_INFLIGHT`（32 x `WORKERS`）個（超過時 `retryAfter` 為 1）。被拒絕後仍持續發送要求的用戶端會遭到封鎖：一分鐘內被拒絕 `ABUSE_BLOCK_REFUSALS_PER_MIN`（600）次即封鎖 1 分鐘，6 小時內每次再遭封鎖，時間依序為 4、16 與 60 分鐘。`auth`、`auth_*` 與 `reauth` 限制的拒絕，每次算作 5 次；按棋手計算的限制則一律不計入。`ABUSE_EXEMPT` 中的位址會略過這一層，但不會略過帳號額度與端點限制。
+    - **帳號額度**：每個帶有有效工作階段權杖的要求，也會計入其帳號：所有端點合計每分鐘 `USER_RATE_PER_MIN`（120）個，不論位址為何，突發上限相當於半分鐘的量。
+    - **端點限制**：
+
+    | 限制 | 預設值 | 計算單位 | 端點 |
+    |---|---|---|---|
+    | `auth` | `AUTH_RATE_PER_IP`（20）/ 10 分鐘，共用 | 用戶端；每個 IPv6 /48 為 `AUTH_RATE_PER_PREFIX`（5 x `AUTH_RATE_PER_IP`） | `POST /auth/register`、`/auth/login`、`/auth/login/mfa`、`/auth/verify-email/resend`、`/auth/password/forgot`、`/auth/password/reset`、`/auth/sso/google/link`、`/auth/sso/complete`；`POST /verify-email`、`/reset-password`、`/confirm-email-change` |
+    | `auth_register` | `AUTH_REGISTER_PER_HOUR`（10）/ 小時，共用 | 用戶端；每個 IPv6 /48 為其 3 倍 | `POST /auth/register` |
+    | `auth_mail` | `AUTH_MAIL_PER_HOUR`（10）/ 小時，共用 | 用戶端；每個 IPv6 /48 為其 3 倍 | `POST /auth/verify-email/resend` |
+    | `auth_forgot` | `AUTH_FORGOT_PER_HOUR`（3）/ 小時，共用 | 用戶端；每個 IPv6 /48 為其 3 倍 | `POST /auth/password/forgot` |
+    | `auth_forgot_day` | `AUTH_FORGOT_PER_DAY`（10）/ 24 小時，共用 | 用戶端；每個 IPv6 /48 為其 3 倍 | `POST /auth/password/forgot` |
+    | `auth_reset` | `AUTH_RESET_PER_HOUR`（10）/ 小時，共用 | 用戶端；每個 IPv6 /48 為其 3 倍 | `POST /auth/password/reset`、`POST /reset-password` |
+    | `reauth` | 數值與 `auth` 相同，但使用獨立的權杖桶，共用 | 用戶端與 IPv6 /48 | 需要輸入密碼的帳號變更（請見「重新驗證」），以及 `POST /account/export` |
+    | `reauth_user` | `AUTH_REAUTH_PER_USER`（10）/ 10 分鐘，共用 | 棋手 | 與 `reauth` 相同的端點 |
+    | `account` | 60 / 分鐘 | 棋手 | `GET /account/me`、`PUT /account/preferences` |
+    | `account_games` | 60 / 分鐘 | 棋手 | `GET /account/games` |
+    | `account_export` | 5 / 小時，共用 | 棋手 | `POST /account/export`（在 `reauth` 之前檢查；每次嘗試都會計入） |
+    | `sessions` | 60 / 分鐘 | 棋手 | `POST /auth/logout`、`/auth/logout-all`、`GET /auth/sessions`、`DELETE /auth/sessions/{id}` |
+    | `public_read` | 60 / 分鐘 | 棋手（未帶權杖時為用戶端） | `GET /players/{username}`、`/players/{username}/games`、`/games/{id}`、`/games/{id}/pgn`（四者共用一個權杖桶） |
+    | `gif` | 30 / 分鐘 | 棋手 | `GET /games/{id}/gif`、`POST /gif`（兩者共用一個權杖桶） |
+    | `gif_user_min`、`gif_user_hour` | `GIF_USER_RENDERS_PER_MIN`（4）/ 分鐘與 `GIF_USER_RENDERS_PER_HOUR`（30）/ 小時，共用 | 棋手 | 同上兩個端點，僅在必須實際製作 GIF 時（而非取自快取） |
+    | `gif_ip_min`、`gif_ip_hour` | `GIF_IP_RENDERS_PER_MIN`（12）/ 分鐘與 `GIF_IP_RENDERS_PER_HOUR`（120）/ 小時，共用 | 用戶端（其所有帳號合計）；每個 IPv6 /48 為其 3 倍 | 同上，條件亦同 |
+    | `reports` | 30 / 小時 | 棋手 | `POST /reports` |
+    | `sso_start` | 30 / 10 分鐘，共用 | 用戶端；每個 IPv6 /48 為 90 | `POST /auth/sso/google/start` |
+    | `sso_finish` | 30 / 分鐘 | 用戶端 | `POST /auth/sso/google/finish` |
+    | `page` | 60 / 分鐘 | 用戶端 | `GET /verify-email`、`/reset-password`、`/confirm-email-change` |
+
+    `GET /info` 與 `GET /leaderboard` 沒有自己的限制，只受每位址層約束。具有多項限制的端點，會依其說明中列出的順序逐一檢查。
+
+    伺服器依下列順序處理要求：每位址層，接著是健康檢查端點；比對端點；驗證；帳號額度（要求帶有工作階段時）；端點的限制；本文；端點本身（GIF 端點只在確實需要製作 GIF 時，才會計入其製作限制）。因此，因權杖問題而被拒絕的要求，不會耗用端點的任何權杖；而本文無效的要求則會耗用。
+
+    其他節流機制，由端點自行回應：
+
+    - **同一登入名稱的登入失敗**（使用者名稱或電子郵件）：自第 `AUTH_FAILURES_PER_ACCOUNT`（5）次失敗起，每次嘗試的等待時間都是前一次的兩倍（2 秒、4 秒，依此類推，最長 15 分鐘）：回應 429 `too_many_attempts` 並附上 `retryAfter`。連續一小時沒有失敗後，計數即會清除。
+    - **登入時第二驗證因素失敗**：自該帳號的第 5 個錯誤驗證碼起，適用相同規則。每個登入步驟最多接受 5 個錯誤的驗證碼。
+    - **同一帳號的第二驗證因素驗證碼**：不論來自哪個位址，在登入與重新驗證時，每 15 分鐘最多 `AUTH_MFA_PER_ACCOUNT`（10）個驗證碼（驗證器驗證碼或復原碼，不論正確與否）；超過時會在檢查驗證碼之前就回應 429 `too_many_attempts`，因此復原碼不會被用掉。
+    - **帳號的重新驗證失敗**（密碼或驗證碼錯誤）：適用相同規則（429 `too_many_attempts`），由所有進行重新驗證的端點共用。
+    - **電子郵件**：每個地址每 5 分鐘最多一封確認或重設郵件（回應不變）；每個地址每小時最多一則「someone tried to use your address」（有人嘗試使用你的地址）通知。
+    - **檢舉**：每位棋手 24 小時內最多 `REPORTS_PER_DAY`（5）次，超過時回應 429 `report_limit`。
+
+    ## 工作量證明
+
+    當 `POW_REGISTER_BITS` 大於 0（預設為 18；`GET /info` 以 `pow.register` 提供此值）時，`POST /auth/register` 一律需要工作量證明。`POST /auth/login` 與 `POST /auth/sso/google/link`（兩者使用同一種挑戰）只有在伺服器偵測到一波登入失敗之後的 5 分鐘內才需要（觸發門檻為 `POW_LOGIN_TRIGGER_PER_MIN`，難度為 `POW_LOGIN_BITS`）；用戶端可從回應得知。
+
+    1. 未附證明（或證明遭拒）的要求會回應 428 `pow_required`，並附上 `reason` 與 `pow` 挑戰 `{ challenge, bits, expiresAt }`。
+    2. 找出一個 nonce：最多 20 位數的十進位字串，使 `SHA-256(challenge + ":" + nonce)` 以 `bits` 個零位元開頭（從第一個位元組的最高有效位元算起）。18 位元平均約需計算 260,000 次雜湊。
+    3. 在本文中加上 `"pow": { "challenge": "...", "nonce": "123456" }`，再次傳送同一個要求。
+
+    挑戰的有效期為 2 分鐘，且只能使用一次，僅適用於單一端點與單一用戶端網路（一個 IPv4 位址或 IPv6 /64）。挑戰經過簽章，因此在它被送回之前，伺服器不必保存任何相關資料。`reason` 說明證明被拒的原因：`required`、`malformed`、`signature`、`endpoint`、`network`、`expired`、`bits`、`work` 或 `replayed`。
+
+    ## 重新驗證
+
+    變更帳號時須再次輸入密碼；若已啟用雙重驗證，還須提供第二驗證因素：
+
+    - 只需密碼：`POST /account/password` 與 `POST /account/mfa/totp/setup`；
+    - 密碼與驗證器驗證碼（不接受復原碼）：`POST /account/mfa/recovery-codes`；
+    - 密碼與驗證器驗證碼或復原碼：`POST /account/mfa/totp/disable`、`POST /account/email`、`POST /account/export` 與 `POST /account/delete`。
+
+    在本文中，`code` 存放 6 位數的驗證器驗證碼，`recoveryCode` 存放復原碼（`xxxx-xxxx-xx`；不分大小寫，空格與連字號也不影響）。在接受復原碼的地方，也可以將復原碼放在 `code` 中傳送。每個驗證碼只能使用一次：用過的驗證器驗證碼在下一個 30 秒時間步驟到來之前都會被拒絕，復原碼一經使用即失效。
+
+    | 狀態 | `error` | 時機 |
+    |---|---|---|
+    | 403 | `invalid_password` | 密碼錯誤。 |
+    | 403 | `mfa_code_required` | 已啟用雙重驗證，但 `code` 與 `recoveryCode` 都沒有傳送。 |
+    | 403 | `invalid_code` | 驗證碼錯誤或已使用過。 |
+    | 400 | `password_not_set` | 僅使用 Google 登入的帳號尚未設定密碼（可透過「忘記密碼」設定）。 |
+    | 429 | `too_many_attempts` | 此帳號的失敗次數過多，或嘗試的驗證碼過多。 |
+    | 503 / 429 | `server_busy` / `rate_limited` | 密碼雜湊佇列忙碌中。 |
+
+    密碼與驗證碼的失敗會計入帳號的失敗計數，並記錄為安全事件。
+
+    ## 指標連接埠
+
+    除了 API 連接埠之外，伺服器還會在指標連接埠（`METRICS_PORT`，9464，繫結至 `METRICS_BIND`，預設為 127.0.0.1；請勿對外公開）上以純 HTTP 回應。它不屬於本 API：`GET /healthz` 回應 `ok`；`GET /readyz` 自啟動完成（每個分片都已重播其日誌，且所有監聽器都已繫結）起、直到開始關閉之前回應 `ready`，其餘時間回應 503 `not ready`；`GET /metrics` 提供 Prometheus 指標，若已設定 `METRICS_TOKEN`，則須以 `Authorization: Bearer <token>` 附上與其完全相同的權杖。
+  contact:
+    name: Scacelith
+    url: https://github.com/DarkCenobyte/scacelith-chess-server
+  license:
+    name: GPL-3.0-or-later
+    identifier: GPL-3.0-or-later
+externalDocs:
+  description: Scacelith 伺服器的原始碼及其參考文件（API.md、PROTOCOL.md、CONFIG.md）。
+  url: https://github.com/DarkCenobyte/scacelith-chess-server
+servers:
+  - url: https://caissa.scacelith.com/api/v1
+    description: 官方伺服器。
+  - url: https://{host}:{port}/api/v1
+    description: 任何 Scacelith 伺服器，例如社群伺服器。
+    variables:
+      host:
+        default: caissa.scacelith.com
+        description: 伺服器的公開主機名稱（`SERVER_PUBLIC_HOST`）。
+      port:
+        default: "443"
+        description: 公開的 API 連接埠（`PUBLIC_API_PORT`，未設定時為 `API_PORT`）。
+tags:
+  - name: server-info
+    x-displayName: 伺服器資訊
+    description: 用戶端在登入或連線之前需要知道的資訊。
+  - name: health
+    x-displayName: 健康狀態
+    description: |-
+      伺服器的存活與就緒狀態，供監控使用。這些端點在 API 連接埠上回應，處理順序早於驗證與所有端點限制，但和任何要求一樣，會取用每位址層的一個權杖；監控主機可以列入 `ABUSE_EXEMPT`。每個端點都有兩條可用的路徑：伺服器的根路徑，以及 `/api/v1` 之下。
+
+      指標連接埠另有自己的健康檢查端點，請見簡介中的說明。
+  - name: auth
+    x-displayName: 註冊與登入
+    description: |-
+      建立帳號、以密碼（及第二驗證因素）登入，以及確認郵件與密碼重設郵件。
+
+      `POST /auth/login`、`POST /auth/login/mfa`、`POST /auth/sso/google/finish`、`POST /auth/sso/google/link` 與 `POST /auth/sso/complete` 會回應一個工作階段 `{ token, expiresAt, user }`（前幾個端點也可能改為回應第二個步驟）。
+  - name: google-sign-in
+    x-displayName: Google 登入
+    description: |-
+      當 `GET /info` 顯示 `sso.google: true` 時提供；否則下列所有端點都會回應 404 `sso_disabled`。遊戲透過系統瀏覽器，以 RFC 8252 的已安裝應用程式流程登入（Google 用戶端類型為「Desktop app」，即電腦版應用程式）：Google 會將瀏覽器導回遊戲在 `127.0.0.1` 上的監聽器，絕不會導向本伺服器，遊戲也從不會接觸到任何 Google 憑證。
+
+      1. 用戶端在 `127.0.0.1:0` 上監聽（由系統選擇連接埠），並產生一組 PKCE：由 43 至 128 個 `[A-Za-z0-9._~-]` 字元組成的 `codeVerifier`，以及 `codeChallenge = BASE64URL(SHA-256(codeVerifier))`，後者長度為 43 個字元，不含填補字元。
+      2. 以挑戰值與連接埠呼叫 `POST /auth/sso/google/start`，會傳回 Google URL 與此次嘗試的 `state`。用戶端檢查該 URL（見下文）後，在瀏覽器中開啟。
+      3. Google 將瀏覽器導向 `http://127.0.0.1:<port>/oauth2/google/<tag>?code=...&state=...`。用戶端只接受開始時回應的 `state`；若重新導向帶有 `error=`，則不傳送任何內容。
+      4. 以嘗試 ID、`codeVerifier`、`state` 與 `code`（以及 Google 有傳送時的 `iss`）呼叫 `POST /auth/sso/google/finish`。
+      5. 回應可能是工作階段、雙重驗證步驟（接著呼叫 `POST /auth/login/mfa`）、新棋手的 `needsUsername`（接著呼叫 `POST /auth/sso/complete`），或在某個設有密碼的帳號使用該地址時回應 `needsPassword`（接著呼叫 `POST /auth/sso/google/link`）。
+
+      **來源標記**：重新導向 URI 帶有棋手所新增之伺服器的標記，使遊戲能拒絕其他伺服器為其自家棋手取得的 URL。來源由小寫的主機名稱（IPv6 位址字面值須加上方括號）、`:` 與十進位的 API 連接埠組成，連接埠一律寫出，443 也不例外：伺服器使用 `SERVER_PUBLIC_HOST` 及其公開 API 連接埠，遊戲則使用它所連線的位址。標記是 SHA-256(UTF-8 `"scacelith-sso-origin-v1\n"` + 來源) 經 base64url 編碼（不含填補字元）後的前 22 個字元。重新導向 URI 為 `"http://127.0.0.1:" + port + "/oauth2/google/" + tag`：一律使用 IPv4 位址字面值，連接埠則是遊戲監聽器的連接埠（1024 至 65535）。伺服器從不採用用戶端提供的 URI、主機或路徑。
+
+      | 來源 | 標記 |
+      |---|---|
+      | `play.scacelith.example:443` | `IhcScoV7eDOzTEcSnqPUPt` |
+      | `localhost:8443` | `TFGx7zQ_8QlGZW5zpqznCr` |
+      | `[::1]:8443` | `XToJm0DG5PjciEVmZa9Cho` |
+      | `127.0.0.1:50443` | `3r653wM5ZjYsHcAJljmCwY` |
+
+      因此，只有以完全相同的 `SERVER_PUBLIC_HOST` 及其公開 API 連接埠新增伺服器的棋手，才能使用 Google 登入。
+
+      **遊戲開啟瀏覽器前的檢查**：`authUrl` 必須正好以 `https://accounts.google.com/o/oauth2/v2/auth?` 開頭，由可列印的 ASCII 字元組成且少於 4096 個字元；其查詢字串必須恰好包含一個 `response_type=code`、恰好一個與遊戲依其連接埠與來源標記算出之 URI 相同的 `redirect_uri`、恰好一個與回應中 `state` 相同的 `state`、`code_challenge_method=S256`，以及一個長度為 43 個字元的 `code_challenge`。否則遊戲會停止監聽器，不開啟任何頁面。遊戲只會將 `finish` 與 `link` 傳送給回應 `start` 的那台伺服器。
+
+      **Google 登入會進入哪個帳號**：已與該 Google 帳號連結的帳號；若沒有，則為使用 Google 所確認之地址的啟用中帳號（設有密碼時，`finish` 會回應 `needsPassword`，必須先通過密碼、若已啟用雙重驗證再通過第二驗證因素，才會儲存連結；未設密碼時，回應 409 `sso_account_exists`）；若仍沒有，則建立新帳號（`needsUsername`）。Google 帳號絕不會僅憑地址就連結到現有帳號。當 Google 登入建立了帳號，或被新增到現有帳號時，該帳號的地址都會收到一封郵件。
+  - name: sessions
+    x-displayName: 工作階段
+    description: 帳號已登入的裝置，以及登出。
+  - name: account
+    x-displayName: 帳號
+    description: 帳號資訊、偏好設定與密碼。
+  - name: two-step-verification
+    x-displayName: 雙重驗證
+    description: 驗證器應用程式（TOTP，RFC 6238），使用 SHA-1、6 位數、30 秒的時間步驟，前後各容許一個時間步驟的誤差；另外還有一次性的復原碼。
+  - name: email-change
+    x-displayName: 變更電子郵件地址
+    description: 變更帳號的電子郵件地址，須透過寄到新地址的連結確認。
+  - name: data-export
+    x-displayName: 資料匯出
+    description: 伺服器保存的有關該帳號的一切資料，匯出為單一 JSON 檔案。
+  - name: account-deletion
+    x-displayName: 刪除帳號
+    description: 永久刪除帳號。
+  - name: game-history
+    x-displayName: 對局紀錄
+    description: 已登入棋手自己的對局，可篩選並分頁。
+  - name: games
+    x-displayName: 對局與 PGN
+    description: |-
+      棋譜（含著法與棋鐘時間）及其 PGN 檔案。
+
+      **對局代碼**：`status`：1 `WhiteWins`、2 `BlackWins`、3 `Draw`、4 `Aborted`（只會儲存已結束的對局）。`result`：`1-0`、`0-1`、`1/2-1/2` 或 `*`（已中止）。`reason` 附有其名稱（`termination`），以及 PGN 檔案著法文字結尾處的文字（PGN 中為英文，下表括號內為中譯）；代碼 7 與 21 為和棋（超時或棄局的一方，其對手無法將死），而伺服器從不以代碼 4 與 13 結束對局（這兩個代碼屬於共用的結束原因清單）：
+
+      | 代碼 | `termination` | PGN 中的文字 |
+      |---|---|---|
+      | 1 | `Checkmate` | Checkmate（將死） |
+      | 2 | `Resignation` | Resignation（認輸） |
+      | 3 | `Timeout` | Loss on time（超時判負） |
+      | 4 | `IllegalMoves` | Second illegal move (forfeit)（第二次違例著法，判負） |
+      | 5 | `Stalemate` | Stalemate（逼和） |
+      | 6 | `InsufficientMaterial` | Dead position (insufficient material)（死局面，子力不足） |
+      | 7 | `TimeoutVsInsufficient` | Flag fall, but the opponent cannot checkmate（超時，但對方無法將死） |
+      | 8 | `FivefoldRepetition` | Fivefold repetition（五次重複局面） |
+      | 9 | `SeventyFiveMoves` | 75-move rule（七十五回合規則） |
+      | 10 | `ThreefoldClaim` | Threefold repetition (claimed)（三次重複局面，提出要求） |
+      | 11 | `FiftyMoveClaim` | 50-move rule (claimed)（五十回合規則，提出要求） |
+      | 12 | `Agreement` | Draw by agreement（協議和棋） |
+      | 13 | `IllegalMovesVsInsufficient` | Second illegal move, but the opponent cannot checkmate（第二次違例著法，但對方無法將死） |
+      | 20 | `Abandonment` | Abandoned (disconnected for too long)（棄局：斷線過久） |
+      | 21 | `AbandonmentVsInsufficient` | Abandoned, but the opponent cannot checkmate（棄局，但對方無法將死） |
+      | 22 | `Aborted` | Game aborted（對局中止） |
+      | 23 | `NoShow` | Aborted: first move not played in time（中止：未按時走出第一步） |
+      | 24 | `Forfeit` | Forfeit (fair play violation)（棄權判負：違反公平對弈） |
+      | 25 | `ServerAborted` | Aborted by the server（被伺服器中止） |
+      | 26 | `BothDisconnected` | Aborted: both players disconnected（中止：雙方皆已斷線） |
+  - name: gifs
+    x-displayName: GIF 動畫
+    description: |-
+      將對局製作成 GIF 動畫，方便保存或分享：從上方俯視的棋盤，從起始局面到最終局面，每個局面一格畫面；棋盤上方顯示雙方棋手的名字與等級分，下方顯示最後一步著法，最後一格畫面則顯示結果與對局的結束方式。
+
+      **成本、快取與配額**：GIF 在專屬的算繪執行緒上製作，絕不佔用執行對局的執行緒，並以最低的 CPU 優先順序執行：共 `GIF_THREADS` 個執行緒（預設為 `WORKERS`），在製作第一個 GIF 時啟動，閒置一分鐘後停止。最多可有 `GIF_QUEUE_MAX`（4 x `WORKERS`）個 GIF 排隊等候執行緒，每個最多等候 `GIF_QUEUE_TIMEOUT_MS`（10 秒）；每次算繪最長可達 `GIF_RENDER_TIMEOUT_MS`（30 秒）。伺服器會將製作好的 GIF 保存在 `GIF_CACHE_MB` MB（32 x `WORKERS`）的快取中，最久未使用者最先移除；取自快取的 GIF，或正在為其他要求製作中的 GIF，都不會產生算繪。快取的索引鍵涵蓋所有會改變畫面的因素，名字也包括在內。
+
+      每個要求都計入 `gif`（兩個端點合計，每位棋手每分鐘 30 次）。必須實際製作的 GIF 還會計入算繪限制：每位棋手每分鐘 `GIF_USER_RENDERS_PER_MIN`（4）次、每小時 `GIF_USER_RENDERS_PER_HOUR`（30）次；每個用戶端（其所有帳號合計）每分鐘 `GIF_IP_RENDERS_PER_MIN`（12）次、每小時 `GIF_IP_RENDERS_PER_HOUR`（120）次，每個 IPv6 /48 則為其 3 倍。用戶端應保存已下載的檔案，而不是重複要求；收到 429 或 503 後，應等待 `retryAfter` 再重試。
+
+      尺寸：`small`（每格 32 px：284 x 350 像素）、`medium`（48 px：424 x 515）、`large`（72 px：628 x 762）；不含座標時分別為 268 x 342、400 x 503 與 600 x 748。起始局面至少停留 1 秒（若影格間隔更長，則停留該間隔），最終局面停留 3 秒，GIF 會循環播放；第一格畫面之後，只儲存畫面中有變化的部分。40 回合的對局約為 135、205 與 325 KiB（small、medium、large），150 回合的對局約為 0.5、0.8 與 1.2 MiB。
+  - name: players
+    x-displayName: 棋手
+    description: 公開的個人資料與近期對局。僅包含公開資料，絕不包含電子郵件地址、工作階段、處分或誠信等級。已刪除的帳號沒有個人資料。
+  - name: leaderboard
+    x-displayName: 排行榜
+    description: 各官方類別的頂尖棋手。
+  - name: reports
+    x-displayName: 檢舉
+    description: 向管理員檢舉近期對局的對手。
+  - name: pages
+    x-displayName: HTML 頁面
+    description: |-
+      供瀏覽器使用的頁面，從電子郵件中的連結開啟。這些連結指向 `https://<SERVER_PUBLIC_HOST>`（連接埠不是 443 時加上 `:<PUBLIC_API_PORT>`），不在 `/api/v1` 之下。
+
+      - 這些頁面不執行任何 JavaScript，也不載入任何外部資源。提供頁面時會附上 `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`。
+      - `GET` 只會顯示按鈕或表單，以免郵件掃描程式開啟連結時就把它用掉。變更在 `POST` 時才會發生：以 `application/x-www-form-urlencoded` 傳送的表單（也接受 JSON 本文），連結的權杖放在隱藏欄位中。重複出現的欄位會被拒絕。
+      - 錯誤（速率限制、無效欄位）也以 HTML 頁面呈現，標題為「Request refused」（要求遭拒），500 以上則為「Server error」（伺服器錯誤）。只有在比對到頁面之前就發現的失敗（要求目標過長或格式錯誤、每位址層）才會以 JSON 回應。
+x-tagGroups:
+  - name: server
+    x-displayName: 伺服器
+    tags:
+      - server-info
+      - health
+  - name: accounts
+    x-displayName: 帳號
+    tags:
+      - auth
+      - google-sign-in
+      - sessions
+      - account
+      - two-step-verification
+      - email-change
+      - data-export
+      - account-deletion
+  - name: games
+    x-displayName: 對局
+    tags:
+      - game-history
+      - games
+      - gifs
+  - name: community
+    x-displayName: 棋手與檢舉
+    tags:
+      - players
+      - leaderboard
+      - reports
+  - name: browser-pages
+    x-displayName: 瀏覽器頁面
+    tags:
+      - pages
+paths:
+  /info:
+    get:
+      operationId: getServerInfo
+      tags:
+        - server-info
+      summary: 取得伺服器的名稱、版本、連接埠與註冊規則
+      description: |-
+        用戶端在登入或連線之前需要的資訊：伺服器的名稱與 ID、WebSocket 通訊協定版本與 WebSocket 的位置、註冊規則、官方時限，以及用戶端在送出表單之前可以先行檢查的各項限制。
+
+        **限制**：只有每位址層。
+      security: []
+      responses:
+        '200':
+          description: 伺服器的描述資訊。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerInfo'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：每位址層。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`timeout`。'
+  /auth/register:
+    post:
+      operationId: registerAccount
+      tags:
+        - auth
+      summary: 建立帳號
+      description: |-
+        建立帳號：在以寄出的連結確認電子郵件地址之後建立；若不需要電子郵件確認，則立即建立。
+
+        **需要電子郵件確認時**（`REQUIRE_EMAIL_VERIFICATION`，預設值）：回應 202 `verification_sent`。此時帳號尚未建立：這筆註冊會等候 24 小時，並在這段期間保留其使用者名稱。伺服器會將一個在這 24 小時內有效的連結寄到該地址，每個地址每 5 分鐘最多一封（`POST /auth/verify-email/resend` 會寄出新的連結）；連結被使用時（按下 `/verify-email` 頁面上的按鈕），帳號隨即建立，地址也同時確認，棋手即可登入。在此之前，以該使用者名稱登入會回應 `invalid_credentials`，與未知帳號相同，公開個人資料也不存在。以相同地址進行的新註冊，會取代等候中的那一筆。若該地址已被其他帳號使用，回應也完全相同：此時不會寄出連結，改為通知該帳號的擁有者（每小時最多一次），使用者名稱也同樣會被保留，因此無從得知該地址是否已有帳號。連結未被使用的註冊會在 24 小時後捨棄，其使用者名稱也會重新開放。
+
+        **不需要電子郵件確認時**（`REQUIRE_EMAIL_VERIFICATION=false`）：回應 201 `ready`，帳號立即建立，並可登入。
+
+        **規則**：`username`：`USERNAME_MIN` 至 `USERNAME_MAX` 個字元（3 至 20），可使用字母、數字、`_` 與 `-`，須以字母或數字開頭（`GET /info` 以 `limits` 提供這些值）；保留名稱（`admin`、`moderator`、`deleted` 等）與部分前綴會被拒絕；不分大小寫，必須唯一。`email`：去除前後空白並以小寫儲存，須為純 ASCII，且網域須含點號。`password`：至少 `PASSWORD_MIN_LENGTH`（10）個字元，且 UTF-8 編碼後最多 256 位元組；不得包含使用者名稱或電子郵件地址的本機部分，也不得為常見密碼。
+
+        **錯誤**，依下列順序檢查：403 `registration_closed`；400 `invalid_username`；400 `invalid_email`；400 `weak_password`；409 `username_taken`；428 `pow_required`；密碼雜湊佇列錯誤；409 `email_taken`（僅限不需要電子郵件確認時）。
+
+        **限制**：`auth`，接著是 `auth_register`（每個用戶端每小時 10 次註冊）。**工作量證明**：當 `POW_REGISTER_BITS` 大於 0 時一律需要。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            examples:
+              first:
+                summary: 第一次嘗試，未附工作量證明
+                value:
+                  username: alice
+                  email: alice@example.org
+                  password: correct horse battery
+              withPow:
+                summary: 附上工作量證明後再次傳送
+                value:
+                  username: alice
+                  email: alice@example.org
+                  password: correct horse battery
+                  pow:
+                    challenge: eyJ2IjoxLCJlIjoicmVnaXN0ZXIiLCJiIjoxOCwieCI6MTc5MDg4Mjk5MTIwMH0.6Ku_D7kw3S69OYxj-9KxsXszRCwz6ECnOQ-B6-v2erM
+                    nonce: '123456'
+      responses:
+        '201':
+          description: 帳號已建立，可以登入（此伺服器不需要電子郵件確認）。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                properties:
+                  status:
+                    const: ready
+              example:
+                status: ready
+        '202':
+          description: 註冊正在等候確認連結（或該地址已有帳號；回應不會透露是哪一種）。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationSentStatus'
+              example:
+                status: verification_sent
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_request`（附 `field`）、`invalid_json`、`invalid_username`、`invalid_email`，或附有 `reason` 的 `weak_password`：`too_short`、`too_long`、`contains_username`、`contains_email` 或 `too_common`。'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '`registration_closed`：此伺服器已關閉註冊（`GET /info` 顯示 `registration: closed`）。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`username_taken`：已有帳號使用該使用者名稱，或另一個地址的等候中註冊保留了它。`email_taken`：另一個帳號已使用該地址（僅限不需要電子郵件確認時）。'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '428':
+          $ref: '#/components/responses/PowRequired'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`auth` 或 `auth_register` 限制，或密碼雜湊佇列。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。'
+  /auth/login:
+    post:
+      operationId: logIn
+      tags:
+        - auth
+      summary: 以密碼登入
+      description: |-
+        以使用者名稱或電子郵件地址加上密碼登入。可能的回應有兩種，狀態碼都是 200：一個工作階段；或在啟用雙重驗證時，一個須在 5 分鐘內以 `POST /auth/login/mfa` 完成的第二步驟。
+
+        未知帳號、密碼錯誤與未設密碼的帳號，都會在相同的時間後得到相同的回應：401 `invalid_credentials`。帳號檢查（`banned`、`email_unverified`）只在密碼正確之後才會進行。同一登入名稱失敗達 `AUTH_FAILURES_PER_ACCOUNT`（5）次起，每次嘗試都必須等待（429 `too_many_attempts`）。
+
+        **限制**：`auth`。**工作量證明**：只在發生一波登入失敗期間需要（428 `pow_required`）。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              login: alice
+              password: correct horse battery
+              clientLabel: Scacelith 1.4 (Windows)
+      responses:
+        '200':
+          description: 一個工作階段，或啟用雙重驗證時登入的第二步驟。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginAnswer'
+              examples:
+                session:
+                  summary: 已登入
+                  value:
+                    token: sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8
+                    expiresAt: 1798658839708
+                    user:
+                      id: 1
+                      username: alice
+                      email: alice@example.org
+                      emailVerified: true
+                      mfaEnabled: false
+                      googleLinked: false
+                      hasPassword: true
+                      acceptChallenges: all
+                      createdAt: 1790882839743
+                      lastLoginAt: 1790882839708
+                      pendingEmail: null
+                mfaRequired:
+                  summary: 已啟用雙重驗證
+                  value:
+                    mfaRequired: true
+                    mfaToken: mfa_m4wXAVhYCMWG0PX7MLcIpBeccBFg0oxPvoRujzGWjO8
+                    expiresIn: 300
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: '`invalid_credentials`：未知帳號、密碼錯誤，或帳號未設密碼。'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '僅在密碼正確之後：`banned`，附有 `until`（紀元毫秒數，永久停權時為 `null`），或 `email_unverified`（地址尚未確認的舊帳號）。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '428':
+          $ref: '#/components/responses/PowRequired'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`too_many_attempts`（此登入名稱的失敗延遲），或 `rate_limited`（`auth` 限制、密碼雜湊佇列）。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。'
+  /auth/login/mfa:
+    post:
+      operationId: logInWithSecondFactor
+      tags:
+        - auth
+      summary: 以第二驗證因素完成登入
+      description: |-
+        啟用雙重驗證時登入的第二步驟，在 `POST /auth/login` 或 Google 登入（`POST /auth/sso/google/finish` 或 `POST /auth/sso/google/link`）回應 `mfaRequired` 之後進行。請傳送 `code`（6 位數的驗證器驗證碼，或復原碼）或 `recoveryCode`。在此使用的復原碼隨即失效。
+
+        每個步驟最多接受 5 個錯誤的驗證碼；密碼被重設或變更時，該步驟也會結束。在 Google 連結的密碼步驟之後，只有驗證碼在此通過，連結才會儲存。
+
+        **限制**：`auth`，以及不論來自哪個位址，該帳號每 15 分鐘最多 `AUTH_MFA_PER_ACCOUNT`（10）個驗證碼；超過時不會檢查驗證碼，因此復原碼不會被耗用。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MfaLoginRequest'
+            examples:
+              authenticator:
+                summary: 驗證器驗證碼
+                value:
+                  mfaToken: mfa_m4wXAVhYCMWG0PX7MLcIpBeccBFg0oxPvoRujzGWjO8
+                  code: '123456'
+              recovery:
+                summary: 復原碼
+                value:
+                  mfaToken: mfa_m4wXAVhYCMWG0PX7MLcIpBeccBFg0oxPvoRujzGWjO8
+                  recoveryCode: j7v5-3ezx-zn
+      responses:
+        '200':
+          description: 已登入。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionAnswer'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_request`：`code` 與 `recoveryCode` 都沒有傳送，或本文不符合結構描述；`invalid_json`。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: '`invalid_mfa_token`：此步驟已過期、已使用、已因 5 個錯誤驗證碼而結束，或自第一步驟以來密碼已被重設或變更（請重新登入）。`invalid_code`：驗證碼錯誤或已使用過。'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '`banned`（附 `until`）、`email_unverified`。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`sso_already_linked`：僅限 Google 連結的密碼步驟之後：該 Google 帳號在此期間已連結到另一個帳號。'
+        '410':
+          $ref: '#/components/responses/Gone'
+          description: '`sso_expired`：僅限 Google 連結的密碼步驟之後：帳號在此期間有所變更；請從遊戲中重新開始。'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`too_many_attempts`：帳號的失敗延遲，或過去 15 分鐘內的 `AUTH_MFA_PER_ACCOUNT` 個驗證碼已用完。`rate_limited`：`auth` 限制。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy` 附 `retryAfter: 1`：資料庫持續鎖定（若發生在 Google 連結步驟之後，則未建立任何連結：請從遊戲中重新開始）。`timeout`。'
+  /auth/logout:
+    post:
+      operationId: logOut
+      tags:
+        - sessions
+      summary: 登出此工作階段
+      description: |-
+        撤銷所用權杖的工作階段。以它開啟的 WebSocket 會被關閉。不需要本文（或傳送 `{}`）。
+
+        **限制**：`sessions`。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 已登出。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoggedOutStatus'
+              example:
+                status: logged_out
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_request`：本文不是 `{}`；`invalid_json`。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`sessions` 限制或帳號額度。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+  /auth/logout-all:
+    post:
+      operationId: logOutEverywhere
+      tags:
+        - sessions
+      summary: 登出所有工作階段
+      description: |-
+        撤銷帳號的所有工作階段，包括目前這一個。以它們開啟的 WebSocket 都會被關閉。不需要本文（或傳送 `{}`）。
+
+        **限制**：`sessions`。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 所有工作階段皆已登出。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoggedOutStatus'
+              example:
+                status: logged_out
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_request`：本文不是 `{}`；`invalid_json`。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`sessions` 限制或帳號額度。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+  /auth/verify-email/resend:
+    post:
+      operationId: resendVerificationEmail
+      tags:
+        - auth
+      summary: 重新寄送確認連結
+      description: |-
+        重新寄送電子郵件確認連結。不論地址為何，回應都是 202 `accepted`，因此絕不會透露是否有帳號或註冊使用該地址。
+
+        每個地址每 5 分鐘最多處理一次要求。使用該地址的等候中註冊，不論該地址是否已被其他帳號使用，都會重新獲得 24 小時，使其使用者名稱在兩種情況下保留同樣長的時間。只有在下列情況才會寄出連結：該地址沒有帳號時，寄給該筆註冊（新連結有效期為 24 小時，並取代先前的連結）；或寄給使用該地址、啟用中但尚未確認的帳號。
+
+        **限制**：`auth`，接著是 `auth_mail`（每個用戶端每小時 10 次）。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailRequest'
+            example:
+              email: alice@example.org
+      responses:
+        '202':
+          description: 已受理（不論地址為何）。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedStatus'
+              example:
+                status: accepted
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`auth` 或 `auth_mail` 限制（不論地址為何）。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy` 附 `retryAfter: 1`：查詢帳號時資料庫持續鎖定（等候中註冊的延期只會盡力而為，絕不會導致要求失敗）。`timeout`。'
+  /auth/password/forgot:
+    post:
+      operationId: requestPasswordReset
+      tags:
+        - auth
+      summary: 寄送密碼重設連結
+      description: |-
+        寄送有效期一小時的密碼重設連結，開啟後會進入 `/reset-password` 頁面。不論地址為何，回應都是 202 `accepted`。連結只會寄給啟用中的帳號，每個地址每 5 分鐘最多一次。僅使用 Google 登入的帳號，可藉此設定第一組密碼。
+
+        密碼找回的限制是整個 API 中最嚴格的，且全部以整台伺服器為範圍計算：每個用戶端（一個 IPv4 位址或一個 IPv6 /64）每小時 3 次（`AUTH_FORGOT_PER_HOUR`）、每 24 小時 10 次（`AUTH_FORGOT_PER_DAY`），每個 IPv6 /48 為這些數字的 3 倍；此外還有 `auth` 限制（每 10 分鐘 20 次），以及每個地址每 5 分鐘一封郵件的限制。不論是 202 還是 429，都不會透露是否有帳號使用該地址。設定新密碼另有自己的限制（`auth_reset`）。
+
+        **限制**：`auth`、`auth_forgot`，接著是 `auth_forgot_day`。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailRequest'
+            example:
+              email: alice@example.org
+      responses:
+        '202':
+          description: 已受理（不論地址為何）。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptedStatus'
+              example:
+                status: accepted
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`auth`、`auth_forgot` 或 `auth_forgot_day` 限制（不論地址為何）。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy` 附 `retryAfter: 1`：資料庫持續鎖定。`timeout`。'
+  /auth/password/reset:
+    post:
+      operationId: resetPassword
+      tags:
+        - auth
+      summary: 以重設連結的權杖設定新密碼
+      description: |-
+        以重設連結的權杖設定新密碼（`/reset-password` 頁面的作用相同）。新密碼須遵守註冊時的規則。
+
+        重設會撤銷所有工作階段，並取消待處理的電子郵件地址變更；該帳號的其他重設連結隨即失效；地址視為已確認（連結已證明這一點）；帳號擁有者會收到一封郵件。雙重驗證不受影響。發生密碼雜湊佇列錯誤或 503 之後，連結依然有效。
+
+        **限制**：`auth`，接著是 `auth_reset`（每個用戶端每小時 10 次，每個 IPv6 /48 為 30 次，與該頁面共用：每次嘗試都會雜湊一次密碼）。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequest'
+            example:
+              token: A0ATfmXCDKFC8UkSxLJCD85K7au5nMIrZ2P3K-1VWQg
+              newPassword: a much better passphrase
+      responses:
+        '200':
+          description: 密碼已變更，所有工作階段皆已登出。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                properties:
+                  status:
+                    const: password_reset
+              example:
+                status: password_reset
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_token`：連結無效、已使用或已過期，或當初寄往的地址已不再屬於該帳號。`weak_password`（附 `reason`）。`invalid_request`、`invalid_json`。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`auth` 或 `auth_reset` 限制，或密碼雜湊佇列。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`：密碼雜湊佇列，或資料庫持續鎖定（`retryAfter: 1`，未做任何變更）。`timeout`。'
+  /auth/sso/google/start:
+    post:
+      operationId: startGoogleSignIn
+      tags:
+        - google-sign-in
+      summary: 開始 Google 登入
+      description: |-
+        針對 PKCE 挑戰值與遊戲在 `127.0.0.1` 上之監聽器的連接埠，開始一次 Google 登入嘗試。回應會提供要在系統瀏覽器中開啟的 Google URL，以及此次嘗試的 `state`；嘗試的有效期為 10 分鐘。
+
+        `authUrl` 包含 `client_id`、`redirect_uri`（由 `redirectPort` 與伺服器的來源標記組成）、`response_type=code`、`scope=openid email profile`、`state`、`nonce`、`code_challenge`（伺服器自己對 Google 使用之 PKCE 驗證值的 S256 值）及 `code_challenge_method=S256`，以及 `prompt=select_account`。遊戲會在開啟前檢查它（請見此標籤的說明）。
+
+        **限制**：`sso_start`。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoStartRequest'
+            example:
+              codeChallenge: 6e7diXEYxG7OTYw7STfNOltEeLxAilPthC_txzaE0xA
+              redirectPort: 51234
+      responses:
+        '200':
+          description: 此次嘗試。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoStartAnswer'
+              example:
+                attemptId: sso_ogvVEL75n7q90NIFsh-4zXVt-izc3WRbghsd6HDOtNQ
+                authUrl: https://accounts.google.com/o/oauth2/v2/auth?client_id=1234567890-abc.apps.googleusercontent.com&redirect_uri=http%3A%2F%2F127.0.0.1%3A51234%2Foauth2%2Fgoogle%2FIhcScoV7eDOzTEcSnqPUPt&response_type=code&scope=openid%20email%20profile&state=yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ&nonce=gYIKKhwnz1AqWfFxOC3R-ZvCACw06q74fEMtGEOJQWU&code_challenge=ZfEI6iZjePTHbnbevupaD9O7GjBCzcL-GJu2XGOdFGc&code_challenge_method=S256&prompt=select_account
+                state: yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ
+                expiresIn: 600
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`sso_disabled`：此伺服器未提供 Google 登入。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`sso_start` 限制。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+  /auth/sso/google/finish:
+    post:
+      operationId: finishGoogleSignIn
+      tags:
+        - google-sign-in
+      summary: 將 Google 的回應交給伺服器
+      description: |-
+        將 Google 傳送到遊戲監聽器的 `code` 與 `state`，連同嘗試 ID 與 PKCE 驗證值一起交給伺服器。沒有驗證值，嘗試 ID 毫無用處；而沒有伺服器自己的 PKCE 驗證值與用戶端密碼，授權碼同樣毫無用處。
+
+        伺服器先檢查嘗試（未知、已使用或已過期：410），再檢查驗證值（錯誤的驗證值不會使嘗試失效），接著將嘗試標記為已使用，檢查 `state` 與 `iss`，向 Google 兌換授權碼，並驗證 ID 權杖。回應（200）為下列其中之一：
+
+        - `{ token, expiresAt, user }`：已登入連結的帳號；
+        - `{ mfaRequired, mfaToken, expiresIn }`：接著呼叫 `POST /auth/login/mfa`；
+        - `{ needsUsername, ssoTicket, suggestedUsername }`：新帳號；請在 10 分鐘內接著呼叫 `POST /auth/sso/complete`。`suggestedUsername` 取自 Google 名稱或電子郵件地址，若都不合用則為 `""`；
+        - `{ needsPassword, linkTicket, username, expiresIn }`：使用該地址的帳號設有密碼；接著呼叫 `POST /auth/sso/google/link`。此時尚未建立任何連結。
+
+        **限制**：`sso_finish`。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoFinishRequest'
+            example:
+              attemptId: sso_ogvVEL75n7q90NIFsh-4zXVt-izc3WRbghsd6HDOtNQ
+              codeVerifier: Sb5SaoX0ByHGjJ0XQkEqaaPaJYx2BId4ncTT8tLM6W8
+              state: yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ
+              code: 4/0AVMBsJhR2x7cKq9vT1pLmN3oW8yZ5aB6dE7fG8hJ
+              iss: https://accounts.google.com
+              clientLabel: Scacelith 1.4 (Windows)
+      responses:
+        '200':
+          description: 一個工作階段、第二步驟，或首次 Google 登入的下一個步驟。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoFinishAnswer'
+              examples:
+                session:
+                  summary: 已登入連結的帳號
+                  value:
+                    token: sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8
+                    expiresAt: 1798658839708
+                    user:
+                      id: 1
+                      username: alice
+                      email: alice@example.org
+                      emailVerified: true
+                      mfaEnabled: false
+                      googleLinked: true
+                      hasPassword: false
+                      acceptChallenges: all
+                      createdAt: 1790882839743
+                      lastLoginAt: 1790882839708
+                      pendingEmail: null
+                mfaRequired:
+                  summary: 已啟用雙重驗證
+                  value:
+                    mfaRequired: true
+                    mfaToken: mfa_m4wXAVhYCMWG0PX7MLcIpBeccBFg0oxPvoRujzGWjO8
+                    expiresIn: 300
+                needsUsername:
+                  summary: 新棋手
+                  value:
+                    needsUsername: true
+                    ssoTicket: sso_gYIKKhwnz1AqWfFxOC3R-ZvCACw06q74fEMtGEOJQWU
+                    suggestedUsername: alice
+                needsPassword:
+                  summary: 設有密碼的帳號正在使用該地址
+                  value:
+                    needsPassword: true
+                    linkTicket: sso_ZfEI6iZjePTHbnbevupaD9O7GjBCzcL-GJu2XGOdFGc
+                    username: alice
+                    expiresIn: 600
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '`invalid_verifier`：驗證值與此次嘗試的挑戰值不符（嘗試仍可使用）。`sso_email_unverified`：Google 尚未確認該地址。`registration_closed`。`account_disabled`。僅限已連結的帳號：`banned`（附 `until`）、`email_unverified`。'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`sso_disabled`：此伺服器未提供 Google 登入。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`sso_account_exists`：有一個未設密碼的啟用中帳號正在使用該地址（不會透露是哪個帳號）。'
+        '410':
+          $ref: '#/components/responses/Gone'
+          description: '`sso_expired`：嘗試未知、已使用或已過期。'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`sso_finish` 限制。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+  /auth/sso/google/link:
+    post:
+      operationId: linkGoogleAccount
+      tags:
+        - google-sign-in
+      summary: 以密碼將 Google 連結到現有帳號
+      description: |-
+        在 `finish` 回應 `needsPassword` 之後：以棋手在遊戲中輸入的該帳號密碼，將 Google 連結到這個現有帳號。回應（200）是一個工作階段（連結已儲存，棋手已登入）；或在啟用雙重驗證時為 `{ mfaRequired, mfaToken, expiresIn }`：接著呼叫 `POST /auth/login/mfa`，只有驗證碼在那裡通過，連結才會儲存。
+
+        密碼錯誤不會使票證失效，總共可嘗試 5 次。嘗試次數在即將檢查密碼之前才扣除：429 `too_many_attempts` 或 428 `pow_required` 不會扣除次數，而密碼雜湊佇列的拒絕（503 `server_busy`、429 `rate_limited`）則已扣除一次，並計為帳號的一次失敗。失敗延遲與 `POST /auth/login` 使用同一個計數器。
+
+        **限制**：`auth`（含其 IPv6 /48 計數）。**工作量證明**：與 `POST /auth/login` 相同。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoLinkRequest'
+            example:
+              linkTicket: sso_ZfEI6iZjePTHbnbevupaD9O7GjBCzcL-GJu2XGOdFGc
+              password: correct horse battery
+              clientLabel: Scacelith 1.4 (Windows)
+      responses:
+        '200':
+          description: 一個工作階段，或登入的第二步驟。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginAnswer'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: '`invalid_credentials`：密碼錯誤；票證仍然有效，總共可嘗試 5 次。'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '`banned`（附 `until`），僅在密碼正確之後。'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`sso_disabled`：此伺服器未提供 Google 登入。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`sso_already_linked`：該 Google 帳號在此期間已連結到另一個帳號。'
+        '410':
+          $ref: '#/components/responses/Gone'
+          description: '`sso_expired`：票證未知、已使用或已過期；第 5 次密碼錯誤；帳號的狀態或地址在 `finish` 之後有所變更；或在儲存連結期間，帳號的狀態、地址、密碼或雙重驗證有所變更。請從遊戲中重新開始。'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '428':
+          $ref: '#/components/responses/PowRequired'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`too_many_attempts`（帳號的失敗延遲），或 `rate_limited`（`auth` 限制、密碼雜湊佇列）。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`：密碼雜湊佇列，或資料庫持續鎖定（`retryAfter: 1`，未建立任何連結）。`timeout`。'
+  /auth/sso/complete:
+    post:
+      operationId: completeGoogleSignUp
+      tags:
+        - google-sign-in
+      summary: 為首次 Google 登入建立帳號
+      description: |-
+        在 `finish` 回應 `needsUsername` 之後：以選定的使用者名稱建立帳號（適用註冊規則），並將其登入。此帳號沒有密碼：`hasPassword` 為 `false`，可透過「忘記密碼」（`POST /auth/password/forgot`）為它設定密碼。
+
+        **限制**：`auth`（含其 IPv6 /48 計數）。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoCompleteRequest'
+            example:
+              ssoTicket: sso_gYIKKhwnz1AqWfFxOC3R-ZvCACw06q74fEMtGEOJQWU
+              username: alice
+              clientLabel: Scacelith 1.4 (Windows)
+      responses:
+        '200':
+          description: 帳號已建立並已登入。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionAnswer'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_username`、`invalid_request`、`invalid_json`。'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '`registration_closed`。'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`sso_disabled`：此伺服器未提供 Google 登入。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`username_taken`（已有帳號使用該使用者名稱，或另一個地址的等候中註冊保留了它）、`sso_already_linked`、`email_taken`。'
+        '410':
+          $ref: '#/components/responses/Gone'
+          description: '`sso_expired`：票證未知、已使用或已過期。'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`auth` 限制。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+  /auth/sessions:
+    get:
+      operationId: listSessions
+      tags:
+        - sessions
+      summary: 列出已登入的裝置
+      description: |-
+        帳號目前有效的工作階段（已登入的裝置），最近使用的排在最前面。`current` 標示發出此要求的工作階段。`lastSeenAt` 最多每 5 分鐘更新一次；`expiresAt` 是絕對的結束時間，閒置期限可能使工作階段更早結束。
+
+        **限制**：`sessions`。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 有效的工作階段。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionList'
+              example:
+                sessions:
+                  - id: 3
+                    createdAt: 1790882839708
+                    lastSeenAt: 1790882839708
+                    expiresAt: 1798658839708
+                    clientLabel: Laptop
+                    current: false
+                  - id: 1
+                    createdAt: 1790882839708
+                    lastSeenAt: 1790882839708
+                    expiresAt: 1798658839708
+                    clientLabel: Scacelith 1.4 (Windows)
+                    current: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`sessions` 限制或帳號額度。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+  /auth/sessions/{id}:
+    delete:
+      operationId: revokeSession
+      tags:
+        - sessions
+      summary: 登出單一裝置
+      description: |-
+        登出帳號的某一個工作階段；目前的工作階段也可以登出。以它開啟的 WebSocket 會被關閉。不需要本文（或傳送 `{}`）。
+
+        **限制**：`sessions`。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: 該工作階段已登出。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                properties:
+                  status:
+                    const: revoked
+              example:
+                status: revoked
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_request`：本文不是 `{}`，或 `id` 不是有效的 URL 編碼；`invalid_json`。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`not_found`：此帳號沒有這個 ID 的有效工作階段。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`sessions` 限制或帳號額度。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+  /account/me:
+    get:
+      operationId: getAccount
+      tags:
+        - account
+      summary: 取得帳號、等級分與生效中的處分
+      description: |-
+        棋手本人所見的帳號：帳號資訊（也就是每個登入回應中的 `user`）、棋手下過計分對局的每個類別各一筆等級分紀錄、生效中的處分，以及停權狀態。反作弊系統的誠信等級從不顯示。
+
+        **限制**：`account`。
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 帳號。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountMe'
+              example:
+                user:
+                  id: 1
+                  username: alice
+                  email: alice@example.org
+                  emailVerified: true
+                  mfaEnabled: true
+                  googleLinked: false
+                  hasPassword: true
+                  acceptChallenges: all
+                  createdAt: 1790882871478
+                  lastLoginAt: 1790882902200
+                  pendingEmail: alice.new@example.org
+                ratings:
+                  - category: '3+2'
+                    rating: 1510
+                    games: 2
+                    wins: 1
+                    draws: 1
+                    losses: 0
+                    peak: 1510
+                    provisional: true
+                sanctions: []
+                ban: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: '`unauthorized`，或 `invalid_token`（帳號已刪除時也是如此）。'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`account` 限制或帳號額度。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+  /account/preferences:
+    put:
+      operationId: updatePreferences
+      tags:
+        - account
+      summary: 接受或拒絕直接挑戰
+      description: |-
+        設定其他棋手是否可以透過使用者名稱向此棋手發起挑戰。設為 `none` 時，直接挑戰會被拒絕：發起挑戰的一方會被告知該棋手目前無法對局。不需要重新驗證。
+
+        **限制**：`account`。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Preferences'
+            example:
+              acceptChallenges: none
+      responses:
+        '200':
+          description: 目前生效的偏好設定。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - preferences
+                properties:
+                  preferences:
+                    $ref: '#/components/schemas/Preferences'
+              example:
+                preferences:
+                  acceptChallenges: none
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`account` 限制或帳號額度。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+  /account/password:
+    post:
+      operationId: changePassword
+      tags:
+        - account
+      summary: 變更密碼
+      description: |-
+        變更密碼。需要提供目前的密碼，但即使已啟用雙重驗證，也不需要第二驗證因素。新密碼須遵守註冊規則（在檢查目前的密碼之後才檢查）。
+
+        變更會撤銷所有其他工作階段（目前這一個仍保持登入）、取消待處理的電子郵件地址變更、使該帳號的密碼重設連結失效，並寄一封郵件給帳號擁有者。
+
+        **重新驗證**：只需密碼。**限制**：`reauth`，接著是 `reauth_user`。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeRequest'
+            example:
+              currentPassword: correct horse battery
+              newPassword: a much better passphrase
+      responses:
+        '200':
+          description: 密碼已變更。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                properties:
+                  status:
+                    const: password_changed
+              example:
+                status: password_changed
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`password_not_set`（僅使用 Google 登入的帳號）、`weak_password`（附 `reason`）、`invalid_request`、`invalid_json`。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '`invalid_password`：目前的密碼錯誤，或在檢查此要求期間，密碼剛好被重設或變更。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`too_many_attempts`（帳號的重新驗證失敗），或 `rate_limited`（`reauth` 或 `reauth_user` 限制、帳號額度、密碼雜湊佇列）。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。'
+  /account/mfa/totp/setup:
+    post:
+      operationId: startTotpSetup
+      tags:
+        - two-step-verification
+      summary: 開始啟用雙重驗證
+      description: |-
+        儲存一組新的待啟用驗證器金鑰（取代先前任何待啟用的金鑰），並將它傳回給驗證器應用程式使用（提供文字形式，以及可顯示為 QR 碼的 `otpauth://` URI）。此時雙重驗證尚未啟用：須以此金鑰產生的驗證碼呼叫 `POST /account/mfa/totp/enable` 才會啟用。
+
+        **重新驗證**：只需密碼。**限制**：`reauth`，接著是 `reauth_user`。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordOnlyRequest'
+            example:
+              password: correct horse battery
+      responses:
+        '200':
+          description: 待啟用的金鑰。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TotpSetup'
+              example:
+                secret: OCKJVMPMMKMPLBSIYLN6QQRMKIPC2VLH
+                uri: otpauth://totp/Scacelith:alice?secret=OCKJVMPMMKMPLBSIYLN6QQRMKIPC2VLH&issuer=Scacelith&algorithm=SHA1&digits=6&period=30
+                algorithm: SHA1
+                digits: 6
+                period: 30
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`password_not_set`（僅使用 Google 登入的帳號）、`invalid_request`、`invalid_json`。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '`invalid_password`。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`mfa_already_enabled`（在檢查密碼之前檢查）。'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`too_many_attempts`（帳號的重新驗證失敗），或 `rate_limited`（`reauth` 或 `reauth_user` 限制、帳號額度、密碼雜湊佇列）。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。'
+  /account/mfa/totp/enable:
+    post:
+      operationId: enableTotp
+      tags:
+        - two-step-verification
+      summary: 完成雙重驗證的啟用並取得復原碼
+      description: |-
+        以待啟用金鑰產生的驗證碼（正好 6 位數）啟用雙重驗證。此處不要求密碼，因為在設定步驟時已經提供過。回應包含 10 組復原碼，只會顯示這一次。
+
+        **限制**：`reauth`，接著是 `reauth_user`；錯誤的驗證碼會計入帳號的重新驗證失敗次數。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TotpEnableRequest'
+            example:
+              code: '123456'
+      responses:
+        '200':
+          description: 雙重驗證已啟用。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - recoveryCodes
+                properties:
+                  status:
+                    const: mfa_enabled
+                  recoveryCodes:
+                    $ref: '#/components/schemas/RecoveryCodeList'
+              example:
+                status: mfa_enabled
+                recoveryCodes:
+                  - j7v5-3ezx-zn
+                  - 4kqm-8w2p-hd
+                  - x0ra-c6tn-5g
+                  - mb3s-9yzj-k1
+                  - 2hvd-pq7e-w8
+                  - c5ng-0tka-xr
+                  - zz4y-b1me-7q
+                  - 8pjh-6dsw-3n
+                  - t9xc-2gfk-0v
+                  - q6wa-ner5-jy
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_request`：`code` 不是正好 6 位數，或本文不符合結構描述；`invalid_json`。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '`invalid_code`：驗證碼錯誤（請檢查裝置的時間）。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`mfa_already_enabled`；`mfa_setup_required`：沒有待啟用的金鑰（請先呼叫 `POST /account/mfa/totp/setup`）。'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`too_many_attempts`（帳號的重新驗證失敗），或 `rate_limited`（`reauth` 或 `reauth_user` 限制、帳號額度）。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+  /account/mfa/totp/disable:
+    post:
+      operationId: disableTotp
+      tags:
+        - two-step-verification
+      summary: 停用雙重驗證
+      description: |-
+        停用雙重驗證。金鑰與復原碼會被刪除，帳號擁有者會收到一封郵件。
+
+        **重新驗證**：密碼，以及驗證器驗證碼或復原碼（必須提供 `code` 或 `recoveryCode` 其中之一）。**限制**：`reauth`，接著是 `reauth_user`。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReauthCredentials'
+            example:
+              password: correct horse battery
+              code: '123456'
+      responses:
+        '200':
+          description: 雙重驗證已停用。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                properties:
+                  status:
+                    const: mfa_disabled
+              example:
+                status: mfa_disabled
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`password_not_set`（僅使用 Google 登入的帳號）、`invalid_request`、`invalid_json`。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '`mfa_code_required`（`code` 與 `recoveryCode` 都沒有提供，在檢查密碼之前檢查）、`invalid_password`、`invalid_code`。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`mfa_not_enabled`。'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`too_many_attempts`（重新驗證失敗，或此帳號嘗試的驗證碼過多），或 `rate_limited`（`reauth` 或 `reauth_user` 限制、帳號額度、密碼雜湊佇列）。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。'
+  /account/mfa/recovery-codes:
+    post:
+      operationId: regenerateRecoveryCodes
+      tags:
+        - two-step-verification
+      summary: 更換復原碼
+      description: |-
+        以 10 組新的復原碼取代現有的復原碼；舊的復原碼隨即失效。
+
+        **重新驗證**：密碼，以及放在 `code` 中的驗證器驗證碼（復原碼會被拒絕，回應 403 `invalid_code`）。**限制**：`reauth`，接著是 `reauth_user`。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecoveryCodesRequest'
+            example:
+              password: correct horse battery
+              code: '123456'
+      responses:
+        '200':
+          description: 新的復原碼，只會顯示這一次。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - recoveryCodes
+                properties:
+                  recoveryCodes:
+                    $ref: '#/components/schemas/RecoveryCodeList'
+              example:
+                recoveryCodes:
+                  - j7v5-3ezx-zn
+                  - 4kqm-8w2p-hd
+                  - x0ra-c6tn-5g
+                  - mb3s-9yzj-k1
+                  - 2hvd-pq7e-w8
+                  - c5ng-0tka-xr
+                  - zz4y-b1me-7q
+                  - 8pjh-6dsw-3n
+                  - t9xc-2gfk-0v
+                  - q6wa-ner5-jy
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`password_not_set`（僅使用 Google 登入的帳號）、`invalid_request`、`invalid_json`。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '`invalid_password`、`mfa_code_required`、`invalid_code`（提供復原碼時也是如此）。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`mfa_not_enabled`。'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`too_many_attempts`（重新驗證失敗，或此帳號嘗試的驗證碼過多），或 `rate_limited`（`reauth` 或 `reauth_user` 限制、帳號額度、密碼雜湊佇列）。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。'
+  /account/email:
+    post:
+      operationId: changeEmail
+      tags:
+        - email-change
+      summary: 變更電子郵件地址
+      description: |-
+        變更帳號的電子郵件地址。`newEmail` 會先去除前後空白並轉為小寫，再以與註冊地址相同的方式檢查。
+
+        **需要電子郵件確認時**（預設）：回應 202 `verification_sent`。一個有效期 24 小時的連結會寄到新地址；連結會開啟 `/confirm-email-change`，只有在棋手按下該頁面的按鈕時，地址才會變更。在此之前，`GET /account/me` 會以 `pendingEmail` 顯示新地址。新的要求會取代待處理的要求；變更或重設密碼則會將其取消。不論由誰提出，同一個新地址每 5 分鐘最多只會收到一個連結（針對已在待處理中之變更的要求，會沿用先前寄出且仍然有效的連結）；回應都相同。目前的地址會收到通知，告知有人要求將地址變更為某個經遮蔽處理的地址（`a***@example.org`）。若新地址已被其他帳號使用，回應與 `pendingEmail` 也都相同：此時不會寄出連結，因此該變更永遠不會完成，改為通知該地址的擁有者（每小時最多一次）。
+
+        連結經確認後，地址隨即變更並視為已確認，各裝置仍保持登入，先前寄出的連結（確認、密碼重設、其他變更）都會失效，原地址也會收到通知，其中的新地址經過遮蔽處理。
+
+        **不需要電子郵件確認時**（`REQUIRE_EMAIL_VERIFICATION=false`）：地址立即變更（200 `email_changed`），原地址會收到通知。若該地址已被其他帳號使用，回應為 409 `email_taken`，該地址的擁有者會收到通知。
+
+        **重新驗證**：密碼；若已啟用雙重驗證，還需要驗證器驗證碼或復原碼。`invalid_email` 與 `same_email` 在檢查密碼之前檢查，因此不會計為失敗。**限制**：`reauth`，接著是 `reauth_user`。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailChangeRequest'
+            example:
+              newEmail: alice.new@example.org
+              password: correct horse battery
+              code: '123456'
+      responses:
+        '200':
+          description: 地址已立即變更（此伺服器不需要電子郵件確認）。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - email
+                properties:
+                  status:
+                    const: email_changed
+                  email:
+                    type: string
+                    format: email
+                    description: 新地址（儲存時的形式）。
+              example:
+                status: email_changed
+                email: alice.new@example.org
+        '202':
+          description: 確認連結已寄到新地址（或該地址屬於另一個帳號；回應不會透露是哪一種）。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationSentStatus'
+              example:
+                status: verification_sent
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_email`、`same_email`（帳號目前的地址）、`password_not_set`（僅使用 Google 登入的帳號）、`invalid_request`、`invalid_json`。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '`invalid_password`（密碼變更或重設搶先於此要求完成時也是如此：不會寄出連結）、`mfa_code_required`、`invalid_code`。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: '`email_taken`：僅限不需要電子郵件確認時。'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`too_many_attempts`（重新驗證失敗，或此帳號嘗試的驗證碼過多），或 `rate_limited`（`reauth` 或 `reauth_user` 限制、帳號額度、密碼雜湊佇列）。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`：密碼雜湊佇列，或資料庫持續鎖定（`retryAfter: 1`：未做任何變更，可以再次傳送相同的要求）。`timeout`。'
+  /account/export:
+    post:
+      operationId: exportAccountData
+      tags:
+        - data-export
+      summary: 下載帳號資料
+      description: |-
+        伺服器所保存有關該帳號的一切資料，以單一 JSON 檔案提供儲存（`format` 為 `scacelith-account-export`，`version` 為 1）。匯出會記錄一筆安全事件（`account_exported`）。文件中的 `notes` 陣列會以淺白的英文告訴棋手哪些資料未包含在內。
+
+        **匯出中絕不包含**：密碼雜湊值、雙重驗證金鑰與復原碼；任何工作階段權杖或連結權杖，或其雜湊值；反作弊系統的資料（誠信等級與分數、異常狀況、對局分析、檢舉的權重）；其他棋手對該棋手提出的檢舉；管理員的身分；其他棋手的私人資料（對手只以其公開名稱與等級分出現，不會透露其他棋手是否受過處分，也不包含任何可能屬於他人的 IP 位址）。
+
+        **重新驗證**：密碼；若已啟用雙重驗證，還需要驗證器驗證碼或復原碼。**限制**：`account_export`（每位棋手每小時 5 次，以整台伺服器為範圍；每次嘗試都會計入，失敗的嘗試也算在內；最先檢查），接著是 `reauth` 與 `reauth_user`。**時間限制**：60 秒。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReauthCredentials'
+            example:
+              password: correct horse battery
+              code: '123456'
+      responses:
+        '200':
+          description: 匯出文件，以附件形式提供。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            Content-Disposition:
+              description: '`attachment; filename="scacelith-account-<username>.json"`。使用者名稱中字母、數字、`_`、`.` 與 `-` 以外的字元都會變成 `_`。'
+              schema:
+                type: string
+                pattern: '^attachment; filename="scacelith-account-[A-Za-z0-9_.-]+\.json"$'
+              example: attachment; filename="scacelith-account-alice.json"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountExport'
+              example:
+                format: scacelith-account-export
+                version: 1
+                exportedAt: 1790882839708
+                server:
+                  name: Scacelith
+                  host: caissa.scacelith.com
+                notes:
+                  - This file holds the data Scacelith keeps about your account. Times are milliseconds since 1970-01-01 UTC.
+                account:
+                  id: 1
+                  username: alice
+                  email: alice@example.org
+                  emailVerified: true
+                  pendingEmail: null
+                  mfaEnabled: false
+                  googleLinked: false
+                  googleEmail: null
+                  hasPassword: true
+                  acceptChallenges: all
+                  createdAt: 1790882839743
+                  lastLoginAt: 1790882839708
+                ratings:
+                  - category: '3+2'
+                    rating: 1510
+                    games: 2
+                    wins: 1
+                    draws: 1
+                    losses: 0
+                    peak: 1510
+                    provisional: true
+                    rated: true
+                    countedGames: 2
+                    updatedAt: 1790882839809
+                ratingRefunds:
+                  - day: 1790812800000
+                    category: '3+2'
+                    points: 9
+                sessions:
+                  - id: 1
+                    createdAt: 1790882839708
+                    lastSeenAt: 1790882839708
+                    expiresAt: 1798658839708
+                    revokedAt: null
+                    clientLabel: Scacelith 1.4 (Windows)
+                    ip: 203.0.113.7
+                securityEvents:
+                  - kind: login
+                    at: 1790882839708
+                    ip: 203.0.113.7
+                    detail:
+                      method: password
+                sanctions: []
+                conduct:
+                  - kind: abort
+                    at: 1790800000000
+                reportsFiled:
+                  - gameId: 4100000000001
+                    reported: bob
+                    category: other
+                    comment: rude
+                    createdAt: 1790882840000
+                    status: open
+                games:
+                  total: 1
+                  list:
+                    - id: 4100000000001
+                      category: '3+2'
+                      rated: true
+                      timeControl: '180+2'
+                      white:
+                        name: alice
+                        rating: 1500
+                        ratingAfter: 1510
+                        ratingDiff: 10
+                      black:
+                        name: bob
+                        rating: 1520
+                        ratingAfter: 1510
+                        ratingDiff: -10
+                      color: white
+                      status: 1
+                      reason: 2
+                      result: 1-0
+                      termination: Resignation
+                      plies: 41
+                      startedAt: 1790620205000
+                      endedAt: 1790620611000
+                      baseMs: 180000
+                      incMs: 2000
+                      outcome: win
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`password_not_set`（僅使用 Google 登入的帳號）、`invalid_request`、`invalid_json`。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '`invalid_password`、`mfa_code_required`、`invalid_code`。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`too_many_attempts`（重新驗證失敗，或此帳號嘗試的驗證碼過多），或 `rate_limited`（`account_export`、`reauth` 或 `reauth_user` 限制、帳號額度、密碼雜湊佇列）。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`busy`（資料庫持續鎖定，附 `Retry-After: 1` 標頭）、`server_busy`（密碼雜湊佇列）、`timeout`（60 秒）。'
+  /account/delete:
+    post:
+      operationId: deleteAccount
+      tags:
+        - account-deletion
+      summary: 刪除帳號
+      description: |-
+        刪除帳號；此操作無法復原。
+
+        - 所有工作階段立即撤銷：此後該權杖都會得到 401 `invalid_token`。
+        - 使用者名稱會變成 `deleted#<id>`，帳號本身與每一份棋譜中皆是如此。
+        - 下列資料會被清除：電子郵件地址、密碼雜湊值、雙重驗證金鑰與復原碼、工作階段與連結權杖、Google 連結、反作弊系統的誠信紀錄，以及與安全事件一同儲存的 IP 位址。
+        - 等級分與對局會保留。對局仍可在匿名名稱下讀取，而 `GET /players/{username}` 對原名稱會回應 404。
+
+        **重新驗證**：密碼；若已啟用雙重驗證，還需要驗證器驗證碼或復原碼。**限制**：`reauth`，接著是 `reauth_user`。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReauthCredentials'
+            example:
+              password: correct horse battery
+              code: '123456'
+      responses:
+        '200':
+          description: 帳號已刪除。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                properties:
+                  status:
+                    const: deleted
+              example:
+                status: deleted
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`password_not_set`（僅使用 Google 登入的帳號）、`invalid_request`、`invalid_json`。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '`invalid_password`、`mfa_code_required`、`invalid_code`。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`too_many_attempts`（重新驗證失敗，或此帳號嘗試的驗證碼過多），或 `rate_limited`（`reauth` 或 `reauth_user` 限制、帳號額度、密碼雜湊佇列）。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。'
+  /account/games:
+    get:
+      operationId: listAccountGames
+      tags:
+        - game-history
+      summary: 列出棋手的對局（可篩選並分頁）
+      description: |-
+        已登入棋手的對局，最新的排在最前面，可篩選並分頁，並附上符合篩選條件的對局數。所有查詢參數皆為選用，空白值視同未提供。
+
+        分頁：將上一頁的 `next` 作為 `before` 傳入；最後一頁的 `next` 為 `null`。`total` 是所有頁面中符合篩選條件的對局總數。
+
+        **限制**：`account_games`。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/BeforeQuery'
+        - $ref: '#/components/parameters/LimitQuery'
+        - name: category
+          in: query
+          required: false
+          description: 官方類別 ID（`3+2` 或 `3%2B2`），或以 `custom` 表示所有採用其他時限的對局。
+          schema:
+            type: string
+            pattern: '^\s*([0-9]+[+ ][0-9]+|custom)\s*$'
+          example: '3+2'
+        - name: rated
+          in: query
+          required: false
+          description: 只列出計分（`true`）或不計分（`false`）對局。
+          schema:
+            type: string
+            enum:
+              - 'true'
+              - 'false'
+        - name: result
+          in: query
+          required: false
+          description: 只列出棋手獲勝、落敗或和棋的對局（從棋手的角度而言）。已中止的對局只在不使用此篩選條件時才會出現。
+          schema:
+            type: string
+            enum:
+              - win
+              - loss
+              - draw
+      responses:
+        '200':
+          description: 對局紀錄的其中一頁。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HistoryPage'
+              example:
+                games:
+                  - id: 4100000000001
+                    category: '3+2'
+                    rated: true
+                    timeControl: '180+2'
+                    white:
+                      name: alice
+                      rating: 1500
+                      ratingAfter: 1510
+                      ratingDiff: 10
+                    black:
+                      name: bob
+                      rating: 1520
+                      ratingAfter: 1510
+                      ratingDiff: -10
+                    color: white
+                    status: 1
+                    reason: 2
+                    result: 1-0
+                    termination: Resignation
+                    plies: 41
+                    startedAt: 1790620205000
+                    endedAt: 1790620611000
+                    baseMs: 180000
+                    incMs: 2000
+                    outcome: win
+                next: null
+                total: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_cursor`（`before` 不是對局 ID）、`invalid_limit`，或 `invalid_filter`（`category`、`rated` 或 `result`），皆附有指出該參數的 `field`。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`account_games` 限制或帳號額度。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`busy`（資料庫持續鎖定；本文中附 `retryAfter: 1`，但沒有 `Retry-After` 標頭）、`server_busy`（查詢工作階段時發現資料庫遭到鎖定）、`timeout`。'
+  /games/{id}:
+    get:
+      operationId: getGame
+      tags:
+        - games
+      summary: 取得棋譜（含著法與棋鐘時間）
+      description: |-
+        一份棋譜，含著法與棋鐘時間。未帶權杖，或權杖所屬棋手沒有參與該對局時，回應公開版本。若權杖所屬棋手參與了該對局，回應會另外加上 `you` 與 `reportable`。
+
+        **限制**：`public_read`（帶權杖時按棋手計算，未帶時按用戶端計算）。
+      security:
+        - {}
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/GameId'
+      responses:
+        '200':
+          description: 棋譜。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameRecord'
+              example:
+                id: 4100000000001
+                category: '3+2'
+                rated: true
+                timeControl: '180+2'
+                white:
+                  name: alice
+                  rating: 1500
+                  ratingAfter: 1510
+                  ratingDiff: 10
+                black:
+                  name: bob
+                  rating: 1520
+                  ratingAfter: 1510
+                  ratingDiff: -10
+                status: 1
+                reason: 2
+                result: 1-0
+                termination: Resignation
+                plies: 2
+                startedAt: 1790620205000
+                endedAt: 1790620611000
+                baseMs: 180000
+                incMs: 2000
+                statusName: WhiteWins
+                rematchOf: null
+                moves:
+                  - uci: e2e4
+                    spentMs: 0
+                    clockMs: 180000
+                  - uci: e7e5
+                    spentMs: 1700
+                    clockMs: 180300
+                pgn:
+                  Event: Scacelith rated 3+2
+                  Site: caissa.scacelith.com
+                  Date: '2026.09.28'
+                  Round: '-'
+                  White: alice
+                  Black: bob
+                  Result: 1-0
+                  WhiteElo: 1500
+                  BlackElo: 1520
+                  TimeControl: '180+2'
+                  Termination: Resignation
+                  PlyCount: 2
+                you: white
+                reportable: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_game_id`：不是最多 16 位數（小於 2^53）的正整數；`invalid_request`：不是有效的 URL 編碼。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: '`invalid_token`：有傳送權杖，但權杖無效。'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`not_found`：沒有這個對局。'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`public_read` 限制或帳號額度。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`busy`（資料庫持續鎖定；本文中附 `retryAfter: 1`，但沒有 `Retry-After` 標頭）、`server_busy`（查詢工作階段時發現資料庫遭到鎖定）、`timeout`。'
+  /games/{id}/pgn:
+    get:
+      operationId: getGamePgn
+      tags:
+        - games
+      summary: 以 PGN 檔案下載對局
+      description: |-
+        以 PGN 檔案提供同一個對局：單一對局，行尾為 `\n`，著法文字每行少於 80 欄。不論是否帶權杖，回應都相同。
+
+        標籤依下列順序排列：`Event`（`<SERVER_NAME> rated <category>` 或 `<SERVER_NAME> casual <category>`）、`Site`（`SERVER_PUBLIC_HOST`）、`Date`（UTC 開始日期）、`Round`、`White`、`Black`、`Result`（已中止的對局為 `*`）、`UTCDate` 與 `UTCTime`（開始時間）、`WhiteElo` 與 `BlackElo`（開始時的等級分，或 `-`）、`WhiteRatingDiff` 與 `BlackRatingDiff`（等級分變化，例如 `+10` 與 `-10`，每場計分對局都有；若等級分規則使等級分維持不變則為 `+0`；不計分、自訂或已中止的對局則兩者皆無）、`TimeControl`（以秒為單位）、`Termination`（PGN 標準值：`normal`；`time forfeit`，即超時，結果為和棋時亦同；`abandoned`；`rules infraction`，即第二次違例著法或違反公平對弈而判負；`unterminated`，即已中止的對局）、`PlyCount`、`ScacelithGameId`（十進位 ID）。
+
+        每一步著法都附有 `{[%clk h:mm:ss.f] [%emt h:mm:ss.f]}`：走棋方在該步之後的棋鐘時間，以及該步所耗用的時間，以十分之一秒為單位（無條件捨去）。棋譜中缺少的值會省略。最後一步之後，接著以文字寫出結束原因，然後是結果。
+
+        **限制**：`public_read`（帶權杖時按棋手計算，未帶時按用戶端計算）。
+      security:
+        - {}
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/GameId'
+      responses:
+        '200':
+          description: PGN 檔案。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+            Content-Disposition:
+              description: '`attachment; filename="scacelith-<id>.pgn"`。'
+              schema:
+                type: string
+                pattern: '^attachment; filename="scacelith-[1-9][0-9]{0,15}\.pgn"$'
+              example: attachment; filename="scacelith-4100000000001.pgn"
+          content:
+            application/x-chess-pgn:
+              schema:
+                type: string
+                description: 'PGN 文字，採用 UTF-8 編碼（`Content-Type: application/x-chess-pgn; charset=utf-8`）。'
+              example: |
+                [Event "Scacelith rated 3+2"]
+                [Site "caissa.scacelith.com"]
+                [Date "2026.09.28"]
+                [Round "-"]
+                [White "alice"]
+                [Black "bob"]
+                [Result "1-0"]
+                [UTCDate "2026.09.28"]
+                [UTCTime "18:30:05"]
+                [WhiteElo "1500"]
+                [BlackElo "1520"]
+                [WhiteRatingDiff "+10"]
+                [BlackRatingDiff "-10"]
+                [TimeControl "180+2"]
+                [Termination "normal"]
+                [PlyCount "2"]
+                [ScacelithGameId "4100000000001"]
+
+                1. e4 {[%clk 0:03:00.0] [%emt 0:00:00.0]} 1... e5 {[%clk 0:03:00.3]
+                [%emt 0:00:01.7]} {Resignation} 1-0
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_game_id`：不是最多 16 位數（小於 2^53）的正整數；`invalid_request`：不是有效的 URL 編碼。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: '`invalid_token`：有傳送權杖，但權杖無效。'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`not_found`：沒有這個對局。'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`public_read` 限制或帳號額度。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+          description: '`internal_error`：原因之一是儲存的著法無法重播出所儲存的結局（伺服器會記錄下來）。'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`busy`（資料庫持續鎖定；本文中附 `retryAfter: 1`，但沒有 `Retry-After` 標頭）、`server_busy`（查詢工作階段時發現資料庫遭到鎖定）、`timeout`。'
+  /games/{id}/gif:
+    get:
+      operationId: getGameGif
+      tags:
+        - gifs
+      summary: 以 GIF 動畫下載本伺服器的對局
+      description: |-
+        將對局製作成 GIF 動畫。名字與等級分取自棋譜（開始時的等級分；已刪除的帳號顯示為 `deleted#<id>`），結果與結束方式也是如此（`Resignation`、`Loss on time` 等）。
+
+        檢查依下列順序進行：`gif_disabled`、畫面選項（`size`、`orientation`、`delay`、`coords`）、對局 ID、對局本身、對局長度。
+
+        **需要工作階段**：配額按帳號計算。**限制**：每個要求都計入 `gif`；只有在必須實際製作 GIF 時，才計入 `gif_user_min`、`gif_user_hour`、`gif_ip_min` 與 `gif_ip_hour`（請見此標籤的說明）。**時間限制**：`GIF_QUEUE_TIMEOUT_MS` + `GIF_RENDER_TIMEOUT_MS` + 5 秒（預設為 45 秒）。
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/GameId'
+        - name: size
+          in: query
+          required: false
+          description: 畫面尺寸：`small`（每格 32 px）、`medium`（48 px）或 `large`（72 px）。
+          schema:
+            type: string
+            enum:
+              - small
+              - medium
+              - large
+            default: medium
+        - name: orientation
+          in: query
+          required: false
+          description: 位於棋盤下方的一方。
+          schema:
+            type: string
+            enum:
+              - white
+              - black
+            default: white
+        - name: delay
+          in: query
+          required: false
+          description: 每步著法的毫秒數（1 至 6 位十進位數字）。
+          schema:
+            type: integer
+            minimum: 100
+            maximum: 3000
+            default: 500
+        - name: coords
+          in: query
+          required: false
+          description: 是否在棋盤周圍繪製直行字母與橫列數字（`1`）或不繪製（`0`）。
+          schema:
+            type: string
+            enum:
+              - '1'
+              - '0'
+            default: '1'
+      responses:
+        '200':
+          $ref: '#/components/responses/GifFile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_option` 附 `field`（`size`、`orientation`、`delay` 或 `coords`）：值不在允許的範圍內。`invalid_game_id`。`invalid_request`：不是有效的 URL 編碼。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`not_found`：沒有這個對局。`gif_disabled`：伺服器已關閉 GIF 功能（`GIF_ENABLED=false`；`gif` 權杖會被退還）。'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`gif` 限制、算繪限制或帳號額度。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+          description: '`render_failed`：無法製作 GIF（伺服器會記錄原因）。`internal_error`。'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy` 附 `retryAfter`（3 至 10 秒）與 `Retry-After`：算繪佇列已滿，或 GIF 等候空閒執行緒已達 `GIF_QUEUE_TIMEOUT_MS`（10 秒）；該要求取用的所有限制權杖都會被退還。`busy`：資料庫持續鎖定（`retryAfter: 1` 只出現在本文中）。`timeout`。'
+  /gif:
+    post:
+      operationId: renderPgnGif
+      tags:
+        - gifs
+      summary: 將以 PGN 傳送的任何對局製作成 GIF 動畫
+      description: |-
+        為以 PGN 文字傳送的任何對局，製作與 `GET /games/{id}/gif` 相同的畫面：遊戲儲存的對局、從其他網站匯出的對局，或手動輸入的對局皆可。只會使用文字中的第一局。
+
+        - PGN 讀取器接受的內容與遊戲本身的讀取器相同：本伺服器輸出的所有 PGN，以及其他網站常見的匯出格式（註解、變化、NAG 與棋鐘標註會被略過；回合編號與 SAN 採寬鬆方式讀取；除非 `SetUp` 為 `"0"`，否則 `FEN` 標籤會提供起始局面）。
+        - 名字與等級分取自 `White`、`Black`、`WhiteElo` 與 `BlackElo` 標籤。帶重音符號的字母會去掉重音，其他可列印 ASCII 以外的字元會變成 `?`，過長的名字會被截斷（48 個字元）。結果取自 `Result` 標籤，若沒有則取自著法文字的結尾。`Termination` 標籤會顯示出來，除非其值為 `normal`：此時由最終局面說明一切（將死、逼和）。
+        - 此端點會自行檢查本文：未知欄位，或 `pgn` 缺少或不是字串時，回應 400 `invalid_request` 並附上 `field`；選項錯誤時回應 400 `invalid_option`（`delayMs` 必須是 JSON 數值，`coords` 必須是布林值；不接受 `null`）。
+
+        **需要工作階段**：配額按帳號計算。**限制**：與 `GET /games/{id}/gif` 相同。**本文上限**：135,168 位元組，不受 `HTTP_BODY_LIMIT` 影響（以 JSON 字串表示的 PGN，包括其中的跳脫字元）。**時間限制**：預設為 45 秒。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GifRequest'
+            examples:
+              short:
+                summary: 手動輸入的短對局，不含座標
+                value:
+                  pgn: 1. f3 e5 2. g4 Qh4# 0-1
+                  coords: false
+              options:
+                summary: 使用所有選項的 PGN 檔案
+                value:
+                  pgn: |
+                    [White "alice"]
+                    [Black "bob"]
+                    [WhiteElo "1500"]
+                    [BlackElo "1520"]
+                    [Result "1-0"]
+
+                    1. e4 e5 2. Bc4 Nc6 3. Qh5 Nf6 4. Qxf7# 1-0
+                  size: small
+                  orientation: black
+                  delayMs: 800
+                  coords: true
+      responses:
+        '200':
+          $ref: '#/components/responses/GifFile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_request` 附 `field`（未知欄位，或 `pgn` 缺少或不是字串；本文不是物件時則不附 `field`）；`invalid_json`；`invalid_option` 附 `field`（`size`、`orientation`、`delayMs` 或 `coords`）；`invalid_pgn` 附 `line` 與 `column`（從 1 起算，欄以字元計），以及讀取器的 `message`：不合規則或有歧義的著法、損壞的標籤、未知的變體、超過 65,536 位元組。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`gif_disabled`：伺服器已關閉 GIF 功能（`GIF_ENABLED=false`；`gif` 權杖會被退還）。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+          description: '`payload_too_large`：本文超過 135,168 位元組。'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableContent'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`gif` 限制、算繪限制或帳號額度。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+          description: '`render_failed`：無法製作 GIF（伺服器會記錄原因）。`internal_error`。'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy` 附 `retryAfter`（3 至 10 秒）與 `Retry-After`：算繪佇列已滿，或 GIF 等候空閒執行緒過久；該要求取用的所有限制權杖都會被退還。`timeout`。'
+  /players/{username}:
+    get:
+      operationId: getPlayer
+      tags:
+        - players
+      summary: 取得棋手的公開個人資料
+      description: |-
+        棋手的公開個人資料：各官方類別的等級分（依伺服器的順序）與對局數。`games.total` 計算所有已儲存的對局，包括不計分與已中止的對局；`games.rated`、`wins`、`draws` 與 `losses` 是各等級分紀錄的合計，因此只包含計分對局。不論是否帶權杖，回應都相同。
+
+        **限制**：`public_read`（帶權杖時按棋手計算，未帶時按用戶端計算）。
+      security:
+        - {}
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Username'
+      responses:
+        '200':
+          description: 個人資料。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerProfile'
+              example:
+                username: alice
+                createdAt: 1790882839743
+                ratings:
+                  - category: '3+2'
+                    rating: 1510
+                    provisional: true
+                    games: 2
+                    wins: 1
+                    draws: 1
+                    losses: 0
+                    peak: 1510
+                games:
+                  total: 3
+                  rated: 2
+                  wins: 1
+                  draws: 1
+                  losses: 0
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_username`：不是由 2 至 24 個 `[A-Za-z0-9_.-]` 字元組成。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: '`invalid_token`：有傳送權杖，但權杖無效。'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`not_found`：沒有這位棋手，或帳號已刪除。'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`public_read` 限制或帳號額度。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`busy`（資料庫持續鎖定；本文中附 `retryAfter: 1`，但沒有 `Retry-After` 標頭）、`server_busy`（查詢工作階段時發現資料庫遭到鎖定）、`timeout`。'
+  /players/{username}/games:
+    get:
+      operationId: listPlayerGames
+      tags:
+        - players
+      summary: 列出棋手的近期對局
+      description: |-
+        棋手的近期對局，最新的排在最前面，分頁方式與對局紀錄相同，但沒有篩選條件，也沒有總數。`color` 是這位棋手所執的一方。只要該頁已滿，`next` 就是最後一局的 ID，因此下一頁可能是空的。伺服器會先查詢棋手：未知的棋手一律回應 404，不論查詢參數為何。
+
+        **限制**：`public_read`（帶權杖時按棋手計算，未帶時按用戶端計算）。
+      security:
+        - {}
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Username'
+        - $ref: '#/components/parameters/BeforeQuery'
+        - $ref: '#/components/parameters/LimitQuery'
+      responses:
+        '200':
+          description: 棋手對局的其中一頁。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerGamesPage'
+              example:
+                username: alice
+                games:
+                  - id: 4100000000001
+                    category: '3+2'
+                    rated: true
+                    timeControl: '180+2'
+                    white:
+                      name: alice
+                      rating: 1500
+                      ratingAfter: 1510
+                      ratingDiff: 10
+                    black:
+                      name: bob
+                      rating: 1520
+                      ratingAfter: 1510
+                      ratingDiff: -10
+                    color: white
+                    status: 1
+                    reason: 2
+                    result: 1-0
+                    termination: Resignation
+                    plies: 41
+                    startedAt: 1790620205000
+                    endedAt: 1790620611000
+                next: 4100000000001
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_username`、`invalid_cursor`（`before` 不是對局 ID）、`invalid_limit`（後兩者不附 `field`）。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+          description: '`invalid_token`：有傳送權杖，但權杖無效。'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`not_found`：沒有這位棋手，或帳號已刪除。'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`public_read` 限制或帳號額度。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`busy`（資料庫持續鎖定；本文中附 `retryAfter: 1`，但沒有 `Retry-After` 標頭）、`server_busy`（查詢工作階段時發現資料庫遭到鎖定）、`timeout`。'
+  /leaderboard:
+    get:
+      operationId: getLeaderboard
+      tags:
+        - leaderboard
+      summary: 取得某個類別的頂尖棋手
+      description: |-
+        某個官方類別中，計入的對局數至少達 `minGames`（`PROVISIONAL_GAMES`）的前 100 筆等級分紀錄，已刪除的帳號與經確認的作弊者除外。伺服器最多每 10 秒重新計算一次各個排行榜；`updatedAt` 標示計算的時間。
+
+        **限制**：只有每位址層。
+      security: []
+      parameters:
+        - name: category
+          in: query
+          required: true
+          description: 官方類別 ID（`3+2` 或 `3%2B2`）。
+          schema:
+            type: string
+            pattern: '^\s*[0-9]+[+ ][0-9]+\s*$'
+          example: '3+2'
+        - name: limit
+          in: query
+          required: false
+          description: 棋手人數，1 至 100。最多 3 位數的更大數字視為 100；空白值視同未提供。
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 999
+            default: 100
+      responses:
+        '200':
+          description: 排行榜。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Leaderboard'
+              example:
+                category: '3+2'
+                minGames: 30
+                updatedAt: 1790882839828
+                players:
+                  - rank: 1
+                    username: bob
+                    rating: 1874
+                    games: 212
+                    wins: 120
+                    draws: 30
+                    losses: 62
+                    peak: 1901
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_category`（缺少，或不是官方類別）、`invalid_limit`。'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：每位址層。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`busy`（資料庫持續鎖定；本文中附 `retryAfter: 1`，但沒有 `Retry-After` 標頭）、`timeout`。'
+  /reports:
+    post:
+      operationId: reportPlayer
+      tags:
+        - reports
+      summary: 檢舉近期對局的對手
+      description: |-
+        檢舉棋手本人在過去 7 天內結束的某一局對局中的對手。檢舉本身絕不會改變等級分、處分或誠信等級。它會提高管理員所見的審查優先順序，而且除了 `abuse` 之外，還會要求對該局進行引擎分析。
+
+        針對同一局的同一位對手重複檢舉，會得到相同的回應，且不會有任何改變；回應絕不會透露被檢舉帳號的任何資訊。`GET /games/{id}` 會事先告知該局的棋手是否可以提出檢舉（`reportable`）。
+
+        此端點會自行檢查本文，順序為 `gameId`、`reported`、`category`、`comment`：檢查失敗時回應 400 `invalid_request`，不附 `field`。不認得的欄位會被忽略。
+
+        **限制**：`reports`（按棋手計算），接著是每位棋手 24 小時內 `REPORTS_PER_DAY`（5）次檢舉（429 `report_limit`）。
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReportRequest'
+            example:
+              gameId: 4100000000001
+              reported: bob
+              category: cheating
+              comment: engine-like play
+      responses:
+        '202':
+          description: 檢舉已收到（或先前已提出過）。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                properties:
+                  status:
+                    const: received
+              example:
+                status: received
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_request`（不附 `field`）、`invalid_json`。'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+          description: '`report_not_allowed`：對方並非檢舉人在過去 7 天內結束之對局中的對手。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`report_limit`（`retryAfter: 3600`，附 `Retry-After` 標頭）：過去 24 小時內已達 `REPORTS_PER_DAY` 次檢舉。`rate_limited`：`reports` 限制或帳號額度。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（查詢工作階段時發現資料庫遭到鎖定）、`timeout`。'
+  /verify-email:
+    servers:
+      - url: https://caissa.scacelith.com
+        description: 官方伺服器（頁面位於根路徑，不在 `/api/v1` 之下）。
+      - url: https://{host}:{port}
+        description: 任何 Scacelith 伺服器（頁面位於根路徑，不在 `/api/v1` 之下）。
+        variables:
+          host:
+            default: caissa.scacelith.com
+            description: 伺服器的公開主機名稱（`SERVER_PUBLIC_HOST`）。
+          port:
+            default: "443"
+            description: 公開的 API 連接埠（`PUBLIC_API_PORT`，未設定時為 `API_PORT`）。
+    get:
+      operationId: showVerifyEmailPage
+      tags:
+        - pages
+      summary: 顯示電子郵件確認頁面
+      description: |-
+        電子郵件確認連結的頁面（註冊時，或重新寄送的確認郵件）。頁面只顯示一個「Confirm my e-mail address」（確認我的電子郵件地址）按鈕，以免郵件掃描程式開啟連結時就把它用掉；按下按鈕會將表單送到 `POST /verify-email`。
+
+        **限制**：`page`。
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/LinkTokenQuery'
+      responses:
+        '200':
+          $ref: '#/components/responses/HtmlPage'
+          description: 附有確認按鈕的頁面。
+        '400':
+          $ref: '#/components/responses/HtmlBadRequest'
+          description: 連結無效或已過期（HTML 頁面）。
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '429':
+          $ref: '#/components/responses/HtmlTooManyRequests'
+          description: '`page` 限制（HTML 頁面），或每位址層（JSON `rate_limited`）。'
+        '500':
+          $ref: '#/components/responses/HtmlInternalError'
+        '503':
+          $ref: '#/components/responses/HtmlServiceUnavailable'
+    post:
+      operationId: submitVerifyEmailPage
+      tags:
+        - pages
+      summary: 確認電子郵件地址
+      description: |-
+        確認頁面的表單。它會確認地址；若是新註冊，此時才會建立帳號，棋手即可登入。
+
+        **限制**：`auth`。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/LinkTokenForm'
+            example:
+              token: asfioO4P0r_Zn5DxWzcQuF6Drgxu7wXGjCyS-UFbTaw
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LinkTokenForm'
+            example:
+              token: asfioO4P0r_Zn5DxWzcQuF6Drgxu7wXGjCyS-UFbTaw
+      responses:
+        '200':
+          $ref: '#/components/responses/HtmlPage'
+          description: 地址已確認（新註冊的帳號也已建立）。
+        '400':
+          $ref: '#/components/responses/HtmlBadRequest'
+          description: 連結無效、已使用或已過期，或表單無效（HTML 頁面）。
+        '408':
+          $ref: '#/components/responses/HtmlRequestTimeout'
+        '409':
+          $ref: '#/components/responses/HtmlConflict'
+          description: 新註冊的連結，但其使用者名稱或地址在此期間已被其他帳號取得；不會建立帳號（HTML 頁面）。
+        '413':
+          $ref: '#/components/responses/HtmlPayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/HtmlUnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/HtmlTooManyRequests'
+          description: '`auth` 限制（HTML 頁面），或每位址層（JSON `rate_limited`）。'
+        '500':
+          $ref: '#/components/responses/HtmlInternalError'
+        '503':
+          $ref: '#/components/responses/HtmlServiceUnavailable'
+          description: '資料庫持續鎖定（`Retry-After: 1`）：未做任何變更，連結仍然有效。處理常式逾時也會回應此狀態。'
+  /reset-password:
+    servers:
+      - url: https://caissa.scacelith.com
+        description: 官方伺服器（頁面位於根路徑，不在 `/api/v1` 之下）。
+      - url: https://{host}:{port}
+        description: 任何 Scacelith 伺服器（頁面位於根路徑，不在 `/api/v1` 之下）。
+        variables:
+          host:
+            default: caissa.scacelith.com
+            description: 伺服器的公開主機名稱（`SERVER_PUBLIC_HOST`）。
+          port:
+            default: "443"
+            description: 公開的 API 連接埠（`PUBLIC_API_PORT`，未設定時為 `API_PORT`）。
+    get:
+      operationId: showResetPasswordPage
+      tags:
+        - pages
+      summary: 顯示密碼重設表單
+      description: |-
+        密碼重設連結的頁面：新密碼表單（密碼須輸入兩次）。表單會送到 `POST /reset-password`。
+
+        **限制**：`page`。
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/LinkTokenQuery'
+      responses:
+        '200':
+          $ref: '#/components/responses/HtmlPage'
+          description: 新密碼表單。
+        '400':
+          $ref: '#/components/responses/HtmlBadRequest'
+          description: 連結無效（當初寄往的地址已不再屬於該帳號時也是如此）。
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '429':
+          $ref: '#/components/responses/HtmlTooManyRequests'
+          description: '`page` 限制（HTML 頁面），或每位址層（JSON `rate_limited`）。'
+        '500':
+          $ref: '#/components/responses/HtmlInternalError'
+        '503':
+          $ref: '#/components/responses/HtmlServiceUnavailable'
+    post:
+      operationId: submitResetPasswordPage
+      tags:
+        - pages
+      summary: 透過重設表單設定新密碼
+      description: |-
+        重設頁面的表單；作用與 `POST /auth/password/reset` 相同：所有裝置都會登出，待處理的電子郵件地址變更會被取消，其他重設連結隨即失效，地址視為已確認，帳號擁有者會收到一封郵件。
+
+        先檢查連結，再檢查兩次輸入的密碼是否相同，最後檢查密碼規則。伺服器忙碌時，會重新顯示表單並附上 `Retry-After`，連結依然有效。
+
+        **限制**：`auth`，接著是 `auth_reset`（與 `POST /auth/password/reset` 共用）。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordForm'
+            example:
+              token: A0ATfmXCDKFC8UkSxLJCD85K7au5nMIrZ2P3K-1VWQg
+              newPassword: a much better passphrase
+              confirmPassword: a much better passphrase
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordForm'
+            example:
+              token: A0ATfmXCDKFC8UkSxLJCD85K7au5nMIrZ2P3K-1VWQg
+              newPassword: a much better passphrase
+              confirmPassword: a much better passphrase
+      responses:
+        '200':
+          $ref: '#/components/responses/HtmlPage'
+          description: 密碼已變更，所有裝置皆已登出。
+        '400':
+          $ref: '#/components/responses/HtmlBadRequest'
+          description: 重新顯示表單並附上錯誤（兩次密碼不一致、密碼強度太弱）、連結無效，或表單無效（HTML 頁面）。
+        '408':
+          $ref: '#/components/responses/HtmlRequestTimeout'
+        '413':
+          $ref: '#/components/responses/HtmlPayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/HtmlUnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/HtmlTooManyRequests'
+          description: '`auth` 或 `auth_reset` 限制（HTML 頁面）；此用戶端等候中的密碼雜湊過多時，重新顯示表單並附上 `Retry-After`（連結依然有效）；或每位址層（JSON `rate_limited`）。'
+        '500':
+          $ref: '#/components/responses/HtmlInternalError'
+        '503':
+          $ref: '#/components/responses/HtmlServiceUnavailable'
+          description: 伺服器忙碌時（密碼雜湊佇列，或資料庫持續鎖定），重新顯示表單並附上 `Retry-After`；連結依然有效。處理常式逾時也會回應此狀態。
+  /confirm-email-change:
+    servers:
+      - url: https://caissa.scacelith.com
+        description: 官方伺服器（頁面位於根路徑，不在 `/api/v1` 之下）。
+      - url: https://{host}:{port}
+        description: 任何 Scacelith 伺服器（頁面位於根路徑，不在 `/api/v1` 之下）。
+        variables:
+          host:
+            default: caissa.scacelith.com
+            description: 伺服器的公開主機名稱（`SERVER_PUBLIC_HOST`）。
+          port:
+            default: "443"
+            description: 公開的 API 連接埠（`PUBLIC_API_PORT`，未設定時為 `API_PORT`）。
+    get:
+      operationId: showConfirmEmailChangePage
+      tags:
+        - pages
+      summary: 顯示電子郵件地址變更確認頁面
+      description: |-
+        電子郵件地址變更連結的頁面：顯示新地址與帳號名稱，並附有「Use this e-mail address」（使用此電子郵件地址）按鈕，按下後會將表單送到 `POST /confirm-email-change`。
+
+        **限制**：`page`。
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/LinkTokenQuery'
+      responses:
+        '200':
+          $ref: '#/components/responses/HtmlPage'
+          description: 顯示新地址及其確認按鈕的頁面。
+        '400':
+          $ref: '#/components/responses/HtmlBadRequest'
+          description: 連結無效或已過期（自提出要求以來帳號地址已變更時也是如此）。
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '429':
+          $ref: '#/components/responses/HtmlTooManyRequests'
+          description: '`page` 限制（HTML 頁面），或每位址層（JSON `rate_limited`）。'
+        '500':
+          $ref: '#/components/responses/HtmlInternalError'
+        '503':
+          $ref: '#/components/responses/HtmlServiceUnavailable'
+    post:
+      operationId: submitConfirmEmailChangePage
+      tags:
+        - pages
+      summary: 確認新的電子郵件地址
+      description: |-
+        電子郵件地址變更頁面的表單。地址隨即變更並視為已確認；各裝置仍保持登入；先前寄出的連結（確認、密碼重設、其他變更）都會失效；原地址會收到通知，其中的新地址經過遮蔽處理。
+
+        **限制**：`auth`。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/LinkTokenForm'
+            example:
+              token: lZ50AvPxUwbGqQCwWPIO28ONray7SzW0Cl_sLImwF3Q
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LinkTokenForm'
+            example:
+              token: lZ50AvPxUwbGqQCwWPIO28ONray7SzW0Cl_sLImwF3Q
+      responses:
+        '200':
+          $ref: '#/components/responses/HtmlPage'
+          description: 地址已變更。
+        '400':
+          $ref: '#/components/responses/HtmlBadRequest'
+          description: 連結無效、已使用或已過期，或表單無效（HTML 頁面）。
+        '408':
+          $ref: '#/components/responses/HtmlRequestTimeout'
+        '409':
+          $ref: '#/components/responses/HtmlConflict'
+          description: 在此期間，該地址已被其他帳號取得（HTML 頁面）。
+        '413':
+          $ref: '#/components/responses/HtmlPayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/HtmlUnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/HtmlTooManyRequests'
+          description: '`auth` 限制（HTML 頁面），或每位址層（JSON `rate_limited`）。'
+        '500':
+          $ref: '#/components/responses/HtmlInternalError'
+        '503':
+          $ref: '#/components/responses/HtmlServiceUnavailable'
+          description: '資料庫持續鎖定（`Retry-After: 1`）：未做任何變更，連結仍然有效。處理常式逾時也會回應此狀態。'
+  /healthz:
+    servers:
+      - url: https://caissa.scacelith.com
+        description: 官方伺服器，根路徑。
+      - url: https://caissa.scacelith.com/api/v1
+        description: 官方伺服器，`/api/v1` 之下。
+      - url: https://{host}:{port}
+        description: 任何 Scacelith 伺服器，根路徑。
+        variables:
+          host:
+            default: caissa.scacelith.com
+            description: 伺服器的公開主機名稱（`SERVER_PUBLIC_HOST`）。
+          port:
+            default: "443"
+            description: 公開的 API 連接埠（`PUBLIC_API_PORT`，未設定時為 `API_PORT`）。
+      - url: https://{host}:{port}/api/v1
+        description: 任何 Scacelith 伺服器，`/api/v1` 之下。
+        variables:
+          host:
+            default: caissa.scacelith.com
+            description: 伺服器的公開主機名稱（`SERVER_PUBLIC_HOST`）。
+          port:
+            default: "443"
+            description: 公開的 API 連接埠（`PUBLIC_API_PORT`，未設定時為 `API_PORT`）。
+    get:
+      operationId: getLiveness
+      tags:
+        - health
+      summary: 檢查處理程序是否正在執行
+      description: |-
+        處理程序執行期間回應 200 `ok`。也可以使用 `HEAD`。其他任何方法（包括 `OPTIONS`）都會回應 405 `method_not_allowed`，並附上 `Allow: GET, HEAD`。
+
+        **限制**：只有每位址層。
+      security: []
+      responses:
+        '200':
+          description: 處理程序正在執行。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                properties:
+                  status:
+                    const: ok
+              example:
+                status: ok
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：每位址層。'
+  /readyz:
+    servers:
+      - url: https://caissa.scacelith.com
+        description: 官方伺服器，根路徑。
+      - url: https://caissa.scacelith.com/api/v1
+        description: 官方伺服器，`/api/v1` 之下。
+      - url: https://{host}:{port}
+        description: 任何 Scacelith 伺服器，根路徑。
+        variables:
+          host:
+            default: caissa.scacelith.com
+            description: 伺服器的公開主機名稱（`SERVER_PUBLIC_HOST`）。
+          port:
+            default: "443"
+            description: 公開的 API 連接埠（`PUBLIC_API_PORT`，未設定時為 `API_PORT`）。
+      - url: https://{host}:{port}/api/v1
+        description: 任何 Scacelith 伺服器，`/api/v1` 之下。
+        variables:
+          host:
+            default: caissa.scacelith.com
+            description: 伺服器的公開主機名稱（`SERVER_PUBLIC_HOST`）。
+          port:
+            default: "443"
+            description: 公開的 API 連接埠（`PUBLIC_API_PORT`，未設定時為 `API_PORT`）。
+    get:
+      operationId: getReadiness
+      tags:
+        - health
+      summary: 檢查伺服器是否接受棋手連線
+      description: |-
+        伺服器接受棋手連線時回應 200 `ready`，啟動或關閉期間回應 503 `not_ready`。也可以使用 `HEAD`。其他任何方法（包括 `OPTIONS`）都會回應 405 `method_not_allowed`，並附上 `Allow: GET, HEAD`。
+
+        **限制**：只有每位址層。
+      security: []
+      responses:
+        '200':
+          description: 伺服器接受棋手連線。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                properties:
+                  status:
+                    const: ready
+              example:
+                status: ready
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：每位址層。'
+        '503':
+          description: 伺服器正在啟動或關閉。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                properties:
+                  status:
+                    const: not_ready
+              example:
+                status: not_ready
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: sct_[A-Za-z0-9_-]{43}
+      description: |-
+        登入回應所提供的工作階段權杖（`sct_` 後接 43 個 base64url 字元），放在 `Authorization` 標頭中：`Authorization: Bearer <token>`。前綴必須正好是 `Bearer`（區分大小寫）加上一個空格；缺少此前綴的值，或不是由 1 至 512 個可列印 ASCII 字元組成的權杖，都會與其他無效權杖一樣回應 401 `invalid_token`。空白標頭視同沒有標頭。
+  parameters:
+    GameId:
+      name: id
+      in: path
+      required: true
+      description: 對局 ID：最多 16 位數、不含前導零的正十進位整數，小於 2^53。
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+        maximum: 9007199254740991
+      example: 4100000000001
+    SessionId:
+      name: id
+      in: path
+      required: true
+      description: 工作階段 ID，與 `GET /auth/sessions` 提供的相同，寫法不含前導零（`03` 不是工作階段 3）。
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+      example: 3
+    Username:
+      name: username
+      in: path
+      required: true
+      description: 棋手的使用者名稱，不分大小寫。伺服器接受任何由 2 至 24 個 `[A-Za-z0-9_.-]` 字元組成的名稱（這是它曾經允許過的最寬鬆規則）。
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9_.-]{2,24}$'
+      example: alice
+    BeforeQuery:
+      name: before
+      in: query
+      required: false
+      description: 對局 ID；只會列出比它更早的對局。請傳入上一頁的 `next`。空白值視同未提供。
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+        maximum: 9007199254740991
+      example: 4100000000002
+    LimitQuery:
+      name: limit
+      in: query
+      required: false
+      description: 每頁筆數，1 至 50。最多 3 位數的更大數字視為 50；空白值視同未提供。
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 999
+        default: 20
+    LinkTokenQuery:
+      name: token
+      in: query
+      required: false
+      description: 電子郵件連結的權杖（43 個 base64url 字元）。缺少或錯誤時，會顯示「link invalid or expired」（連結無效或已過期）頁面。
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9_-]{43}$'
+      example: asfioO4P0r_Zn5DxWzcQuF6Drgxu7wXGjCyS-UFbTaw
+  headers:
+    CacheControl:
+      description: 伺服器的每個回應都禁止快取。
+      schema:
+        type: string
+        const: no-store
+    RetryAfter:
+      description: 重試前須等待的秒數；與本文中的 `retryAfter` 值相同。
+      schema:
+        type: integer
+        minimum: 1
+      example: 30
+    WwwAuthenticate:
+      description: Bearer 驗證挑戰，權杖無效時附有 `error="invalid_token"`。
+      schema:
+        type: string
+        enum:
+          - Bearer realm="scacelith"
+          - Bearer realm="scacelith", error="invalid_token"
+    ConnectionClose:
+      description: 伺服器在此回應之後關閉連線。
+      schema:
+        type: string
+        const: close
+  responses:
+    BadRequest:
+      description: '`invalid_request`（本文中的某個欄位有問題時附 `field`）或 `invalid_json`。'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalidRequest:
+              summary: 某個欄位不符合結構描述
+              value:
+                error: invalid_request
+                message: '"password" is required'
+                field: password
+            invalidJson:
+              summary: 本文不是 JSON
+              value:
+                error: invalid_json
+                message: The body is not valid JSON.
+            weakPassword:
+              summary: 密碼強度太弱
+              value:
+                error: weak_password
+                message: The password must have at least 10 characters.
+                reason: too_short
+            invalidPgn:
+              summary: 無法讀取的 PGN
+              value:
+                error: invalid_pgn
+                message: illegal move 'Ke3'
+                line: 1
+                column: 13
+    Unauthorized:
+      description: '`unauthorized`（沒有 `Authorization` 標頭）或 `invalid_token`（權杖格式錯誤、已過期、已撤銷，或屬於已刪除的帳號）。'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        WWW-Authenticate:
+          $ref: '#/components/headers/WwwAuthenticate'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            unauthorized:
+              summary: 沒有工作階段
+              value:
+                error: unauthorized
+                message: Log in first.
+            invalidToken:
+              summary: 無效的權杖
+              value:
+                error: invalid_token
+                message: The session is invalid or has expired; log in again.
+    Forbidden:
+      description: 要求遭到拒絕。
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalidPassword:
+              summary: 重新驗證時密碼錯誤
+              value:
+                error: invalid_password
+                message: Wrong password.
+            banned:
+              summary: 已停權的帳號
+              value:
+                error: banned
+                message: This account is banned.
+                until: 1791487639708
+    NotFound:
+      description: '`not_found`，或此伺服器已關閉的功能。'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: not_found
+            message: No such game.
+    RequestTimeout:
+      description: '`request_timeout`：本文未在 10 秒內送達。伺服器會關閉連線。'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        Connection:
+          $ref: '#/components/headers/ConnectionClose'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: request_timeout
+            message: The request body took too long.
+    Conflict:
+      description: 要求與伺服器的狀態衝突。
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: username_taken
+            message: This username is already taken.
+    Gone:
+      description: '`sso_expired`：Google 登入嘗試或票證未知、已使用或已過期；請從遊戲中重新開始。'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: sso_expired
+            message: This sign-in has expired; start again from Scacelith.
+    PayloadTooLarge:
+      description: '`payload_too_large`：本文超過 `HTTP_BODY_LIMIT`（預設為 16,384 位元組）。伺服器會關閉連線。'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        Connection:
+          $ref: '#/components/headers/ConnectionClose'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: payload_too_large
+            message: The body must not exceed 16384 bytes.
+    UriTooLong:
+      description: '`uri_too_long`：要求目標超過 4096 個字元。'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: uri_too_long
+            message: The URL is too long.
+    UnsupportedMediaType:
+      description: '`unsupported_media_type`：本文不是 `application/json`，或其字元集不是 UTF-8。'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: unsupported_media_type
+            message: Content-Type must be application/json.
+    UnprocessableContent:
+      description: '`game_too_long`：對局超過 `GIF_MAX_PLIES`（600）個半回合。'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: game_too_long
+            message: The game is too long for a GIF (742 plies, at most 600).
+    PowRequired:
+      description: '`pow_required`：請解出 `pow` 挑戰，並附上 `pow: { challenge, nonce }` 再次傳送相同的要求。`reason` 說明原因：`required`、`malformed`、`signature`、`endpoint`、`network`、`expired`、`bits`、`work` 或 `replayed`。'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: pow_required
+            message: Proof of work required.
+            reason: required
+            pow:
+              challenge: eyJ2IjoxLCJlIjoicmVnaXN0ZXIiLCJiIjoxOCwieCI6MTc5MDg4Mjk5MTIwMH0.6Ku_D7kw3S69OYxj-9KxsXszRCwz6ECnOQ-B6-v2erM
+              bits: 18
+              expiresAt: 1790882991200
+    TooManyRequests:
+      description: '`rate_limited`（速率限制、帳號額度或密碼雜湊佇列）或 `too_many_attempts`（帳號的節流機制），附有 `retryAfter` 與 `Retry-After` 標頭。'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            rateLimited:
+              summary: 速率限制
+              value:
+                error: rate_limited
+                message: Too many requests; try again later.
+                retryAfter: 30
+            tooManyAttempts:
+              summary: 此帳號失敗次數過多
+              value:
+                error: too_many_attempts
+                message: Too many attempts; wait before trying again.
+                retryAfter: 4
+    InternalError:
+      description: '`internal_error`：非預期的失敗。伺服器會將其記錄下來。'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: internal_error
+            message: Internal server error.
+    BadGateway:
+      description: '`sso_failed`：`state` 或 `iss` 錯誤，或 Google 拒絕了授權碼，或傳來無法通過驗證的 ID 權杖。回應絕不會包含 Google 的原文訊息。'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: sso_failed
+            message: Google sign-in could not be completed.
+    ServiceUnavailable:
+      description: '`server_busy`、`busy` 或 `timeout`：若有提供 `retryAfter`，請在其後重試。'
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            serverBusy:
+              summary: 伺服器忙碌中
+              value:
+                error: server_busy
+                message: The server is busy; try again in a few seconds.
+                retryAfter: 9
+            busy:
+              summary: 資料庫持續鎖定（讀取時）
+              value:
+                error: busy
+                message: Try again shortly.
+                retryAfter: 1
+            timeout:
+              summary: 伺服器處理時間過長
+              value:
+                error: timeout
+                message: The server took too long to answer; try again.
+    GifFile:
+      description: GIF 動畫，以附件形式提供。
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        Content-Disposition:
+          description: '本伺服器的對局為 `attachment; filename="scacelith-<id>.gif"`，以 `POST /gif` 傳送的 PGN 則為 `attachment; filename="scacelith-game.gif"`。'
+          schema:
+            type: string
+            pattern: '^attachment; filename="scacelith-([1-9][0-9]{0,15}|game)\.gif"$'
+          example: attachment; filename="scacelith-4100000000001.gif"
+        Content-Length:
+          description: 檔案大小，以位元組為單位。
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        image/gif:
+          schema:
+            type: string
+            format: binary
+    HtmlPage:
+      description: HTML 頁面。
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        text/html:
+          schema:
+            $ref: '#/components/schemas/HtmlDocument'
+    HtmlBadRequest:
+      description: 說明拒絕原因的 HTML 頁面。
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        text/html:
+          schema:
+            $ref: '#/components/schemas/HtmlDocument'
+    HtmlRequestTimeout:
+      description: 表單未在 10 秒內送達（HTML 頁面）。伺服器會關閉連線。
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        Connection:
+          $ref: '#/components/headers/ConnectionClose'
+      content:
+        text/html:
+          schema:
+            $ref: '#/components/schemas/HtmlDocument'
+    HtmlConflict:
+      description: 說明衝突原因的 HTML 頁面。
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        text/html:
+          schema:
+            $ref: '#/components/schemas/HtmlDocument'
+    HtmlPayloadTooLarge:
+      description: 表單超過 `HTTP_BODY_LIMIT`（HTML 頁面）。伺服器會關閉連線。
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        Connection:
+          $ref: '#/components/headers/ConnectionClose'
+      content:
+        text/html:
+          schema:
+            $ref: '#/components/schemas/HtmlDocument'
+    HtmlUnsupportedMediaType:
+      description: 本文既不是表單（`application/x-www-form-urlencoded`）也不是 JSON，或其字元集不是 UTF-8（HTML 頁面）。
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        text/html:
+          schema:
+            $ref: '#/components/schemas/HtmlDocument'
+    HtmlTooManyRequests:
+      description: 觸及速率限制（HTML 頁面），附 `Retry-After`。
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        text/html:
+          schema:
+            $ref: '#/components/schemas/HtmlDocument'
+    HtmlInternalError:
+      description: 非預期的失敗（標題為「Server error」（伺服器錯誤）的 HTML 頁面）。伺服器會將其記錄下來。
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+      content:
+        text/html:
+          schema:
+            $ref: '#/components/schemas/HtmlDocument'
+    HtmlServiceUnavailable:
+      description: 伺服器忙碌中（資料庫持續鎖定，附 `Retry-After`）或處理時間過長（標題為「Server error」（伺服器錯誤）的 HTML 頁面）。
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControl'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        text/html:
+          schema:
+            $ref: '#/components/schemas/HtmlDocument'
+  schemas:
+    Error:
+      type: object
+      description: JSON API 所有錯誤回應的統一格式。
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          pattern: '^[a-z][a-z0-9_]*$'
+          description: '`snake_case` 格式的錯誤代碼。用戶端應依據它決定要顯示的內容。'
+          examples:
+            - rate_limited
+        message:
+          type: string
+          description: 一句英文句子，供記錄使用，或作為備用文字。
+        retryAfter:
+          type: integer
+          minimum: 1
+          description: 重試前須等待的秒數，只會出現在經過一段時間即會解除的拒絕中。此時回應也會帶有相同值的 `Retry-After` 標頭，但讀取對局紀錄、對局、棋手與排行榜時的 503 `busy` 除外。
+        field:
+          type: string
+          description: 有問題的欄位或查詢參數（`invalid_request`、`invalid_option`，以及 `GET /account/games` 的 `invalid_cursor`、`invalid_limit` 與 `invalid_filter`）。巢狀欄位以點號連接（`pow.nonce`）。
+        reason:
+          type: string
+          description: '原因：`weak_password` 所違反的規則，或要求、拒絕工作量證明的原因（`pow_required`）。'
+          enum:
+            - too_short
+            - too_long
+            - contains_username
+            - contains_email
+            - too_common
+            - required
+            - malformed
+            - signature
+            - endpoint
+            - network
+            - expired
+            - bits
+            - work
+            - replayed
+        pow:
+          $ref: '#/components/schemas/PowChallenge'
+        until:
+          type:
+            - integer
+            - 'null'
+          format: int64
+          description: '僅限 `banned`：停權結束時間（紀元毫秒數），永久停權時為 `null`。'
+        line:
+          type: integer
+          minimum: 1
+          description: '僅限 `invalid_pgn`：錯誤所在的行，從 1 起算。'
+        column:
+          type: integer
+          minimum: 1
+          description: '僅限 `invalid_pgn`：錯誤所在的欄，從 1 起算，以字元計。'
+    PowChallenge:
+      type: object
+      description: 工作量證明挑戰（428 `pow_required` 中的 `pow`）。
+      required:
+        - challenge
+        - bits
+        - expiresAt
+      properties:
+        challenge:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{16,400}\.[A-Za-z0-9_-]{43}$'
+          description: 經簽章的挑戰，須原封不動地送回。
+        bits:
+          type: integer
+          minimum: 1
+          maximum: 26
+          description: '`SHA-256(challenge + ":" + nonce)` 開頭必須具有的零位元數。'
+        expiresAt:
+          type: integer
+          format: int64
+          description: 挑戰的到期時間（紀元毫秒數），即發出後 2 分鐘。
+    PowAnswer:
+      type: object
+      description: 工作量證明挑戰的解答。
+      additionalProperties: false
+      required:
+        - challenge
+        - nonce
+      properties:
+        challenge:
+          type: string
+          minLength: 16
+          maxLength: 512
+          description: 428 回應中的 `challenge`，須與收到時完全相同。
+        nonce:
+          type: string
+          pattern: '^[0-9]{1,20}$'
+          description: 最多 20 位數的十進位字串，使 `SHA-256(challenge + ":" + nonce)` 以 `bits` 個零位元開頭。
+    ServerInfo:
+      type: object
+      description: 用戶端在登入或連線之前需要的資訊。
+      required:
+        - name
+        - serverId
+        - motd
+        - protocol
+        - wsPort
+        - wsPath
+        - registration
+        - emailVerification
+        - sso
+        - mfa
+        - pow
+        - categories
+        - limits
+      properties:
+        name:
+          type: string
+          description: 伺服器的名稱（`SERVER_NAME`）。
+        serverId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: 資料庫首次啟動時取得的 UUID。重新啟動後仍維持不變。資料庫無法提供時為 `null`。
+        motd:
+          type: string
+          description: 今日訊息（`SERVER_MOTD`），可能為空。
+        protocol:
+          type: object
+          description: WebSocket 通訊協定（`PROTOCOL.md`）。
+          required:
+            - min
+            - max
+            - schema
+            - subprotocol
+          properties:
+            min:
+              type: integer
+              minimum: 1
+              description: 伺服器支援的最舊通訊協定版本。
+            max:
+              type: integer
+              minimum: 1
+              description: 伺服器支援的最新通訊協定版本。
+            schema:
+              type: integer
+              format: int64
+              minimum: 0
+              maximum: 4294967295
+              description: 通訊協定結構描述的指紋（其標準形式之 SHA-256 的前 4 個位元組，以無號整數表示）；僅供參考。
+            subprotocol:
+              type: string
+              description: WebSocket 子通訊協定名稱（`Sec-WebSocket-Protocol`）。
+        wsPort:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          description: 棋手所用的 WebSocket 連接埠（`PUBLIC_WS_PORT`；未設定時為 `WS_PORT`，再未設定則為 `API_PORT`）。
+        wsPath:
+          type: string
+          const: /ws
+          description: WebSocket 的路徑。
+        registration:
+          type: string
+          enum:
+            - open
+            - closed
+          description: 是否可以建立新帳號。
+        emailVerification:
+          type: boolean
+          description: 新帳號是否需要確認電子郵件地址（`REQUIRE_EMAIL_VERIFICATION`）。
+        sso:
+          type: object
+          required:
+            - google
+          properties:
+            google:
+              type: boolean
+              description: 是否提供 Google 登入。
+        mfa:
+          type: boolean
+          const: true
+          description: 雙重驗證一律可用。
+        pow:
+          type: object
+          required:
+            - register
+          properties:
+            register:
+              type: integer
+              minimum: 0
+              maximum: 26
+              description: 註冊所需的工作量證明位元數（0 表示不需要）。
+        categories:
+          type: array
+          description: 官方（計分）時限（`RATED_CATEGORIES`），依伺服器的順序排列。其他任何時限皆為 `custom`。
+          items:
+            $ref: '#/components/schemas/Category'
+        limits:
+          type: object
+          description: 用戶端在送出表單之前可以先行檢查的規則。
+          required:
+            - usernameMin
+            - usernameMax
+            - usernamePattern
+            - passwordMinLength
+            - passwordMaxBytes
+            - customTimeControls
+            - reportsPerDay
+            - wsMaxMessageBytes
+          properties:
+            usernameMin:
+              type: integer
+              description: 使用者名稱的最短長度（`USERNAME_MIN`）。
+            usernameMax:
+              type: integer
+              description: 使用者名稱的最長長度（`USERNAME_MAX`）。
+            usernamePattern:
+              type: string
+              description: 新使用者名稱必須符合的規則運算式。
+            passwordMinLength:
+              type: integer
+              description: 密碼的最短長度，以字元計（`PASSWORD_MIN_LENGTH`）。
+            passwordMaxBytes:
+              type: integer
+              description: 密碼的最長長度，以 UTF-8 位元組計。
+            customTimeControls:
+              type: boolean
+              description: 挑戰與私人對局是否可以使用自訂時限。
+            reportsPerDay:
+              type: integer
+              description: 每位棋手每 24 小時可提出的檢舉次數（`REPORTS_PER_DAY`）。
+            wsMaxMessageBytes:
+              type: integer
+              description: 用戶端可傳送的 WebSocket 訊息大小上限，以位元組計。
+      example:
+        name: Scacelith
+        serverId: 07dd26af-672a-43af-a8af-34011c7e977b
+        motd: ''
+        protocol:
+          min: 1
+          max: 1
+          schema: 97842216
+          subprotocol: scacelith.rt1
+        wsPort: 443
+        wsPath: /ws
+        registration: open
+        emailVerification: true
+        sso:
+          google: false
+        mfa: true
+        pow:
+          register: 18
+        categories:
+          - id: '1+0'
+            baseSec: 60
+            incSec: 0
+          - id: '3+2'
+            baseSec: 180
+            incSec: 2
+        limits:
+          usernameMin: 3
+          usernameMax: 20
+          usernamePattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+          passwordMinLength: 10
+          passwordMaxBytes: 256
+          customTimeControls: true
+          reportsPerDay: 5
+          wsMaxMessageBytes: 512
+    Category:
+      type: object
+      description: 官方時限。
+      required:
+        - id
+        - baseSec
+        - incSec
+      properties:
+        id:
+          type: string
+          pattern: '^[0-9]+\+[0-9]+$'
+          description: 類別 ID，由分鐘數與加秒秒數組成（`3+2`）。
+        baseSec:
+          type: number
+          minimum: 0
+          description: 基本時間，以秒為單位。
+        incSec:
+          type: number
+          minimum: 0
+          description: 每步加秒，以秒為單位。
+    AccountView:
+      type: object
+      description: 棋手本人所見的帳號（登入回應與 `GET /account/me` 中的 `user`）。
+      required:
+        - id
+        - username
+        - email
+        - emailVerified
+        - mfaEnabled
+        - googleLinked
+        - hasPassword
+        - acceptChallenges
+        - createdAt
+        - lastLoginAt
+        - pendingEmail
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: 帳號 ID。
+        username:
+          type: string
+          description: 使用者名稱。
+        email:
+          type: string
+          format: email
+          description: 電子郵件地址。
+        emailVerified:
+          type: boolean
+          description: 地址是否已確認。
+        mfaEnabled:
+          type: boolean
+          description: 是否已啟用雙重驗證。
+        googleLinked:
+          type: boolean
+          description: 是否已連結 Google 帳號。
+        hasPassword:
+          type: boolean
+          description: '透過 Google 建立且尚未設定密碼的帳號為 `false`。'
+        acceptChallenges:
+          type: string
+          enum:
+            - all
+            - none
+          description: 是否接受透過使用者名稱發起的直接挑戰（請見 `PUT /account/preferences`）。
+        createdAt:
+          type: integer
+          format: int64
+          description: 帳號建立時間（紀元毫秒數）。
+        lastLoginAt:
+          type:
+            - integer
+            - 'null'
+          format: int64
+          description: 上次登入時間（紀元毫秒數），或 `null`。
+        pendingEmail:
+          type:
+            - string
+            - 'null'
+          format: email
+          description: 等候連結確認之電子郵件地址變更的新地址，或 `null`。
+    SessionAnswer:
+      type: object
+      description: 新的工作階段。
+      required:
+        - token
+        - expiresAt
+        - user
+      properties:
+        token:
+          type: string
+          pattern: '^sct_[A-Za-z0-9_-]{43}$'
+          description: 工作階段權杖，用於 `Authorization` 標頭與 WebSocket。
+        expiresAt:
+          type: integer
+          format: int64
+          description: 工作階段的絕對結束時間（紀元毫秒數）；閒置期限可能使其更早結束。
+        user:
+          $ref: '#/components/schemas/AccountView'
+      example:
+        token: sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8
+        expiresAt: 1798658839708
+        user:
+          id: 1
+          username: alice
+          email: alice@example.org
+          emailVerified: true
+          mfaEnabled: true
+          googleLinked: false
+          hasPassword: true
+          acceptChallenges: all
+          createdAt: 1790882839743
+          lastLoginAt: 1790882839708
+          pendingEmail: null
+    MfaChallenge:
+      type: object
+      description: 啟用雙重驗證時登入的第二步驟；接著呼叫 `POST /auth/login/mfa`。
+      required:
+        - mfaRequired
+        - mfaToken
+        - expiresIn
+      properties:
+        mfaRequired:
+          type: boolean
+          const: true
+        mfaToken:
+          type: string
+          pattern: '^mfa_[A-Za-z0-9_-]{43}$'
+          description: 此步驟的權杖，用於 `POST /auth/login/mfa`。
+        expiresIn:
+          type: integer
+          const: 300
+          description: 完成此步驟的剩餘秒數。
+    LoginAnswer:
+      description: 一個工作階段，或啟用雙重驗證時登入的第二步驟。
+      oneOf:
+        - $ref: '#/components/schemas/SessionAnswer'
+        - $ref: '#/components/schemas/MfaChallenge'
+    SsoNeedsUsername:
+      type: object
+      description: 首次 Google 登入；接著呼叫 `POST /auth/sso/complete`。
+      required:
+        - needsUsername
+        - ssoTicket
+        - suggestedUsername
+      properties:
+        needsUsername:
+          type: boolean
+          const: true
+        ssoTicket:
+          type: string
+          pattern: '^sso_[A-Za-z0-9_-]{43}$'
+          description: 用於 `POST /auth/sso/complete` 的票證，有效期 10 分鐘。
+        suggestedUsername:
+          type: string
+          description: 根據 Google 名稱或電子郵件地址產生的使用者名稱，若都不合用則為 `""`。
+    SsoNeedsPassword:
+      type: object
+      description: 設有密碼的帳號正在使用該地址；接著呼叫 `POST /auth/sso/google/link`。此時尚未建立任何連結。
+      required:
+        - needsPassword
+        - linkTicket
+        - username
+        - expiresIn
+      properties:
+        needsPassword:
+          type: boolean
+          const: true
+        linkTicket:
+          type: string
+          pattern: '^sso_[A-Za-z0-9_-]{43}$'
+          description: 用於 `POST /auth/sso/google/link` 的票證。
+        username:
+          type: string
+          description: 該帳號的使用者名稱（只有已向 Google 證明擁有該地址的人才看得到）。
+        expiresIn:
+          type: integer
+          const: 600
+          description: 票證的剩餘有效秒數。
+    SsoFinishAnswer:
+      description: '`POST /auth/sso/google/finish` 的回應。'
+      oneOf:
+        - $ref: '#/components/schemas/SessionAnswer'
+        - $ref: '#/components/schemas/MfaChallenge'
+        - $ref: '#/components/schemas/SsoNeedsUsername'
+        - $ref: '#/components/schemas/SsoNeedsPassword'
+    SsoStartAnswer:
+      type: object
+      description: 一次 Google 登入嘗試。
+      required:
+        - attemptId
+        - authUrl
+        - state
+        - expiresIn
+      properties:
+        attemptId:
+          type: string
+          pattern: '^sso_[A-Za-z0-9_-]{43}$'
+          description: 此次嘗試，用於 `POST /auth/sso/google/finish`。
+        authUrl:
+          type: string
+          format: uri
+          description: 要在系統瀏覽器中開啟的 Google URL（須先通過檢查）。
+        state:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: Google 必須送回的 `state`。
+        expiresIn:
+          type: integer
+          const: 600
+          description: 嘗試的剩餘有效秒數。
+    VerificationSentStatus:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          const: verification_sent
+    AcceptedStatus:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          const: accepted
+    LoggedOutStatus:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          const: logged_out
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - username
+        - email
+        - password
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 使用者名稱；另須符合伺服器的規則（請見說明）。
+        email:
+          type: string
+          minLength: 1
+          maxLength: 254
+          description: 電子郵件地址。會去除前後空白並以小寫儲存。
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: 密碼；另須符合密碼規則。
+        pow:
+          $ref: '#/components/schemas/PowAnswer'
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - login
+        - password
+      properties:
+        login:
+          type: string
+          minLength: 1
+          maxLength: 254
+          description: 使用者名稱或電子郵件地址（任何含有 `@` 的文字）。
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        clientLabel:
+          $ref: '#/components/schemas/ClientLabel'
+        pow:
+          $ref: '#/components/schemas/PowAnswer'
+    ClientLabel:
+      type: string
+      maxLength: 64
+      description: 選用。顯示於已登入裝置的清單中（例如 `Scacelith 1.4 (Windows)`）。
+    MfaLoginRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - mfaToken
+      properties:
+        mfaToken:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 登入回應（或 Google 登入回應）中的 `mfaToken`。
+        code:
+          type: string
+          maxLength: 32
+          description: 選用。6 位數的驗證器驗證碼，或復原碼。
+        recoveryCode:
+          type: string
+          maxLength: 32
+          description: 選用。復原碼。必須提供 `code` 與 `recoveryCode` 其中之一。
+    EmailRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - email
+      properties:
+        email:
+          type: string
+          minLength: 1
+          maxLength: 254
+          description: 電子郵件地址。
+    PasswordResetRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - token
+        - newPassword
+      properties:
+        token:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: 重設連結的 `token` 參數。
+        newPassword:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: 新密碼；適用註冊時的密碼規則。
+    SsoStartRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - codeChallenge
+        - redirectPort
+      properties:
+        codeChallenge:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: 用戶端 `codeVerifier` 的 S256 PKCE 挑戰值（`BASE64URL(SHA-256(codeVerifier))`）。
+        redirectPort:
+          type: integer
+          minimum: 1024
+          maximum: 65535
+          description: 用戶端在 `127.0.0.1` 上之監聽器的連接埠。
+    SsoFinishRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - attemptId
+        - codeVerifier
+        - state
+        - code
+      properties:
+        attemptId:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: '`POST /auth/sso/google/start` 傳回的 `attemptId`。'
+        codeVerifier:
+          type: string
+          pattern: '^[A-Za-z0-9._~-]{43,128}$'
+          description: PKCE 驗證值；其 SHA-256 必須與提供給 `start` 的挑戰值相符。
+        state:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: Google 送回的 `state`，原樣傳送。
+        code:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          pattern: '^[\x21-\x7E]+$'
+          description: Google 送回的 `code`，原樣傳送（不含空格的可列印 ASCII 字元）。
+        iss:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: 選用。Google 有送回 `iss` 時，原樣傳送。
+        clientLabel:
+          $ref: '#/components/schemas/ClientLabel'
+    SsoLinkRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - linkTicket
+        - password
+      properties:
+        linkTicket:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: '`finish` 傳回的 `linkTicket`，有效期 10 分鐘。'
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: 帳號的密碼。
+        clientLabel:
+          $ref: '#/components/schemas/ClientLabel'
+        pow:
+          $ref: '#/components/schemas/PowAnswer'
+    SsoCompleteRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - ssoTicket
+        - username
+      properties:
+        ssoTicket:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: '`finish` 傳回的 `ssoTicket`，有效期 10 分鐘。'
+        username:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 使用者名稱；適用註冊規則。
+        clientLabel:
+          $ref: '#/components/schemas/ClientLabel'
+    SessionList:
+      type: object
+      required:
+        - sessions
+      properties:
+        sessions:
+          type: array
+          description: 有效的工作階段，最近使用的排在最前面。
+          items:
+            $ref: '#/components/schemas/SessionEntry'
+    SessionEntry:
+      type: object
+      description: 一個有效的工作階段（一台已登入的裝置）。
+      required:
+        - id
+        - createdAt
+        - lastSeenAt
+        - expiresAt
+        - clientLabel
+        - current
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: 工作階段 ID，用於 `DELETE /auth/sessions/{id}`。
+        createdAt:
+          type: integer
+          format: int64
+          description: 登入時間（紀元毫秒數）。
+        lastSeenAt:
+          type: integer
+          format: int64
+          description: 上次使用時間（紀元毫秒數），最多每 5 分鐘更新一次。
+        expiresAt:
+          type: integer
+          format: int64
+          description: 絕對結束時間（紀元毫秒數）；閒置期限可能使工作階段更早結束。
+        clientLabel:
+          type:
+            - string
+            - 'null'
+          description: 登入時提供的 `clientLabel`，未提供時為 `null`。
+        current:
+          type: boolean
+          description: 是否為發出此要求的工作階段。
+    AccountMe:
+      type: object
+      required:
+        - user
+        - ratings
+        - sanctions
+        - ban
+      properties:
+        user:
+          $ref: '#/components/schemas/AccountView'
+        ratings:
+          type: array
+          description: 棋手下過計分對局的每個類別各一筆紀錄。
+          items:
+            $ref: '#/components/schemas/RatingSummary'
+        sanctions:
+          type: array
+          description: 生效中的處分。
+          items:
+            $ref: '#/components/schemas/ActiveSanction'
+        ban:
+          description: '停權期間為 `{ until }`，否則為 `null`。'
+          oneOf:
+            - $ref: '#/components/schemas/Ban'
+            - type: 'null'
+    RatingSummary:
+      type: object
+      description: 單一類別的等級分紀錄。
+      required:
+        - category
+        - rating
+        - games
+        - wins
+        - draws
+        - losses
+        - peak
+        - provisional
+      properties:
+        category:
+          type: string
+          description: 類別 ID。
+        rating:
+          type: integer
+          description: 等級分。
+        games:
+          type: integer
+          minimum: 0
+          description: 在該類別下過的對局數（不論是否計入）。
+        wins:
+          type: integer
+          minimum: 0
+        draws:
+          type: integer
+          minimum: 0
+        losses:
+          type: integer
+          minimum: 0
+        peak:
+          type: integer
+          description: 曾達到的最高等級分。
+        provisional:
+          type: boolean
+          description: '等級分尚未定級，或計入的對局少於 `PROVISIONAL_GAMES` 局時為 `true`（遊戲中顯示為 `1510?`）。'
+    ActiveSanction:
+      type: object
+      required:
+        - kind
+        - reason
+        - startsAt
+        - endsAt
+      properties:
+        kind:
+          type: string
+          enum:
+            - ban
+            - mm_block
+            - warning
+          description: 處分的種類。
+        reason:
+          type:
+            - string
+            - 'null'
+          description: 給出的理由（如有）。
+        startsAt:
+          type: integer
+          format: int64
+          description: 開始時間（紀元毫秒數）。
+        endsAt:
+          type:
+            - integer
+            - 'null'
+          format: int64
+          description: 結束時間（紀元毫秒數），永久處分時為 `null`。
+    Ban:
+      type: object
+      required:
+        - until
+      properties:
+        until:
+          type:
+            - integer
+            - 'null'
+          format: int64
+          description: 停權結束時間（紀元毫秒數），永久停權時為 `null`。
+    Preferences:
+      type: object
+      additionalProperties: false
+      required:
+        - acceptChallenges
+      properties:
+        acceptChallenges:
+          type: string
+          enum:
+            - all
+            - none
+          description: '`all` 表示接受透過使用者名稱發起的直接挑戰，`none` 表示拒絕。'
+    PasswordChangeRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - currentPassword
+        - newPassword
+      properties:
+        currentPassword:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: 目前的密碼。
+        newPassword:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: 新密碼；適用註冊時的密碼規則。
+    PasswordOnlyRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - password
+      properties:
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: 帳號的密碼。
+    TotpEnableRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - code
+      properties:
+        code:
+          type: string
+          pattern: '^[0-9]{6}$'
+          description: 以待啟用金鑰產生的驗證碼，正好 6 位數。
+    ReauthCredentials:
+      type: object
+      additionalProperties: false
+      required:
+        - password
+      properties:
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: 帳號的密碼。
+        code:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: 選用；啟用雙重驗證時必須提供（或改為提供 `recoveryCode`）。驗證器驗證碼或復原碼。
+        recoveryCode:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: 選用。復原碼（`xxxx-xxxx-xx`；不分大小寫，空格與連字號也不影響）。
+    RecoveryCodesRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - password
+        - code
+      properties:
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: 帳號的密碼。
+        code:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: 驗證器驗證碼（不接受復原碼）。
+    EmailChangeRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - newEmail
+        - password
+      properties:
+        newEmail:
+          type: string
+          minLength: 1
+          maxLength: 254
+          description: 新地址；會先去除前後空白並轉為小寫，再以與註冊地址相同的方式檢查。
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: 帳號的密碼。
+        code:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: 選用；啟用雙重驗證時必須提供（或改為提供 `recoveryCode`）。驗證器驗證碼或復原碼。
+        recoveryCode:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: 選用。復原碼。
+    TotpSetup:
+      type: object
+      description: 供驗證器應用程式使用的待啟用金鑰。
+      required:
+        - secret
+        - uri
+        - algorithm
+        - digits
+        - period
+      properties:
+        secret:
+          type: string
+          pattern: '^[A-Z2-7]+$'
+          description: 以 base32 表示的金鑰，可手動輸入應用程式。
+        uri:
+          type: string
+          format: uri
+          description: '`otpauth://totp/...` URI，可顯示為 QR 碼。'
+        algorithm:
+          type: string
+          const: SHA1
+        digits:
+          type: integer
+          const: 6
+        period:
+          type: integer
+          const: 30
+          description: 每個時間步驟的秒數。
+    RecoveryCodeList:
+      type: array
+      description: 10 組復原碼，只會顯示這一次。每組只能使用一次。
+      minItems: 10
+      maxItems: 10
+      items:
+        type: string
+        pattern: '^[0-9a-hjkmnp-tv-z]{4}-[0-9a-hjkmnp-tv-z]{4}-[0-9a-hjkmnp-tv-z]{2}$'
+    PlayerSide:
+      type: object
+      description: 對局中的一方。
+      required:
+        - name
+        - rating
+        - ratingAfter
+        - ratingDiff
+      properties:
+        name:
+          type: string
+          description: 棋譜中的名字（已刪除的帳號為 `deleted#<id>`）。
+        rating:
+          type:
+            - integer
+            - 'null'
+          description: 開始時的等級分，未知時為 `null`。
+        ratingAfter:
+          type:
+            - integer
+            - 'null'
+          description: 對局後的等級分。計分對局一定會有此值；只有不計入等級分的對局（不計分、自訂、已中止）才為 `null`。
+        ratingDiff:
+          type:
+            - integer
+            - 'null'
+          description: 等級分的變化；若等級分規則使等級分維持不變則為 `0`（FIDE 的零分規則、對手尚未定級、尚未定級棋手的最初幾局）；為 `null` 的情況與 `ratingAfter` 相同。
+    GameSummary:
+      type: object
+      description: 已儲存對局的摘要。
+      required:
+        - id
+        - category
+        - rated
+        - timeControl
+        - white
+        - black
+        - status
+        - reason
+        - result
+        - termination
+        - plies
+        - startedAt
+        - endedAt
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 9007199254740991
+          description: 對局 ID。
+        category:
+          type: string
+          description: 官方類別 ID（`3+2`），或 `custom`。
+        rated:
+          type: boolean
+          description: 對局是否計入等級分。
+        timeControl:
+          type: string
+          pattern: '^[0-9]+\+[0-9]+$'
+          description: 以秒表示的時限（`180+2`）。
+        white:
+          $ref: '#/components/schemas/PlayerSide'
+        black:
+          $ref: '#/components/schemas/PlayerSide'
+        status:
+          type: integer
+          enum:
+            - 1
+            - 2
+            - 3
+            - 4
+          description: '1 `WhiteWins`、2 `BlackWins`、3 `Draw`、4 `Aborted`（請見對局代碼）。'
+        reason:
+          type: integer
+          minimum: 0
+          maximum: 255
+          description: 結束原因代碼（請見對局代碼）。
+        result:
+          type: string
+          enum:
+            - 1-0
+            - 0-1
+            - 1/2-1/2
+            - '*'
+          description: 結果，已中止的對局為 `*`。
+        termination:
+          $ref: '#/components/schemas/Termination'
+        plies:
+          type: integer
+          minimum: 0
+          description: 半回合數。
+        startedAt:
+          type: integer
+          format: int64
+          description: 開始時間（紀元毫秒數）。
+        endedAt:
+          type: integer
+          format: int64
+          description: 結束時間（紀元毫秒數）。
+    Termination:
+      type: string
+      description: 結束原因的名稱（請見對局代碼）；通訊協定不認得的代碼為 `Unknown`。
+      enum:
+        - Checkmate
+        - Resignation
+        - Timeout
+        - IllegalMoves
+        - Stalemate
+        - InsufficientMaterial
+        - TimeoutVsInsufficient
+        - FivefoldRepetition
+        - SeventyFiveMoves
+        - ThreefoldClaim
+        - FiftyMoveClaim
+        - Agreement
+        - IllegalMovesVsInsufficient
+        - Abandonment
+        - AbandonmentVsInsufficient
+        - Aborted
+        - NoShow
+        - Forfeit
+        - ServerAborted
+        - BothDisconnected
+        - Unknown
+    PlayerGameSummary:
+      description: 從某一位棋手的角度呈現的對局摘要。
+      allOf:
+        - $ref: '#/components/schemas/GameSummary'
+        - type: object
+          required:
+            - color
+          properties:
+            color:
+              type: string
+              enum:
+                - white
+                - black
+              description: 棋手所執的一方。
+    HistoryGameSummary:
+      description: 已登入棋手對局紀錄中的一局。
+      allOf:
+        - $ref: '#/components/schemas/PlayerGameSummary'
+        - type: object
+          required:
+            - baseMs
+            - incMs
+            - outcome
+          properties:
+            baseMs:
+              type: integer
+              format: int64
+              minimum: 0
+              description: 基本時間，以毫秒為單位。
+            incMs:
+              type: integer
+              format: int64
+              minimum: 0
+              description: 加秒，以毫秒為單位。
+            outcome:
+              type: string
+              enum:
+                - win
+                - loss
+                - draw
+                - aborted
+              description: 從棋手角度而言的勝負結果。
+    HistoryPage:
+      type: object
+      required:
+        - games
+        - next
+        - total
+      properties:
+        games:
+          type: array
+          description: 本頁的對局，最新的排在最前面。
+          items:
+            $ref: '#/components/schemas/HistoryGameSummary'
+        next:
+          type:
+            - integer
+            - 'null'
+          format: int64
+          description: 取得下一頁時要作為 `before` 傳入的 ID；最後一頁為 `null`。
+        total:
+          type: integer
+          minimum: 0
+          description: 所有頁面中符合篩選條件的對局總數。
+    MoveRecord:
+      type: object
+      description: 對局中的一個半回合。
+      required:
+        - uci
+        - spentMs
+        - clockMs
+      properties:
+        uci:
+          type: string
+          pattern: '^[a-h][1-8][a-h][1-8][nbrq]?$'
+          description: 以 UCI 記譜法表示的著法，升變時加上 `n`、`b`、`r` 或 `q`。
+        spentMs:
+          type:
+            - integer
+            - 'null'
+          minimum: 0
+          description: 該步耗用的時間（毫秒），棋譜中沒有此資料時為 `null`。
+        clockMs:
+          type:
+            - integer
+            - 'null'
+          minimum: 0
+          description: 走棋方在該步之後的棋鐘時間（毫秒），棋譜中沒有此資料時為 `null`。
+    PgnTagsView:
+      type: object
+      description: 主要的 PGN 標籤，供顯示使用。此處的 `Termination` 是結束原因的名稱；PGN 檔案中則使用 PGN 標準值。
+      required:
+        - Event
+        - Site
+        - Date
+        - Round
+        - White
+        - Black
+        - Result
+        - WhiteElo
+        - BlackElo
+        - TimeControl
+        - Termination
+        - PlyCount
+      properties:
+        Event:
+          type: string
+          description: '`<SERVER_NAME> rated <category>` 或 `<SERVER_NAME> casual <category>`。'
+        Site:
+          type: string
+          description: '`SERVER_PUBLIC_HOST`。'
+        Date:
+          type: string
+          pattern: '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$'
+          description: UTC 開始日期。
+        Round:
+          type: string
+          const: '-'
+        White:
+          type: string
+        Black:
+          type: string
+        Result:
+          type: string
+          enum:
+            - 1-0
+            - 0-1
+            - 1/2-1/2
+            - '*'
+        WhiteElo:
+          description: 開始時的等級分，或 `"-"`。
+          oneOf:
+            - type: integer
+            - type: string
+              const: '-'
+        BlackElo:
+          description: 開始時的等級分，或 `"-"`。
+          oneOf:
+            - type: integer
+            - type: string
+              const: '-'
+        TimeControl:
+          type: string
+          pattern: '^[0-9]+\+[0-9]+$'
+        Termination:
+          $ref: '#/components/schemas/Termination'
+        PlyCount:
+          type: integer
+          minimum: 0
+    GameRecord:
+      description: 一份棋譜，含著法與棋鐘時間。它具有對局摘要的欄位，但沒有 `color` 與 `outcome`。
+      allOf:
+        - $ref: '#/components/schemas/GameSummary'
+        - type: object
+          required:
+            - baseMs
+            - incMs
+            - statusName
+            - rematchOf
+            - moves
+            - pgn
+          properties:
+            baseMs:
+              type: integer
+              format: int64
+              minimum: 0
+              description: 基本時間，以毫秒為單位。
+            incMs:
+              type: integer
+              format: int64
+              minimum: 0
+              description: 加秒，以毫秒為單位。
+            statusName:
+              type: string
+              enum:
+                - WhiteWins
+                - BlackWins
+                - Draw
+                - Aborted
+              description: '`status` 的名稱。'
+            rematchOf:
+              type:
+                - integer
+                - 'null'
+              format: int64
+              description: 若本局是某局的再戰，則為該原對局的 ID，否則為 `null`。
+            moves:
+              type: array
+              description: 每個半回合一筆。
+              items:
+                $ref: '#/components/schemas/MoveRecord'
+            pgn:
+              $ref: '#/components/schemas/PgnTagsView'
+            you:
+              type: string
+              enum:
+                - white
+                - black
+              description: 僅在權杖所屬棋手參與此對局時提供：該棋手所執的一方。
+            reportable:
+              type: boolean
+              description: 僅在權杖所屬棋手參與此對局時提供；若此時 `POST /reports` 會受理針對此對局對手的檢舉，則為 `true`（對局在 7 天內結束、每日配額尚未用完，且尚未針對此對局檢舉過該對手）。
+    PlayerProfile:
+      type: object
+      required:
+        - username
+        - createdAt
+        - ratings
+        - games
+      properties:
+        username:
+          type: string
+          description: 使用者名稱，保留棋手當初輸入的寫法。
+        createdAt:
+          type: integer
+          format: int64
+          description: 帳號建立時間（紀元毫秒數）。
+        ratings:
+          type: array
+          description: 僅限官方類別，依伺服器的順序排列。
+          items:
+            $ref: '#/components/schemas/RatingSummary'
+        games:
+          type: object
+          required:
+            - total
+            - rated
+            - wins
+            - draws
+            - losses
+          properties:
+            total:
+              type: integer
+              minimum: 0
+              description: 所有已儲存的對局，包括不計分與已中止的對局。
+            rated:
+              type: integer
+              minimum: 0
+              description: 計分對局數，為各等級分紀錄的合計。
+            wins:
+              type: integer
+              minimum: 0
+            draws:
+              type: integer
+              minimum: 0
+            losses:
+              type: integer
+              minimum: 0
+    PlayerGamesPage:
+      type: object
+      required:
+        - username
+        - games
+        - next
+      properties:
+        username:
+          type: string
+          description: 使用者名稱，保留棋手當初輸入的寫法。
+        games:
+          type: array
+          description: 本頁的對局，最新的排在最前面。
+          items:
+            $ref: '#/components/schemas/PlayerGameSummary'
+        next:
+          type:
+            - integer
+            - 'null'
+          format: int64
+          description: 該頁已滿時為最後一局的 ID（此時下一頁可能是空的），否則為 `null`。
+    Leaderboard:
+      type: object
+      required:
+        - category
+        - minGames
+        - updatedAt
+        - players
+      properties:
+        category:
+          type: string
+          description: 類別 ID。
+        minGames:
+          type: integer
+          minimum: 0
+          description: 一筆紀錄要列入排行榜所需的計入對局數（`PROVISIONAL_GAMES`）。
+        updatedAt:
+          type: integer
+          format: int64
+          description: 排行榜的計算時間（紀元毫秒數）。
+        players:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/LeaderboardEntry'
+    LeaderboardEntry:
+      type: object
+      required:
+        - rank
+        - username
+        - rating
+        - games
+        - wins
+        - draws
+        - losses
+        - peak
+      properties:
+        rank:
+          type: integer
+          minimum: 1
+        username:
+          type: string
+        rating:
+          type: integer
+        games:
+          type: integer
+          minimum: 0
+        wins:
+          type: integer
+          minimum: 0
+        draws:
+          type: integer
+          minimum: 0
+        losses:
+          type: integer
+          minimum: 0
+        peak:
+          type: integer
+    GifRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - pgn
+      properties:
+        pgn:
+          type: string
+          description: PGN 文字，UTF-8 編碼最多 65,536 位元組。只會使用第一局。
+        size:
+          type: string
+          enum:
+            - small
+            - medium
+            - large
+          default: medium
+          description: 選用。畫面尺寸。
+        orientation:
+          type: string
+          enum:
+            - white
+            - black
+          default: white
+          description: 選用。位於棋盤下方的一方。
+        delayMs:
+          type: integer
+          minimum: 100
+          maximum: 3000
+          default: 500
+          description: 選用。每步著法的毫秒數，須為整數值的 JSON 數值。
+        coords:
+          type: boolean
+          default: true
+          description: 選用。是否在棋盤周圍繪製直行字母與橫列數字。
+    ReportRequest:
+      type: object
+      required:
+        - gameId
+        - reported
+        - category
+      properties:
+        gameId:
+          description: 對局，以整數或 1 至 16 位數字的字串表示。
+          oneOf:
+            - type: integer
+              format: int64
+              minimum: 1
+              maximum: 9007199254740991
+            - type: string
+              pattern: '^[0-9]{1,16}$'
+        reported:
+          type: string
+          minLength: 1
+          maxLength: 24
+          description: 對手的使用者名稱，可使用棋譜中的名稱或目前的名稱，不分大小寫。不得為空白。
+        category:
+          type: string
+          enum:
+            - cheating
+            - abuse
+            - other
+          description: 檢舉的類別。
+        comment:
+          type:
+            - string
+            - 'null'
+          description: 選用。移除控制字元（定位字元與換行字元除外）並去除前後空白後，最多 500 個字元。
+    AccountExport:
+      type: object
+      description: 伺服器保存的有關該帳號的一切資料（時間皆為紀元毫秒數）。
+      required:
+        - format
+        - version
+        - exportedAt
+        - server
+        - notes
+        - account
+        - ratings
+        - ratingRefunds
+        - sessions
+        - securityEvents
+        - sanctions
+        - conduct
+        - reportsFiled
+        - games
+      properties:
+        format:
+          type: string
+          const: scacelith-account-export
+        version:
+          type: integer
+          const: 1
+        exportedAt:
+          type: integer
+          format: int64
+          description: 匯出的時間。
+        server:
+          type: object
+          required:
+            - name
+            - host
+          properties:
+            name:
+              type: string
+              description: '`SERVER_NAME`。'
+            host:
+              type: string
+              description: '`SERVER_PUBLIC_HOST`。'
+        notes:
+          type: array
+          description: 以淺白的英文向棋手說明檔案包含與未包含的內容。
+          items:
+            type: string
+        account:
+          description: '`GET /account/me` 的帳號資訊，另加上 `googleEmail`。'
+          allOf:
+            - $ref: '#/components/schemas/AccountView'
+            - type: object
+              required:
+                - googleEmail
+              properties:
+                googleEmail:
+                  type:
+                    - string
+                    - 'null'
+                  description: 已連結之 Google 帳號的電子郵件地址，或 `null`。
+        ratings:
+          type: array
+          description: 完整的等級分紀錄。
+          items:
+            $ref: '#/components/schemas/ExportRating'
+        ratingRefunds:
+          type: array
+          description: 因對手被查出作弊而恢復的等級分，按 UTC 日與類別加總，最新的排在最前面。不會列出相關對局，也不會指明作弊者。
+          items:
+            $ref: '#/components/schemas/RatingRefund'
+        sessions:
+          type: array
+          description: 所有已儲存的工作階段，最新的排在最前面，不含任何權杖。保留期限清除作業會刪除已過期的工作階段，已登出的工作階段則在登出一天後刪除。
+          items:
+            $ref: '#/components/schemas/ExportSession'
+        securityEvents:
+          type: array
+          description: 安全事件，最新的排在最前面，保留 `RETENTION_SECURITY_DAYS` 天。
+          items:
+            $ref: '#/components/schemas/SecurityEvent'
+        sanctions:
+          type: array
+          description: 所有處分，包括已解除的處分。絕不包含管理員的名字。
+          items:
+            $ref: '#/components/schemas/ExportSanction'
+        conduct:
+          type: array
+          description: 針對棋手棄局、中止與未按時走出第一步之對局所記錄的行為事件，保留 30 天。
+          items:
+            $ref: '#/components/schemas/ConductEvent'
+        reportsFiled:
+          type: array
+          description: 棋手提出的檢舉。
+          items:
+            $ref: '#/components/schemas/FiledReport'
+        games:
+          type: object
+          required:
+            - total
+            - list
+          properties:
+            total:
+              type: integer
+              minimum: 0
+              description: 對局數。
+            list:
+              type: array
+              description: 所有對局，最新的排在最前面，格式同 `GET /account/games` 的摘要。著法請見 `GET /games/{id}`，PGN 請見 `GET /games/{id}/pgn`。
+              items:
+                $ref: '#/components/schemas/HistoryGameSummary'
+    ExportRating:
+      description: 完整的等級分紀錄。
+      allOf:
+        - $ref: '#/components/schemas/RatingSummary'
+        - type: object
+          required:
+            - rated
+            - countedGames
+            - updatedAt
+          properties:
+            rated:
+              type: boolean
+              description: 棋手是否已脫離尚未定級的階段。
+            countedGames:
+              type: integer
+              minimum: 0
+              description: 計入等級分的對局數。
+            updatedAt:
+              type: integer
+              format: int64
+              description: 紀錄最後一次變更的時間。
+    RatingRefund:
+      type: object
+      required:
+        - day
+        - category
+        - points
+      properties:
+        day:
+          type: integer
+          format: int64
+          description: 當日 UTC 00:00（紀元毫秒數）。
+        category:
+          type: string
+        points:
+          type: integer
+          description: 當日在該類別中恢復的分數。
+    ExportSession:
+      type: object
+      required:
+        - id
+        - createdAt
+        - lastSeenAt
+        - expiresAt
+        - revokedAt
+        - clientLabel
+        - ip
+      properties:
+        id:
+          type: integer
+          format: int64
+        createdAt:
+          type: integer
+          format: int64
+        lastSeenAt:
+          type: integer
+          format: int64
+        expiresAt:
+          type: integer
+          format: int64
+        revokedAt:
+          type:
+            - integer
+            - 'null'
+          format: int64
+          description: 工作階段登出的時間，或 `null`。
+        clientLabel:
+          type:
+            - string
+            - 'null'
+        ip:
+          type:
+            - string
+            - 'null'
+          description: 登入時的 IP 位址，於 `RETENTION_IP_DAYS` 天後清除。
+    SecurityEvent:
+      type: object
+      description: |-
+        一筆安全事件。只有在已登入狀態下、使用帳號密碼（及第二驗證因素），或使用寄到帳號地址的連結所進行的操作，才會提供 `ip`：`register`、`email_verified`、`login`、`sso_login`、`sso_linked`、`sso_account_created`、`recovery_code_used`、`password_reset`、`password_changed`、`reauth_failed`、`mfa_setup_started`、`mfa_enabled`、`mfa_disabled`、`recovery_codes_regenerated`、`session_revoked`、`sessions_revoked_all`、`email_change_requested`、`email_changed`、`email_change_refused` 與 `account_exported`；其他所有種類皆為 `ip: null`，且 `ip` 會在 `RETENTION_IP_DAYS` 天後清除。
+
+        `detail` 只保留下列欄位：`login`：`method`；`sso_login`、`sso_account_created`：`provider`；`sso_linked`：`provider` 與 `method`（`password` 或 `password+totp`）；`login_failed`：`failures`；`login_lockout`：`retryAfterMs`；`mfa_failed`：`attempts`；`recovery_code_used`：`remaining`；`reauth_failed`：`factor`；`session_revoked` 與 `sessions_revoked_all`：`reason`；`email_change_refused`：`reason`；`sanction_auto`：`kind`、`gameId`、`until`。`moderator_action` 事件只保留 `{ action }`，且僅限 `ban`、`unban`、`reset_mfa`、`verify_email` 與 `revoke_sessions` 這幾種操作（其他管理員操作不包含在內）。其他所有種類皆為 `detail: null`。`rating_refund` 事件不包含在內：其分數已列於 `ratingRefunds`。
+      required:
+        - kind
+        - at
+        - ip
+        - detail
+      properties:
+        kind:
+          type: string
+          description: 事件種類（`login`、`password_changed` 等）。
+        at:
+          type: integer
+          format: int64
+          description: 發生時間。
+        ip:
+          type:
+            - string
+            - 'null'
+        detail:
+          type:
+            - object
+            - 'null'
+    ExportSanction:
+      type: object
+      required:
+        - id
+        - kind
+        - reason
+        - source
+        - gameId
+        - startsAt
+        - endsAt
+        - createdAt
+        - liftedAt
+      properties:
+        id:
+          type: integer
+          format: int64
+        kind:
+          type: string
+          enum:
+            - ban
+            - mm_block
+            - warning
+        reason:
+          type:
+            - string
+            - 'null'
+        source:
+          type: string
+          enum:
+            - auto
+            - moderator
+        gameId:
+          type:
+            - integer
+            - 'null'
+          format: int64
+        startsAt:
+          type: integer
+          format: int64
+        endsAt:
+          type:
+            - integer
+            - 'null'
+          format: int64
+        createdAt:
+          type: integer
+          format: int64
+        liftedAt:
+          type:
+            - integer
+            - 'null'
+          format: int64
+    ConductEvent:
+      type: object
+      required:
+        - kind
+        - at
+      properties:
+        kind:
+          type: string
+          enum:
+            - abandon
+            - abort
+            - noshow
+        at:
+          type: integer
+          format: int64
+    FiledReport:
+      type: object
+      required:
+        - gameId
+        - reported
+        - category
+        - comment
+        - createdAt
+        - status
+      properties:
+        gameId:
+          type:
+            - integer
+            - 'null'
+          format: int64
+        reported:
+          type: string
+          description: 被檢舉棋手目前的公開名稱。
+        category:
+          type: string
+          enum:
+            - cheating
+            - abuse
+            - other
+        comment:
+          type:
+            - string
+            - 'null'
+        createdAt:
+          type: integer
+          format: int64
+        status:
+          type: string
+          enum:
+            - open
+            - closed
+          description: 檢舉是否仍在處理中（不會透露被檢舉棋手是否受到處分）。
+    LinkTokenForm:
+      type: object
+      additionalProperties: false
+      required:
+        - token
+      properties:
+        token:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: 電子郵件連結的權杖（頁面表單中的隱藏欄位）。
+    ResetPasswordForm:
+      type: object
+      additionalProperties: false
+      required:
+        - token
+        - newPassword
+        - confirmPassword
+      properties:
+        token:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: 重設連結的權杖（表單中的隱藏欄位）。
+        newPassword:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: 新密碼；適用註冊時的密碼規則。
+        confirmPassword:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: 再次輸入新密碼；兩者必須相同。
+    HtmlDocument:
+      type: string
+      contentMediaType: text/html
+      description: UTF-8 編碼的 HTML 頁面（`text/html; charset=utf-8`），不含 JavaScript 或外部資源。
