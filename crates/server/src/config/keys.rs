@@ -662,10 +662,10 @@ pub static KEYS: &[KeySpec] = &[
         "HEARTBEAT_INTERVAL_MS",
         Limits,
         Int,
-        "Server ping interval: each connection gets a ping every half interval to one interval (it also \
-         measures each player's latency). The game client sends a Ping of its own after 1.5 times this with \
-         nothing received (at least 7.5 s, at most 90 s), and considers the connection dead after twice this \
-         (at least 10 s, at most 120 s).",
+        "Server ping interval: each connection gets a ping every interval, the first half an interval after \
+         it opened (it also measures each player's latency). The game client sends a Ping of its own after \
+         1.5 times this with nothing received (at least 7.5 s, at most 90 s), and considers the connection \
+         dead after twice this (at least 10 s, at most 120 s).",
     )
     .default("10000")
     .min(1000),
@@ -879,10 +879,11 @@ pub static KEYS: &[KeySpec] = &[
         Limits,
         Int,
         "Failed logins per minute (whole server) that turn on the login proof-of-work. Every failed login costs \
-         a password hash (about 0.5 s of CPU), so 30 per minute already keeps a quarter of a core busy, and a \
-         few hundred would need several cores: with PASSWORD_HASH_CONCURRENCY at one per core, a small server \
-         could never reach such a trigger. Raise it only on a large server where honest typos alone come near \
-         it.",
+         a password hash (about 0.17 s of CPU on a 2.1 GHz Xeon vCPU, about 0.3 s on a VPS vCore: \
+         docs/SIZING.md), so 30 per minute already keep about a sixth of such a vCore busy, and a few hundred \
+         would need one or two cores: with PASSWORD_HASH_CONCURRENCY at one per core, a small server could \
+         reach such a trigger only by spending its whole CPU on hashes. Raise it only on a large server where \
+         honest typos alone come near it.",
     )
     .default("30")
     .min(1),
@@ -892,8 +893,9 @@ pub static KEYS: &[KeySpec] = &[
         Int,
         "Password hashes and verifications (login, registration, password change and reset, account changes \
          that ask for the password) that the server runs at once, each on a thread of its own. Each costs \
-         about 0.5 s of CPU and 64 MiB (Argon2id). Empty (the default) = WORKERS. check-config warns when it is above \
-         the number of CPU cores, as the hashes would then slow the games down.",
+         about 0.17 s of CPU on a 2.1 GHz Xeon vCPU (about 0.3 s on a VPS vCore) and 64 MiB (Argon2id). Empty \
+         (the default) = WORKERS. check-config warns when it is above the number of CPU cores, as the hashes \
+         would then slow the games down.",
     )
     .range(1, 64),
     key(
@@ -1224,10 +1226,9 @@ pub static KEYS: &[KeySpec] = &[
         Int,
         "GIF renders at the same time, whole server, each on a thread of its own at the lowest CPU priority (on \
          Linux: it only takes the CPU the games leave). Empty (the default) = WORKERS. A render takes one core \
-         (measured on a 2.1 GHz Xeon: about 45 ms for a 40-move game at the medium size, about 0.7 s for a game \
-         of GIF_MAX_PLIES at the large size; docs/SIZING.md), and a thread 40-50 MiB of memory while it lives \
-         (up to about 125 MiB after many of the longest games at the large size). The threads start on demand \
-         and stop after a minute without work.",
+         while it runs (on a 2.1 GHz Xeon vCPU, about 9 ms for a 40-ply game at the medium size, the request \
+         included; longer games and larger sizes take longer: docs/SIZING.md), and a thread about 20 MiB of \
+         memory while it lives. The threads start on demand and stop after a minute without work.",
     )
     .range(1, 64),
     key(

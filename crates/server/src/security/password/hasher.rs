@@ -12,9 +12,9 @@
 //! Unknown accounts: [`PasswordHasher::verify_dummy`] does the same work on a fixed dummy hash, so
 //! that a login for an unknown user costs as much as one with a wrong password.
 //!
-//! The functions here are blocking (one hash is about half a second of CPU and 64 MiB):
-//! they run on blocking threads behind the hash limiter (see [`super::LimitedHasher`]), never on a
-//! runtime thread.
+//! The functions here are blocking (one hash takes 64 MiB and about 0.17 s of CPU on a 2.1 GHz Xeon
+//! vCPU, about 0.3 s on a VPS vCore: docs/SIZING.md): they run on blocking threads behind the hash
+//! limiter (see [`super::LimitedHasher`]), never on a runtime thread.
 
 use std::fmt;
 use std::sync::Arc;
