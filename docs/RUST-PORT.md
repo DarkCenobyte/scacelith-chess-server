@@ -231,11 +231,95 @@ Frozen as "version 1" at the end of the rewrite. Generated from `protocol/scacel
   `protocol: {min: 1, max: 1, schema, subprotocol: "scacelith.rt1"}`, so a protocol-3 client shows
   "update the game" before connecting.
 
-## 8. Interfaces between modules (wave 2)
+## 8. Interfaces between modules
 
-Written before wave 2 starts, from the APIs that wave 1 delivered: connection task and host
-actor messages (`HostMsg`, `Endpoint`), lobby messages, the auth service used by routes and by the
-Hello (`validate_token`), the anti-cheat hooks of the host and the router.
+Cross-module events and notification traits live in `crate::events` (`NewGame`, `GameEnded`,
+`RematchRequest`, `Anomaly`, `SanctionApplied`, `HostEvents`, `AnomalySink`, `SessionEvents`,
+`SanctionEvents`, `Noop`). A module calls a trait object (`Arc<dyn HostEvents>`...) and never
+the concrete type of its peer; `app::start` wires the implementations. Trait methods never block:
+they post to an actor or enqueue a store job.
+
+### 8.1 Game host (owner: game)
+
+`crate::game` exposes:
+
+```rust
+pub struct Hosts { /* one HostHandle per shard */ }
+impl Hosts {
+    pub fn start(deps: HostDeps, shards: Range<u32>) -> Hosts;      // recovers the journals first
+    pub fn get(&self, game: GameId) -> Option<&HostHandle>;           // by ids::shard_of
+    pub fn pick(&self, preferred: Option<u32>) -> &HostHandle;        // placement (least loaded)
+    pub fn stall_during(&self, since_mono_ms: f64) -> bool;           // RTT sample filter
+    pub async fn shutdown(&self);                                     // final commits, journal flush
+}
+
+#[derive(Clone)]
+pub struct HostHandle { /* shard number, unbounded inbox sender, load counters */ }
+impl HostHandle {
+    pub fn shard(&self) -> u32;
+    /// A strictly decoded game request (Move, Resign, DrawOffer, DrawAnswer, DrawClaim, Abort,
+    /// Resync, Rematch) with the connection it came from and its read time (mono ms).
+    pub fn client(&self, user: UserId, msg: scacelith_protocol::ClientMsg, ep: Endpoint, recv_at: f64);
+    pub fn gesture(&self, game: GameId, user: UserId, frame: Bytes);  // raw C_Gesture
+    pub fn attach(&self, game: GameId, user: UserId, ep: Endpoint);   // sends a GameSnapshot
+    pub fn detach(&self, game: GameId, user: UserId, conn: ConnId);   // only if still that endpoint
+    pub fn rtt(&self, game: GameId, user: UserId, rtt_ms: u32);
+    pub fn forfeit_user(&self, user: UserId);
+    pub fn decline_rematch(&self, game: GameId, user: UserId);
+    pub async fn create(&self, game: NewGame) -> Result<GameId, ErrorCode>;
+    pub fn cancel(&self, game: GameId);                               // ServerAborted, no conduct
+    pub fn load(&self) -> HostLoad;                                   // games, players (atomics)
+}
+
+pub struct HostDeps {
+    pub config: Arc<Config>, pub clock: SharedClock, pub store: Store,
+    pub events: Arc<dyn HostEvents>, pub anomalies: Arc<dyn AnomalySink>,
+}
+```
+
+The host owns rooms, timers, the shard journal (`JOURNAL_DIR/shard-<n>`), commits through
+`store.games().finish_batch`, sends `RatingUpdate` after the commit, then calls
+`HostEvents::game_ended`. Game ids come from one `GameIdAllocator` per shard, seeded from the
+database and the journal. Inbox messages are processed one at a time; a connection's frames and
+its detach stay ordered because they travel through the same inbox.
+
+### 8.2 Realtime (owner: realtime)
+
+* Connection tasks drive `net`'s WebSocket reader/writer and an `Outbound` queue
+  (`realtime::endpoint`). Hello: `HelloPrefix::read` first, then the checks of PROTOCOL.md
+  "Connection lifecycle"; Welcome negotiates `minor = min`, `caps = and`. Every fatal `Error` is
+  followed by `close_code_for(code)`; 4303 (slow consumer) has no Error frame.
+* The lobby actor owns presence (one live connection per account, `MAX_CONNECTIONS` online
+  users, per-address connection counts), the `matching` state machines, conduct cooldowns,
+  rematches, the ban cache, refund notices, and implements `HostEvents`, `SessionEvents` and
+  `SanctionEvents` by posting to its inbox.
+* `app::start` builds every service, recovers games, binds the listeners, notifies systemd and
+  runs the shutdown.
+
+### 8.3 Auth (owner: auth)
+
+```rust
+pub struct SessionInfo { pub user_id: UserId, pub username: String, pub session_id: i64,
+                         pub email_verified: bool, pub token_hash: [u8; 32] }
+impl Auth {
+    pub async fn validate_token(&self, token: &str) -> Result<Option<SessionInfo>, AuthError>;
+}
+```
+
+Used by the HTTP Bearer hook and by the Hello. Revocations call `SessionEvents`.
+
+### 8.4 Anti-cheat (owner: anticheat)
+
+Implements `AnomalySink` (anomaly rows enqueued on the store writer in call order; automatic
+sanction of certain cheats), applies sanctions and refunds (calls `SanctionEvents`), stores
+reports, runs the analysis workers (Stockfish pool, `anticheat::analysis`) on the analysis queue
+and the integrity updates, and provides the `admin` commands.
+
+### 8.5 Routes
+
+Each route group exposes `pub fn register(router: &mut Router, deps: <Group>Deps)` with a deps
+struct defined by its owner (store, auth, mailer, gif service, limits...). `app::start` builds the
+router from every group in the order of the Node `DEFAULT_ROUTES` (the `Allow` header order).
 
 ## 9. Configuration
 
