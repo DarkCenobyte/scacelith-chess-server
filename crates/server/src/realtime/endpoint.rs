@@ -7,6 +7,11 @@
 //! consumer) and the queue is dropped. Droppable frames (the opponent's gestures) are skipped as
 //! soon as a quarter of the limit is waiting, so cosmetic traffic never closes a slow consumer.
 //!
+//! A kick ([`Outbound::kick`]) queues its own frames (the fatal `Error` and its `Notice`) with the
+//! close request, apart from the frames queued before: a connection kicked before its `Welcome`
+//! writes the kick frames only ([`Outbound::take_kick`]), so that no lobby frame ever precedes the
+//! `Welcome`.
+//!
 //! [`Endpoint`] is a player's handle on a connection: its ids, its outbound queue and its
 //! smoothed round-trip time, which the host uses for lag compensation.
 
@@ -44,22 +49,51 @@ struct State {
     frames: VecDeque<Bytes>,
     queued: usize,
     in_flight: usize,
+    /// Frames of a kick, written after `frames`.
+    kick: Vec<Bytes>,
     close: Option<CloseRequest>,
     close_taken: bool,
+}
+
+impl State {
+    /// Records the close request; false when one was already there.
+    fn request_close(&mut self, code: u16, reason: &str) -> bool {
+        if self.close.is_some() {
+            return false;
+        }
+        self.close = Some(CloseRequest { code, reason: reason.to_string() });
+        true
+    }
 }
 
 /// Byte-accounted outbound queue of one connection (see the module documentation).
 #[derive(Debug)]
 pub struct Outbound {
     state: Mutex<State>,
+    /// Wakes the writer: frames or a close request may be waiting.
     wake: Notify,
+    /// Wakes every task waiting in [`Outbound::closed`].
+    closing: Notify,
     limit: usize,
 }
 
 impl Outbound {
     /// A queue that closes the connection when more than `limit` bytes wait for the socket.
     pub fn new(limit: usize) -> Arc<Outbound> {
-        Arc::new(Outbound { state: Mutex::new(State::default()), wake: Notify::new(), limit: limit.max(1) })
+        Arc::new(Outbound {
+            state: Mutex::new(State::default()),
+            wake: Notify::new(),
+            closing: Notify::new(),
+            limit: limit.max(1),
+        })
+    }
+
+    /// Wakes the writer and, after a close request, the tasks waiting for it.
+    fn notify(&self, closed: bool) {
+        self.wake.notify_one();
+        if closed {
+            self.closing.notify_waiters();
+        }
     }
 
     /// Queues a frame. Returns `false` when the frame was refused: the connection is closing, or
@@ -72,15 +106,15 @@ impl Outbound {
         if st.queued + st.in_flight + frame.len() > self.limit {
             st.frames.clear();
             st.queued = 0;
-            st.close = Some(CloseRequest { code: CLOSE_SLOW_CONSUMER, reason: "slow consumer".into() });
+            st.request_close(CLOSE_SLOW_CONSUMER, "slow consumer");
             drop(st);
-            self.wake.notify_one();
+            self.notify(true);
             return false;
         }
         st.queued += frame.len();
         st.frames.push_back(frame);
         drop(st);
-        self.wake.notify_one();
+        self.notify(false);
         true
     }
 
@@ -100,10 +134,42 @@ impl Outbound {
     /// refused. The first close request wins.
     pub fn close(&self, code: u16, reason: &str) {
         let mut st = self.state.lock();
-        if st.close.is_none() {
-            st.close = Some(CloseRequest { code, reason: reason.to_string() });
+        if st.request_close(code, reason) {
             drop(st);
-            self.wake.notify_one();
+            self.notify(true);
+        }
+    }
+
+    /// Kicks the connection: `frames` (a fatal `Error` and its `Notice`) are written after the
+    /// frames already queued, then the connection closes with `code`. They are not counted
+    /// against the limit. Returns `false` (nothing queued) when the connection was already
+    /// closing.
+    pub fn kick(&self, frames: &[Bytes], code: u16, reason: &str) -> bool {
+        let mut st = self.state.lock();
+        if !st.request_close(code, reason) {
+            return false;
+        }
+        st.kick = frames.to_vec();
+        drop(st);
+        self.notify(true);
+        true
+    }
+
+    /// The close request, if any (taken or not).
+    pub fn close_request(&self) -> Option<CloseRequest> {
+        self.state.lock().close.clone()
+    }
+
+    /// Resolves once a close has been requested (at once if it already was).
+    pub async fn closed(&self) {
+        loop {
+            let notified = self.closing.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.is_open() {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -132,14 +198,37 @@ impl Outbound {
     /// The bytes taken count as in flight until [`Outbound::written`] is called.
     pub fn take(&self) -> Batch {
         let mut st = self.state.lock();
-        let frames: Vec<Bytes> = st.frames.drain(..).collect();
-        st.in_flight += st.queued;
+        let mut frames: Vec<Bytes> = st.frames.drain(..).collect();
+        let close = Self::take_close(&mut st);
+        if close.is_some() {
+            frames.append(&mut st.kick);
+        }
+        st.in_flight += frames.iter().map(Bytes::len).sum::<usize>();
         st.queued = 0;
+        Batch { frames, close }
+    }
+
+    /// Writer side, before the `Welcome`: drops the frames queued so far and takes the frames of
+    /// a kick with the close request (nothing when no close was requested).
+    pub fn take_kick(&self) -> Batch {
+        let mut st = self.state.lock();
+        let close = Self::take_close(&mut st);
+        if close.is_none() {
+            return Batch::default();
+        }
+        st.frames.clear();
+        st.queued = 0;
+        let frames = std::mem::take(&mut st.kick);
+        st.in_flight += frames.iter().map(Bytes::len).sum::<usize>();
+        Batch { frames, close }
+    }
+
+    fn take_close(st: &mut State) -> Option<CloseRequest> {
         let close = if st.close_taken { None } else { st.close.clone() };
         if close.is_some() {
             st.close_taken = true;
         }
-        Batch { frames, close }
+        close
     }
 
     /// Writer side: `bytes` taken earlier have been handed to the socket.
@@ -193,6 +282,11 @@ impl Endpoint {
     /// Closes the connection after the frames already queued.
     pub fn close(&self, code: u16, reason: &str) {
         self.0.out.close(code, reason);
+    }
+
+    /// Kicks the connection: `frames`, then a close with `code` (see [`Outbound::kick`]).
+    pub fn kick(&self, frames: &[Bytes], code: u16, reason: &str) -> bool {
+        self.0.out.kick(frames, code, reason)
     }
 
     pub fn is_open(&self) -> bool {
@@ -272,5 +366,47 @@ mod tests {
         let (other, _) = Endpoint::for_tests(1, 1);
         assert!(ep.same(&ep.clone()));
         assert!(!ep.same(&other));
+    }
+
+    #[test]
+    fn a_kick_writes_its_frames_after_the_queue() {
+        let (ep, out) = Endpoint::for_tests(1, 1);
+        ep.send(Bytes::from_static(b"q"));
+        assert!(ep.kick(&[Bytes::from_static(b"err"), Bytes::from_static(b"note")], 4007, ""));
+        assert!(!ep.kick(&[Bytes::from_static(b"again")], 4004, ""), "the first close wins");
+        let b = out.take();
+        assert_eq!(
+            b.frames,
+            vec![Bytes::from_static(b"q"), Bytes::from_static(b"err"), Bytes::from_static(b"note")]
+        );
+        assert_eq!(b.close.unwrap().code, 4007);
+        assert_eq!(out.buffered(), 8);
+    }
+
+    #[test]
+    fn before_the_welcome_a_kick_drops_the_queue() {
+        let (ep, out) = Endpoint::for_tests(1, 1);
+        assert!(out.take_kick().close.is_none(), "nothing to take without a kick");
+        ep.send(Bytes::from_static(b"queue status"));
+        ep.kick(&[Bytes::from_static(b"err")], 4003, "");
+        let b = out.take_kick();
+        assert_eq!(b.frames, vec![Bytes::from_static(b"err")]);
+        assert_eq!(b.close.unwrap().code, 4003);
+        assert!(out.take().frames.is_empty());
+    }
+
+    #[tokio::test]
+    async fn closed_resolves_on_any_close_request() {
+        let out = Outbound::new(4);
+        let waiter = {
+            let out = out.clone();
+            tokio::spawn(async move { out.closed().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        assert!(!out.send(Bytes::from_static(b"12345")), "overflow");
+        waiter.await.expect("woken by the slow-consumer close");
+        assert_eq!(out.close_request().unwrap().code, CLOSE_SLOW_CONSUMER);
+        out.closed().await;
     }
 }
