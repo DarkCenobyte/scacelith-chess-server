@@ -13,8 +13,9 @@ every key with its default.
 
 Settings described as "whole server" apply to the one server process. Where the former Node.js
 server counted per worker process, the defaults now scale with `WORKERS`, so that a server keeps its
-capacity. Keys of the former server that no longer apply (`GOOGLE_REDIRECT_URI`,
-`SHARD_OVERLOAD_LAG_MS`, `LISTEN_REUSE_PORT`, `UV_THREADPOOL_SIZE`) are ignored with a warning.
+capacity. Keys of the former server that no longer apply (`WS_MAX_MESSAGE_BYTES`,
+`GOOGLE_REDIRECT_URI`, `SHARD_OVERLOAD_LAG_MS`, `LISTEN_REUSE_PORT`, `UV_THREADPOOL_SIZE`) are
+ignored with a warning.
 
 Sections:
 
@@ -139,7 +140,6 @@ Sections:
 | `MAX_CONNECTIONS_PER_IP` | integer (&gt;= 1) | `64` | Simultaneous WebSocket connections from one IP address (IPv6: per /64), whole server. 64 lets a class or a mobile operator's shared address (carrier-grade NAT) play; one live connection per account still applies, and IP_MAX_CONNECTIONS bounds every connection of an address before TLS. |
 | `MAX_PENDING_HANDSHAKES` | integer (2-100000) | (empty) | TLS handshakes in progress, whole server (TLS_MODE=native). Empty (the default) = 128 x WORKERS. A new connection takes a slot once the first record of its ClientHello has arrived; it has 3 s for that and holds no slot meanwhile. A connection beyond this cap, or beyond MAX_PENDING_HANDSHAKES_PER_IP for its address group, is closed before any TLS work and the client retries later, so a reconnection storm is served in turn instead of every handshake slowing down together. The server also sheds load, letting at most half this number of new TLS connections per second through, for up to 5 s after it refused a WebSocket upgrade because MAX_CONNECTIONS and its reserve are in use, or while it holds 1.2 times MAX_CONNECTIONS. It does not shed at MAX_CONNECTIONS itself, so that a player coming back to a game in progress does not compete with newcomers for that rate: each newcomer then completes the handshake and gets ServerFull at Hello. |
 | `MAX_PENDING_HANDSHAKES_PER_IP` | integer (1-99999) | (empty) | TLS handshakes in progress for one address group: an IPv4 address or an IPv6 /48 (TLS_MODE=native), whole server. Empty (the default) = MAX_PENDING_HANDSHAKES / 32 with a floor of 2, but always below MAX_PENDING_HANDSHAKES (4 x WORKERS with the default MAX_PENDING_HANDSHAKES; check-config prints the value in use). A value you set must be lower than MAX_PENDING_HANDSHAKES, so that a few hosts cannot hold every handshake slot. The server also keeps at most 4 times this number of connections of one group waiting for their ClientHello (and 16 times MAX_PENDING_HANDSHAKES in total). Raise it when many players share one public address (a school or company network); a handshake takes a fraction of a second, so a small value still serves many players. |
-| `WS_MAX_MESSAGE_BYTES` | integer (128-65536) | `512` | Largest message a client may send. |
 | `WS_MSG_RATE` | integer (&gt;= 1) | `20` | Messages per second a client may send (sustained). |
 | `WS_MSG_BURST` | integer (&gt;= 1) | `40` | Message burst a client may send. |
 | `WS_SEND_BUFFER_LIMIT` | integer (&gt;= 4096) | `262144` | Bytes queued for a client that does not read; beyond it the connection is closed (the client reconnects and resynchronises). |

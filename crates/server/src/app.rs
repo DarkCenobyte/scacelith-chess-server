@@ -35,9 +35,10 @@
 //! the HTTP requests in progress finish), the lobby's periodic work stops, the engine analysis and
 //! the retention purge stop, and the realtime connections drain (`Notice{ServerShutdown}`,
 //! `SHUTDOWN_GRACE_MS`, then `Error{ShuttingDown}` and 4008). Then the game hosts make their
-//! final commits and flush their journals, the lobby ends, the anomalies still buffered go to the
-//! store writer, the mailer sends what it holds (5 s at most), the route modules close (GIF render
-//! threads), the auth service saves its security events, and the store closes. The watchdog keeps
+//! final commits and flush their journals, the lobby ends, the listeners end and the API handlers
+//! still running finish (5 s at most), the anomalies still buffered go to the store writer, the
+//! mailer sends what it holds (5 s at most), the route modules close (GIF render threads), the
+//! auth service saves its security events, and the store closes. The watchdog keeps
 //! pinging until the end.
 
 use std::fmt;
@@ -99,6 +100,8 @@ use scacelith_protocol::ErrorCode;
 const RUNTIME_SHUTDOWN: Duration = Duration::from_secs(1);
 /// How long the shutdown waits for the mailer to send the messages it holds.
 const MAIL_DRAIN: Duration = Duration::from_secs(5);
+/// How long the shutdown waits for the API requests still running once the listeners stopped.
+const HANDLER_QUIESCE: Duration = Duration::from_secs(5);
 /// Interval of the analysis backlog gauges.
 const BACKLOG_EVERY: Duration = Duration::from_secs(5);
 /// Interval of the sweep of the auth service's control counters and single-use keys.
@@ -112,6 +115,7 @@ const SERVER_ID_HEADER: &str = "Scacelith-Server-Id";
 /// (SIGTERM, SIGINT), 1 when the server could not start or a second signal cut the shutdown short.
 pub fn start(config: Config) -> i32 {
     log::init(log::Options::from_config(&config));
+    log::install_panic_hook();
     let threads = usize::try_from(config.workers).unwrap_or(1).max(1);
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(threads)
@@ -137,6 +141,7 @@ pub fn start(config: Config) -> i32 {
 /// Logs go to stderr, so that stdout holds the report only.
 pub fn migrate(config: Config) -> i32 {
     log::init(log::Options { stderr: true, ..log::Options::from_config(&config) });
+    log::install_panic_hook();
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(rt) => rt,
         Err(e) => {
@@ -594,7 +599,7 @@ impl Instance {
             .build();
         let admissions = Admissions::from_config(&config, clock.clone());
         let settings = WsSettings {
-            max_message_bytes: usize::try_from(config.ws_max_message_bytes).unwrap_or(512),
+            max_message_bytes: scacelith_protocol::MAX_CLIENT_MESSAGE,
             close_timeout: CLOSE_TIMEOUT,
             clock: clock.clone(),
             log: Logger::root().child("ws"),
@@ -737,15 +742,22 @@ impl Instance {
         if let Err(e) = lobby_task.await {
             log_error!(log, "lobby failed", { "err": e.to_string() });
         }
+        // The listeners are stopped; the requests still running (handlers outlive their route
+        // timeout) may queue e-mails, anomalies or renders: let them end first.
+        if let Err(e) = serving.await {
+            log_error!(log, "listeners failed", { "err": e.to_string() });
+        }
+        if !api.quiesce(HANDLER_QUIESCE).await {
+            log_warn!(log, "requests still running at the stop", {
+                "handlers": api.handlers_running(), "waitedMs": HANDLER_QUIESCE.as_millis() as u64,
+            });
+        }
         // The anomalies of the last moves and of the drained connections, before the store closes.
         anticheat.flush();
         if !mailer.drain(MAIL_DRAIN).await {
             log_warn!(log, "e-mails not sent before the stop", { "waitedMs": MAIL_DRAIN.as_millis() as u64 });
         }
         api.close().await;
-        if let Err(e) = serving.await {
-            log_error!(log, "listeners failed", { "err": e.to_string() });
-        }
         auth.close().await;
         store.close().await;
         if let Some(p) = process {

@@ -142,11 +142,13 @@ the crate's manifest in their own commit.
 * `ids`: `UserId = u32`, `GameId = u64`, `ConnId = u32`, `GameIdAllocator`, `shard_of`,
   `is_game_id`, `created_ms`, `ID53_LIMIT`.
 * `log`: `log::init(Options)`, `Logger::root().child("name")`, macros, `log::flush()`,
-  `log::capture_logs(level)` for tests, `scrub`, `iso_time`, `civil_from_days`. Journald priorities when
-  `JOURNAL_STREAM` is set.
+  `log::capture_logs(level)` for tests, `scrub`, `iso_time`, `civil_from_days`. Journald priorities
+  (`<N>` prefixes) when `JOURNAL_STREAM` names the stream the lines go to: stdout, or stderr for
+  `migrate` and the administration commands.
 * `metrics`: `counter`, `counter_vec`, `gauge`, `gauge_vec`, `gauge_fn`, `histogram`,
   `histogram_vec`, `registry().render()`, `js_number`.
-* `systemd`: `notify`, `ready`, `stopping`, `journald`.
+* `systemd`: `notify`, `ready`, `stopping`, `journald` (stdout is the journal),
+  `journald_stderr`.
 * `config::Config`: every setting as a typed field (see section 9), `Config::for_tests()`.
 
 ## 6. Storage
@@ -336,10 +338,16 @@ router from every group in the order of the Node `DEFAULT_ROUTES` (the `Allow` h
 
 ## 10. Operations
 
-* Logs: JSON lines on stdout (or `LOG_FORMAT=pretty`), `<N>` syslog priorities under journald,
-  same messages as before. No log files.
-* systemd: `Type=notify` (`READY=1` after migrations, journal recovery and listeners;
-  `STOPPING=1` at shutdown), `SIGHUP` reloads the TLS certificate, `SIGTERM`/`SIGINT` drain
+* Logs: JSON lines on stdout (or `LOG_FORMAT=pretty`), `<N>` syslog priorities when
+  `JOURNAL_STREAM` names stdout (systemd connects stdout and stderr to the journal by default),
+  same messages as before. No log files. `migrate` and the administration commands log on stderr
+  (stdout holds their output), with the same detection. A panic is logged as an `error` record
+  (`log::install_panic_hook`); what comes before logging starts (an invalid configuration) and a
+  backtrace asked with `RUST_BACKTRACE` are plain text on stderr.
+* systemd: `Type=notify-reload` (`READY=1` after migrations, journal recovery and listeners;
+  `RELOADING=1` then `READY=1` around a `SIGHUP` certificate reload, even a failed one;
+  `STOPPING=1` at shutdown; `WATCHDOG=1` when `WatchdogSec` is set), `SIGHUP` reloads the TLS
+  certificate, `SIGTERM`/`SIGINT` drain
   (`Notice{ServerShutdown}`, `SHUTDOWN_GRACE_MS`, final commits, journal flush, store close), a
   second signal exits with code 1. Example unit and guide in `deploy/systemd/`.
 * Exit codes: 0 success, 1 failure, 2 usage.

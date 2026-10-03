@@ -210,7 +210,9 @@ fn outside_a_runtime_the_repeats_are_written_with_the_next_writer_turn() {
     ac.record_anomaly(&anomaly(a, g, "bad_seq", Value::Null, false));
     rt.block_on(barrier(&w.store));
     ac.record_anomaly(&anomaly(a, g, "bad_seq", Value::Null, false));
-    assert_eq!(ac.pending_count(), 1);
+    // The repeat waits for the writer job queued with it, which the writer thread may already
+    // have run.
+    assert!(ac.pending_count() <= 1);
     rt.block_on(barrier(&w.store));
     assert_eq!(ac.pending_count(), 0, "no timer to wait for");
     assert_eq!(rt.block_on(w.store.anomalies().for_user(a, 10)).unwrap().len(), 2);

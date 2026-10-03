@@ -213,7 +213,7 @@ fn check(buf: &[u8]) -> Result<Hello, Refusal> {
 }
 
 /// A connection the lobby admitted.
-struct Admitted {
+pub(super) struct Admitted {
     link: Arc<ConnLink>,
     out: Arc<Outbound>,
     cmds: mpsc::UnboundedReceiver<ConnCmd>,
@@ -222,9 +222,14 @@ struct Admitted {
 }
 
 /// Validates the token, claims presence, validates the token again. Dropped midway, it leaves no
-/// claim behind: the lobby releases a claim whose answer it cannot deliver, and the guard of an
-/// answered one releases it.
-async fn authenticate(ctx: &ConnContext, conn: ConnId, hello: &Hello) -> Result<Admitted, Refusal> {
+/// claim behind: its guard, taken before the claim is posted, releases the claim, and the release
+/// follows the claim in the lobby's inbox (a claim answered just before the task stopped waiting
+/// included; the release of a refused claim changes nothing).
+pub(super) async fn authenticate(
+    ctx: &ConnContext,
+    conn: ConnId,
+    hello: &Hello,
+) -> Result<Admitted, Refusal> {
     let session = match ctx.tokens.validate(hello.token.clone()).await {
         Ok(Some(session)) => session,
         Ok(None) => return Err(Refusal::new("unauthorized", 1, ErrorCode::Unauthorized)),
@@ -241,6 +246,7 @@ async fn authenticate(ctx: &ConnContext, conn: ConnId, hello: &Hello) -> Result<
     let out = Outbound::new(ctx.settings.send_buffer_limit);
     let endpoint = Endpoint::new(conn, user, out.clone());
     let (link, cmds) = ConnLink::new(endpoint, session.username, session.token_hash);
+    let claim = ClaimGuard::new(ctx.lobby.clone(), user, conn);
     let (reply, answer) = oneshot::channel();
     ctx.lobby.post(LobbyMsg::Claim { link: link.clone(), ban, reply });
     let active_game = match answer.await {
@@ -256,7 +262,6 @@ async fn authenticate(ctx: &ConnContext, conn: ConnId, hello: &Hello) -> Result<
             return Err(Refusal::internal());
         }
     };
-    let claim = ClaimGuard::new(ctx.lobby.clone(), user, conn);
     match ctx.tokens.validate(hello.token.clone()).await {
         Ok(Some(_)) => Ok(Admitted { link, out, cmds, claim, active_game }),
         Ok(None) => Err(Refusal::new("unauthorized", 1, ErrorCode::Unauthorized)

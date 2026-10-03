@@ -8,7 +8,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use scacelith_protocol::{
     ClientGesture, ClientMsg, ErrorCode, Message, MsgType, NoticeCode, ServerPing, ServerPong,
-    close_code_for, peek_seq,
+    close_code_for, decode_hello, peek_seq,
 };
 use serde_json::{Value, json};
 use tokio::task::{JoinError, JoinHandle};
@@ -30,6 +30,8 @@ use crate::realtime::reads;
 
 /// Length of a drop window (ms).
 const DROP_WINDOW_MS: f64 = 10_000.0;
+/// The first type byte of the server-to-client range (PROTOCOL.md "Encoding").
+const SERVER_TYPES: u8 = 0x80;
 /// Least gap between two `RateLimited` errors (ms).
 const RATE_ERROR_GAP_MS: f64 = 1000.0;
 /// Rounding slack of a bucket (a millionth of a message): a client pacing its messages exactly at
@@ -175,11 +177,18 @@ impl Session {
             self.rate_limited(&buf, now);
             return;
         }
-        if MsgType::from_u8(type_byte).is_some_and(|t| !t.is_client()) {
+        // A type byte of the server's range (0x80-0xFF, assigned or not): no client sends one.
+        if type_byte >= SERVER_TYPES {
             self.forged(type_byte);
             return;
         }
-        let msg = match ClientMsg::decode(&buf) {
+        // A Hello is read as at the handshake: a later minor's appended fields are ignored.
+        let decoded = if type_byte == MsgType::Hello.to_u8() {
+            decode_hello(&buf).map(ClientMsg::Hello)
+        } else {
+            ClientMsg::decode(&buf)
+        };
+        let msg = match decoded {
             Ok(msg) => msg,
             Err(e) => {
                 self.anomaly("malformed", json!({ "reason": e.to_string(), "type": type_byte }), 0);
@@ -311,8 +320,8 @@ impl Session {
         }
     }
 
-    /// A server type byte from the client: a forgery, sanctioned as a certain cheat when
-    /// `AUTO_SANCTION_CERTAIN_CHEATS` is on.
+    /// A type byte of the server's range from the client: a forgery, sanctioned as a certain
+    /// cheat when `AUTO_SANCTION_CERTAIN_CHEATS` is on.
     fn forged(&mut self, type_byte: u8) {
         let game = self.current_game();
         self.anomaly("forged_type", json!({ "type": type_byte }), game);

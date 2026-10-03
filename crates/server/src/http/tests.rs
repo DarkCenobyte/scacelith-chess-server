@@ -408,6 +408,18 @@ async fn slow_bodies_408_slow_handlers_503() {
 }
 
 #[tokio::test]
+async fn the_shutdown_waits_for_the_late_handlers() {
+    let s = start();
+    assert!(s.t.api.quiesce(Duration::ZERO).await, "nothing runs");
+    let r = s.t.get("/api/v1/slow").send().await;
+    assert_eq!(r.status, 503, "answered at the route timeout");
+    assert_eq!(s.t.api.handlers_running(), 1, "the late handler still runs");
+    assert!(!s.t.api.quiesce(Duration::from_millis(10)).await);
+    assert!(s.t.api.quiesce(Duration::from_secs(5)).await);
+    assert_eq!(s.t.api.handlers_running(), 0);
+}
+
+#[tokio::test]
 async fn authentication_modes() {
     let s = start();
     let r = s.t.get("/api/v1/private").send().await;

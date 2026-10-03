@@ -9,8 +9,9 @@
 //! the former Node.js server, so that an existing `.env` keeps working, with these changes
 //! (docs/RUST-PORT.md section 9):
 //!
-//! * `SHARD_OVERLOAD_LAG_MS`, `LISTEN_REUSE_PORT` (and `UV_THREADPOOL_SIZE`, `GOOGLE_REDIRECT_URI`)
-//!   no longer exist: still set, they get a warning, never an error ([`OBSOLETE`]);
+//! * `SHARD_OVERLOAD_LAG_MS`, `LISTEN_REUSE_PORT`, `WS_MAX_MESSAGE_BYTES` (and `UV_THREADPOOL_SIZE`,
+//!   `GOOGLE_REDIRECT_URI`) no longer exist: still set, they get a warning, never an error
+//!   ([`OBSOLETE`]);
 //! * `WORKERS` is the number of game shards and of runtime threads (`auto` = one per core, at
 //!   most 16), still within `SHARD_BASE + WORKERS <= 64`;
 //! * the settings the former server applied per worker process are whole-server values whose
@@ -504,7 +505,6 @@ config_struct! {
     "MAX_CONNECTIONS_PER_IP" => max_connections_per_ip: i64,
     "MAX_PENDING_HANDSHAKES" => max_pending_handshakes: i64,
     "MAX_PENDING_HANDSHAKES_PER_IP" => max_pending_handshakes_per_ip: i64,
-    "WS_MAX_MESSAGE_BYTES" => ws_max_message_bytes: i64,
     "WS_MSG_RATE" => ws_msg_rate: i64,
     "WS_MSG_BURST" => ws_msg_burst: i64,
     "WS_SEND_BUFFER_LIMIT" => ws_send_buffer_limit: i64,

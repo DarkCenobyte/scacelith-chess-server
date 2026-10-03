@@ -198,7 +198,11 @@ journal; there are no log files, and retention is journald's (`Storage=`, `Syste
 `journald.conf`). Under journald every line starts with a syslog priority, `<6>` for example,
 which journald removes and stores as the entry's priority. When standard output is not the
 journal (a file, a terminal), lines have no prefix. `LOG_FORMAT=pretty` prints readable text
-instead of JSON; `LOG_LEVEL` sets the threshold.
+instead of JSON; `LOG_LEVEL` sets the threshold. A panic is logged as an `error` record (component
+`panic`, with its thread, location and message). Standard error goes to the journal as well, but
+holds only what comes before logging starts (an invalid configuration) and, with
+`RUST_BACKTRACE=1`, the backtrace of a panic, in plain text that journald stores with priority 6
+(`info`): look for those without `-p`.
 
 | `level` | Priority | `journalctl -p` name |
 |---|---|---|
