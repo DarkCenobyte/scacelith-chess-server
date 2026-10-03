@@ -97,13 +97,13 @@ impl ConnLink {
     /// [`MAX_LOBBY_IN_FLIGHT`].
     pub(crate) fn begin_request(&self) -> bool {
         self.in_flight
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_LOBBY_IN_FLIGHT).then_some(n + 1))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_LOBBY_IN_FLIGHT).then_some(n + 1))
             .is_ok()
     }
 
     /// A lobby request was answered.
     pub(crate) fn end_request(&self) {
-        let _ = self.in_flight.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+        let _ = self.in_flight.try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
     }
 
     /// Sends a command to the connection task (dropped when the task is gone).

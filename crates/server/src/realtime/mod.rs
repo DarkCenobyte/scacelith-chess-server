@@ -6,9 +6,12 @@
 pub mod admission;
 pub mod deps;
 pub mod endpoint;
+pub(crate) mod frames;
 pub(crate) mod link;
+pub mod lobby;
 pub(crate) mod metrics;
 pub(crate) mod presence;
+pub(crate) mod reads;
 
 pub use admission::Admissions;
 pub use endpoint::{Endpoint, Outbound};
