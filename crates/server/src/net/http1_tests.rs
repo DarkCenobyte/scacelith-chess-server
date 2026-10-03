@@ -627,6 +627,29 @@ async fn a_head_larger_than_hypers_buffer_gets_the_raw_431_even_when_hyper_parse
         (padded(9300, "Content-Length: 2\r\nContent-Length: 2\r\n"), "Content-Length twice past the capture"),
         (padded(9300, "Content-Length: 2\r\n"), "a plain head"),
         (format!("{}{}", "\r\n".repeat(100), padded(9100, "Content-Length: 2\r\n")), "after empty lines"),
+        // Empty lines count as sent too (llhttp skips them without counting): a capture that
+        // stops before the request line holds no header line to check.
+        (
+            format!("{}{}", "\r\n".repeat(4700), padded(0, "Content-Length: 2\r\nContent-Length: 2\r\n")),
+            "Content-Length twice after 9400 bytes of empty lines",
+        ),
+        (
+            format!(
+                "{}{}",
+                "\n".repeat(9300),
+                padded(0, "Content-Length: 2\r\nTransfer-Encoding: chunked\r\n")
+            ),
+            "Content-Length and chunked after 9300 bare LF",
+        ),
+        (format!("{}{}", "\r\n".repeat(4700), padded(0, "Content-Length: 2\r\n")), "a plain head after them"),
+        (
+            format!("{}{}", "\r\n".repeat(4607), padded(0, "Content-Length: 2\r\nContent-Length: 2\r\n")),
+            "a capture that stops in the method",
+        ),
+        (
+            format!("{}{}", "\r\n".repeat(4606), padded(0, "Content-Length: 2\r\nContent-Length: 2\r\n")),
+            "a capture that stops after the method",
+        ),
     ] {
         let mut c = connect(&s.edge, "127.0.0.1");
         c.io.write_all(text.as_bytes()).await.expect("write");
@@ -637,13 +660,39 @@ async fn a_head_larger_than_hypers_buffer_gets_the_raw_431_even_when_hyper_parse
             "{what}"
         );
     }
-    assert_eq!(s.edge.client_errors(ClientError::TooLarge), 4);
-    assert_eq!(reports(&s.guard), [(local(), 4.0)], "each one counts toward a block");
+    assert_eq!(s.edge.client_errors(ClientError::TooLarge), 9);
+    assert_eq!(reports(&s.guard), [(local(), 9.0)], "each one counts toward a block");
     let mut c = connect(&s.edge, "127.0.0.1");
     let w =
         request(&mut c, &format!("GET /healthz HTTP/1.1\r\nHost: x\r\nX-Pad:{}v\r\n\r\n", " ".repeat(9000)))
             .await;
     assert_eq!(w.status, 200, "a head that fits in the buffer");
+    let w =
+        request(&mut c, &format!("{}GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n", "\r\n".repeat(4575))).await;
+    assert_eq!(w.status, 200, "empty lines and a head that fit in the buffer");
+}
+
+#[test]
+fn a_full_capture_overflows_unless_it_holds_a_whole_head_or_a_pipelined_fragment() {
+    // `MAX_BUF` bytes: `start`, then `fill` up to the limit.
+    let capture = |start: &str, fill: u8| {
+        let mut raw = start.as_bytes().to_vec();
+        raw.resize(MAX_BUF, fill);
+        raw
+    };
+    let empty_lines = |n: usize, then: &str| format!("{}{then}", "\r\n".repeat(n));
+    for (raw, method, overflows, what) in [
+        (capture("", b'\n'), "POST", true, "line ends only"),
+        (capture(&empty_lines(4607, "PO"), b'\n'), "POST", true, "stops in the method"),
+        (capture(&empty_lines(4606, "POST"), b'\n'), "POST", true, "stops after the method"),
+        (capture(&empty_lines(10, "POST /x HTTP/1.1\r\nX-A: "), b'a'), "POST", true, "stops in a header"),
+        (capture("POST /x HTTP/1.1\r\nHost: x\r\n\r\n", b'a'), "POST", false, "a whole head and its body"),
+        (capture(&empty_lines(4607, "PO"), b'\n'), "GET", false, "another request's method: a fragment"),
+        (capture("Host: x\r\n\r\n", b'a'), "POST", false, "the end of a pipelined head and its body"),
+        ("\r\n".repeat(MAX_BUF / 2 - 1).into_bytes(), "POST", false, "a capture that is not full"),
+    ] {
+        assert_eq!(head_overflows(&raw, method), overflows, "{what}");
+    }
 }
 
 #[tokio::test]

@@ -343,6 +343,20 @@ async fn framing(d: &mut Duo) {
         raw(&padded("Content-Length: 2\r\nTransfer-Encoding: chunked\r\n"))
     })
     .await;
+    // The same with 9400 bytes of empty lines before the request line: llhttp skips them without
+    // counting them.
+    let after_empty_lines = |headers: &str| {
+        format!(
+            "{}POST {LOGIN} HTTP/1.1\r\nHost: {{host}}\r\nContent-Type: application/json\r\n{headers}\r\n{{}}",
+            "\r\n".repeat(4700)
+        )
+    };
+    d.step("header-empty-lines-9400", fresh_ip(), 0, |_| raw(&after_empty_lines("Content-Length: 2\r\n")))
+        .await;
+    d.step("header-empty-lines-9400-cl-double", fresh_ip(), 0, |_| {
+        raw(&after_empty_lines("Content-Length: 2\r\nContent-Length: 2\r\n"))
+    })
+    .await;
     // Chunk extensions and trailers: llhttp allows 16 KiB of extensions per chunk and trailers
     // within the limits of a head; hyper 16 KiB of extensions per body and 16 KiB, 100 lines of
     // trailers.

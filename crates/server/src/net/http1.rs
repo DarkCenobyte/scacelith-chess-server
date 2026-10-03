@@ -40,12 +40,14 @@
 //! * header lines ending in a bare LF are accepted (httparse is lenient there);
 //! * a head of more than 9216 bytes as sent gets the raw `431` (hyper's read buffer), also when
 //!   its URL, header names and values stay under 8192 bytes: llhttp does not count the
-//!   whitespace before header values;
+//!   whitespace before header values, nor the empty lines before the request line;
 //! * the 16 KiB of chunk extensions hyper allows count over the whole body (llhttp: in each
 //!   chunk), and trailers may take 16 KiB and 100 lines (llhttp: 8192 bytes and 64 lines, as a
 //!   head);
 //! * pipelined requests are answered one after the other (a request whose head came in with
-//!   the previous request is not checked for `Content-Length` lines or a head over 9216 bytes);
+//!   the previous request is not checked for `Content-Length` lines or a head over 9216 bytes,
+//!   and gets the raw `431` when the rest of its head comes in followed by line ends, 9216 bytes
+//!   in all);
 //! * the answer to an HTTP/1.0 request has an `HTTP/1.0` status line (Node: `HTTP/1.1`);
 //! * header names are written in title case, `Www-Authenticate` for Node's `WWW-Authenticate`;
 //! * a `#fragment` in the target is dropped (Node routes it as part of the path: `404`);
@@ -337,13 +339,24 @@ fn ambiguous_length(h: &HeaderMap, raw: &[u8], method: &str) -> bool {
 
 /// A head larger than hyper's read buffer (`MAX_BUF`) that hyper parsed all the same: it parses
 /// what it has read before it checks the limit, and one read may fill a buffer that grew past
-/// the limit. The capture of such a head (`raw`, `MAX_BUF` bytes at most) starts with its request
-/// line but stops before its end, so its lines cannot be checked: it is refused as hyper refuses
-/// the heads that come in smaller reads (`431`).
+/// the limit. The capture of such a head (`raw`, `MAX_BUF` bytes at most) stops before its end,
+/// so its lines cannot be checked: it is refused as hyper refuses the heads that come in smaller
+/// reads (`431`). The empty lines before the request line count, as hyper counts them: a capture
+/// may hold nothing else, or stop in the method. A full capture that starts elsewhere in the head
+/// (pipelined requests) is refused only when it holds nothing but line ends (the rest of its head
+/// followed by 9 KiB of them).
 fn head_overflows(raw: &[u8], method: &str) -> bool {
-    raw.len() >= MAX_BUF
-        && request_line_start(raw, method).is_some()
-        && raw_header_lines(raw, method).is_none()
+    if raw.len() < MAX_BUF {
+        return false;
+    }
+    let Some(start) = raw.iter().position(|&b| b != b'\r' && b != b'\n') else {
+        return true;
+    };
+    let rest = &raw[start..];
+    if rest.len() <= method.len() {
+        return method.as_bytes().starts_with(rest);
+    }
+    request_line_start(raw, method).is_some() && raw_header_lines(raw, method).is_none()
 }
 
 /// Node's head size: URL + header names + header values.

@@ -28,6 +28,7 @@ main/http-edge/body-on-unknown-path | header connection | intended: unread body 
 main/http-edge/body-on-405 | connection | intended: unread body still on its way, the connection ends after the answer (net/http1.rs known differences)
 main/http-edge/body-on-405 | header connection | intended: unread body still on its way, Connection: close (net/http1.rs known differences)
 main/http-edge/header-padded-9300* | * | intended: a head over 9216 bytes as sent gets the raw 431 (hyper's read buffer); llhttp does not count the whitespace before a value (net/http1.rs known differences)
+main/http-edge/header-empty-lines-9400* | * | intended: a head over 9216 bytes as sent gets the raw 431 (hyper's read buffer); llhttp does not count the empty lines before the request line (net/http1.rs known differences)
 main/http-edge/chunk-extensions-3x6000 | * | intended: hyper's 16 KiB of chunk extensions count over the whole body, llhttp's in each chunk (net/http1.rs known differences)
 main/http-edge/chunk-trailers-9000 | * | intended: hyper takes trailers up to 16 KiB and 100 lines, llhttp within the limits of a head (net/http1.rs known differences)
 main/http-edge/chunk-trailers-70-lines | * | intended: hyper takes trailers up to 16 KiB and 100 lines, llhttp within the limits of a head (net/http1.rs known differences)
