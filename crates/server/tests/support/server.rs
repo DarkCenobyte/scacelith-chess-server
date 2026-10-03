@@ -270,8 +270,9 @@ impl std::fmt::Debug for TestServer {
     }
 }
 
-/// The settings of every test server before its options.
-fn base_env(dir: &TempDir, workers: u32, metrics_port: u16) -> Vec<(String, String)> {
+/// The settings of every test server before its options (also those of a server a tool of the
+/// workspace runs in its own process).
+pub fn base_env(dir: &TempDir, workers: u32, metrics_port: u16) -> Vec<(String, String)> {
     let (cert, key, _) = certificate(dir);
     let secret = base64::engine::general_purpose::STANDARD.encode([42u8; 48]);
     let pairs: Vec<(&str, String)> = vec![
