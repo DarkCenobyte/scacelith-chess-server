@@ -18,6 +18,7 @@ pub mod num;
 pub mod players;
 pub mod priors;
 pub mod refunds;
+pub mod reports;
 pub mod sanction;
 pub mod scoring;
 pub mod service;

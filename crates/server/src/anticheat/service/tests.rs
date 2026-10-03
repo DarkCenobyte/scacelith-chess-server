@@ -95,18 +95,20 @@ fn unknown_kinds_are_info_and_position_cheats_need_a_synchronised_position() {
 async fn non_certain_anomalies_are_coalesced_while_their_job_waits_for_the_writer() {
     let w = world(&[], &["ann", "ben"]).await;
     let (a, b) = (w.ids[0], w.ids[1]);
+    // A game id of its own: the logs of the other tests are captured too.
+    let g = next_game_id();
     let (ac, _) = w.anticheat();
     let logs = LogCapture::start();
     let before = anomaly_count("bad_seq", "suspicious");
     let hold = hold_writer(&w.store);
-    let c = ac.record_anomaly(&anomaly(a, 11, "bad_seq", json!({ "expected": 4, "got": 9 }), true));
+    let c = ac.record_anomaly(&anomaly(a, g, "bad_seq", json!({ "expected": 4, "got": 9 }), true));
     assert_eq!(c, Classification { severity: Severity::Suspicious, certain: false, known: true });
     w.clock.advance(3.0);
-    ac.record_anomaly(&anomaly(a, 11, "bad_seq", Value::Null, true));
+    ac.record_anomaly(&anomaly(a, g, "bad_seq", Value::Null, true));
     w.clock.advance(4.0);
-    ac.record_anomaly(&anomaly(a, 11, "bad_seq", Value::Null, true));
-    ac.record_anomaly(&anomaly(a, 11, "stale_ply", Value::Null, true));
-    ac.record_anomaly(&anomaly(b, 11, "desync", Value::Null, false));
+    ac.record_anomaly(&anomaly(a, g, "bad_seq", Value::Null, true));
+    ac.record_anomaly(&anomaly(a, g, "stale_ply", Value::Null, true));
+    ac.record_anomaly(&anomaly(b, g, "desync", Value::Null, false));
     assert_eq!(ac.pending_count(), 3, "the repeats wait in one row");
     assert_eq!(anomaly_count("bad_seq", "suspicious") - before, 3, "every anomaly is counted");
     drop(hold);
@@ -121,7 +123,7 @@ async fn non_certain_anomalies_are_coalesced_while_their_job_waits_for_the_write
         Some(json!({ "expected": 4, "got": 9, "posMatched": true, "count": 3, "lastAt": NOW + 7 }))
     );
     assert_eq!(seq.at, NOW);
-    assert_eq!(seq.game_id, Some(11));
+    assert_eq!(seq.game_id, Some(g));
     let desync = w.store.anomalies().for_user(b, 10).await.unwrap();
     assert_eq!(desync[0].detail, Some(json!({ "posMatched": false })));
     assert_eq!(desync[0].severity, Severity::Info);
@@ -129,15 +131,15 @@ async fn non_certain_anomalies_are_coalesced_while_their_job_waits_for_the_write
     let records = logs.records("anticheat");
     let security: Vec<&Value> = records
         .iter()
-        .filter(|r| r["level"] == "security" && r["msg"] == "anomaly" && r["userId"] == a)
+        .filter(|r| r["level"] == "security" && r["msg"] == "anomaly" && r["userId"] == a && r["gameId"] == g)
         .collect();
     assert_eq!(security.len(), 1, "a repeat waiting in the buffer is not logged again");
     assert_eq!(security[0]["kind"], "bad_seq");
     assert!(
-        !records.iter().any(|r| r["level"] == "security" && r["kind"] == "stale_ply"),
+        !records.iter().any(|r| r["level"] == "security" && r["kind"] == "stale_ply" && r["gameId"] == g),
         "info anomalies are not security-logged"
     );
-    assert!(records.iter().any(|r| r["level"] == "debug" && r["kind"] == "stale_ply" && r["userId"] == a));
+    assert!(records.iter().any(|r| r["level"] == "debug" && r["kind"] == "stale_ply" && r["gameId"] == g));
 }
 
 #[tokio::test]
@@ -217,14 +219,9 @@ async fn a_failing_store_loses_the_rows_without_failing_the_caller() {
             .map(|r| (r["msg"].as_str().unwrap_or("").to_string(), r["rows"].as_u64().unwrap_or(0)))
             .collect::<Vec<_>>()
     };
-    assert!(eventually(|| errors().len() >= 2).await);
-    let mut errors = errors();
-    errors.sort();
-    assert_eq!(
-        errors,
-        [("anomaly batch lost".to_string(), 1), ("certain anomaly not persisted".to_string(), 1)],
-        "the repeated flood was one row"
-    );
+    let lost = ("anomaly batch lost".to_string(), 1);
+    let certain = ("certain anomaly not persisted".to_string(), 1);
+    assert!(eventually(|| errors().contains(&lost) && errors().contains(&certain)).await, "{:?}", errors());
     assert!(METRICS.dropped.get() - before >= 2);
     assert_eq!(ac.pending_count(), 0);
 
