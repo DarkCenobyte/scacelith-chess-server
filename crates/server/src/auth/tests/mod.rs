@@ -5,9 +5,11 @@
 
 mod login;
 mod mfa;
+mod register;
 mod sessions;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use http::Method;
 use parking_lot::Mutex;
@@ -25,7 +27,7 @@ use crate::http::{Api, Router};
 use crate::ids::UserId;
 use crate::log::Logger;
 use crate::mail::{CustomTransport, Mailer, MailerOptions, OutgoingMail};
-use crate::security::password::{Argon2Hasher, Argon2Params, PasswordHasher};
+use crate::security::password::{Argon2Hasher, Argon2Params, HashFailure, PasswordHasher, Verified};
 use crate::store::{GameSummary, NewUser, SecurityEvent, Store, StoreOptions, User};
 
 /// The password of the test accounts.
@@ -114,6 +116,54 @@ pub(crate) struct Harness {
 /// The cheap hasher of the tests.
 pub(crate) fn test_hasher() -> Arc<dyn PasswordHasher> {
     Arc::new(Argon2Hasher::new(Argon2Params { memory_kib: 64, passes: 1, lanes: 1, ..Argon2Params::DEFAULT }))
+}
+
+/// A hasher that counts its hashes and can run a hook once, before its next hash (to land a
+/// change while a request hashes).
+pub(crate) struct CountingHasher {
+    inner: Arc<dyn PasswordHasher>,
+    hashes: AtomicUsize,
+    hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl CountingHasher {
+    /// Counts the hashes of the cheap test hasher.
+    pub(crate) fn new() -> Arc<CountingHasher> {
+        Arc::new(CountingHasher { inner: test_hasher(), hashes: AtomicUsize::new(0), hook: Mutex::new(None) })
+    }
+
+    /// New hashes so far.
+    pub(crate) fn hashes(&self) -> usize {
+        self.hashes.load(Ordering::SeqCst)
+    }
+
+    /// Runs `hook` on the blocking thread of the next hash, before it.
+    pub(crate) fn before_next_hash(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.hook.lock() = Some(Box::new(hook));
+    }
+}
+
+impl PasswordHasher for CountingHasher {
+    fn algorithm(&self) -> &'static str {
+        self.inner.algorithm()
+    }
+
+    fn hash(&self, password: &str) -> Result<String, HashFailure> {
+        self.hashes.fetch_add(1, Ordering::SeqCst);
+        let hook = self.hook.lock().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.inner.hash(password)
+    }
+
+    fn verify(&self, stored: &str, password: &str) -> Result<Verified, HashFailure> {
+        self.inner.verify(stored, password)
+    }
+
+    fn verify_dummy(&self, password: &str) -> Result<(), HashFailure> {
+        self.inner.verify_dummy(password)
+    }
 }
 
 impl Harness {
