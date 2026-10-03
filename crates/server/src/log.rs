@@ -329,15 +329,6 @@ pub fn dropped() -> u64 {
     DROPPED.load(Ordering::Relaxed)
 }
 
-/// Keeps formatted lines in memory instead of writing them (tests). With `true`, returns the lines
-/// captured so far and keeps capturing; with `false`, stops and returns (and clears) them. Prefer
-/// [`capture_logs`], which also serialises the tests that capture.
-pub fn capture(on: bool) -> Vec<String> {
-    CAPTURE_ON.store(on, Ordering::SeqCst);
-    let mut c = CAPTURE.lock();
-    if on { c.clone() } else { std::mem::take(&mut *c) }
-}
-
 /// A capture of the log lines for a test, from [`capture_logs`]. Restores the previous level and
 /// format when dropped. Records of other tests running at the same time are captured too: filter
 /// by component.

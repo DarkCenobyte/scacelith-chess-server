@@ -93,31 +93,19 @@ pub async fn store_with(config: &Config, mut opts: StoreOptions) -> Store {
 
 /// Keeps the log lines in memory while alive (one capture at a time in the test binary).
 pub struct LogCapture {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    capture: crate::log::Capture,
 }
 
 impl LogCapture {
+    /// Captures every record (debug level and up) until dropped; one capture at a time across
+    /// the whole test binary.
     pub fn start() -> LogCapture {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        crate::log::capture(false);
-        crate::log::capture(true);
-        LogCapture { _lock: lock }
+        LogCapture { capture: crate::log::capture_logs(crate::log::Level::Debug) }
     }
 
     /// The captured records of a logger component, parsed.
     pub fn records(&self, component: &str) -> Vec<serde_json::Value> {
-        crate::log::capture(true)
-            .iter()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
-            .filter(|v| v["c"] == component)
-            .collect()
-    }
-}
-
-impl Drop for LogCapture {
-    fn drop(&mut self) {
-        crate::log::capture(false);
+        self.capture.records().into_iter().filter(|v| v["c"] == component).collect()
     }
 }
 
