@@ -685,6 +685,16 @@ async fn treats_a_server_type_as_a_certain_cheat() {
     );
     assert_eq!(rig.anomalies.sanctions(), [(1, game, "forged_type")]);
     assert!(rig.hosts.calls().contains(&HostCall::Forfeit { game, user: 1 }));
+    // Any type byte of the server's range is one, assigned or not (PROTOCOL.md: 0x80-0xFF).
+    for (token, user, type_byte) in [(BOB, 2, 0xC0), (CARL, 3, 0xFF)] {
+        let rig = Rig::new(&[("REQUIRE_EMAIL_VERIFICATION", "false")]).await;
+        let (mut c, _) = rig.login(token).await;
+        c.raw(&[type_byte, 2, 0, 0, 0]).await;
+        let (e, code) = c.refused().await;
+        assert_eq!((e.r#ref, e.code, code), (0, ErrorCode::CheatDetected, 4302), "type {type_byte:#x}");
+        assert_eq!(rig.anomalies.kinds(), ["forged_type"]);
+        assert_eq!(rig.anomalies.sanctions(), [(user, 0, "forged_type")]);
+    }
 }
 
 #[tokio::test(start_paused = true)]
