@@ -688,6 +688,37 @@ async fn a_chunked_body_hyper_cannot_decode_gets_the_raw_400() {
 }
 
 #[tokio::test]
+async fn chunk_extensions_or_trailers_over_hypers_limits_get_the_raw_431() {
+    let s = setup(Options::default());
+    let upload = |body: &str| {
+        format!(
+            "POST /api/v1/upload HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{body}"
+        )
+    };
+    let trailers: String = (0..101).map(|i| format!("X-T{i}: v\r\n")).collect();
+    for (body, what) in [
+        (format!("2;{}\r\n{{}}\r\n0\r\n\r\n", "a".repeat(17_000)), "17000 bytes of chunk extensions"),
+        (format!("2\r\n{{}}\r\n0\r\nX-T: {}\r\n\r\n", "a".repeat(17_000)), "17000 bytes of trailers"),
+        (format!("2\r\n{{}}\r\n0\r\n{trailers}\r\n"), "101 trailer lines"),
+    ] {
+        let mut c = connect(&s.edge, "127.0.0.1");
+        c.io.write_all(upload(&body).as_bytes()).await.expect("write");
+        let answer = until_closed(&mut c.io, Duration::from_secs(3)).await.expect("closed");
+        assert_eq!(
+            String::from_utf8_lossy(&answer),
+            String::from_utf8_lossy(ClientError::TooLarge.raw_answer()),
+            "{what}"
+        );
+    }
+    assert_eq!(s.edge.client_errors(ClientError::TooLarge), 3);
+    assert_eq!(s.edge.client_errors(ClientError::Malformed), 0);
+    assert_eq!(reports(&s.guard), [(local(), 3.0)], "each one counts toward a block");
+    let mut c = connect(&s.edge, "127.0.0.1");
+    let w = request(&mut c, &upload(&format!("2;{}\r\n{{}}\r\n0\r\nX-T: v\r\n\r\n", "a".repeat(9000)))).await;
+    assert_eq!(w.status, 200, "extensions and trailers under the limits");
+}
+
+#[tokio::test]
 async fn node_answers_missing_host_and_unknown_expect_itself() {
     let s = setup(Options::default());
     let mut c = connect(&s.edge, "127.0.0.1");

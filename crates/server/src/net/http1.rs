@@ -17,10 +17,10 @@
 //!   8192 bytes counted as URL + header names + values, more than 64 header lines,
 //!   `Content-Length` given twice or with `Transfer-Encoding`, a target with bytes outside ASCII)
 //!   get the same raw answers, as does a chunked body hyper cannot decode once the handler that
-//!   read it is done (Node answers when the bad bytes come in, also for a route that does not
-//!   read its body). These
-//!   client errors count in `scacelith_http_client_errors_total{reason}` and 1 toward a block of
-//!   the peer (unless it is a trusted proxy);
+//!   read it is done (`431` for chunk extensions or trailers over hyper's limits, `400` for the
+//!   rest; Node answers when the bad bytes come in, also for a route that does not read its
+//!   body). These client errors count in `scacelith_http_client_errors_total{reason}` and 1
+//!   toward a block of the peer (unless it is a trusted proxy);
 //! * a connection the server closes after an answer keeps reading (and discarding) for 2 s, 1 s
 //!   after a raw answer, so the client reads the answer before the socket goes.
 //!
@@ -41,6 +41,9 @@
 //! * a head of more than 9216 bytes as sent gets the raw `431` (hyper's read buffer), also when
 //!   its URL, header names and values stay under 8192 bytes: llhttp does not count the
 //!   whitespace before header values;
+//! * the 16 KiB of chunk extensions hyper allows count over the whole body (llhttp: in each
+//!   chunk), and trailers may take 16 KiB and 100 lines (llhttp: 8192 bytes and 64 lines, as a
+//!   head);
 //! * pipelined requests are answered one after the other (a request whose head came in with
 //!   the previous request is not checked for `Content-Length` lines or a head over 9216 bytes);
 //! * the answer to an HTTP/1.0 request has an `HTTP/1.0` status line (Node: `HTTP/1.1`);
@@ -59,7 +62,7 @@ use std::io;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
@@ -836,10 +839,11 @@ impl Body for ResponseBody {
     }
 }
 
-/// A request body on its way to the API: notes a chunked encoding hyper cannot decode.
+/// A request body on its way to the API: notes a chunked encoding hyper cannot decode (the
+/// client error of [`bad_encoding`]).
 struct WatchedBody {
     inner: Incoming,
-    malformed: Arc<AtomicBool>,
+    refused: Arc<OnceLock<ClientError>>,
 }
 
 impl Body for WatchedBody {
@@ -852,9 +856,9 @@ impl Body for WatchedBody {
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let frame = ready!(Pin::new(&mut self.inner).poll_frame(cx));
         if let Some(Err(e)) = &frame
-            && is_bad_encoding(e)
+            && let Some(kind) = bad_encoding(e)
         {
-            self.malformed.store(true, Ordering::Relaxed);
+            let _ = self.refused.set(kind);
         }
         Poll::Ready(frame)
     }
@@ -868,12 +872,27 @@ impl Body for WatchedBody {
     }
 }
 
-/// Whether a body error is a chunked encoding hyper's decoder refused (its errors of kind
-/// `InvalidData` / `InvalidInput`), not a connection that broke off.
-fn is_bad_encoding(e: &hyper::Error) -> bool {
-    std::error::Error::source(e)
-        .and_then(|cause| cause.downcast_ref::<io::Error>())
-        .is_some_and(|io| matches!(io.kind(), io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput))
+/// The messages of hyper's chunked decoder (1.11) for chunk extensions and trailers over its
+/// limits: errors of kind `InvalidData` with nothing else to tell them from the encoding errors
+/// (`chunk_extensions_or_trailers_over_hypers_limits_get_the_raw_431` fails if hyper renames them).
+const DECODER_LIMITS: [&str; 3] =
+    ["chunk extensions over limit", "chunk trailers bytes over limit", "chunk trailers count overflow"];
+
+/// The client error of a body error that is a chunked encoding hyper's decoder refused (its
+/// errors of kind `InvalidData` / `InvalidInput`), not a connection that broke off: too large for
+/// chunk extensions or trailers over its limits (llhttp: `HPE_CHUNK_EXTENSIONS_OVERFLOW`,
+/// `HPE_HEADER_OVERFLOW`), malformed for the others.
+fn bad_encoding(e: &hyper::Error) -> Option<ClientError> {
+    let io = std::error::Error::source(e)?.downcast_ref::<io::Error>()?;
+    match io.kind() {
+        io::ErrorKind::InvalidData
+            if io.get_ref().is_some_and(|inner| DECODER_LIMITS.contains(&inner.to_string().as_str())) =>
+        {
+            Some(ClientError::TooLarge)
+        }
+        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => Some(ClientError::Malformed),
+        _ => None,
+    }
 }
 
 impl Drop for ResponseBody {
@@ -1242,15 +1261,15 @@ impl HttpListener {
             }
         }
         let api = self.api.clone();
-        let malformed = Arc::new(AtomicBool::new(false));
-        let req = req.map(|inner| WatchedBody { inner, malformed: malformed.clone() });
+        let refused = Arc::new(OnceLock::new());
+        let req = req.map(|inner| WatchedBody { inner, refused: refused.clone() });
         let handled = tokio::spawn(async move {
             let res = api.handle(req, keys).await;
             (res, slot)
         })
         .await;
-        if malformed.load(Ordering::Relaxed) {
-            return Ok(self.raw_error(&st, ClientError::Malformed));
+        if let Some(&e) = refused.get() {
+            return Ok(self.raw_error(&st, e));
         }
         Ok(match handled {
             Ok((res, slot)) => self.finish(&st, res, keep_alive, head, slot),
