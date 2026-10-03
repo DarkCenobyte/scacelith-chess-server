@@ -7,6 +7,7 @@
 
 use std::borrow::Cow;
 use std::fmt::Display;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
@@ -189,7 +190,33 @@ impl ApiBuilder {
             page_renderer: self.page_renderer,
             body_timeout: self.body_timeout,
             handler_timeout: self.handler_timeout,
+            handlers: Arc::new(Handlers::default()),
         })
+    }
+}
+
+/// The handler tasks still running, late ones included (a handler outlives its route timeout).
+#[derive(Default)]
+struct Handlers {
+    running: AtomicUsize,
+    idle: tokio::sync::Notify,
+}
+
+/// One running handler task; dropping it (the task ended or panicked) wakes [`Api::quiesce`].
+struct HandlerTask(Arc<Handlers>);
+
+impl HandlerTask {
+    fn start(handlers: &Arc<Handlers>) -> HandlerTask {
+        handlers.running.fetch_add(1, Ordering::SeqCst);
+        HandlerTask(handlers.clone())
+    }
+}
+
+impl Drop for HandlerTask {
+    fn drop(&mut self) {
+        if self.0.running.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.idle.notify_waiters();
+        }
     }
 }
 
@@ -209,6 +236,7 @@ pub struct Api {
     body_timeout: Duration,
     handler_timeout: Duration,
     hsts: bool,
+    handlers: Arc<Handlers>,
 }
 
 impl std::fmt::Debug for Api {
@@ -306,6 +334,27 @@ impl Api {
     /// The configuration.
     pub fn config(&self) -> &Arc<Config> {
         &self.config
+    }
+
+    /// Waits until no handler task runs any more, at most `limit` (the server's shutdown, once the
+    /// listeners stopped: the late handlers may still use the store, the mailer or the GIF pool).
+    /// Returns whether every handler ended.
+    pub async fn quiesce(&self, limit: Duration) -> bool {
+        let wait = async {
+            loop {
+                let idle = self.handlers.idle.notified();
+                if self.handlers.running.load(Ordering::SeqCst) == 0 {
+                    return;
+                }
+                idle.await;
+            }
+        };
+        tokio::time::timeout(limit, wait).await.is_ok()
+    }
+
+    /// Handler tasks running now, late ones included.
+    pub fn handlers_running(&self) -> usize {
+        self.handlers.running.load(Ordering::SeqCst)
     }
 
     /// Runs the close hooks of the route modules once (the server's shutdown).
@@ -501,7 +550,12 @@ impl Api {
     /// (its side effects happen) and its answer is dropped.
     async fn run_handler(&self, route: &Route, ctx: Ctx) -> Result<Answer, ApiError> {
         let timeout = route.opts().timeout.unwrap_or(self.handler_timeout);
-        let task = tokio::spawn((route.handler())(ctx));
+        let running = HandlerTask::start(&self.handlers);
+        let handler = (route.handler())(ctx);
+        let task = tokio::spawn(async move {
+            let _running = running;
+            handler.await
+        });
         match tokio::time::timeout(timeout, task).await {
             Ok(Ok(result)) => result,
             Ok(Err(join)) => Err(ApiError::internal(format!("handler panicked: {join}"))),

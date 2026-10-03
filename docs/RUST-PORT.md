@@ -341,10 +341,13 @@ router from every group in the order of the Node `DEFAULT_ROUTES` (the `Allow` h
 * Logs: JSON lines on stdout (or `LOG_FORMAT=pretty`), `<N>` syslog priorities when
   `JOURNAL_STREAM` names stdout (systemd connects stdout and stderr to the journal by default),
   same messages as before. No log files. `migrate` and the administration commands log on stderr
-  (stdout holds their output), with the same detection. What comes before logging starts (an
-  invalid configuration) and a panic message are plain text on stderr.
-* systemd: `Type=notify` (`READY=1` after migrations, journal recovery and listeners;
-  `STOPPING=1` at shutdown), `SIGHUP` reloads the TLS certificate, `SIGTERM`/`SIGINT` drain
+  (stdout holds their output), with the same detection. A panic is logged as an `error` record
+  (`log::install_panic_hook`); what comes before logging starts (an invalid configuration) and a
+  backtrace asked with `RUST_BACKTRACE` are plain text on stderr.
+* systemd: `Type=notify-reload` (`READY=1` after migrations, journal recovery and listeners;
+  `RELOADING=1` then `READY=1` around a `SIGHUP` certificate reload, even a failed one;
+  `STOPPING=1` at shutdown; `WATCHDOG=1` when `WatchdogSec` is set), `SIGHUP` reloads the TLS
+  certificate, `SIGTERM`/`SIGINT` drain
   (`Notice{ServerShutdown}`, `SHUTDOWN_GRACE_MS`, final commits, journal flush, store close), a
   second signal exits with code 1. Example unit and guide in `deploy/systemd/`.
 * Exit codes: 0 success, 1 failure, 2 usage.

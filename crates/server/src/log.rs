@@ -270,6 +270,25 @@ pub fn init(opts: Options) {
     k.day = i64::MIN;
 }
 
+/// Logs panics as error records (priority 3 under journald) instead of the default plain text on
+/// stderr, which journald stores at priority info. The default hook still runs afterwards when
+/// `RUST_BACKTRACE` asks for a backtrace.
+pub fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        crate::log_error!(Logger::root().child("panic"), "panic", {
+            "thread": thread.name().unwrap_or("unnamed"),
+            "location": info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())),
+            "message": info.payload_as_str().unwrap_or("(no message)"),
+        });
+        flush();
+        if std::env::var_os("RUST_BACKTRACE").is_some_and(|v| v != "0") {
+            default(info);
+        }
+    }));
+}
+
 /// Changes the threshold only.
 pub fn set_level(level: Level) {
     LEVEL.store(level as u8, Ordering::Relaxed);

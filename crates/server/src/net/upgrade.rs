@@ -384,8 +384,8 @@ impl std::fmt::Debug for WsEndpoint {
 }
 
 impl WsEndpoint {
-    /// The endpoint of `config` (`WS_ALLOWED_ORIGINS`, `WS_MAX_MESSAGE_BYTES`,
-    /// `WS_HELLO_TIMEOUT_MS`), handing connections to `on_connection`.
+    /// The endpoint of `config` (`WS_ALLOWED_ORIGINS`, `WS_HELLO_TIMEOUT_MS`), handing connections
+    /// to `on_connection`.
     pub fn new(config: &Config, settings: WsSettings, on_connection: OnConnection) -> WsEndpoint {
         let hello = u64::try_from(config.ws_hello_timeout_ms).unwrap_or(10_000).min(10_000);
         WsEndpoint {

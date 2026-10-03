@@ -2,8 +2,8 @@
 //! closing handshake, exposed as a reader/writer pair that the realtime connection task drives.
 //!
 //! Client frames must be masked binary frames (text closes with 1003), one message is at most
-//! `WS_MAX_MESSAGE_BYTES` (checked from the frame header, before any payload is buffered) and at
-//! most 64 frames. Pings are answered at most 2 per second (burst 5), close frames are echoed,
+//! `WsSettings::max_message_bytes` (512 bytes for protocol v1; checked from the frame header,
+//! before any payload is buffered) and at most 64 frames. Pings are answered at most 2 per second (burst 5), close frames are echoed,
 //! and every closing path ends the socket 2 s after the close started at the latest.
 //!
 //! The reader handles control frames itself; its [`WsReader::next`] is cancel-safe, so it can

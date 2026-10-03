@@ -191,6 +191,11 @@ pub fn spec(name: &str) -> Option<&'static KeySpec> {
 /// server: an existing `.env` keeps working.
 pub const OBSOLETE: &[(&str, &str)] = &[
     (
+        "WS_MAX_MESSAGE_BYTES",
+        "WS_MAX_MESSAGE_BYTES is no longer used: protocol v1 fixes the largest client message at 512 bytes \
+         (docs/PROTOCOL.md). Remove it.",
+    ),
+    (
         "GOOGLE_REDIRECT_URI",
         "GOOGLE_REDIRECT_URI is no longer used: Google sign-in now returns to the game on 127.0.0.1. Remove it \
          and use a \"Desktop app\" OAuth client.",
@@ -634,7 +639,6 @@ pub static KEYS: &[KeySpec] = &[
          second, so a small value still serves many players.",
     )
     .range(1, 99_999),
-    key("WS_MAX_MESSAGE_BYTES", Limits, Int, "Largest message a client may send.").default("512").range(128, 65_536),
     key("WS_MSG_RATE", Limits, Int, "Messages per second a client may send (sustained).").default("20").min(1),
     key("WS_MSG_BURST", Limits, Int, "Message burst a client may send.").default("40").min(1),
     key(
