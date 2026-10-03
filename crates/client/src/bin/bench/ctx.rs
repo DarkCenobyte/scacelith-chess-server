@@ -49,6 +49,8 @@ pub struct Ctx {
     pub accounts: Vec<Account>,
     /// The server's process tree.
     pub probe: Probe,
+    /// The load generator itself.
+    pub load_probe: Probe,
     /// Bounds the connection handshakes in flight.
     pub handshakes: Arc<Semaphore>,
 }
@@ -76,6 +78,7 @@ impl Ctx {
             endpoint,
             accounts,
             probe: Probe::new(opts.server_pid),
+            load_probe: Probe::new(Some(std::process::id())),
             handshakes: Arc::new(Semaphore::new(opts.inflight)),
             opts,
         }))
@@ -143,6 +146,8 @@ pub struct Window {
     pub server: Value,
     /// The server sample at the end.
     pub end_sample: Option<Sample>,
+    /// The load generator's own CPU and memory.
+    pub load: Value,
 }
 
 impl Window {
@@ -171,6 +176,11 @@ impl Window {
         self.server.get("rssMiB").and_then(Value::as_f64).unwrap_or(0.0)
     }
 
+    /// The load generator's CPU in percent of one core.
+    pub fn load_cpu(&self) -> f64 {
+        self.load.get("cpuPercent").and_then(Value::as_f64).unwrap_or(0.0)
+    }
+
     /// Counters whose name starts with `fail.`, `error.` or `drop.`, as JSON.
     pub fn errors_json(&self) -> Value {
         let map: Map<String, Value> = self
@@ -191,7 +201,20 @@ impl Window {
             "counters": self.counters,
             "latencyMs": self.latencies,
             "server": self.server,
+            "loadGenerator": self.load,
         })
+    }
+}
+
+/// Warns when the load generator used most of its CPUs during a window: its own limits may then
+/// show in the figures.
+pub fn check_load(load: &Value) {
+    let cpus = std::thread::available_parallelism().map_or(1, usize::from) as f64;
+    let used = load.get("cpuPercent").and_then(Value::as_f64).unwrap_or(0.0);
+    if used > 85.0 * cpus {
+        progress(format!(
+            "warning: the load generator used {used:.0} % of its {cpus} CPUs: the figures may show its limits"
+        ));
     }
 }
 
@@ -200,19 +223,22 @@ pub async fn measure(ctx: &Ctx, stats: &Stats, warmup: Duration, duration: Durat
     tokio::time::sleep(warmup).await;
     stats.set_measuring(true);
     let before = stats.counters();
-    let s0 = ctx.probe.sample();
+    let (s0, l0) = (ctx.probe.sample(), ctx.load_probe.sample());
     let t0 = Instant::now();
     tokio::time::sleep(duration).await;
     let after = stats.counters();
-    let s1 = ctx.probe.sample();
+    let (s1, l1) = (ctx.probe.sample(), ctx.load_probe.sample());
     let seconds = t0.elapsed().as_secs_f64();
     stats.set_measuring(false);
+    let load = window_json(l0.as_ref(), l1.as_ref());
+    check_load(&load);
     Window {
         seconds,
         counters: counter_delta(&before, &after),
         latencies: stats.hists_json(),
         server: window_json(s0.as_ref(), s1.as_ref()),
         end_sample: s1,
+        load,
     }
 }
 

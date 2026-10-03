@@ -72,7 +72,7 @@ pub async fn run(ctx: &Arc<Ctx>) -> Result<(Value, Vec<Step>), String> {
         progress(format!("connections: ramping to {target}"));
         ramp_stats.set_measuring(true);
         let before = ramp_stats.counters();
-        let s0 = ctx.probe.sample();
+        let (s0, l0) = (ctx.probe.sample(), ctx.load_probe.sample());
         let started = Instant::now();
         let mut ramp = JoinSet::new();
         for account in &accounts[opened..target] {
@@ -85,7 +85,9 @@ pub async fn run(ctx: &Arc<Ctx>) -> Result<(Value, Vec<Step>), String> {
             }
         }
         let ramp_s = started.elapsed().as_secs_f64();
-        let s1 = ctx.probe.sample();
+        let (s1, l1) = (ctx.probe.sample(), ctx.load_probe.sample());
+        let ramp_load = crate::procfs::window_json(l0.as_ref(), l1.as_ref());
+        crate::ctx::check_load(&ramp_load);
         ramp_stats.set_measuring(false);
         let ramp_counts = counter_delta(&before, &ramp_stats.counters());
         let ramp_lat = ramp_stats.hists_json();
@@ -116,6 +118,7 @@ pub async fn run(ctx: &Arc<Ctx>) -> Result<(Value, Vec<Step>), String> {
             .figure("RSS MiB", window.rss())
             .figure("KiB/conn RSS", per_conn_kib(base.as_ref(), now.as_ref(), conns, |s| s.rss))
             .figure("KiB/conn PSS", per_conn_kib(base.as_ref(), now.as_ref(), conns, |s| s.pss))
+            .figure("ramp load CPU %", ramp_load.get("cpuPercent").cloned().unwrap_or(Value::Null))
             .detail(json!({
                 "ramp": {
                     "seconds": round3(ramp_s),
@@ -124,6 +127,7 @@ pub async fn run(ctx: &Arc<Ctx>) -> Result<(Value, Vec<Step>), String> {
                     "failures": failures,
                     "latencyMs": ramp_lat,
                     "server": crate::procfs::window_json(s0.as_ref(), s1.as_ref()),
+                    "loadGenerator": ramp_load,
                 },
                 "baselineRssMiB": base.map(|s| mib(s.rss)),
                 "baselinePssMiB": base.map(|s| mib(s.pss)),

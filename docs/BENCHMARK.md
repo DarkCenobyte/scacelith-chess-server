@@ -151,8 +151,10 @@ busy).
   a shared or virtual machine, other jobs disturb the runs: compare runs made on a quiet machine,
   and repeat a run that looks off.
 - The load generator must not saturate its own cores: at the largest steps (10,000 TLS
-  handshakes, 2,000 bots with 20,000 gestures per second) check the load CPUs with `top` during
-  the run, or give it more CPUs (`--load-cpus`).
+  handshakes, 2,000 bots with 20,000 gestures per second) it may. Its own CPU is reported next to
+  the server's ("load CPU %", "ramp load CPU %", in % of one core), and it warns on stderr when
+  that passes 85 % of the cores it may use: then give it more CPUs (`--load-cpus`), since its
+  queueing would show as server latency.
 - RSS overstates the Node.js server (shared pages counted in each process); PSS is the fairer
   memory figure for it. "KiB/conn" divides the growth above the idle footprint by the open
   connections; a garbage-collected heap makes it noisy at small steps.
@@ -166,7 +168,8 @@ Each report (`scacelith-bench` prints it on stdout, `--out` writes it) holds `to
 `scenario`, `target`, `label`, `meta` (server version, password hash, CPUs), `settings`, `params`
 (the scenario's options) and one entry per step: `headline` (the figures of the Markdown table,
 in order) and `detail` (every counter, every latency summary in ms with `n`, `mean`, `p50`, `p90`,
-`p99`, `p999` and `max`, the server CPU and memory of the window, failures by class).
+`p99`, `p999` and `max`, the server CPU and memory of the window, the load generator's own CPU
+under `loadGenerator`, failures by class).
 `scacelith-bench table FILE...` prints one Markdown table per scenario, one row per run and step.
 
 Error counters are named by cause: `fail.<class>` (a connection that did not complete: `timeout`,

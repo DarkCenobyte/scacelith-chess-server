@@ -575,6 +575,7 @@ pub async fn run(ctx: &Arc<Ctx>) -> Result<(Value, Vec<Step>), String> {
             .figure("errors", errors)
             .figure("CPU %", window.cpu())
             .figure("RSS MiB", window.rss())
+            .figure("load CPU %", window.load_cpu())
             .detail(
                 json!({ "startedGames": started, "errors": window.errors_json(), "window": window.json() }),
             );

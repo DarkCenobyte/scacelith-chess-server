@@ -121,6 +121,7 @@ async fn measure_endpoint(ctx: &Arc<Ctx>, name: &str, concurrency: usize, plan: 
         .figure("errors", errors)
         .figure("CPU %", window.cpu())
         .figure("RSS MiB", window.rss())
+        .figure("load CPU %", window.load_cpu())
         .detail(json!({
             "errors": window.errors_json(),
             "bytesPerRequest": if window.count("ok") > 0 { window.count("bytes") / window.count("ok") } else { 0 },
