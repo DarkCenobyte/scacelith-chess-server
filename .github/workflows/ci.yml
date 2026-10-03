@@ -13,6 +13,11 @@ on:
   schedule:
     - cron: "23 4 * * 1"
   workflow_dispatch:
+    inputs:
+      game-ref:
+        description: Branch, tag or commit of the game to check the contract against
+        type: string
+        default: master
   workflow_call:
 
 permissions: {}
@@ -187,27 +192,12 @@ jobs:
           path: server
           persist-credentials: false
 
-      # A change made on both sides lands on branches of the same name in the two repositories:
-      # a pull request is checked against the game's branch of that name when there is one, and
-      # everything else against the game's master.
-      - name: Pick the game's branch
-        id: game
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-          GAME_REPOSITORY: ${{ github.server_url }}/DarkCenobyte/scacelith-chess
-        run: |
-          ref=master
-          if [[ -n "$HEAD_REF" ]] &&
-            git ls-remote --exit-code --heads "$GAME_REPOSITORY" "refs/heads/$HEAD_REF" > /dev/null; then
-            ref=$HEAD_REF
-          fi
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "The game's branch: $ref" >> "$GITHUB_STEP_SUMMARY"
-
+      # The game's master, or the branch a manual run names (a change made on both sides: run
+      # this workflow on the server's branch with the game's branch as game-ref).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: DarkCenobyte/scacelith-chess
-          ref: ${{ steps.game.outputs.ref }}
+          ref: ${{ inputs.game-ref || 'master' }}
           path: game
           persist-credentials: false
 
