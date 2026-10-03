@@ -18,7 +18,9 @@ serde_json = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The tests run the freshness check of the generated files (the codegen module).
 serde_json.workspace = true
+sha2.workspace = true
 
 [[bin]]
 name = "protogen"
