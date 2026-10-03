@@ -51,12 +51,13 @@ and does not matter.
 ### game
 
 A server with two shards, a self-signed certificate, proof of work on registration
-(`POW_REGISTER_BITS=12`), no e-mail confirmation and no GIFs (`GIF_ENABLED=false`). A bot of the
-client SDK (`scacelith_client::bot`) registers `livebot`, queues in rated 3+2 and plays random
-legal moves. Then:
+(`POW_REGISTER_BITS=12`), no e-mail confirmation, no GIFs (`GIF_ENABLED=false`) and a gesture
+keepalive of 2.5 s (`GESTURE_IDLE_MS=2500`). A bot of the client SDK (`scacelith_client::bot`)
+registers `livebot`, queues in rated 3+2 and plays random legal moves. Then:
 
-- `net_live_server_game` registers `cppplayer` (solving the proof of work), signs in, queues,
-  plays 12 plies against the bot, resigns and checks the rating update;
+- `net_live_server_game` registers `cppplayer` (solving the proof of work), signs in, checks the
+  keepalive the client read in `Welcome` (2500 ms), queues, plays 12 plies against the bot,
+  resigns and checks the rating update;
 - `net_live_account_server_settings` changes the player's address (refused for the bot's address:
   `email_taken`, then applied at once: `email_changed`) and asks for GIFs (`gif_disabled`). The
   harness checks the notice mailed to the former address in the server's log.
