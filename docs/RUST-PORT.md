@@ -132,9 +132,14 @@ Server modules (`crates/server/src`):
 * Metrics: `crate::metrics` statics (`LazyLock`). Metric names, help texts, labels and buckets
   are those of the former server where they kept their meaning (DESIGN 8, docs/SIZING.md); the
   `shard` label is gone (one process). New metrics use the `scacelith_` prefix.
-* Async: tokio. Channels: `tokio::sync::mpsc` for actor inboxes (bounded where a producer can be a
-  client, with an explicit overflow policy), `oneshot` for replies. No `async-trait`; traits return
-  boxed futures or `impl Future` where needed.
+* Async: tokio. Channels: `tokio::sync::mpsc` for actor inboxes, `oneshot` for replies. The inboxes
+  of the game hosts and of the lobby are unbounded, without an overflow policy: what clients put in
+  them is bounded upstream, per connection, by the message and gesture rate buckets (`WS_MSG_RATE`,
+  `GESTURE_RATE` and their bursts; the messages over them are dropped and a flood closes the
+  connection, 4301), the lobby's cap of `MAX_LOBBY_IN_FLIGHT` (8) requests in flight and one claim
+  per connection, and by the connection limits (`MAX_CONNECTIONS`, `MAX_CONNECTIONS_PER_IP`). An
+  inbox thus grows with the number of connections and the time its actor is held up, not with what
+  one client sends. No `async-trait`; traits return boxed futures or `impl Future` where needed.
 * JSON: `serde_json::Value` with `preserve_order` (key order = insertion order, as JavaScript).
   Answers keep the key order of the API specification. Integers stay integers (`i64`/`u64`),
   never `f64` unless the value is fractional.
@@ -248,7 +253,7 @@ implementations. Trait methods never block: they post to an actor or enqueue a s
 | `HostEvents` (`game_ended`, `game_recovered`, `rematch`, `conduct`) | game host actors | the lobby |
 | `AnomalySink` (`record`, `sanction_certain`) | game host actors, connection tasks | the anti-cheat service |
 | `SessionEvents` (`sessions_revoked`) | auth | the lobby (closes the connections) |
-| `SanctionEvents` (`sanction_applied`, `refunds_pending`) | the anti-cheat service | the lobby |
+| `SanctionEvents` (`sanction_pending`, `sanction_applied`, `refunds_pending`) | the anti-cheat service | the lobby |
 
 ### 8.1 Game host
 
