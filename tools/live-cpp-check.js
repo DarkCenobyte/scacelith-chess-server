@@ -67,7 +67,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { startServer } from '../test/integration/helpers/harness.js';
-import { createCaptureMailer, TEST_DEFAULTS } from '../test/unit/helpers/auth-fakes.js';
+import { capturedLogs, createCaptureMailer, TEST_DEFAULTS } from '../test/unit/helpers/auth-fakes.js';
 import { startFakeOidc } from '../test/unit/helpers/auth-oidc.js';
 import { applyGame } from '../test/unit/helpers/real-auth.js';
 import { createAuth } from '../src/auth/index.js';
@@ -617,6 +617,11 @@ async function ssoPart() {
     } catch (e) {
         console.error(e);
     } finally {
+        // That server logs in this process, into the buffer of auth-fakes.js (its import replaced
+        // the log output); a failed Google sign-in gives its reason only there, as a warning.
+        const logged = capturedLogs.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+            .filter((l) => l && (l.level === 'warn' || l.level === 'error'));
+        if (logged.length) console.log(`[sso] server warnings and errors logged:\n${logged.map((l) => JSON.stringify(l)).join('\n')}`);
         if (ctl) await ctl.close();
         await srv.stop();
     }
