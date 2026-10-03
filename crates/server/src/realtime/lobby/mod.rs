@@ -11,7 +11,8 @@
 //! The actor never waits on the database while it holds a decision: the connection tasks read
 //! what a request needs (ratings, the stored ban, the conduct cooldown) before posting it, and
 //! the work that needs the store or a host afterwards (game creation, rematch checks, conduct
-//! records, refund notices) runs in a spawned task whose result comes back as a message. The one
+//! records, the refund notices of [`crate::anticheat::notices`]) runs in a spawned task whose
+//! result comes back as a message. The one
 //! exception is the target's challenge preference, read inline for a direct challenge to an online
 //! player (one indexed read, a rare request).
 //!
@@ -21,7 +22,6 @@
 //! events.
 
 mod actor;
-mod refunds;
 
 #[cfg(test)]
 mod tests;
@@ -35,6 +35,7 @@ use tokio::task::JoinHandle;
 use self::actor::LobbyActor;
 pub(crate) use self::actor::LobbyDeps;
 use super::link::ConnLink;
+use crate::anticheat::notices::RefundEvent;
 use crate::events::{
     GameEnded, HostEvents, IncidentKind, RematchRequest, SanctionApplied, SanctionEvents, SessionEvents,
 };
@@ -101,7 +102,6 @@ pub(crate) enum Timer {
     ExpireChallenges,
     Sweep,
     RefundPoll,
-    RefundRetries,
 }
 
 /// A message of the lobby's inbox.
@@ -144,6 +144,8 @@ pub(crate) enum LobbyMsg {
     },
     SanctionApplied(SanctionApplied),
     RefundsPending,
+    /// A result of the refund notices' background work.
+    Refund(RefundEvent),
     /// The results of the lobby's own tasks.
     Done(actor::Done),
     /// Stops the periodic work (the drain at shutdown).

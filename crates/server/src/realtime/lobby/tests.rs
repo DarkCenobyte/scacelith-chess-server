@@ -172,6 +172,8 @@ impl Harness {
                 }),
             ),
             create_timeout: Duration::from_millis(100),
+            refund_poll: Duration::from_secs(3600),
+            refund_retry: Duration::from_millis(10),
             log: Logger::root().child("lobby"),
         };
         let (lobby, inbox) = Lobby::channel();
@@ -1019,45 +1021,69 @@ async fn insert_refund(store: &Store, game: GameId, victim: UserId, cheater: Use
         .expect("refund rows");
 }
 
+/// Waits (5 s at most) for the player's next notices.
+async fn next_notices(p: &Player) -> Vec<(NoticeCode, f64)> {
+    for _ in 0..2500 {
+        let n = notices(&p.frames());
+        if !n.is_empty() {
+            return n;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    panic!("no notice for user {}", p.user());
+}
+
+/// Waits (5 s at most) until the user's refunds are marked notified.
+async fn all_notified(store: &Store, user: UserId) {
+    for _ in 0..2500 {
+        if store.refunds().pending_for(user).await.expect("pending").ids.is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    panic!("refunds of user {user} not marked notified");
+}
+
 #[tokio::test]
 async fn a_refund_is_announced_once_to_an_idle_victim() {
     let h = Harness::new(&[]).await;
     let a = h.online(1).await;
-    let _b = h.online(2).await;
+    let b = h.online(2).await;
     let game = h.hosts.next_id(0);
     h.lobby.game_recovered(game, 2, 3);
     insert_refund(&h.store, 11, 1, 6, 12).await;
     insert_refund(&h.store, 12, 2, 6, 7).await;
     h.lobby.refunds_pending();
-    h.settle().await;
-    assert_eq!(notices(&a.frames()), [(NoticeCode::RatingRestored, 12.0)]);
+    assert_eq!(next_notices(&a).await, [(NoticeCode::RatingRestored, 12.0)]);
+    all_notified(&h.store, 1).await;
     h.timer(Timer::RefundPoll).await;
-    assert!(a.frames().is_empty(), "once");
-    let pending = h.store.refunds().pending_for(1).await.expect("pending");
-    assert!(pending.ids.is_empty(), "marked notified");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(notices(&a.frames()).is_empty(), "once");
     // Bob plays: told when his game ends.
-    let b = &_b;
     assert!(notices(&b.frames()).is_empty());
     h.game_ended(game, 2, 3);
-    h.settle().await;
-    assert_eq!(notices(&b.frames()), [(NoticeCode::RatingRestored, 7.0)]);
+    assert_eq!(next_notices(&b).await, [(NoticeCode::RatingRestored, 7.0)]);
+    all_notified(&h.store, 2).await;
 }
 
 #[tokio::test]
 async fn a_victim_who_connects_is_told_after_the_welcome() {
     let h = Harness::new(&[]).await;
     insert_refund(&h.store, 11, 3, 6, 20).await;
+    insert_refund(&h.store, 12, 4, 6, 9).await;
     h.timer(Timer::RefundPoll).await;
-    let c = h.connect(3, 30);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Carol connects: told right after her Welcome.
+    let c = h.online(3).await;
+    assert_eq!(next_notices(&c).await, [(NoticeCode::RatingRestored, 20.0)]);
+    // Dave's connection is admitted, but its Welcome is not out yet: nothing before it.
+    let d = h.connect(4, 40);
     let (reply, answer) = tokio::sync::oneshot::channel();
-    h.lobby.post(LobbyMsg::Claim { link: c.link.clone(), ban: None, reply });
+    h.lobby.post(LobbyMsg::Claim { link: d.link.clone(), ban: None, reply });
     assert_eq!(answer.await.expect("answer"), ClaimOutcome::Admitted { active_game: 0 });
-    // Not welcomed yet: the retry finds the Welcome missing and tries again later.
-    h.clock.advance(250.0);
-    h.timer(Timer::RefundRetries).await;
-    assert!(c.frames().is_empty());
-    c.link.set_welcomed();
-    h.clock.advance(250.0);
-    h.timer(Timer::RefundRetries).await;
-    assert_eq!(notices(&c.frames()), [(NoticeCode::RatingRestored, 20.0)]);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(d.frames().is_empty());
+    d.link.set_welcomed();
+    h.timer(Timer::RefundPoll).await;
+    assert_eq!(next_notices(&d).await, [(NoticeCode::RatingRestored, 9.0)]);
 }

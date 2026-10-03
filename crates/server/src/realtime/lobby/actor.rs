@@ -12,8 +12,8 @@ use scacelith_protocol::{
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
-use super::refunds::RefundNotices;
 use super::{ClaimOutcome, LobbyMsg, LobbyRequest, Timer};
+use crate::anticheat::notices::{REFUND_POLL_MS, RETRY_MS, RefundHost, RefundNotices, RefundPost};
 use crate::clock::SharedClock;
 use crate::config::Config;
 use crate::events::{GameEnded, IncidentKind, NewGame, RematchRequest, SanctionApplied};
@@ -33,8 +33,9 @@ use crate::realtime::deps::GameHosts;
 use crate::realtime::frames;
 use crate::realtime::link::{ConnCmd, ConnLink};
 use crate::realtime::metrics;
+use crate::realtime::presence::Presence;
 use crate::realtime::reads::{self, DbConduct};
-use crate::store::{PendingRefund, PendingRefunds, Store, StoreError};
+use crate::store::{Store, StoreError};
 use crate::{log_error, log_security};
 
 /// How long the lobby waits for a host to create a game (a game created later is cancelled).
@@ -58,6 +59,10 @@ pub(crate) struct LobbyDeps {
     pub challenges: Challenges,
     /// How long a host may take to create a game ([`CREATE_TIMEOUT`]).
     pub create_timeout: Duration,
+    /// Interval of the polls for rating refunds not notified yet.
+    pub refund_poll: Duration,
+    /// Delay before a refund notice that could not be queued is tried again.
+    pub refund_retry: Duration,
     pub log: Logger,
 }
 
@@ -79,6 +84,8 @@ impl LobbyDeps {
             hosts,
             limits,
             create_timeout: CREATE_TIMEOUT,
+            refund_poll: Duration::from_millis(REFUND_POLL_MS),
+            refund_retry: Duration::from_millis(RETRY_MS),
             log: Logger::root().child("lobby"),
         }
     }
@@ -100,20 +107,6 @@ pub(crate) enum Done {
         user: UserId,
         kind: IncidentKind,
         result: Result<IncidentOutcome, StoreError>,
-    },
-    RefundsPolled {
-        result: Result<Vec<PendingRefund>, StoreError>,
-    },
-    RefundsRead {
-        user: UserId,
-        seen: u32,
-        result: Result<PendingRefunds, StoreError>,
-    },
-    RefundsMarked {
-        user: UserId,
-        seen: u32,
-        pending: PendingRefunds,
-        result: Result<usize, StoreError>,
     },
 }
 
@@ -191,16 +184,16 @@ struct Queued {
 
 /// The lobby actor.
 pub(crate) struct LobbyActor {
-    pub(super) config: Arc<Config>,
-    pub(super) clock: SharedClock,
-    pub(super) store: Store,
+    config: Arc<Config>,
+    clock: SharedClock,
+    store: Store,
     hosts: Arc<dyn GameHosts>,
     limits: Arc<SharedLimits>,
     create_timeout: Duration,
-    pub(super) log: Logger,
+    log: Logger,
     conduct_log: Logger,
     categories: Categories,
-    pub(super) presence: crate::realtime::presence::Presence,
+    presence: Presence,
     mm: Matchmaker,
     ch: Challenges,
     conduct: Conduct,
@@ -214,11 +207,12 @@ pub(crate) struct LobbyActor {
     bans: HashMap<UserId, i64>,
     creations: HashMap<u64, Creation>,
     next_token: u64,
-    pub(super) refunds: RefundNotices,
+    /// The rating refund notices (their tasks post to our inbox).
+    refunds: RefundNotices,
     /// Our own inbox, for the results of our tasks.
     tx: mpsc::UnboundedSender<LobbyMsg>,
     pending_tasks: usize,
-    pub(super) timers_on: bool,
+    timers_on: bool,
 }
 
 fn rating_u16(r: i64) -> u16 {
@@ -277,6 +271,12 @@ fn player_info(user_id: UserId, name: &str, rating: i64, provisional: bool) -> P
 
 impl LobbyActor {
     pub(super) fn new(deps: LobbyDeps, tx: mpsc::UnboundedSender<LobbyMsg>) -> LobbyActor {
+        let inbox = tx.clone();
+        let post: RefundPost = Arc::new(move |event| {
+            let _ = inbox.send(LobbyMsg::Refund(event));
+        });
+        let refunds = RefundNotices::new(deps.store.clone(), deps.clock.clone(), post)
+            .with_timing(deps.refund_poll, deps.refund_retry);
         LobbyActor {
             categories: Categories::from_config(&deps.config),
             conduct_log: Logger::root().child("conduct"),
@@ -297,7 +297,7 @@ impl LobbyActor {
             bans: HashMap::new(),
             creations: HashMap::new(),
             next_token: 0,
-            refunds: RefundNotices::default(),
+            refunds,
             tx,
             pending_tasks: 0,
             timers_on: false,
@@ -317,22 +317,16 @@ impl LobbyActor {
         let mut refresh = every(Duration::from_millis(QUEUE_REFRESH_MS as u64));
         let mut expire = every(EXPIRE_EVERY);
         let mut sweep = every(SWEEP_EVERY);
-        let mut poll = every(super::refunds::REFUND_POLL);
         if timers {
-            self.refunds_poll();
+            self.refunds.start();
         }
         loop {
-            let retry_at = self.next_refund_retry();
             tokio::select! {
                 biased;
                 _ = tick.tick(), if self.timers_on => self.on_timer(Timer::MatchTick),
                 _ = refresh.tick(), if self.timers_on => self.on_timer(Timer::RefreshQueues),
                 _ = expire.tick(), if self.timers_on => self.on_timer(Timer::ExpireChallenges),
                 _ = sweep.tick(), if self.timers_on => self.on_timer(Timer::Sweep),
-                _ = poll.tick(), if self.timers_on => self.on_timer(Timer::RefundPoll),
-                _ = tokio::time::sleep_until(retry_at.unwrap_or_else(far_future)), if self.timers_on && retry_at.is_some() => {
-                    self.on_timer(Timer::RefundRetries);
-                }
                 msg = rx.recv() => match msg {
                     None | Some(LobbyMsg::Stop) => break,
                     Some(msg) => self.handle(msg).await,
@@ -349,7 +343,7 @@ impl LobbyActor {
         m.challenges_open.set(self.ch.len() as f64);
     }
 
-    pub(super) fn now(&self) -> i64 {
+    fn now(&self) -> i64 {
         self.clock.wall_ms()
     }
 
@@ -366,14 +360,18 @@ impl LobbyActor {
                 self.sessions_revoked(user, token_hashes.as_deref())
             }
             LobbyMsg::SanctionApplied(s) => self.sanction_applied(s),
-            LobbyMsg::RefundsPending => self.refunds_poll(),
+            LobbyMsg::RefundsPending => self.refunds.poll(),
+            LobbyMsg::Refund(event) => {
+                let mut host = NoticeHost::new(&self.presence, &self.active_games, &self.starting);
+                self.refunds.handle(event, &mut host);
+            }
             LobbyMsg::Done(done) => {
                 self.pending_tasks = self.pending_tasks.saturating_sub(1);
                 self.done(done);
             }
             LobbyMsg::StopTimers => {
                 self.timers_on = false;
-                self.refunds_stop();
+                self.refunds.stop();
             }
             LobbyMsg::Ping(reply) => {
                 let _ = reply.send(self.pending_tasks);
@@ -384,19 +382,18 @@ impl LobbyActor {
         }
     }
 
-    pub(super) fn on_timer(&mut self, timer: Timer) {
+    fn on_timer(&mut self, timer: Timer) {
         match timer {
             Timer::MatchTick => self.match_tick(),
             Timer::RefreshQueues => self.refresh_queues(),
             Timer::ExpireChallenges => self.expire_challenges(),
             Timer::Sweep => self.sweep(),
-            Timer::RefundPoll => self.refunds_poll(),
-            Timer::RefundRetries => self.refund_retries(),
+            Timer::RefundPoll => self.refunds.poll(),
         }
     }
 
     /// Runs a task whose result comes back as [`LobbyMsg::Done`].
-    pub(super) fn spawn(&mut self, task: impl Future<Output = Done> + Send + 'static) {
+    fn spawn(&mut self, task: impl Future<Output = Done> + Send + 'static) {
         self.pending_tasks += 1;
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -412,18 +409,13 @@ impl LobbyActor {
                 self.rematch_checked(request, reply, bans, cooldowns);
             }
             Done::ConductRecorded { user, kind, result } => self.conduct_recorded(user, kind, result),
-            Done::RefundsPolled { result } => self.refunds_polled(result),
-            Done::RefundsRead { user, seen, result } => self.refunds_read(user, seen, result),
-            Done::RefundsMarked { user, seen, pending, result } => {
-                self.refunds_marked(user, seen, pending, result)
-            }
         }
     }
 
     // ---- helpers --------------------------------------------------------------------------------
 
     /// Queues a frame for the user's live connection.
-    pub(super) fn send_user(&self, user: UserId, frame: Option<Bytes>) -> bool {
+    fn send_user(&self, user: UserId, frame: Option<Bytes>) -> bool {
         match (self.presence.get(user), frame) {
             (Some(link), Some(frame)) => link.send(frame),
             _ => false,
@@ -468,7 +460,7 @@ impl LobbyActor {
         true
     }
 
-    pub(super) fn busy(&self, user: UserId) -> bool {
+    fn busy(&self, user: UserId) -> bool {
         self.active_games.contains_key(&user) || self.starting.contains(&user)
     }
 
@@ -532,7 +524,7 @@ impl LobbyActor {
                     self.leave_queue(user, false);
                 }
                 let active_game = self.active_games.get(&user).copied().unwrap_or(0);
-                self.refunds_connected(user, active_game);
+                self.refunds.connected(user, active_game != 0);
                 ClaimOutcome::Admitted { active_game }
             }
         };
@@ -1054,7 +1046,8 @@ impl LobbyActor {
                 self.active_games.remove(&user);
             }
         }
-        self.refunds_game_ended(&[ended.white, ended.black]);
+        let mut host = NoticeHost::new(&self.presence, &self.active_games, &self.starting);
+        self.refunds.game_ended(&[ended.white, ended.black], &mut host);
     }
 
     fn game_recovered(&mut self, game: GameId, white: UserId, black: UserId) {
@@ -1190,7 +1183,7 @@ impl LobbyActor {
         self.bans.insert(s.user, end);
         self.enforce_ban(s.user, end, &s.reason);
         if s.refunds > 0 {
-            self.refunds_poll();
+            self.refunds.poll();
         }
     }
 
@@ -1232,9 +1225,35 @@ impl LobbyActor {
     }
 }
 
-/// A far deadline for a disabled timer branch.
-fn far_future() -> Instant {
-    Instant::now() + Duration::from_secs(86_400)
+/// The refund notices' view of the lobby.
+struct NoticeHost<'a> {
+    presence: &'a Presence,
+    active_games: &'a HashMap<UserId, GameId>,
+    starting: &'a HashSet<UserId>,
+}
+
+impl<'a> NoticeHost<'a> {
+    fn new(
+        presence: &'a Presence,
+        active_games: &'a HashMap<UserId, GameId>,
+        starting: &'a HashSet<UserId>,
+    ) -> NoticeHost<'a> {
+        NoticeHost { presence, active_games, starting }
+    }
+}
+
+impl RefundHost for NoticeHost<'_> {
+    fn can_notify(&self, user: UserId) -> bool {
+        self.presence.get(user).is_some_and(|link| link.is_welcomed())
+            && !self.active_games.contains_key(&user)
+            && !self.starting.contains(&user)
+    }
+
+    fn send_notice(&mut self, user: UserId, points: i64) -> bool {
+        self.presence.get(user).is_some_and(|link| {
+            link.is_welcomed() && link.send(frames::notice(NoticeCode::RatingRestored, points as f64))
+        })
+    }
 }
 
 /// The work of a game creation, off the actor.
