@@ -9,8 +9,8 @@
 //! version 3 or later.
 
 pub mod clock;
-pub mod events;
 pub mod config;
+pub mod events;
 pub mod ids;
 pub mod log;
 pub mod metrics;
