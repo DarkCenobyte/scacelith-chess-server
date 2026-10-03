@@ -82,21 +82,21 @@ impl Journaled {
 
 /// Everything a replay must reproduce (the round-trip averages are not journaled).
 #[derive(Debug, PartialEq)]
-pub(super) struct State {
+pub(in crate::game) struct State {
     plies: Vec<PlyRecord>,
     gseq: u32,
     draw_offer: Option<Side>,
     draw_offers_used: [u16; 2],
     draw_declined_at: [i32; 2],
     desyncs: [u16; 2],
-    connected: [bool; 2],
-    disconnected_at: [i64; 2],
-    disconnect_grace: [i64; 2],
-    clock_held: bool,
-    away_since_recovery: [bool; 2],
-    clock_ms: [i64; 2],
+    pub(in crate::game) connected: [bool; 2],
+    pub(in crate::game) disconnected_at: [i64; 2],
+    pub(in crate::game) disconnect_grace: [i64; 2],
+    pub(in crate::game) clock_held: bool,
+    pub(in crate::game) away_since_recovery: [bool; 2],
+    pub(in crate::game) clock_ms: [i64; 2],
     quota: [i64; 2],
-    turn_start: i64,
+    pub(in crate::game) turn_start: i64,
     result: Option<GameResult>,
     end_gseq: u32,
     culprit: Option<Side>,
@@ -108,7 +108,7 @@ pub(super) struct State {
     journal_state: Vec<JournalRecord>,
 }
 
-pub(super) fn state(room: &GameRoom, t: i64) -> State {
+pub(in crate::game) fn state(room: &GameRoom, t: i64) -> State {
     State {
         plies: room.plies.clone(),
         gseq: room.gseq,

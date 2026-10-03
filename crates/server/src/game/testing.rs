@@ -424,9 +424,10 @@ impl GameStore for FakeStore {
                 .map(|r| CommitEntry {
                     game_id: r.id,
                     duplicate: false,
-                    ratings: r
-                        .rated
-                        .then(|| CommitRatings { white: change(r.white_rating, 8), black: change(r.black_rating, -8) }),
+                    ratings: r.rated.then(|| CommitRatings {
+                        white: change(r.white_rating, 8),
+                        black: change(r.black_rating, -8),
+                    }),
                     analysis_skipped: None,
                     analysis_displaced: Vec::new(),
                 })

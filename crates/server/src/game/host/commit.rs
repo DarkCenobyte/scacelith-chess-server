@@ -108,7 +108,12 @@ pub(super) enum Done {
     /// The journal flush a batch waited for (`failures`: the journal's failed writes before it).
     Flushed { batch: Vec<GameId>, failures: u64, result: Result<(), JournalError> },
     /// A batch commit.
-    Committed { batch: Vec<GameId>, unjournaled: bool, started: Instant, result: Result<Vec<CommitEntry>, StoreError> },
+    Committed {
+        batch: Vec<GameId>,
+        unjournaled: bool,
+        started: Instant,
+        result: Result<Vec<CommitEntry>, StoreError>,
+    },
     /// The games of a refused batch committed one by one (with each commit's duration in ms).
     CommittedEach { results: Vec<(GameId, f64, Result<Vec<CommitEntry>, StoreError>)>, unjournaled: bool },
     /// The probe flush.
@@ -195,7 +200,8 @@ impl Shard {
     /// One commit attempt of the pending games (see the module documentation).
     pub(super) fn commit(&mut self, t: i64) {
         self.last_commit = None;
-        let batch: Vec<GameId> = self.pending.iter().take(self.settings.commit_batch_max.max(1)).copied().collect();
+        let batch: Vec<GameId> =
+            self.pending.iter().take(self.settings.commit_batch_max.max(1)).copied().collect();
         if batch.is_empty() {
             self.last_commit = Some(true);
             return;
@@ -251,7 +257,9 @@ impl Shard {
                         self.last_commit = Some(true);
                     }
                     // One bad record must not hold the others: one game at a time.
-                    Err(e) if batch.len() > 1 && e.game_id().is_some() => self.commit_each(batch, unjournaled),
+                    Err(e) if batch.len() > 1 && e.game_id().is_some() => {
+                        self.commit_each(batch, unjournaled)
+                    }
                     Err(e) => {
                         self.commit_failed(&CommitError::Store(e), batch.len(), now);
                         self.last_commit = Some(false);
@@ -276,7 +284,10 @@ impl Shard {
             }
             Done::Probe { failures, result } => {
                 self.probe_in_flight = false;
-                if result.is_ok() && self.failed_writes() == failures && self.gate_failures >= JOURNAL_GATE_TRIES {
+                if result.is_ok()
+                    && self.failed_writes() == failures
+                    && self.gate_failures >= JOURNAL_GATE_TRIES
+                {
                     self.journal_works();
                 }
             }
@@ -308,7 +319,8 @@ impl Shard {
                 continue;
             }
             entry.rejournal = false;
-            let Some(rec) = guarded(&self.log, game, "journal snapshot failed", || entry.room.journal_snapshot(t))
+            let Some(rec) =
+                guarded(&self.log, game, "journal snapshot failed", || entry.room.journal_snapshot(t))
             else {
                 continue;
             };
@@ -395,7 +407,9 @@ impl Shard {
         let started = Instant::now();
         let commit = self.store.finish_batch(records);
         self.commit_in_flight = true;
-        self.spawn(TaskKind::Commit, async move { Done::Committed { batch, unjournaled, started, result: commit.await } });
+        self.spawn(TaskKind::Commit, async move {
+            Done::Committed { batch, unjournaled, started, result: commit.await }
+        });
     }
 
     /// The games of a refused batch, one commit each (queued at once, in order).
@@ -441,7 +455,9 @@ impl Shard {
                         send(entry.ep[0].as_ref(), &frame);
                         send(entry.ep[1].as_ref(), &frame);
                     }
-                    Err(e) => log_error!(self.log, "RatingUpdate not encodable", { "gameId": game, "err": e.to_string() }),
+                    Err(e) => {
+                        log_error!(self.log, "RatingUpdate not encodable", { "gameId": game, "err": e.to_string() })
+                    }
                 }
             }
             let ended = room.result().map(|r| GameEnded {

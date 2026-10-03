@@ -94,7 +94,9 @@ impl std::fmt::Display for HostError {
             HostError::BadShards(r) => write!(f, "bad game shards {}..{} (at most 64)", r.start, r.end),
             HostError::Store(e) => write!(f, "game ids not readable: {e}"),
             HostError::Journal { shard, error } => write!(f, "journal of shard {shard}: {error}"),
-            HostError::Recovery { shard, message } => write!(f, "recovery of shard {shard} failed: {message}"),
+            HostError::Recovery { shard, message } => {
+                write!(f, "recovery of shard {shard} failed: {message}")
+            }
         }
     }
 }
@@ -312,10 +314,19 @@ impl Hosts {
         }
         let last_game_id = deps.store.games().last_id().await.map_err(HostError::Store)?;
         let logger = Logger::root().child("game");
-        let mut hosts = Hosts { handles: Vec::new(), first_shard: shards.start, tasks: Mutex::new(Vec::new()) };
+        let mut hosts =
+            Hosts { handles: Vec::new(), first_shard: shards.start, tasks: Mutex::new(Vec::new()) };
         for shard in shards {
-            let started = Hosts::start_shard(deps, shard, store.clone(), rules.clone(), &journal_options, &logger, last_game_id)
-                .await;
+            let started = Hosts::start_shard(
+                deps,
+                shard,
+                store.clone(),
+                rules.clone(),
+                &journal_options,
+                &logger,
+                last_game_id,
+            )
+            .await;
             match started {
                 Ok((handle, task)) => {
                     hosts.handles.push(handle);
@@ -339,7 +350,9 @@ impl Hosts {
         logger: &Logger,
         last_game_id: GameId,
     ) -> Result<(HostHandle, JoinHandle<()>), HostError> {
-        let journal = Journal::open(journal_options(shard)).await.map_err(|error| HostError::Journal { shard, error })?;
+        let journal = Journal::open(journal_options(shard))
+            .await
+            .map_err(|error| HostError::Journal { shard, error })?;
         let mut core = Shard::new(ShardDeps {
             shard,
             settings: ShardSettings::from_config(&deps.config),
@@ -483,21 +496,10 @@ async fn run(mut shard: Shard, mut inbox: mpsc::UnboundedReceiver<Msg>) {
     let mut beat = tokio::time::interval(Duration::from_millis(SLOT_MS as u64));
     beat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
+        // The beat and the task results come at a bounded rate: first, so that a busy inbox
+        // cannot starve the timers.
         tokio::select! {
             biased;
-            msg = inbox.recv() => {
-                let Some(msg) = msg else {
-                    // Every handle is gone: nothing more can come.
-                    shard.shutdown().await;
-                    break;
-                };
-                if step(&mut shard, msg).await.is_break() {
-                    break;
-                }
-            }
-            Some(result) = shard.tasks.join_next_with_id(), if !shard.tasks.is_empty() => {
-                shielded(&mut shard, "game host task result failed", |s| s.on_task(result));
-            }
             _ = beat.tick() => {
                 let t = shard.now();
                 if shielded(&mut shard, "game host beat failed", |s| s.heartbeat(t)) == Some(true) {
@@ -509,6 +511,19 @@ async fn run(mut shard: Shard, mut inbox: mpsc::UnboundedReceiver<Msg>) {
                         }
                     }
                     shielded(&mut shard, "game host beat failed", Shard::after_stall);
+                }
+            }
+            Some(result) = shard.tasks.join_next_with_id(), if !shard.tasks.is_empty() => {
+                shielded(&mut shard, "game host task result failed", |s| s.on_task(result));
+            }
+            msg = inbox.recv() => {
+                let Some(msg) = msg else {
+                    // Every handle is gone: nothing more can come.
+                    shard.shutdown().await;
+                    break;
+                };
+                if step(&mut shard, msg).await.is_break() {
+                    break;
                 }
             }
         }

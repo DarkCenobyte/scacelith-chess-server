@@ -44,7 +44,7 @@
 pub mod journal;
 
 #[cfg(test)]
-mod journal_tests;
+pub(in crate::game) mod journal_tests;
 #[cfg(test)]
 mod real_rules_tests;
 #[cfg(test)]

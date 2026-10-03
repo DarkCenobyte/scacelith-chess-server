@@ -29,7 +29,9 @@ use super::metrics::{Counters, GestureDrop, Meter};
 use crate::clock::SharedClock;
 use crate::config::Config;
 use crate::events::{Anomaly, AnomalySink, HostEvents, NewGame, RematchRequest};
-use crate::game::room::{CERTAIN_KINDS, GameRoom, JournalRecord, NEVER, Outcome, RematchSpec, RoomSettings, RoomSpec, Timing};
+use crate::game::room::{
+    CERTAIN_KINDS, GameRoom, JournalRecord, NEVER, Outcome, RematchSpec, RoomSettings, RoomSpec, Timing,
+};
 use crate::game::rules::{Rules, Side};
 use crate::game::timers::TimerSet;
 use crate::ids::{ConnId, GameId, GameIdAllocator, UserId};
@@ -483,7 +485,8 @@ impl Shard {
         for side in Side::BOTH {
             self.by_user.insert(room.player(side).user_id, id);
         }
-        self.rooms.insert(id, Entry { room, ep: [None, None], queued: false, committed: false, rejournal: false });
+        self.rooms
+            .insert(id, Entry { room, ep: [None, None], queued: false, committed: false, rejournal: false });
         self.active += 1;
         self.meter.created();
         self.meter.game_started();
@@ -519,7 +522,9 @@ impl Shard {
             return false;
         }
         *slot = None;
-        if let Some(out) = guarded(&self.log, game, "game disconnection failed", || entry.room.on_disconnect(side, timing)) {
+        if let Some(out) =
+            guarded(&self.log, game, "game disconnection failed", || entry.room.on_disconnect(side, timing))
+        {
             self.process(game, out, &Origin::none(timing));
         } else {
             self.reschedule(game);
@@ -601,8 +606,9 @@ impl Shard {
         let (timing, _) = self.credited(self.now());
         let Some(entry) = self.rooms.get_mut(&game) else { return };
         let Some(side) = entry.room.side_of(user) else { return };
-        let Some(mut out) = guarded(&self.log, game, "rematch decline failed", || entry.room.on_rematch(side, false, 0, timing))
-        else {
+        let Some(mut out) = guarded(&self.log, game, "rematch decline failed", || {
+            entry.room.on_rematch(side, false, 0, timing)
+        }) else {
             return self.reschedule(game);
         };
         out.rejected = None;
@@ -786,7 +792,8 @@ impl Shard {
             if entry.committed {
                 continue;
             }
-            let Some(rec) = guarded(&self.log, game, "journal snapshot failed", || entry.room.journal_snapshot(t))
+            let Some(rec) =
+                guarded(&self.log, game, "journal snapshot failed", || entry.room.journal_snapshot(t))
             else {
                 continue;
             };
@@ -875,7 +882,8 @@ impl Shard {
             if entry.room.is_over() {
                 continue;
             }
-            let (white, black) = (entry.room.player(Side::White).user_id, entry.room.player(Side::Black).user_id);
+            let (white, black) =
+                (entry.room.player(Side::White).user_id, entry.room.player(Side::Black).user_id);
             self.by_user.insert(white, game);
             self.by_user.insert(black, game);
             self.meter.counts.recovered += 1;
@@ -920,7 +928,8 @@ impl Shard {
         }
         if snapshot
             && let Some(entry) = self.rooms.get(&game)
-            && let Some(frame) = guarded(&self.log, game, "snapshot failed", || entry.room.snapshot_frame(side, timing.now))
+            && let Some(frame) =
+                guarded(&self.log, game, "snapshot failed", || entry.room.snapshot_frame(side, timing.now))
         {
             ep.send(frame);
         }
@@ -954,7 +963,10 @@ impl Shard {
             log_error!(self.log, "journal.committed failed", { "gameId": game, "err": log::error(&e) });
         }
         #[cfg(test)]
-        self.journal_log.push((game, JournalRecord { kind: crate::journal::RecordKind::Committed, at: 0, payload: Vec::new() }));
+        self.journal_log.push((
+            game,
+            JournalRecord { kind: crate::journal::RecordKind::Committed, at: 0, payload: Vec::new() },
+        ));
     }
 
     /// Delivers an outcome and applies its side effects. `from`: the request's sender and
@@ -993,10 +1005,10 @@ impl Shard {
             && !entry.room.is_over()
         {
             // A clock held since a recovery started: the opponent's display shows it stopped.
-            let opp = side.opponent();
+            let (opp, now) = (side.opponent(), self.now());
             if let Some(ep) = &entry.ep[opp.index()]
                 && let Some(frame) =
-                    guarded(&self.log, game, "snapshot failed", || entry.room.snapshot_frame(opp, from.timing.now))
+                    guarded(&self.log, game, "snapshot failed", || entry.room.snapshot_frame(opp, now))
             {
                 ep.send(frame);
             }
@@ -1006,7 +1018,17 @@ impl Shard {
             let own = from.side == Some(a.side);
             let ep = if own { from.ep.clone() } else { eps[a.side.index()].clone() };
             let seq = if own { from.seq } else { 0 };
-            self.handle_anomaly(Some(a.side), user, game, a.kind, a.detail, a.pos_matched, ep, seq, from.timing);
+            self.handle_anomaly(
+                Some(a.side),
+                user,
+                game,
+                a.kind,
+                a.detail,
+                a.pos_matched,
+                ep,
+                seq,
+                from.timing,
+            );
         }
     }
 

@@ -26,8 +26,13 @@ pub enum GestureDrop {
 
 impl GestureDrop {
     /// Every reason, in label order.
-    pub const ALL: [GestureDrop; 5] =
-        [GestureDrop::NoGame, GestureDrop::NotPlayer, GestureDrop::NoOpponent, GestureDrop::Backlog, GestureDrop::Malformed];
+    pub const ALL: [GestureDrop; 5] = [
+        GestureDrop::NoGame,
+        GestureDrop::NotPlayer,
+        GestureDrop::NoOpponent,
+        GestureDrop::Backlog,
+        GestureDrop::Malformed,
+    ];
 
     /// The metric label.
     #[must_use]
@@ -104,7 +109,11 @@ struct Global {
 }
 
 static GLOBAL: LazyLock<Global> = LazyLock::new(|| {
-    let drops = metrics::counter_vec("scacelith_gestures_dropped_total", "Gestures not relayed, by reason", &["reason"]);
+    let drops = metrics::counter_vec(
+        "scacelith_gestures_dropped_total",
+        "Gestures not relayed, by reason",
+        &["reason"],
+    );
     Global {
         active: metrics::gauge("scacelith_games_active", "Games in progress"),
         moves: metrics::counter("scacelith_game_moves_total", "Moves accepted"),
@@ -113,7 +122,11 @@ static GLOBAL: LazyLock<Global> = LazyLock::new(|| {
             "Time to process one move intent, delivery and journaling included (microseconds)",
             &[5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0],
         ),
-        rejected: metrics::counter_vec("scacelith_game_rejects_total", "Game requests refused, by error code", &["code"]),
+        rejected: metrics::counter_vec(
+            "scacelith_game_rejects_total",
+            "Game requests refused, by error code",
+            &["code"],
+        ),
         ended: metrics::counter_vec("scacelith_games_ended_total", "Games ended, by reason", &["reason"]),
         batch: metrics::histogram(
             "scacelith_game_commit_batch_size",
