@@ -38,8 +38,11 @@
 //! (RUST-PORT.md section 1; `tools/rest-diff` shows each one):
 //!
 //! * header lines ending in a bare LF are accepted (httparse is lenient there);
-//! * pipelined requests are answered one after the other (the `Content-Length` lines of a
-//!   request whose head came in with the previous request are not counted);
+//! * a head of more than 9216 bytes as sent gets the raw `431` (hyper's read buffer), also when
+//!   its URL, header names and values stay under 8192 bytes: llhttp does not count the
+//!   whitespace before header values;
+//! * pipelined requests are answered one after the other (a request whose head came in with
+//!   the previous request is not checked for `Content-Length` lines or a head over 9216 bytes);
 //! * the answer to an HTTP/1.0 request has an `HTTP/1.0` status line (Node: `HTTP/1.1`);
 //! * header names are written in title case, `Www-Authenticate` for Node's `WWW-Authenticate`;
 //! * a `#fragment` in the target is dropped (Node routes it as part of the path: `404`);
@@ -98,7 +101,11 @@ pub const MAX_HEADER_SIZE: usize = 8192;
 /// Header lines of a request head: Node's API sets `server.maxHeadersCount = 64`, and its
 /// parser refuses a head with more (`431`). hyper itself refuses more than 100.
 pub const MAX_HEADER_LINES: usize = 64;
-/// hyper's read buffer: a raw head larger than this is refused 431 by hyper itself.
+/// hyper's read buffer, and the most bytes of a head kept for the checks of the listener. hyper
+/// refuses a raw head larger than this (`431`) when it has read up to the limit without the end
+/// of the head, but one read may take it past the limit with the whole head (a read fills the
+/// room of a buffer grown past the limit, 16 KiB after a first read of 8 KiB): [`head_overflows`]
+/// refuses those.
 const MAX_BUF: usize = MAX_HEADER_SIZE + 1024;
 /// A raw error answer and the connection behind it last this long at most.
 const RAW_ANSWER_LINGER: Duration = Duration::from_secs(1);
@@ -276,25 +283,45 @@ fn target_of<B>(req: &Request<B>) -> String {
     }
 }
 
+/// Where the request line of a `method` request starts in `raw`, the bytes read while its head
+/// came in: after the empty lines httparse skips before it (as llhttp does). `None` when `raw`
+/// does not start with it: the head started in an earlier read (pipelined requests).
+fn request_line_start(raw: &[u8], method: &str) -> Option<usize> {
+    let start = raw.iter().position(|&b| b != b'\r' && b != b'\n')?;
+    let line = &raw[start..];
+    (line.starts_with(method.as_bytes()) && line.get(method.len()) == Some(&b' ')).then_some(start)
+}
+
+/// The header lines of a `method` request in `raw`, the bytes read while its head came in: the
+/// bytes between the request line (or the end of a line, when the head started in an earlier
+/// read) and the empty line that ends the head. `None` when `raw` stops before that line.
+fn raw_header_lines<'a>(raw: &'a [u8], method: &str) -> Option<&'a [u8]> {
+    let start = request_line_start(raw, method).unwrap_or(0);
+    let first = start + raw[start..].iter().position(|&b| b == b'\n')? + 1;
+    let mut at = first;
+    loop {
+        let len = raw[at..].iter().position(|&b| b == b'\n')?;
+        if len == 0 || raw[at..at + len] == *b"\r" {
+            return Some(&raw[first..at]);
+        }
+        at += len + 1;
+    }
+}
+
 /// A body length llhttp refuses and hyper accepts: `Content-Length` given twice (even with the
 /// same value), or together with `Transfer-Encoding`. hyper keeps one `Content-Length` of equal
 /// ones and drops it next to `Transfer-Encoding`, so the lines are counted in `raw`, the bytes
 /// read while the head came in. When `raw` holds no complete head (pipelined requests), the
-/// request passes.
-fn ambiguous_length(h: &HeaderMap, raw: &[u8]) -> bool {
+/// request passes; a head larger than the capture is refused before ([`head_overflows`]).
+fn ambiguous_length(h: &HeaderMap, raw: &[u8], method: &str) -> bool {
     if !h.contains_key(header::CONTENT_LENGTH) && !h.contains_key(header::TRANSFER_ENCODING) {
         return false;
     }
+    let Some(lines) = raw_header_lines(raw, method) else {
+        return false;
+    };
     let (mut lengths, mut chunked) = (0, false);
-    // The first line is the request line (or the end of one when the head started earlier).
-    for line in raw.split_inclusive(|&b| b == b'\n').skip(1) {
-        let Some(line) = line.strip_suffix(b"\n") else {
-            return false;
-        };
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if line.is_empty() {
-            return lengths > 1 || (lengths == 1 && chunked);
-        }
+    for line in lines.split(|&b| b == b'\n') {
         let name = line.split(|&b| b == b':').next().unwrap_or_default();
         if name.eq_ignore_ascii_case(b"content-length") {
             lengths += 1;
@@ -302,7 +329,18 @@ fn ambiguous_length(h: &HeaderMap, raw: &[u8]) -> bool {
             chunked = true;
         }
     }
-    false
+    lengths > 1 || (lengths == 1 && chunked)
+}
+
+/// A head larger than hyper's read buffer (`MAX_BUF`) that hyper parsed all the same: it parses
+/// what it has read before it checks the limit, and one read may fill a buffer that grew past
+/// the limit. The capture of such a head (`raw`, `MAX_BUF` bytes at most) starts with its request
+/// line but stops before its end, so its lines cannot be checked: it is refused as hyper refuses
+/// the heads that come in smaller reads (`431`).
+fn head_overflows(raw: &[u8], method: &str) -> bool {
+    raw.len() >= MAX_BUF
+        && request_line_start(raw, method).is_some()
+        && raw_header_lines(raw, method).is_none()
 }
 
 /// Node's head size: URL + header names + header values.
@@ -343,7 +381,8 @@ struct Track {
     close_after: Option<Duration>,
     answered: bool,
     requests: u32,
-    /// The bytes read while waiting for a request head (at most `MAX_BUF`).
+    /// The first `MAX_BUF` bytes read while waiting for a request head (a longer head is refused:
+    /// [`head_overflows`]).
     head: Vec<u8>,
 }
 
@@ -424,7 +463,7 @@ impl ConnState {
     }
 
     /// Bytes came in: a new request starts on an idle connection; the bytes of a head are kept
-    /// for [`ambiguous_length`].
+    /// for [`ambiguous_length`] and [`head_overflows`].
     fn bytes_in(&self, data: &[u8]) {
         let mut t = self.track.lock();
         if t.phase == Phase::KeepAlive {
@@ -1131,10 +1170,13 @@ impl HttpListener {
         if method == Method::CONNECT {
             return Err(ClosedWithoutAnswer);
         }
-        if node_head_size(&req) >= MAX_HEADER_SIZE || req.headers().len() > MAX_HEADER_LINES {
+        if node_head_size(&req) >= MAX_HEADER_SIZE
+            || req.headers().len() > MAX_HEADER_LINES
+            || head_overflows(&raw_head, method.as_str())
+        {
             return Ok(self.raw_error(&st, ClientError::TooLarge));
         }
-        if ambiguous_length(req.headers(), &raw_head) || !target_of(&req).is_ascii() {
+        if ambiguous_length(req.headers(), &raw_head, method.as_str()) || !target_of(&req).is_ascii() {
             return Ok(self.raw_error(&st, ClientError::Malformed));
         }
         let is_upgrade = has_token(req.headers(), header::CONNECTION, "upgrade")

@@ -580,6 +580,73 @@ async fn an_ambiguous_body_length_gets_the_raw_400() {
 }
 
 #[tokio::test]
+async fn empty_lines_before_the_request_line_hide_no_ambiguous_body_length() {
+    let s = setup(Options::default());
+    let post =
+        |headers: &str, body: &str| format!("POST /api/v1/x HTTP/1.1\r\nHost: x\r\n{headers}\r\n{body}");
+    // httparse skips any number of empty lines before the request line, as llhttp does.
+    for (text, what) in [
+        (format!("\r\n\r\n{}", post("Content-Length: 2\r\nContent-Length: 2\r\n", "{}")), "two CRLF"),
+        (
+            format!(
+                "\n\r\n\n{}",
+                post("Content-Length: 2\r\nTransfer-Encoding: chunked\r\n", "2\r\n{}\r\n0\r\n\r\n")
+            ),
+            "bare LF and CRLF",
+        ),
+    ] {
+        let mut c = connect(&s.edge, "127.0.0.1");
+        c.io.write_all(text.as_bytes()).await.expect("write");
+        let answer = until_closed(&mut c.io, Duration::from_secs(3)).await.expect("closed");
+        assert_eq!(
+            String::from_utf8_lossy(&answer),
+            String::from_utf8_lossy(ClientError::Malformed.raw_answer()),
+            "{what}"
+        );
+    }
+    assert_eq!(s.edge.client_errors(ClientError::Malformed), 2);
+    let mut c = connect(&s.edge, "127.0.0.1");
+    let w = request(&mut c, &format!("\r\n\r\n{}", post("Content-Length: 2\r\n", "{}"))).await;
+    assert_ne!(w.status, 400, "one Content-Length is fine");
+}
+
+#[tokio::test]
+async fn a_head_larger_than_hypers_buffer_gets_the_raw_431_even_when_hyper_parses_it() {
+    let s = setup(Options::default());
+    // Whitespace after a colon is not part of the value: the head stays far under 8192 bytes of
+    // URL + names + values. In one write, hyper reads 8192 bytes, then the rest at once into a
+    // buffer grown to 16 KiB, and parses the whole head.
+    let padded = |pad: usize, headers: &str| {
+        format!("POST /api/v1/x HTTP/1.1\r\nHost: x\r\nX-Pad:{}v\r\n{headers}\r\n{{}}", " ".repeat(pad))
+    };
+    for (text, what) in [
+        (
+            padded(9300, "Content-Length: 2\r\nTransfer-Encoding: chunked\r\n"),
+            "Content-Length and chunked past the capture",
+        ),
+        (padded(9300, "Content-Length: 2\r\nContent-Length: 2\r\n"), "Content-Length twice past the capture"),
+        (padded(9300, "Content-Length: 2\r\n"), "a plain head"),
+        (format!("{}{}", "\r\n".repeat(100), padded(9100, "Content-Length: 2\r\n")), "after empty lines"),
+    ] {
+        let mut c = connect(&s.edge, "127.0.0.1");
+        c.io.write_all(text.as_bytes()).await.expect("write");
+        let answer = until_closed(&mut c.io, Duration::from_secs(3)).await.expect("closed");
+        assert_eq!(
+            String::from_utf8_lossy(&answer),
+            String::from_utf8_lossy(ClientError::TooLarge.raw_answer()),
+            "{what}"
+        );
+    }
+    assert_eq!(s.edge.client_errors(ClientError::TooLarge), 4);
+    assert_eq!(reports(&s.guard), [(local(), 4.0)], "each one counts toward a block");
+    let mut c = connect(&s.edge, "127.0.0.1");
+    let w =
+        request(&mut c, &format!("GET /healthz HTTP/1.1\r\nHost: x\r\nX-Pad:{}v\r\n\r\n", " ".repeat(9000)))
+            .await;
+    assert_eq!(w.status, 200, "a head that fits in the buffer");
+}
+
+#[tokio::test]
 async fn a_target_outside_ascii_gets_the_raw_400() {
     let s = setup(Options::default());
     // The http crate takes UTF-8 in a target; llhttp takes no byte above 0x7f.
