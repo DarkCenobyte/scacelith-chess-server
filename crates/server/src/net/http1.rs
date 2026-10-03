@@ -14,10 +14,10 @@
 //!   handler's own timeouts answer it);
 //! * hyper's own answers to unparsable requests are replaced by the raw `400` / `431` answers;
 //!   requests llhttp would refuse but hyper accepts (unknown or lower-case methods, a head over
-//!   8192 bytes counted as URL + header names + values, more than 64 header lines) get the same
-//!   raw answers. These client
-//!   errors count in `scacelith_http_client_errors_total{reason}` and 1 toward a block of the peer
-//!   (unless it is a trusted proxy);
+//!   8192 bytes counted as URL + header names + values, more than 64 header lines,
+//!   `Content-Length` given twice or with `Transfer-Encoding`) get the same raw answers. These
+//!   client errors count in `scacelith_http_client_errors_total{reason}` and 1 toward a block of
+//!   the peer (unless it is a trusted proxy);
 //! * a connection the server closes after an answer keeps reading (and discarding) for 2 s, 1 s
 //!   after a raw answer, so the client reads the answer before the socket goes.
 //!
@@ -32,7 +32,9 @@
 //! connection, a request asking for it, a draining server).
 //!
 //! Known differences with Node's llhttp: header lines ending in a bare LF are accepted (httparse
-//! is lenient there), and pipelined requests are answered one after the other.
+//! is lenient there), and pipelined requests are answered one after the other (the
+//! `Content-Length` lines of a request whose head came in with the previous request are not
+//! counted).
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -260,6 +262,35 @@ fn target_of<B>(req: &Request<B>) -> String {
     }
 }
 
+/// A body length llhttp refuses and hyper accepts: `Content-Length` given twice (even with the
+/// same value), or together with `Transfer-Encoding`. hyper keeps one `Content-Length` of equal
+/// ones and drops it next to `Transfer-Encoding`, so the lines are counted in `raw`, the bytes
+/// read while the head came in. When `raw` holds no complete head (pipelined requests), the
+/// request passes.
+fn ambiguous_length(h: &HeaderMap, raw: &[u8]) -> bool {
+    if !h.contains_key(header::CONTENT_LENGTH) && !h.contains_key(header::TRANSFER_ENCODING) {
+        return false;
+    }
+    let (mut lengths, mut chunked) = (0, false);
+    // The first line is the request line (or the end of one when the head started earlier).
+    for line in raw.split_inclusive(|&b| b == b'\n').skip(1) {
+        let Some(line) = line.strip_suffix(b"\n") else {
+            return false;
+        };
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            return lengths > 1 || (lengths == 1 && chunked);
+        }
+        let name = line.split(|&b| b == b':').next().unwrap_or_default();
+        if name.eq_ignore_ascii_case(b"content-length") {
+            lengths += 1;
+        } else if name.eq_ignore_ascii_case(b"transfer-encoding") {
+            chunked = true;
+        }
+    }
+    false
+}
+
 /// Node's head size: URL + header names + header values.
 fn node_head_size<B>(req: &Request<B>) -> usize {
     let url = match req.uri().path_and_query() {
@@ -298,6 +329,8 @@ struct Track {
     close_after: Option<Duration>,
     answered: bool,
     requests: u32,
+    /// The bytes read while waiting for a request head (at most `MAX_BUF`).
+    head: Vec<u8>,
 }
 
 /// The state of one connection, shared by its [`GuardedIo`] and its service.
@@ -326,17 +359,19 @@ impl ConnState {
                 close_after: None,
                 answered: false,
                 requests: 0,
+                head: Vec::new(),
             }),
         }
     }
 
-    fn begin_request(&self) -> u32 {
+    /// A request head was parsed: its number on the connection and the bytes read for it.
+    fn begin_request(&self) -> (u32, Vec<u8>) {
         let mut t = self.track.lock();
         if t.phase != Phase::Closing {
             t.phase = Phase::Request;
         }
         t.requests += 1;
-        t.requests
+        (t.requests, std::mem::take(&mut t.head))
     }
 
     /// The service produced an answer; `close_after`: the server closes the connection after it
@@ -374,12 +409,17 @@ impl ConnState {
         false
     }
 
-    /// Bytes came in: a new request starts on an idle connection.
-    fn bytes_in(&self) {
+    /// Bytes came in: a new request starts on an idle connection; the bytes of a head are kept
+    /// for [`ambiguous_length`].
+    fn bytes_in(&self, data: &[u8]) {
         let mut t = self.track.lock();
         if t.phase == Phase::KeepAlive {
             t.phase = Phase::Head;
             t.head_deadline = Instant::now() + self.edge.timeouts.head;
+        }
+        if t.phase == Phase::Head {
+            let room = MAX_BUF.saturating_sub(t.head.len());
+            t.head.extend_from_slice(&data[..data.len().min(room)]);
         }
     }
 
@@ -566,7 +606,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for GuardedIo<IO> {
             Poll::Ready(Ok(())) => {
                 if buf.filled().len() > before {
                     this.last_progress = Instant::now();
-                    this.st.bytes_in();
+                    this.st.bytes_in(&buf.filled()[before..]);
                 }
                 Poll::Ready(Ok(()))
             }
@@ -1029,7 +1069,7 @@ impl HttpListener {
         req: Request<Incoming>,
         st: Arc<ConnState>,
     ) -> Result<Response<ResponseBody>, ClosedWithoutAnswer> {
-        let n = st.begin_request();
+        let (n, raw_head) = st.begin_request();
         let method = req.method().clone();
         if !METHODS.contains(&method.as_str()) {
             return Ok(self.raw_error(&st, ClientError::Malformed));
@@ -1039,6 +1079,9 @@ impl HttpListener {
         }
         if node_head_size(&req) >= MAX_HEADER_SIZE || req.headers().len() > MAX_HEADER_LINES {
             return Ok(self.raw_error(&st, ClientError::TooLarge));
+        }
+        if ambiguous_length(req.headers(), &raw_head) {
+            return Ok(self.raw_error(&st, ClientError::Malformed));
         }
         let is_upgrade = has_token(req.headers(), header::CONNECTION, "upgrade")
             && req.headers().contains_key(header::UPGRADE);
