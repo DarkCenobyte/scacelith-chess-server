@@ -17,31 +17,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 use std::time::Duration;
 
-use scacelith_client::ApiClient;
-use scacelith_client::http::Response;
 use scacelith_protocol::{NoticeCode, ServerMsg, close};
 use serde_json::{Value, json};
-use support::server::{Logs, SERVER_BIN};
-use support::web::{link_path, page, query_param, text};
+use support::server::{Logs, server_bin};
+use support::web::{call, link_path, page, query_param, text};
 use support::*;
 use tokio::process::Command;
-
-/// A request through the API client: the answer whatever its status, and its JSON body (`Null`
-/// when it has none).
-async fn call(
-    api: &ApiClient,
-    method: &str,
-    path: &str,
-    token: Option<&str>,
-    body: Option<Value>,
-) -> (Response, Value) {
-    let res = api
-        .request(method, path, token, body.as_ref())
-        .await
-        .unwrap_or_else(|e| panic!("{method} {path}: {e}"));
-    let json = serde_json::from_slice(&res.body).unwrap_or(Value::Null);
-    (res, json)
-}
 
 /// Registers `name`, confirms the address with the link of the mail, logs in (client label
 /// "integration test") and connects.
@@ -305,7 +286,9 @@ async fn without_cap_net_bind_service_port_443_fails_with_the_fixes_in_the_log_a
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).expect("chmod");
     let secret = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [9u8; 48]);
     let mut child = Command::new("setpriv")
-        .args(["--reuid=65534", "--regid=65534", "--clear-groups", SERVER_BIN, "start"])
+        .args(["--reuid=65534", "--regid=65534", "--clear-groups"])
+        .arg(server_bin())
+        .arg("start")
         .env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", dir.path())

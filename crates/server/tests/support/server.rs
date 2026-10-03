@@ -32,8 +32,15 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::watch;
 
-/// The server binary built with these tests.
-pub const SERVER_BIN: &str = env!("CARGO_BIN_EXE_scacelith-server");
+/// The server binary: the one built with the integration tests of its package, else the
+/// `scacelith-server` next to the running program (a tool of the workspace, built with it).
+pub fn server_bin() -> PathBuf {
+    if let Some(built) = option_env!("CARGO_BIN_EXE_scacelith-server") {
+        return PathBuf::from(built);
+    }
+    let exe = std::env::current_exe().unwrap_or_default();
+    exe.with_file_name("scacelith-server")
+}
 
 /// The longest start-up (migrations, journal replay, listeners) on a loaded machine.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
@@ -92,7 +99,7 @@ fn pem(label: &str, der: &[u8]) -> String {
 
 /// The certificate of the data directory `dir` (made the first time: a restart keeps it, so the
 /// clients keep trusting the server): `(certificate file, key file, certificate PEM)`.
-fn certificate(dir: &TempDir) -> (PathBuf, PathBuf, Vec<u8>) {
+pub fn certificate(dir: &TempDir) -> (PathBuf, PathBuf, Vec<u8>) {
     let (cert, key) = (dir.file("cert.pem"), dir.file("key.pem"));
     if !cert.exists() {
         let made = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
@@ -102,6 +109,14 @@ fn certificate(dir: &TempDir) -> (PathBuf, PathBuf, Vec<u8>) {
     }
     let pem = std::fs::read(&cert).expect("certificate read");
     (cert, key, pem)
+}
+
+/// The SHA-256 of the certificate of a PEM block (its DER), lower-case hexadecimal.
+pub fn certificate_pin(pem: &[u8]) -> String {
+    let text = String::from_utf8_lossy(pem);
+    let b64: String = text.lines().filter(|l| !l.starts_with("-----")).collect();
+    let der = base64::engine::general_purpose::STANDARD.decode(b64.trim()).expect("a PEM certificate");
+    scacelith_server::util::sha256(&der).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A TCP port free right now on 127.0.0.1 (the metrics port: 0 would turn it off).
@@ -194,6 +209,7 @@ pub struct ServerOptions {
     workers: u32,
     env: Vec<(String, String)>,
     dir: Option<Arc<TempDir>>,
+    bin: Option<PathBuf>,
 }
 
 impl ServerOptions {
@@ -213,6 +229,12 @@ impl ServerOptions {
     /// Starts on the data directory of an earlier server (a restart, a recovery).
     pub fn dir(mut self, dir: Arc<TempDir>) -> ServerOptions {
         self.dir = Some(dir);
+        self
+    }
+
+    /// Runs this server binary instead of [`server_bin`].
+    pub fn bin(mut self, path: PathBuf) -> ServerOptions {
+        self.bin = Some(path);
         self
     }
 
@@ -236,6 +258,8 @@ pub struct TestServer {
     pub env: Vec<(String, String)>,
     /// What the server logged.
     pub logs: Logs,
+    /// The server binary (also the admin CLI's).
+    pub bin: PathBuf,
     child: Child,
     exit: Option<ExitStatus>,
 }
@@ -301,7 +325,7 @@ fn base_env(dir: &TempDir, workers: u32, metrics_port: u16) -> Vec<(String, Stri
 impl TestServer {
     /// The default options: one worker, the harness's settings.
     pub fn options() -> ServerOptions {
-        ServerOptions { workers: 1, env: Vec::new(), dir: None }
+        ServerOptions { workers: 1, env: Vec::new(), dir: None, bin: None }
     }
 
     /// A server with the default options.
@@ -332,7 +356,8 @@ impl TestServer {
             env.push((k.clone(), v.clone()));
         }
         let (_, _, cert_pem) = certificate(&dir);
-        let mut child = Command::new(SERVER_BIN)
+        let bin = opts.bin.clone().unwrap_or_else(server_bin);
+        let mut child = Command::new(&bin)
             .arg("start")
             .env_clear()
             .envs(passthrough_env())
@@ -343,7 +368,7 @@ impl TestServer {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| format!("cannot run {SERVER_BIN}: {e}"))?;
+            .map_err(|e| format!("cannot run {}: {e}", bin.display()))?;
         let logs = Logs::default();
         logs.follow(child.stdout.take().expect("piped stdout"));
         logs.follow(child.stderr.take().expect("piped stderr"));
@@ -376,7 +401,7 @@ impl TestServer {
         if logs.wait(START_TIMEOUT, |l| l["msg"] == "ready").await.is_none() {
             return Err(format!("not ready:\n{}", logs.tail(30)));
         }
-        Ok(TestServer { dir, addr, metrics_addr, cert_pem, env, logs, child, exit: None })
+        Ok(TestServer { dir, addr, metrics_addr, cert_pem, env, logs, bin, child, exit: None })
     }
 
     /// The server's address for the client SDK: TLS, the certificate's name, its certificate.
@@ -387,6 +412,12 @@ impl TestServer {
     /// The same endpoint, its connections opened from the local address `ip` (127.0.0.2...).
     pub fn endpoint_from(&self, ip: IpAddr) -> Endpoint {
         self.endpoint().with_local_addr(ip)
+    }
+
+    /// The SHA-256 of the server's certificate (DER), lower-case hexadecimal: the pin of a
+    /// client that trusts this certificate only.
+    pub fn pin(&self) -> String {
+        certificate_pin(&self.cert_pem)
     }
 
     /// The client TLS settings that trust this server's certificate.
@@ -457,7 +488,7 @@ impl TestServer {
     /// Runs `scacelith-server admin <args>` on this server's data directory (another process, as
     /// on a server host) with `extra` settings; returns its standard output, or its error output.
     pub async fn admin(&self, args: &[&str], extra: &[(&str, &str)]) -> Result<String, String> {
-        let out = Command::new(SERVER_BIN)
+        let out = Command::new(&self.bin)
             .arg("admin")
             .args(args)
             .env_clear()

@@ -1,7 +1,9 @@
 //! Plain HTTP requests of the black-box tests: the HTML pages of the e-mail links (a GET, or a
 //! form posted as a browser does), the links of the mails, and a small GIF reader.
 
+use scacelith_client::ApiClient;
 use scacelith_client::http::{HttpConnection, Request, Response};
+use serde_json::Value;
 
 use super::server::TestServer;
 
@@ -64,6 +66,23 @@ pub async fn page(srv: &TestServer, method: &str, path: &str, form: Option<&[(&s
     };
     let mut conn = HttpConnection::open(&srv.endpoint()).await.expect("connected");
     conn.send(&req).await.expect("an answer")
+}
+
+/// A request through the API client: the answer whatever its status, and its JSON body (`Null`
+/// when it has none).
+pub async fn call(
+    api: &ApiClient,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: Option<Value>,
+) -> (Response, Value) {
+    let res = api
+        .request(method, path, token, body.as_ref())
+        .await
+        .unwrap_or_else(|e| panic!("{method} {path}: {e}"));
+    let json = serde_json::from_slice(&res.body).unwrap_or(Value::Null);
+    (res, json)
 }
 
 /// The path and query of the first `https://` link of a mail's text.

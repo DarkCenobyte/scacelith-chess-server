@@ -15,6 +15,7 @@ use scacelith_protocol::{
 };
 
 use super::server::TestServer;
+use super::web::{call, link_path, page, query_param, text};
 
 /// The password of every test account.
 pub const PASSWORD: &str = "correct horse battery staple 9";
@@ -268,6 +269,28 @@ pub async fn account(srv: &TestServer, name: &str) -> Account {
         "register {name}: {answer}"
     );
     sign_in(srv, name, None).await
+}
+
+/// Registers `name` (e-mail `<name>@example.org`) on a server that confirms the addresses,
+/// opens the link of the confirmation mail and presses its button as a browser would, then signs
+/// in with `label`.
+pub async fn verified_account(srv: &TestServer, name: &str, label: Option<&str>) -> Account {
+    let api = srv.api();
+    let email = format!("{name}@example.org");
+    let body = serde_json::json!({"username": name, "email": email, "password": PASSWORD});
+    let (res, answer) = call(&api, "POST", "/auth/register", None, Some(body)).await;
+    assert_eq!(
+        (res.status, &answer),
+        (202, &serde_json::json!({"status": "verification_sent"})),
+        "register {name}"
+    );
+    let mail = srv.mail_to(&email, "Confirm your e-mail address for", 0).await;
+    let link = link_path(mail["text"].as_str().expect("the mail's text"));
+    let token = query_param(&link, "token").expect("the link's token");
+    assert_eq!(page(srv, "GET", &link, None).await.status, 200, "the confirmation page of {name}");
+    let done = page(srv, "POST", "/verify-email", Some(&[("token", &token)])).await;
+    assert_eq!(done.status, 200, "verify {name}: {}", text(&done));
+    sign_in(srv, name, label).await
 }
 
 /// A realtime connection with `token`, from 127.0.0.1.
