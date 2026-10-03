@@ -22,10 +22,13 @@ rustls-pki-types.workspace = true
 webpki-roots.workspace = true
 bytes.workspace = true
 sha1.workspace = true
-sha2.workspace = true
 base64.workspace = true
 getrandom.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+# Certificates of the in-test TLS servers.
+rcgen.workspace = true
 
 [lints]
 workspace = true
