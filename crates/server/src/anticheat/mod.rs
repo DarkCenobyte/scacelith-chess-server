@@ -22,8 +22,10 @@ pub mod reports;
 pub mod sanction;
 pub mod scoring;
 pub mod service;
+pub mod worker;
 
 pub use service::{Anticheat, Classification, SanctionResult, classify};
+pub use worker::{AnalysisPool, PoolStats};
 
 #[cfg(test)]
 mod synthetic;
