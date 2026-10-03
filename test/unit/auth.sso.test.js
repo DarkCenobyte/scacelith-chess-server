@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import net from 'node:net';
-import { ssoOriginTag } from '../../src/auth/oidc.js';
+import { createOidcClient, ssoOriginTag } from '../../src/auth/oidc.js';
 import { createMailer } from '../../src/mail/index.js';
 import { sha256Hex } from '../../src/security/keys.js';
 import { createPasswordHasher } from '../../src/security/password.js';
@@ -136,6 +136,25 @@ test('start: Google returns to the posted loopback port under this server\'s ori
         const a = await x.start({ port });
         assert.equal(new URL(a.authUrl).searchParams.get('redirect_uri'), `http://127.0.0.1:${port}/oauth2/google/${TAG}`);
     }
+});
+
+test('the origin tags of the contract\'s vectors; the provider client takes only a loopback redirect URI', async () => {
+    for (const [origin, tag] of [['play.scacelith.example:443', 'IhcScoV7eDOzTEcSnqPUPt'], ['localhost:8443', 'TFGx7zQ_8QlGZW5zpqznCr'],
+        ['[::1]:8443', 'XToJm0DG5PjciEVmZa9Cho'], ['127.0.0.1:50443', '3r653wM5ZjYsHcAJljmCwY']]) {
+        assert.equal(ssoOriginTag(origin), tag, origin);
+    }
+    let requests = 0;
+    const oidc = createOidcClient({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, request: async () => { requests++; return { status: 500, body: '' }; } });
+    const url = (redirectUri) => oidc.authorizationUrl({ state: 's'.repeat(43), nonce: 'n'.repeat(43), codeChallenge: 'c'.repeat(43), redirectUri });
+    assert.equal(new URL(url(REDIRECT)).searchParams.get('redirect_uri'), REDIRECT);
+    const tagged = (hostPort, path = `/oauth2/google/${TAG}`, scheme = 'http') => `${scheme}://${hostPort}${path}`;
+    for (const bad of [tagged(`localhost:${PORT}`), tagged(`[::1]:${PORT}`), tagged(`127.0.0.1:${PORT}`, undefined, 'https'),
+        tagged('127.0.0.1:80'), tagged('127.0.0.1:1023'), tagged('127.0.0.1:65536'), tagged(`127.0.0.1:${PORT}`, `/oauth2/google/${TAG}x`),
+        tagged(`127.0.0.1:${PORT}`, `/oauth2/google/${TAG}/`), tagged(`127.0.0.1:${PORT}`, '/callback'), undefined]) {
+        assert.throws(() => url(bad), (e) => e.reason === 'bad_redirect_uri', String(bad));
+        await assert.rejects(oidc.exchangeCode('code', 'v'.repeat(43), bad), (e) => e.reason === 'bad_redirect_uri', String(bad));
+    }
+    assert.equal(requests, 0, 'nothing sent to Google');
 });
 
 test('start and finish validate their body', async (t) => {
