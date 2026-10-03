@@ -49,8 +49,11 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-# Test certificates (TLS edge, fake SMTP server with STARTTLS and implicit TLS).
+# Test certificates (TLS edge, fake SMTP server with STARTTLS and implicit TLS, the black-box
+# servers of tests/).
 rcgen.workspace = true
+# The client of the black-box tests of tests/ (the real server binary over TLS).
+scacelith-client.workspace = true
 
 [lints]
 workspace = true

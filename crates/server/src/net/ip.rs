@@ -10,14 +10,6 @@
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
-use std::sync::LazyLock;
-
-use base64::Engine as _;
-use hmac::{Hmac, KeyInit, Mac};
-use parking_lot::RwLock;
-use sha2::Sha256;
-
-use crate::config::LogIp;
 
 /// The canonical form of an address: IPv4-mapped IPv6 becomes IPv4.
 pub fn canonical(ip: IpAddr) -> IpAddr {
@@ -317,52 +309,17 @@ impl ClientAddress {
     }
 }
 
-struct LogIpState {
-    mode: LogIp,
-    secret: Vec<u8>,
-}
-
-static LOG_IP: LazyLock<RwLock<LogIpState>> =
-    LazyLock::new(|| RwLock::new(LogIpState { mode: LogIp::Truncated, secret: Vec::new() }));
-
-/// Sets how client addresses appear in the logs (`LOG_IP`; `SERVER_SECRET` keys the hashed form).
-/// Called once at start-up; the default is `truncated`.
-pub fn configure_log_ip(mode: LogIp, secret: &[u8]) {
-    let mut st = LOG_IP.write();
-    st.mode = mode;
-    st.secret = secret.to_vec();
-}
-
 /// A client address as it may appear in the logs: see [`for_log_text`].
 pub fn for_log(ip: IpAddr) -> String {
     for_log_text(&canonical(ip).to_string())
 }
 
-/// An address (or an address key) as it may appear in the logs, by `LOG_IP`: `truncated` (the
-/// default) keeps the IPv4 /24 or the IPv6 /48, `full` keeps it whole, `hashed` replaces it with
-/// `ip:` and 12 characters of an HMAC keyed by `SERVER_SECRET` and the day (so one address can be
-/// followed within a day, never recovered).
+/// An address (or an address key) as it may appear in the logs, by `LOG_IP` as the logger applies
+/// it ([`crate::log::ip`]): `truncated` (the default) keeps the IPv4 /24 or the IPv6 /48, `full`
+/// keeps it whole, `hashed` replaces it with `ip:` and 12 characters of an HMAC keyed by
+/// `SERVER_SECRET` and the day (so one address can be followed within a day, never recovered).
 pub fn for_log_text(ip: &str) -> String {
-    let st = LOG_IP.read();
-    match st.mode {
-        LogIp::Full => ip.to_string(),
-        LogIp::Truncated => truncate_ip(ip),
-        LogIp::Hashed => {
-            let day = crate::clock::wall_ms().div_euclid(86_400_000);
-            hashed_ip(&st.secret, day, ip)
-        }
-    }
-}
-
-fn hashed_ip(secret: &[u8], day: i64, ip: &str) -> String {
-    let secret: &[u8] = if secret.is_empty() { b"scacelith" } else { secret };
-    let mut k = <Hmac<Sha256> as KeyInit>::new_from_slice(secret).expect("HMAC takes any key length");
-    k.update(format!("log-ip:{day}").as_bytes());
-    let day_key = k.finalize().into_bytes();
-    let mut h = <Hmac<Sha256> as KeyInit>::new_from_slice(&day_key).expect("HMAC takes any key length");
-    h.update(ip.as_bytes());
-    let digest = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(h.finalize().into_bytes());
-    format!("ip:{}", &digest[..12])
+    crate::log::ip(ip).unwrap_or_default()
 }
 
 /// IPv4 /24 (`192.0.2.0/24`) or IPv6 /48 (`2001:db8:1::/48`). An IPv4-mapped IPv6 address is
@@ -558,14 +515,5 @@ mod tests {
         assert_eq!(truncate_ip("2001:db8:1:2::/64"), "2001:db8:1::/48");
         assert_eq!(truncate_ip("garbage"), "garbage");
         assert_eq!(truncate_ip("1.2.3"), "1.2.3");
-    }
-
-    #[test]
-    fn hashed_form_is_stable_within_a_day() {
-        let a = hashed_ip(b"secret", 20000, "192.0.2.7");
-        assert!(a.starts_with("ip:") && a.len() == 15);
-        assert_eq!(a, hashed_ip(b"secret", 20000, "192.0.2.7"));
-        assert_ne!(a, hashed_ip(b"secret", 20001, "192.0.2.7"));
-        assert_ne!(a, hashed_ip(b"other", 20000, "192.0.2.7"));
     }
 }

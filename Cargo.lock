@@ -930,6 +930,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "scacelith-live-check"
+version = "1.0.0"
+dependencies = [
+ "base64",
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rcgen",
+ "ring",
+ "rusqlite",
+ "scacelith-chess",
+ "scacelith-client",
+ "scacelith-protocol",
+ "scacelith-server",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "scacelith-protocol"
 version = "1.0.0"
 dependencies = [
@@ -985,6 +1006,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "scacelith-chess",
+ "scacelith-client",
  "scacelith-gif",
  "scacelith-protocol",
  "serde_json",
