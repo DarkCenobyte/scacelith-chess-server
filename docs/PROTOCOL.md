@@ -339,8 +339,9 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
   a minute; `MatchmakingCooldown` with `Notice{MatchmakingCooldown, arg = until}`). Two players who
   played `MATCH_REPEAT_LIMIT` (3) rated games together within `MATCH_REPEAT_WINDOW_MS` (an hour),
   whatever made them, are no longer paired by the rated queue, and their rated challenges and private
-  games are refused with `RatedRepeatLimit` (a refused `ChallengeJoinCode` leaves the code valid),
-  their rated rematches with `RematchUnavailable`.
+  games are refused with `RatedRepeatLimit` (a refused `ChallengeJoinCode` leaves the code valid;
+  a target who does not accept challenges still answers `UserUnavailable`, as an offline one), their
+  rated rematches with `RematchUnavailable`.
 
 ## Error handling
 

@@ -356,7 +356,8 @@ describe('control plane: matchmaking', () => {
     });
 
     it('MATCH_REPEAT_LIMIT counts rated challenges, private games and rematches, and refuses them past it; unrated games stay free', async () => {
-        const { cp, ch, shards, mm, clock, online } = setup({ realMatchmaker: true });
+        let bobAccepts = true;
+        const { cp, ch, shards, mm, clock, online } = setup({ realMatchmaker: true, acceptsChallenges: (u) => u !== 2 || bobAccepts });
         const a = online(1, 'alice', 0), b = online(2, 'bob', 1), c = online(3, 'carl', 1);
         const tc = { baseSec: 300, incSec: 0 }, rated = { ...tc, rated: true };
         const end = (gameId) => cp.gameEnded({ gameId, whiteId: 1, blackId: 2 });
@@ -386,6 +387,13 @@ describe('control plane: matchmaking', () => {
         shards.clear();
         assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', ...rated }), { error: E.RatedRepeatLimit });
         assert.deepEqual(shards.frames(), [], 'nothing reaches the target');
+        // A target who refuses challenges answers as an offline one: the limit does not reveal presence.
+        bobAccepts = false;
+        assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', ...rated }), { error: E.UserUnavailable });
+        bobAccepts = true;
+        cp.presenceRelease({ userId: 2, connId: 20 }, 1);
+        assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', ...rated }), { error: E.UserUnavailable }, 'offline');
+        online(2, 'bob', 1);
         // A wrong time control keeps its own error.
         assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', baseSec: 420, incSec: 1, rated: true }), { error: E.RatedRequiresOfficialTc });
         assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', baseSec: 5, incSec: 0, rated: true }), { error: E.InvalidTimeControl });

@@ -43,8 +43,9 @@
 // it (queue, direct challenge, private code, rematch), in the matchmaker's counts (in memory: a
 // restart forgets them). Two players who reached it within MATCH_REPEAT_WINDOW_MS are no longer
 // paired by the rated queue, and their rated challenges and private games are refused with
-// RatedRepeatLimit (a private game's joiner before the code is used: the game stays pending), their
-// rated rematches with RematchUnavailable; unrated games stay free.
+// RatedRepeatLimit (a private game's joiner before the code is used: the game stays pending; a
+// target who refuses challenges still answers UserUnavailable, as an offline one), their rated
+// rematches with RematchUnavailable; unrated games stay free.
 //
 // Notifications (QueueStatus, ChallengeReceived, ChallengeStatus, Notice) are encoded here and
 // written by the shard of the user's live connection ('conn.send'); waiting players get a fresh
@@ -546,8 +547,9 @@ export class ControlPlane {
                 }
                 targetUser = { userId: tid, username: this.presence.get(tid).username, online: true, acceptChallenges: accepts };
                 // Past MATCH_REPEAT_LIMIT (header), for a time control ch.create takes as rated: a
-                // wrong one keeps its own error.
-                if (rated && categoryOf(baseSec * 1000, incSec * 1000, this.config) !== 'custom'
+                // wrong one keeps its own error, and a target who refuses challenges keeps
+                // ch.create's UserUnavailable (nothing leaks: an offline target answers the same).
+                if (rated && accepts && categoryOf(baseSec * 1000, incSec * 1000, this.config) !== 'custom'
                     && this._repeatLimited(from.userId, tid, now)) return { error: E.RatedRepeatLimit };
             }
         }
