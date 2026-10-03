@@ -258,7 +258,8 @@ After a restart every client reconnects within a short time. New connections wai
 queue until the server accepts them; `LISTEN_BACKLOG` (2048 by default) sets its length, but the
 kernel caps it at `net.core.somaxconn` (4096 since Linux 5.4, 128 on older kernels), and
 connections still in their TCP handshake wait in a second queue bounded by
-`net.ipv4.tcp_max_syn_backlog`. Raise both:
+`net.ipv4.tcp_max_syn_backlog`. Raise both; on a server for more than about 50,000 players, use
+8192 and 16384 with `LISTEN_BACKLOG=8192`:
 
 ```sh
 # /etc/sysctl.d/90-scacelith.conf, applied with: sysctl --system
@@ -267,6 +268,13 @@ net.ipv4.tcp_max_syn_backlog = 8192
 # Only for a server port inside 32768-60999 (here a custom API_PORT=44664):
 # net.ipv4.ip_local_reserved_ports = 44664
 ```
+
+With a stateful firewall on the machine (nftables or iptables rules on `ct state`, ufw,
+firewalld), every player connection also takes an entry of the kernel's connection tracking
+table, whose size `net.netfilter.nf_conntrack_max` scales with the RAM (65,536 on many 4 GB
+machines), and a full table drops packets: set it to at least twice the connections you expect,
+or exempt the game port from tracking (`notrack`). Without such a firewall there is nothing to
+do. The server needs no other kernel setting ([docs/SIZING.md](docs/SIZING.md#system)).
 
 The default port 443 needs nothing more. A custom port inside Linux's default range of ephemeral
 ports (32768-60999, `net.ipv4.ip_local_port_range`) must also be reserved, as the commented line
@@ -294,7 +302,8 @@ of the normal grace. The clock of the side to move stays stopped until that play
 it their clock runs again even while they are away, and the rest of their reconnection time is
 charged to it.
 
-`MAX_CONNECTIONS` (200,000) counts the signed-in players of the whole server. Beyond it, a newcomer
+`MAX_CONNECTIONS` (200,000) counts the signed-in players of the whole server; set it to what the
+machine holds (see [Scaling](#scaling)). Beyond it, a newcomer
 still completes the TLS handshake and the WebSocket upgrade, then is refused when it logs in
 (`ServerFull`), and the game waits 60 to 120 s before it tries again. A player whose game is in
 progress is still let in, so that the game can go on. So that such a player can reach the login,
@@ -380,8 +389,9 @@ licences:
 ## Password hashing
 
 Every login, registration, password change or reset and every account change that asks for the
-password computes an Argon2id hash (64 MiB, 3 passes), which takes a core for a fraction of a
-second, on a thread of its own. The whole server runs at most `PASSWORD_HASH_CONCURRENCY` of them
+password computes an Argon2id hash (64 MiB, 3 passes), which takes one core for about 0.17 s on
+a 2.1 GHz Xeon vCPU and about 0.3 s on a VPS vCore ([docs/SIZING.md](docs/SIZING.md#password-logins)),
+on a thread of its own. The whole server runs at most `PASSWORD_HASH_CONCURRENCY` of them
 at once (`WORKERS` by default); up to `PASSWORD_HASH_QUEUE_MAX` more wait their turn (32 ×
 `WORKERS` by default). All the hashes of one request wait at most `PASSWORD_HASH_QUEUE_TIMEOUT_MS`
 (10 s) together: a password change, which checks the current password and then hashes the new
@@ -423,8 +433,8 @@ that its time does not reveal whether the e-mail address or user name has an acc
 - `PASSWORD_HASH_QUEUE_TIMEOUT_MS` is at most 13000: the game gives up after 15 s, so that a
   refused player gets the "busy" answer rather than a timeout.
 - `POW_LOGIN_TRIGGER_PER_MIN` (30) turns the login proof of work on during a credential-stuffing
-  wave. Each failed login costs a hash, so a much higher trigger could never be reached on a
-  small machine.
+  wave. Each failed login costs a hash, so 30 a minute already keep about a sixth of a VPS vCore
+  busy, and a trigger of a few hundred would take the whole CPU of a small machine.
 - On the metrics endpoint, `scacelith_password_hash_queued`, `scacelith_password_hash_wait_ms`
   and `scacelith_password_hash_rejected_total` show the queue. Regular refusals with the reasons
   `queue_full` or `timeout` outside an attack mean the machine needs more cores, not a higher
@@ -638,7 +648,13 @@ One process serves everything: `WORKERS` game shards (one per core by default, u
 are those of the whole server. Several instances on one machine are independent servers, each
 with its own accounts, data and ports ([docs/DEPLOY.md](docs/DEPLOY.md), section 11). Capacity
 and memory: [docs/SIZING.md](docs/SIZING.md); load tests (`bench/run.sh`, the `scacelith-bench`
-load generator) and their results: [docs/BENCHMARK.md](docs/BENCHMARK.md).
+load generator) and their results: [docs/BENCHMARK.md](docs/BENCHMARK.md). Set
+`MAX_CONNECTIONS` to what the machine really holds, so that a full server refuses newcomers at
+login instead of running out of memory: its default of 200,000 needs about 5.3 GiB for the
+connections alone, while a 2-vCore, 4 GB VPS holds about 60,000 and a 4-vCore, 8 GB one about
+150,000. With the live gestures on, the CPU fills before the memory: the 2-vCore VPS holds about
+9,300 games of calm players with the defaults, and about 26,000 with `GESTURE_RATE=0`
+([docs/SIZING.md](docs/SIZING.md#recommended-settings)).
 
 On a small machine, three settings are the idle cost you control, all announced to the game in
 `Welcome`. `CLIENT_PING_INTERVAL_MS` (10 s) is how often the game pings the server for its ping
