@@ -37,7 +37,7 @@ async fn bodies(d: &mut Duo) {
     let mut n = 0;
     let mut next = |n: &mut u32| {
         *n += 1;
-        if *n % 15 == 0 {
+        if n.is_multiple_of(15) {
             ip = fresh_ip();
         }
         ip

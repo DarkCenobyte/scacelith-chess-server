@@ -350,7 +350,7 @@ pub async fn play(
         let pos_hash = chess.position().digest();
         let draw_offer = matches!(script.end, End::DrawAgreed) && ply == last;
         let ply = ply as u16;
-        let mover: &mut Rt = if ply % 2 == 0 { &mut *white } else { &mut *black };
+        let mover: &mut Rt = if ply.is_multiple_of(2) { &mut *white } else { &mut *black };
         mover.send(Cmd::Move { game, ply, mv, pos_hash, draw_offer })?;
         for p in [&mut *white, &mut *black] {
             p.wait("MoveMade", |e| match e {
@@ -372,7 +372,7 @@ pub async fn play(
         }
         End::DrawAgreed => {
             // The offer came with the last move; the other side answers.
-            let p: &mut Rt = if last % 2 == 0 { &mut *black } else { &mut *white };
+            let p: &mut Rt = if last.is_multiple_of(2) { &mut *black } else { &mut *white };
             p.send(Cmd::DrawAnswer { game, accept: true })?;
         }
         End::OnBoard => {}

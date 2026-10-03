@@ -376,13 +376,13 @@ mod tests {
         let src = r#" {"b":1.50,"a":[true,null,"xBSu00e9BSn"],"c":-2e3} "#.replace("BS", "\\");
         let v = parse(src.as_bytes()).unwrap();
         assert_eq!(v.to_text(), src.trim());
-        assert_eq!(v.at("a.2").and_then(J::as_str), Some("x\u{e9}\n"));
+        assert!(matches!(v.at("a.2"), Some(J::Str(s, _)) if s == "x\u{e9}\n"));
         assert_eq!(v.get("b"), Some(&J::Num("1.50".into())));
         assert!(parse(b"{\"a\":1,}").is_err());
         assert!(parse(b"[1] 2").is_err());
         assert!(is_compact(br#"{"a":"x y"}"#));
         assert!(!is_compact(br#"{"a": 1}"#));
         let pair = parse(r#""BSud83dBSude00""#.replace("BS", "\\").as_bytes()).unwrap();
-        assert_eq!(pair.as_str(), Some("\u{1F600}"));
+        assert!(matches!(&pair, J::Str(s, _) if s == "\u{1F600}"));
     }
 }

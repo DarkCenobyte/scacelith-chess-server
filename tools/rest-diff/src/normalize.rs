@@ -86,9 +86,10 @@ pub fn normalize(resp: &Resp, ctx: &Context) -> Normalized {
             }
             Err(_) => Body::Text(normalize_text(&String::from_utf8_lossy(&resp.body), ctx)),
         }
-    } else if content_type.starts_with("text/") || content_type.starts_with("application/x-chess-pgn") {
-        Body::Text(normalize_text(&String::from_utf8_lossy(&resp.body), ctx))
-    } else if content_type.is_empty() && std::str::from_utf8(&resp.body).is_ok() {
+    } else if content_type.starts_with("text/")
+        || content_type.starts_with("application/x-chess-pgn")
+        || (content_type.is_empty() && std::str::from_utf8(&resp.body).is_ok())
+    {
         Body::Text(normalize_text(&String::from_utf8_lossy(&resp.body), ctx))
     } else {
         Body::Binary

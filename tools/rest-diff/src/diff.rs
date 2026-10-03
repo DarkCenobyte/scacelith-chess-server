@@ -276,12 +276,12 @@ mod tests {
     #[test]
     fn finds_key_order_numbers_and_status() {
         let ctx = Context::default();
-        let a = normalize(&resp(200, r#"{"a":1,"b":2.0,"t":1790000000000}"#), &ctx);
-        let b = normalize(&resp(200, r#"{"b":2,"a":1,"t":1790000005000}"#), &ctx);
+        let a = normalize(&resp(200, r#"{"a":1,"b":2.0,"createdAt":1790000000000}"#), &ctx);
+        let b = normalize(&resp(200, r#"{"b":2,"a":1,"createdAt":1790000005000}"#), &ctx);
         let d = compare(&a, &b);
         let aspects: Vec<&str> = d.iter().map(|x| x.aspect.as_str()).collect();
         assert_eq!(aspects, vec!["body $ key order", "body $.b"]);
-        let c = normalize(&resp(201, r#"{"a":1,"b":2.0,"t":1790000000000}"#), &ctx);
+        let c = normalize(&resp(201, r#"{"a":1,"b":2.0,"createdAt":1790000000000}"#), &ctx);
         assert_eq!(compare(&a, &c)[0].aspect, "status");
         assert!(compare(&a, &a).is_empty());
     }
