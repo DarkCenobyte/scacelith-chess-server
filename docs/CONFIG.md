@@ -42,7 +42,7 @@ Sections:
 | `SERVER_PUBLIC_HOST` | text | `localhost` | Public DNS name of the server, used in e-mail links, and Google sign-in works only for players who added the server under exactly this name and PUBLIC_API_PORT. |
 | `SERVER_MOTD` | text (at most 200 characters) | (empty) | Short message of the day shown in the online menu. |
 | `BIND_ADDRESS` | text | `0.0.0.0` | Address the API and WebSocket listeners bind to. |
-| `API_PORT` | port (0-65535) | `443` | HTTPS API port (TCP). 443, the HTTPS port: firewalls and proxies let it through; any free port works for a community server. A port below 1024 needs the CAP_NET_BIND_SERVICE capability (README, systemd unit) unless the server runs as root. |
+| `API_PORT` | port (0-65535) | `443` | HTTPS API port (TCP). 443, the HTTPS port: firewalls and proxies let it through; any free port works for a community server. A port below 1024 needs the CAP_NET_BIND_SERVICE capability (docs/DEPLOY.md) unless the server runs as root. |
 | `WS_PORT` | port (0-65535) | (empty) | WSS (game WebSocket) port. Empty (the default) = the same port as API_PORT: one TLS listener serves the API under /api/v1 and the WebSocket upgrade on /ws. Set another port to split them. |
 | `PUBLIC_API_PORT` | port (0-65535) | `0` | API port as seen by clients when a proxy/NAT maps ports (0 = API_PORT). |
 | `PUBLIC_WS_PORT` | port (0-65535) | `0` | WSS port as seen by clients (0 = WS_PORT). |
@@ -68,7 +68,7 @@ Sections:
 
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
-| `DATA_DIR` | path (relative to the working directory) | `./data` | Directory for the database, the game journal and runtime files. |
+| `DATA_DIR` | path (relative to the working directory) | `./data` | Directory of the database and the game journal (created at start when missing). |
 | `DB_PATH` | path (relative to the working directory) | (empty) | SQLite database file (default: DATA_DIR/scacelith.db; :memory: keeps it in memory, for tests). |
 | `JOURNAL_DIR` | path (relative to the working directory) | (empty) | Append-only journal of the games in progress, replayed after a crash (default: DATA_DIR/journal). |
 | `JOURNAL_FLUSH_MS` | integer (5-1000) | `50` | Longest time a game event waits in memory before being written to the journal (group commit). |
@@ -252,7 +252,7 @@ Sections:
 | `METRICS_BIND` | text | `127.0.0.1` | Keep it private: 127.0.0.1 or an internal address. |
 | `METRICS_TOKEN`<br>`METRICS_TOKEN_FILE` | secret text (used as written) | (empty) | Optional bearer token required to read the metrics: /metrics then needs the header "Authorization: Bearer &lt;token&gt;" with this exact text (no spaces). |
 | `LOG_LEVEL` | one of debug, info, warn, error | `info` | Log verbosity. |
-| `LOG_FORMAT` | one of json, pretty | `json` | JSON lines (for log collectors) or readable text, on stdout. Under systemd each line starts with its journald priority (&lt;6&gt; info, &lt;5&gt; security, &lt;4&gt; warn, &lt;3&gt; error). |
+| `LOG_FORMAT` | one of json, pretty | `json` | JSON lines (for log collectors) or readable text, on stdout (stderr for migrate). When that stream is the journal (JOURNAL_STREAM, set by systemd), each line starts with its syslog priority (&lt;7&gt; debug, &lt;6&gt; info, &lt;5&gt; security, &lt;4&gt; warn, &lt;3&gt; error). |
 | `LOG_IP` | one of truncated, full, hashed | `truncated` | How client addresses appear in the logs: truncated (IPv4 /24, IPv6 /48), full, or hashed (keyed HMAC, rotated daily). |
 | `RETENTION_SECURITY_DAYS` | integer (&gt;= 1) | `90` | Security events (failed logins, anomalies without sanction) are deleted after this many days. |
 | `RETENTION_IP_DAYS` | integer (&gt;= 1) | `30` | Stored IP addresses (sessions, security events) are erased after this many days. |
