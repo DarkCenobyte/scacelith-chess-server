@@ -14,8 +14,8 @@ export function verification({ serverName, username, link, hours }) {
         text: `Hello ${username},\n\n` +
             `Welcome to ${serverName}. To confirm your e-mail address and start playing online, open\n` +
             `this link and press the confirmation button:\n\n${link}\n\n` +
-            `The link is valid for ${hours} hours. If you did not create this account, ignore this\n` +
-            'message: without the confirmation the account cannot be used.\n' + sign(serverName),
+            `The link is valid for ${hours} hours. If you did not sign up, ignore this message:\n` +
+            'without the confirmation nothing is created or confirmed.\n' + sign(serverName),
     };
 }
 

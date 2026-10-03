@@ -7,6 +7,26 @@
 // owner of the address instead. E-mails are throttled per address (primary `once.consume`, the
 // same call made whether the address exists or not).
 //
+// Pending signups (with REQUIRE_EMAIL_VERIFICATION; store.signups, migration 007): register
+// creates no account. The signup (username, address, password hash, the SHA-256 of its link's
+// token) waits in pending_signups for the life of the link (24 h) and holds its username, in both
+// branches: a new address gets the link (at most one link mail per address every 5 minutes,
+// `signup` throttle, consumed once the signup is stored: within that time the new signup's link is
+// not mailed), an address that already has an account gets no link (token NULL) and its owner the
+// notice. A username held by a live pending signup of another address is refused as a taken one
+// (409 username_taken, here and in POST /auth/sso/complete); a new signup with the same address
+// replaces the pending one (its username is freed, its link stops working). Nothing else sees a
+// pending signup: no account row, so sign-in answers invalid_credentials, the public profile 404,
+// a password reset nothing. POST /auth/verify-email/resend gives the address's pending signup its
+// 24 h again whether or not the address has an account (the same transaction in both cases, best
+// effort: a busy store still answers 202), and a new link (a new token) only when it has none.
+// Using the link (POST /verify-email, confirmSignup) creates the account, its address confirmed,
+// and deletes the pending signup in one transaction; when another account took the username or the
+// address meanwhile (Google sign-in), the signup is dropped and the page says so. Expired pending
+// signups free their username at once and are deleted by the retention purge. Accounts created
+// unconfirmed before pending signups existed keep the `email_verify` links and the 403
+// email_unverified sign-in answer.
+//
 // E-mail change (POST /account/email { newEmail, password, code?, recoveryCode? }; the
 // re-authentication of deletion: password, plus a code or a recovery code when MFA is on):
 //  * 400 invalid_email / same_email before the password is checked (the session already shows
@@ -47,9 +67,10 @@
 // an account_exported security event.
 //
 // Deviations (also in docs/API.md sections 4 and 6, and docs/DESIGN.md section 8):
-//  * REQUIRE_EMAIL_VERIFICATION=false: an account is ready at once (201 { status: 'ready' }) and an
-//    existing e-mail is answered 409 email_taken (without confirmation e-mails the "same answer"
-//    would only hide the failure from honest users; the owner still gets the notice e-mail).
+//  * REQUIRE_EMAIL_VERIFICATION=false: an account is ready at once (201 { status: 'ready' }), with
+//    no pending signup, and an existing e-mail is answered 409 email_taken (without confirmation
+//    e-mails the "same answer" would only hide the failure from honest users; the owner still gets
+//    the notice e-mail).
 //  * POST /account/password requires the current password only (the client contract
 //    changePassword(current, next) sends no code); PUT /account/preferences requires only the
 //    session. Deletion, MFA disable and recovery-code regeneration require password + second factor.
@@ -91,6 +112,31 @@ export function createAccounts(svc) {
         svc.mail('verification', user.email, { username: user.username, link: svc.links.verify(token), hours: TOKEN_TTL_MS.email_verify / 3600000 });
     }
 
+    // Whether a live pending signup of another address holds `username` (it is then refused as a
+    // taken one; the signup's own address may sign up again with it, which replaces the signup).
+    function usernameHeld(username, email) {
+        const p = store.signups.byUsername(username);
+        return !!p && p.expiresAt > now() && normalizeEmail(p.email) !== normalizeEmail(email);
+    }
+
+    // Stores the pending signup of `em` (replacing the address's previous one), in one transaction
+    // with the checks of its username. false: an account or a live pending signup of another
+    // address took the username since the first check.
+    function holdSignup({ username, em, passwordHash, token }) {
+        return atomicallyOrBusy(() => {
+            const t = now();
+            if (store.users.byUsername(username) || usernameHeld(username, em)) return false;
+            for (const p of [store.signups.byUsername(username), store.signups.byEmail(em)]) if (p) store.signups.delete(p.id);
+            store.signups.create({ username, email: em, passwordHash, tokenHash: token ? sha256Hex(token) : null, createdAt: t,
+                expiresAt: t + TOKEN_TTL_MS.email_verify });
+            return true;
+        });
+    }
+
+    function mailSignupLink(username, email, token) {
+        svc.mail('verification', email, { username, link: svc.links.verify(token), hours: TOKEN_TTL_MS.email_verify / 3600000 });
+    }
+
     async function notifyExistingAddress(user, ip) {
         events.record('register_existing_email', { userId: user.id, ip });
         if (await once(mailKey('regattempt', user.email), NOTICE_THROTTLE_MS)) {
@@ -118,34 +164,42 @@ export function createAccounts(svc) {
         if (!isValidEmail(em)) throw new AuthError(400, 'invalid_email', 'This e-mail address is not valid.');
         const policy = checkPasswordPolicy(password, { minLength: config.passwordMinLength, username, email: em });
         if (policy) throw weak(policy);
-        if (store.users.byUsername(username)) throw new AuthError(409, 'username_taken', 'This username is already taken.');
+        const taken = () => new AuthError(409, 'username_taken', 'This username is already taken.');
+        if (store.users.byUsername(username) || usernameHeld(username, em)) throw taken();
         if (config.powRegisterBits > 0) await svc.requirePow('register', config.powRegisterBits, ip, pow);
 
-        const sameAnswer = { status: 202, body: { status: 'verification_sent' } };
         const existing = store.users.byEmail(em);
         const passwordHash = await hasher.hash(password, svc.hashBudget(ip).next());     // also for an existing address: same work
+        if (config.requireEmailVerification) {
+            // No account before the link is used: a pending signup holds the username in both
+            // branches, so that the answer, a second signup with that username, a sign-in and the
+            // public profile are the same whether or not the address has an account (header). The
+            // mail throttle is consumed only once the signup is stored (a busy store or a lost race
+            // leaves it for the retry).
+            const token = existing ? null : randomToken('', 32);
+            if (!holdSignup({ username, em, passwordHash, token })) throw taken();
+            if (existing) await notifyExistingAddress(existing, ip);
+            else if (await once(mailKey('signup', em), MAIL_THROTTLE_MS)) mailSignupLink(username, em, token);
+            return { status: 202, body: { status: 'verification_sent' } };
+        }
         if (existing) {
             await notifyExistingAddress(existing, ip);
-            if (!config.requireEmailVerification) throw new AuthError(409, 'email_taken', 'An account already uses this e-mail address.');
-            return sameAnswer;
+            throw new AuthError(409, 'email_taken', 'An account already uses this e-mail address.');
         }
         let id;
         try {
-            id = store.users.create({ username, email: em, passwordHash, emailVerified: !config.requireEmailVerification });
+            id = store.users.create({ username, email: em, passwordHash, emailVerified: true });
         } catch (err) {
-            if (err && err.code === 'username_taken') throw new AuthError(409, 'username_taken', 'This username is already taken.');
+            if (err && err.code === 'username_taken') throw taken();
             if (err && err.code === 'email_taken') {
                 const owner = store.users.byEmail(em);
                 if (owner) await notifyExistingAddress(owner, ip);
-                if (!config.requireEmailVerification) throw new AuthError(409, 'email_taken', 'An account already uses this e-mail address.');
-                return sameAnswer;
+                throw new AuthError(409, 'email_taken', 'An account already uses this e-mail address.');
             }
             throw err;
         }
         events.record('register', { userId: id, ip });
-        if (!config.requireEmailVerification) return { status: 201, body: { status: 'ready' } };
-        sendVerification({ id, username, email: em });
-        return sameAnswer;
+        return { status: 201, body: { status: 'ready' } };
     }
 
     /**
@@ -180,11 +234,27 @@ export function createAccounts(svc) {
     }
 
     /**
+     * A live pending signup of a link token, or null (does not use it).
+     */
+    function liveSignup(token) {
+        if (typeof token !== 'string' || !LINK_TOKEN_RE.test(token)) return null;
+        const p = store.signups.byTokenHash(sha256Hex(token));
+        return p && p.expiresAt > now() ? p : null;
+    }
+
+    /** Whether a confirmation link (an account's, or a pending signup's) is live; GET /verify-email. */
+    function peekVerification(token) {
+        return !!(peekToken('email_verify', token) || liveSignup(token));
+    }
+
+    /**
      * POST /verify-email: consumes the token and confirms the address, in one transaction (a busy
-     * store: 503 server_busy, the link still works).
+     * store: 503 server_busy, the link still works). The link of a pending signup creates its
+     * account instead (confirmSignup).
+     * @returns {'confirmed'|'invalid'|'taken'}
      */
     function verifyEmail(token, ip = null) {
-        if (typeof token !== 'string' || !LINK_TOKEN_RE.test(token)) return false;
+        if (typeof token !== 'string' || !LINK_TOKEN_RE.test(token)) return 'invalid';
         const user = atomicallyOrBusy(() => {
             const row = store.tokens.consume('email_verify', sha256Hex(token), now());
             if (!row || (row.expiresAt != null && row.expiresAt <= now())) return null;
@@ -193,21 +263,62 @@ export function createAccounts(svc) {
             if (!u.emailVerified) store.users.update(u.id, { emailVerified: true });
             return u;
         });
-        if (!user) return false;
+        if (!user) return confirmSignup(token, ip);
         sessions.invalidate({ userId: user.id });
         events.record('email_verified', { userId: user.id, ip });
-        return true;
+        return 'confirmed';
+    }
+
+    // The link of a pending signup: its account is created, the address confirmed, and the signup
+    // deleted, in one transaction (a busy store: 503 server_busy, nothing changed, the link still
+    // works). 'taken': another account took the username or the address since the signup (the
+    // signup is dropped).
+    function confirmSignup(token, ip) {
+        const r = atomicallyOrBusy(() => {
+            const p = liveSignup(token);
+            if (!p) return { status: 'invalid' };
+            store.signups.delete(p.id);
+            if (store.users.byUsername(p.username) || store.users.byEmail(p.email)) return { status: 'taken' };
+            try {
+                const id = store.users.create({ username: p.username, email: p.email, passwordHash: p.passwordHash, emailVerified: true,
+                    createdAt: now() });
+                return { status: 'confirmed', id };
+            } catch (err) {
+                if (err && (err.code === 'username_taken' || err.code === 'email_taken')) return { status: 'taken' };
+                throw err;
+            }
+        });
+        if (r.status === 'confirmed') events.record('register', { userId: r.id, ip });
+        return r.status;
     }
 
     /** POST /auth/verify-email/resend: 202 whatever happens. */
     async function resendVerification({ email, ip }) {
         const em = normalizeEmail(email);
         const fresh = await once(mailKey('verify', em), MAIL_THROTTLE_MS);
-        const user = isValidEmail(em) ? store.users.byEmail(em) : null;
-        if (fresh && user && user.status === 'active' && !user.emailVerified) {
+        if (!fresh || !isValidEmail(em)) return { status: 'accepted' };
+        const user = store.users.byEmail(em);
+        if (user && user.status === 'active' && !user.emailVerified) {
             sendVerification(user);
             events.record('verification_resent', { userId: user.id, ip });
         }
+        // The address's pending signup, if any, gets its 24 h again whether or not the address has
+        // an account (how long its username stays held must not tell), with the same transaction in
+        // both cases; a new link replaces the previous one only when the address has no account (as
+        // at signup). Best effort: a busy store renews nothing and the answer is still 202.
+        const token = randomToken('', 32);
+        let p = null;
+        try {
+            p = svc.atomically(() => {
+                const row = store.signups.byEmail(em);
+                if (!row || row.expiresAt <= now()) return null;
+                store.signups.renew(row.id, { tokenHash: user ? row.tokenHash : sha256Hex(token), expiresAt: now() + TOKEN_TTL_MS.email_verify });
+                return row;
+            });
+        } catch (err) {
+            if (!(err && err.code === 'busy' && !err.expose)) throw err;
+        }
+        if (p && !user) mailSignupLink(p.username, p.email, token);
         return { status: 'accepted' };
     }
 
@@ -612,8 +723,8 @@ export function createAccounts(svc) {
     }
 
     return {
-        register, peekToken, verifyEmail, resendVerification, forgotPassword, resetPassword, reauth, changePassword,
-        me, mfaSetup, mfaEnable, mfaDisable, regenerateRecoveryCodes, deleteAccount, setPreferences,
+        register, usernameHeld, peekToken, peekVerification, verifyEmail, resendVerification, forgotPassword, resetPassword, reauth,
+        changePassword, me, mfaSetup, mfaEnable, mfaDisable, regenerateRecoveryCodes, deleteAccount, setPreferences,
         changeEmail, peekEmailChange, confirmEmailChange, exportAccount,
         logout, logoutAll, revokeSession,
     };

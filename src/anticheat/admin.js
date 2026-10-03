@@ -551,8 +551,10 @@ function benchAccounts(ctx) {
     const maxLen = ctx.config?.usernameMax ?? 20;
     if (prefix.length + width > maxLen) throw new AdminError(`usernames would exceed ${maxLen} characters: shorten --prefix`);
     // An existing token file is made 600 below, which only its owner (or root) may do: another
-    // user's file is refused before any account or session is created.
-    const existing = fs.statSync(out, { throwIfNoEntry: false });
+    // user's file is refused before any account or session is created, and so is a symbolic link
+    // (the tokens would land wherever it points; open() below refuses one too, O_NOFOLLOW).
+    const existing = fs.lstatSync(out, { throwIfNoEntry: false });
+    if (existing?.isSymbolicLink()) throw new AdminError(`--out: ${out} is a symbolic link; give the path of the file itself`);
     if (existing?.isFile() && process.geteuid && process.geteuid() !== 0 && existing.uid !== process.geteuid()) {
         throw new AdminError(`--out: ${out} belongs to another user, so its mode cannot be made 600`);
     }
@@ -581,8 +583,15 @@ function benchAccounts(ctx) {
         lines.push(format === 'tsv' ? `${username}\t${token}` : token);
     }
     // The mode of open() only applies to a new file: an existing regular file is made 600 before
-    // the tokens go in. A device or a pipe (--out /dev/stdout) keeps its mode.
-    const fd = fs.openSync(out, 'w', 0o600);
+    // the tokens go in. A device or a pipe (--out /dev/null) keeps its mode.
+    const { O_WRONLY, O_CREAT, O_TRUNC, O_NOFOLLOW = 0 } = fs.constants;
+    let fd;
+    try {
+        fd = fs.openSync(out, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0o600);
+    } catch (e) {
+        if (e.code === 'ELOOP') throw new AdminError(`--out: ${out} is a symbolic link; give the path of the file itself`);
+        throw e;
+    }
     try {
         if (fs.fstatSync(fd).isFile()) fs.fchmodSync(fd, 0o600);
         fs.writeFileSync(fd, lines.join('\n') + '\n');

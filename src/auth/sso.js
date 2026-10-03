@@ -15,7 +15,8 @@
 //
 // Account resolution: an existing link -> that user; else a local account with the same e-mail
 // is linked when both our address and Google's are confirmed; an unconfirmed local account with
-// that e-mail is refused (clear page); otherwise a new account (needs a username).
+// that e-mail is refused (clear page); otherwise a new account (needs a username; a pending signup
+// of the address is no account: its link then finds the address taken, auth/accounts.js).
 
 import { AuthError } from './errors.js';
 import { LINK_TOKEN_RE, SSO_TOKEN_RE, TOKEN_TTL_MS, dataOf, isLive } from './tokens.js';
@@ -166,7 +167,10 @@ export function createSso(svc) {
         const row = store.tokens.get('sso_ticket', h);
         if (!isLive(row, now())) throw expired();
         const d = dataOf(row);
-        if (store.users.byUsername(username)) throw new AuthError(409, 'username_taken', 'This username is already taken.');
+        // A username held by a pending signup of another address is taken as well (auth/accounts.js).
+        if (store.users.byUsername(username) || svc.accounts.usernameHeld(username, d.email)) {
+            throw new AuthError(409, 'username_taken', 'This username is already taken.');
+        }
         if (!store.tokens.consume('sso_ticket', h, now())) throw expired();
         if (store.sso.find(PROVIDER, d.sub)) throw new AuthError(409, 'sso_already_linked', 'This Google account is already linked; sign in with Google again.');
         let id;

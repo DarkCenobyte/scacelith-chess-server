@@ -73,7 +73,13 @@ async function verifiedPlayer(name) {
     const email = `${name}@example.org`;
     const r = await api.register({ username: name, email, password: PASSWORD });
     assert.deepEqual([r.status, r.body], [202, { status: 'verification_sent' }]);
-    assert.equal((await api.login(name, PASSWORD)).body.error, 'email_unverified');
+    // No account before the link is used: the sign-in fails as for an unknown name, and the
+    // database has no row for it.
+    const early = await api.login(name, PASSWORD);
+    assert.deepEqual([early.status, early.body.error], [401, 'invalid_credentials']);
+    const db = new DatabaseSync(path.join(srv.dir, 'scacelith.db'), { readOnly: true });
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM users WHERE username = ?').get(name).n, 0);
+    db.close();
     const mail = await mailTo(email, /Confirm your e-mail address for/);
     const token = new URL(`https://x${linkPath(mail.text)}`).searchParams.get('token');
     assert.equal((await page('GET', linkPath(mail.text))).status, 200);

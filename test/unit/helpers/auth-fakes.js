@@ -29,15 +29,17 @@ const copy = (o) => (o ? structuredClone(o) : null);
 const RESULT_STATUS = { win: [1, 2], loss: [2, 1], draw: [3, 3] };
 
 /**
- * In-memory Store (users, mfa, sessions, tokens, sso, security, sanctions, ratings, meta, and the
- * account API's reads: games.listForUser / countForUser, conduct.forUser, reports.forReporter,
- * refunds.list; `_raw.games`, `_raw.conduct`, `_raw.reports`, `_raw.refunds` hold their rows).
+ * In-memory Store (users, mfa, sessions, tokens, pending signups, sso, security, sanctions, ratings,
+ * meta, and the account API's reads: games.listForUser / countForUser, conduct.forUser,
+ * reports.forReporter, refunds.list; `_raw.games`, `_raw.conduct`, `_raw.reports`, `_raw.refunds`
+ * hold their rows).
  */
 export function createFakeStore({ now = Date.now } = {}) {
     const users = new Map();
     const codes = new Map();
     const sessions = new Map();
     const tokens = new Map();
+    const signups = new Map();
     const links = [];
     const securityEvents = [];
     const sanctions = [];
@@ -47,7 +49,7 @@ export function createFakeStore({ now = Date.now } = {}) {
     const reports = [];
     const refunds = [];
     const calls = { touch: 0 };
-    let userSeq = 0, sessionSeq = 0, sanctionSeq = 0;
+    let userSeq = 0, sessionSeq = 0, sanctionSeq = 0, signupSeq = 0;
     const gameMatches = (g, userId, { category = null, rated = null, result = null } = {}) => {
         if (g.whiteId !== userId && g.blackId !== userId) return false;
         if (category !== null && g.category !== category) return false;
@@ -171,6 +173,29 @@ export function createFakeStore({ now = Date.now } = {}) {
                 return copy(live.sort((a, b) => b.createdAt - a.createdAt).at(0) || null);
             },
         },
+        // Like the real store: a name or an address of another pending signup is refused; nothing
+        // is checked against the accounts.
+        signups: {
+            create({ username, email, passwordHash, tokenHash = null, createdAt = now(), expiresAt }) {
+                for (const p of signups.values()) {
+                    if (lc(p.username) === lc(username)) throw new StoreError('username_taken');
+                    if (lc(p.email) === lc(email)) throw new StoreError('email_taken');
+                }
+                const id = ++signupSeq;
+                signups.set(id, { id, username, email, passwordHash, tokenHash, createdAt, expiresAt });
+                return id;
+            },
+            byUsername: (n) => copy([...signups.values()].find((p) => lc(p.username) === lc(n)) || null),
+            byEmail: (e) => copy([...signups.values()].find((p) => lc(p.email) === lc(e)) || null),
+            byTokenHash: (h) => copy([...signups.values()].find((p) => p.tokenHash !== null && p.tokenHash === h) || null),
+            renew(id, { tokenHash, expiresAt }) {
+                const p = signups.get(id);
+                if (!p) return false;
+                Object.assign(p, { tokenHash: tokenHash ?? null, expiresAt });
+                return true;
+            },
+            delete: (id) => signups.delete(id),
+        },
         sso: {
             find: (provider, subject) => { const l = links.find((x) => x.provider === provider && x.subject === subject); return l ? { userId: l.userId } : null; },
             link(userId, provider, subject, email) { links.push({ userId, provider, subject, email }); },
@@ -212,7 +237,7 @@ export function createFakeStore({ now = Date.now } = {}) {
             forUser: (userId) => (ratings.get(userId) || []).map(copy),
             _set(userId, list) { ratings.set(userId, list); },
         },
-        _raw: { users, sessions, tokens, links, securityEvents, sanctions, codes, calls, games, conduct, reports, refunds },
+        _raw: { users, sessions, tokens, signups, links, securityEvents, sanctions, codes, calls, games, conduct, reports, refunds },
     };
     return store;
 }

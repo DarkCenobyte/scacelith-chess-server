@@ -16,6 +16,7 @@ import { describe as describeConfig, loadConfig, testConfig } from '../../src/co
 import { Challenges } from '../../src/match/challenges.js';
 import { Matchmaker } from '../../src/match/matchmaker.js';
 import { Registry } from '../../src/metrics.js';
+import { TicketKeys } from '../../src/net/ticket-keys.js';
 import { CloseCode, decode, enums, messageName } from '../../src/protocol/index.js';
 import { GameIdAllocator, shardOfGameId } from '../../src/util/ids.js';
 
@@ -735,5 +736,40 @@ describe('primary assembly', () => {
         assert.equal(shard.serverMotd, 'before');
         assert.deepEqual(shard.serverSecret, Buffer.alloc(32, 1));
         assert.deepEqual(describeConfig(shard), describeConfig(config));
+        assert.equal(await new Ipc(workers[0]).request('tls.ticketKeys'), null, 'no shared ticket keys without native TLS');
+    });
+
+    it('gives every shard, a restarted one included, the current state of the session-ticket keys (native TLS)', async (t) => {
+        const wall = Date.now;
+        let shift = 0;
+        Date.now = () => wall() + shift;
+        t.after(() => { Date.now = wall; });
+        const workers = [];
+        const fork = () => {
+            const [a, b] = channelPair();
+            const w = Object.assign(new EventEmitter(), { send: (...args) => a.send(...args), kill() {} });
+            a.on('message', (m) => w.emit('message', m));
+            const ipc = new Ipc(b).on('shutdown', () => setImmediate(() => w.emit('exit', 0, null)));
+            workers.push({ w, ipc });
+            return w;
+        };
+        const silent = { child: () => silent, debug() {}, info() {}, warn() {}, error() {}, security() {} };
+        const primary = await startPrimary({
+            config: { ...cfg, tlsMode: 'native' }, log: silent, fork, shards: [0, 1], matchmaker: new FakeMatchmaker(),
+            challenges: new Challenges({ config: cfg }), registry: new Registry(),
+        });
+        t.after(() => primary.stop(0));
+        const first = await workers[0].ipc.request('tls.ticketKeys');
+        assert.equal(first.key.length, 32);
+        assert.deepEqual(await workers[1].ipc.request('tls.ticketKeys'), first, 'every shard starts from the same state');
+        // Shard 1 crashes the next day: the supervisor starts it again, and it gets the state the
+        // running shard has moved to, not the one of the primary's start.
+        shift = 86400000;
+        workers[1].w.emit('exit', 1, null);
+        for (let i = 0; i < 100 && workers.length < 3; i++) await new Promise((r) => setTimeout(r, 20));
+        const restarted = await workers[2].ipc.request('tls.ticketKeys');
+        assert.equal(restarted.day, first.day + 1);
+        assert.notDeepEqual(restarted.key, first.key);
+        assert.deepEqual(new TicketKeys(restarted).ticketKeys(), new TicketKeys(first).ticketKeys());
     });
 });

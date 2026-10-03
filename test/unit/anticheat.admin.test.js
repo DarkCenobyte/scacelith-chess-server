@@ -328,7 +328,7 @@ test('bench-accounts: a pipe keeps its mode; another user\'s file is refused bef
     const { store } = world();
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bench-'));
     t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-    // A FIFO stands for /dev/stdout or /dev/null: written to, never chmod'ed.
+    // A FIFO stands for a pipe or /dev/null: written to, never chmod'ed.
     const fifo = path.join(dir, 'tokens.fifo');
     assert.equal(spawnSync('mkfifo', ['-m', '644', fifo]).status, 0);
     const reader = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
@@ -350,6 +350,28 @@ test('bench-accounts: a pipe keeps its mode; another user\'s file is refused bef
     assert.match(refused.err, /belongs to another user/);
     assert.equal(store.users.byUsername('other0001'), null);
     assert.equal(fs.readFileSync(out, 'utf8'), 'kept\n');
+});
+
+test('bench-accounts: a symbolic link as --out is refused before any account is created', { skip: process.platform === 'win32' }, async (t) => {
+    const { store } = world();
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bench-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const target = path.join(dir, 'elsewhere.txt');
+    fs.writeFileSync(target, 'kept\n', { mode: 0o644 });
+    const link = path.join(dir, 'tokens.txt');
+    fs.symlinkSync(target, link);
+    const refused = await run(store, ['bench-accounts', '--count', '2', '--out', link, '--i-know-this-is-a-test-server']);
+    assert.equal(refused.code, 1);
+    assert.match(refused.err, /is a symbolic link/);
+    assert.equal(store.users.byUsername('bench0001'), null);
+    assert.equal(fs.readFileSync(target, 'utf8'), 'kept\n');
+    assert.equal(fs.statSync(target).mode & 0o777, 0o644);
+    // A dangling link (the tokens would create the file it names) is refused the same way.
+    fs.rmSync(target);
+    const dangling = await run(store, ['bench-accounts', '--count', '2', '--out', link, '--i-know-this-is-a-test-server']);
+    assert.equal(dangling.code, 1);
+    assert.match(dangling.err, /is a symbolic link/);
+    assert.equal(fs.existsSync(target), false);
 });
 
 test('backup refuses a source that is not a Scacelith database, and creates nothing', async (t) => {

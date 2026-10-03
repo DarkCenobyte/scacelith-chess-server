@@ -121,11 +121,14 @@ export function register(router, { config, auth }) {
     const serverName = config.serverName;
     router.page('GET', '/verify-email', (ctx) => {
         const token = ctx.query.token;
-        if (!auth.peekToken('email_verify', token)) return { status: 400, html: verifyPages.verifyInvalid({ serverName }) };
+        if (!auth.peekVerification(token)) return { status: 400, html: verifyPages.verifyInvalid({ serverName }) };
         return { html: verifyPages.verifyForm({ serverName, token }) };
     }, { rate: PAGE_RATE });
+    // The link of an account confirms its address; the link of a pending signup creates the account.
     router.page('POST', '/verify-email', (ctx) => {
-        if (!auth.verifyEmail(ctx.body.token, ctx.ip)) return { status: 400, html: verifyPages.verifyInvalid({ serverName }) };
+        const r = auth.verifyEmail(ctx.body.token, ctx.ip);
+        if (r === 'taken') return { status: 409, html: verifyPages.verifyTaken({ serverName }) };
+        if (r !== 'confirmed') return { status: 400, html: verifyPages.verifyInvalid({ serverName }) };
         return { html: verifyPages.verifyDone({ serverName }) };
     }, { rate: authRate, body: { token: LINK_TOKEN_FIELD } });
 

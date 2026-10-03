@@ -85,7 +85,7 @@ Sections:
 | Variable | Type | Default | Description |
 | --- | --- | --- | --- |
 | `REGISTRATION` | one of open, closed | `open` | Whether new accounts can be created from the game. |
-| `REQUIRE_EMAIL_VERIFICATION` | boolean (true/false, 1/0, yes/no, on/off) | `true` | Accounts must confirm their e-mail address before playing online. |
+| `REQUIRE_EMAIL_VERIFICATION` | boolean (true/false, 1/0, yes/no, on/off) | `true` | An account is created only once its e-mail address is confirmed with the link sent to it (24 h). false: created at once, with no link. |
 | `USERNAME_MIN` | integer (2-24) | `3` | Shortest username. |
 | `USERNAME_MAX` | integer (3-24) | `20` | Longest username (the scoresheet has room for 24 characters). |
 | `PASSWORD_MIN_LENGTH` | integer (8-64) | `10` | Shortest password. |

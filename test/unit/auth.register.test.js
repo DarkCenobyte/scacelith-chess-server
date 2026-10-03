@@ -23,35 +23,43 @@ async function verifyFromMail(s, mail) {
     return token;
 }
 
-test('register: 202, verification e-mail, confirmation page, then login', async (t) => {
+const confirmPost = (s, token) => s.request('POST', '/verify-email', { raw: `token=${token}`, contentType: 'application/x-www-form-urlencoded' });
+const tokenOf = (mail) => new URL(linkIn(mail.text)).searchParams.get('token');
+
+test('register: 202 and a link; the account is created only when the link is used, then login', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
     const r = await s.request('POST', REG, { body: good() });
     assert.equal(r.status, 202);
     assert.deepEqual(r.json, { status: 'verification_sent' });
-    const u = s.store.users.byUsername('alice_1');
-    assert.equal(u.email, 'alice@example.com', 'stored in lower case');
-    assert.equal(u.emailVerified, false);
-    assert.match(u.passwordHash, /^scrypt\$10\$/);
+    assert.equal(s.store.users.byUsername('alice_1'), null, 'no account before the link is used');
+    const p = s.store.signups.byUsername('alice_1');
+    assert.equal(p.email, 'alice@example.com', 'stored in lower case');
+    assert.match(p.passwordHash, /^scrypt\$10\$/);
+    assert.equal(p.expiresAt, s.now() + 24 * 3600000, 'the life of the link');
     await s.mailer.idle();
     assert.equal(s.mailer.sent.length, 1);
     assert.equal(s.mailer.sent[0].to, 'alice@example.com');
     assert.match(s.mailer.sent[0].subject, /Confirm your e-mail address/);
 
-    // Before confirmation: a correct password is answered email_unverified, a wrong one invalid_credentials.
-    let l = await s.request('POST', '/api/v1/auth/login', { body: { login: 'alice_1', password: 'ivory rook takes e5' } });
-    assert.deepEqual([l.status, l.json.error], [403, 'email_unverified']);
-    l = await s.request('POST', '/api/v1/auth/login', { body: { login: 'alice_1', password: 'wrong password!' } });
-    assert.deepEqual([l.status, l.json.error], [401, 'invalid_credentials']);
+    // Before confirmation there is no account: the right password is answered as an unknown account.
+    for (const password of ['ivory rook takes e5', 'wrong password!']) {
+        const l = await s.request('POST', '/api/v1/auth/login', { body: { login: 'alice_1', password } });
+        assert.deepEqual([l.status, l.json.error], [401, 'invalid_credentials'], password);
+    }
 
     const token = await verifyFromMail(s, s.mailer.sent[0]);
-    assert.equal(s.store.users.byUsername('Alice_1').emailVerified, true);
-    const again = await s.request('POST', '/verify-email', { raw: `token=${token}`, contentType: 'application/x-www-form-urlencoded' });
+    const u = s.store.users.byUsername('Alice_1');
+    assert.deepEqual([u.username, u.email, u.emailVerified, u.passwordHash], ['Alice_1', 'alice@example.com', true, p.passwordHash]);
+    assert.equal(s.store.signups.byUsername('alice_1'), null, 'the pending signup is gone');
+    const again = await confirmPost(s, token);
     assert.equal(again.status, 400, 'single use');
     assert.equal((await s.request('GET', `/verify-email?token=${token}`)).status, 400);
     const ok = await s.login('ALICE@example.com', 'ivory rook takes e5');
     assert.match(ok.token, /^sct_[A-Za-z0-9_-]{43}$/);
     assert.equal(ok.user.username, 'Alice_1');
+    s.auth.events.flush();
+    assert.deepEqual(s.store._raw.securityEvents.filter((e) => e.kind === 'register').map((e) => e.userId), [u.id]);
 });
 
 test('the GET confirmation page does not consume the token (link scanners)', async (t) => {
@@ -59,29 +67,34 @@ test('the GET confirmation page does not consume the token (link scanners)', asy
     t.after(s.close);
     await s.request('POST', REG, { body: good() });
     await s.mailer.idle();
-    const token = new URL(linkIn(s.mailer.sent[0].text)).searchParams.get('token');
+    const token = tokenOf(s.mailer.sent[0]);
     for (let i = 0; i < 3; i++) assert.equal((await s.request('GET', `/verify-email?token=${token}`)).status, 200);
-    assert.equal(s.store.users.byUsername('Alice_1').emailVerified, false);
+    assert.equal(s.store.users.byUsername('Alice_1'), null);
     s.now.advance(24 * 3600000 + 1);
-    assert.equal((await s.request('POST', '/verify-email', { raw: `token=${token}`, contentType: 'application/x-www-form-urlencoded' })).status, 400, 'expired after 24 h');
+    const expired = await s.request('GET', `/verify-email?token=${token}`);
+    assert.equal(expired.status, 400);
+    assert.match(expired.text, /create your account again from Scacelith \(the same username and address work\)/);
+    assert.equal((await confirmPost(s, token)).status, 400, 'expired after 24 h');
+    assert.equal(s.store.users.byUsername('Alice_1'), null);
 });
 
 test('a busy store during the confirmation: 503, nothing changed, the same link works afterwards', async (t) => {
     const s = await startReal(t);
     assert.equal((await s.request('POST', REG, { body: good() })).status, 202);
     await s.mailer.idle();
-    const token = new URL(linkIn(s.mailer.sent.at(-1).text)).searchParams.get('token');
-    const confirm = () => s.request('POST', '/verify-email', { raw: `token=${token}`, contentType: 'application/x-www-form-urlencoded' });
+    const token = tokenOf(s.mailer.sent.at(-1));
     // The write lock is lost past the busy timeout once the link was used up.
-    const update = s.store.users.update;
-    s.store.users.update = () => { s.store.users.update = update; throw new StoreError('busy', 'database is locked'); };
-    const busy = await confirm();
+    const create = s.store.users.create;
+    s.store.users.create = () => { s.store.users.create = create; throw new StoreError('busy', 'database is locked'); };
+    const busy = await confirmPost(s, token);
     assert.deepEqual([busy.status, busy.headers['retry-after']], [503, '1']);
-    assert.equal(s.store.users.byEmail('alice@example.com').emailVerified, false);
-    const done = await confirm();
+    assert.equal(s.store.users.byEmail('alice@example.com'), null);
+    assert.ok(s.store.signups.byEmail('alice@example.com'), 'the pending signup is still there');
+    const done = await confirmPost(s, token);
     assert.equal(done.status, 200);
     assert.match(done.text, /confirmed/);
     assert.equal(s.store.users.byEmail('alice@example.com').emailVerified, true);
+    assert.equal(s.store.signups.byEmail('alice@example.com'), null);
 });
 
 test('username rules', async (t) => {
@@ -119,6 +132,42 @@ test('e-mail and password checks', async (t) => {
     }
 });
 
+test('an existing e-mail: the same answer, the same work and the same traces as a new one', async (t) => {
+    // Two identical servers, except that one has an account with the address.
+    const servers = [];
+    for (const withAccount of [false, true]) {
+        const s = await startTestServer();
+        t.after(s.close);
+        if (withAccount) await s.createUser({ username: 'owner', email: 'target@example.com' });
+        servers.push(s);
+    }
+    const answers = [];
+    for (const s of servers) {
+        const hash = t.mock.method(s.hasher, 'hash');
+        const users = s.store._raw.users.size;
+        const r = await s.request('POST', REG, { body: good({ username: 'Prober', email: 'TARGET@example.com' }) });
+        const { date, ...headers } = r.headers;
+        answers.push({ status: r.status, text: r.text, headers });
+        // The same work: one password hash and one throttle call to the primary in both cases.
+        assert.equal(hash.mock.callCount(), 1);
+        assert.equal(s.primary.calls.filter((c) => c.type === 'once.consume').length, 1);
+        assert.equal(s.store._raw.users.size, users, 'no account created');
+        assert.equal(s.store.signups.byUsername('prober').email, 'target@example.com', 'the username is held');
+    }
+    assert.deepEqual(answers[0], answers[1]);
+    assert.equal(answers[0].status, 202);
+    // What a prober could look at next answers the same on both servers.
+    const probes = [];
+    for (const s of servers) {
+        const again = await s.request('POST', REG, { body: good({ username: 'prober', email: 'other@example.com' }) });
+        const login = await s.request('POST', '/api/v1/auth/login', { body: { login: 'Prober', password: good().password } });
+        const profile = await s.request('GET', '/api/v1/players/Prober');
+        probes.push([again.status, again.json.error, login.status, login.json.error, profile.status]);
+    }
+    assert.deepEqual(probes[0], [409, 'username_taken', 401, 'invalid_credentials', 404]);
+    assert.deepEqual(probes[1], probes[0]);
+});
+
 test('an existing e-mail gets the same answer and its owner a notice', async (t) => {
     const s = await startTestServer();
     t.after(s.close);
@@ -128,6 +177,7 @@ test('an existing e-mail gets the same answer and its owner a notice', async (t)
     assert.equal(r.status, fresh.status);
     assert.deepEqual(r.json, fresh.json);
     assert.equal(s.store.users.byUsername('newcomer'), null);
+    assert.equal(s.store.signups.byEmail('taken@example.com').tokenHash, null, 'no link for an address with an account');
     await s.mailer.idle();
     const notice = s.mailer.sent.find((m) => m.to === 'taken@example.com');
     assert.match(notice.subject, /Someone tried to register/);
@@ -138,6 +188,184 @@ test('an existing e-mail gets the same answer and its owner a notice', async (t)
     assert.equal(s.mailer.sent.filter((m) => m.to === 'taken@example.com').length, 1);
     s.auth.events.flush();
     assert.ok(s.store._raw.securityEvents.some((e) => e.kind === 'register_existing_email'));
+});
+
+test('a pending signup holds its username for the life of its link; the purge deletes it once expired', async (t) => {
+    const s = await startReal(t);
+    assert.equal((await s.request('POST', REG, { body: good() })).status, 202);
+    const other = good({ email: 'mallory@example.com' });
+    let r = await s.request('POST', REG, { body: { ...other, username: 'ALICE_1' } });
+    assert.deepEqual([r.status, r.json.error], [409, 'username_taken'], 'held, whatever the case');
+    s.now.advance(24 * 3600000 - 1);
+    assert.equal((await s.request('POST', REG, { body: other })).status, 409);
+    s.now.advance(1);
+    // Expired: the username is free at once, before the purge.
+    r = await s.request('POST', REG, { body: other });
+    assert.equal(r.status, 202);
+    assert.equal(s.store.signups.byUsername('alice_1').email, 'mallory@example.com');
+    assert.equal(s.store.signups.byEmail('alice@example.com'), null, 'the expired signup was replaced');
+    // The retention purge deletes the expired ones and keeps the live ones.
+    assert.equal((await s.request('POST', REG, { body: good({ username: 'Bob_2', email: 'bob@example.com' }) })).status, 202);
+    s.now.advance(12 * 3600000);
+    assert.equal((await s.request('POST', REG, { body: good({ username: 'Carol', email: 'carol@example.com' }) })).status, 202);
+    s.now.advance(12 * 3600000);
+    const counts = s.store.retention.run(s.now(), s.config);
+    assert.equal(counts.tokens, 2, 'the two signups of the first day');
+    assert.equal(s.store.signups.byUsername('alice_1'), null);
+    assert.equal(s.store.signups.byUsername('bob_2'), null);
+    assert.ok(s.store.signups.byUsername('carol'));
+    assert.equal(s.store.users.byUsername('carol'), null);
+});
+
+test('a second signup with the same address replaces the pending one', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    assert.equal((await s.request('POST', REG, { body: good() })).status, 202);
+    await s.mailer.idle();
+    const first = tokenOf(s.mailer.sent.at(-1));
+    // Within 5 minutes: replaced, but no second link mail (the address is anyone's).
+    let r = await s.request('POST', REG, { body: good({ username: 'Alice_2' }) });
+    assert.equal(r.status, 202);
+    await s.mailer.idle();
+    assert.equal(s.mailer.sent.length, 1);
+    assert.equal(s.store.signups.byUsername('alice_1'), null, 'the first username is free again');
+    assert.equal((await s.request('GET', `/verify-email?token=${first}`)).status, 400, 'the first link no longer works');
+    assert.equal((await s.request('POST', REG, { body: good({ username: 'Alice_1', email: 'someone@example.com' }) })).status, 202);
+    // Later: replaced again, with a new link.
+    s.now.advance(5 * 60000);
+    r = await s.request('POST', REG, { body: good({ username: 'Alice_3', password: 'another ivory rook' }) });
+    assert.equal(r.status, 202);
+    await s.mailer.idle();
+    const mails = s.mailer.sent.filter((m) => m.to === 'alice@example.com');
+    assert.equal(mails.length, 2);
+    assert.match(mails[1].text, /Alice_3/);
+    assert.equal((await confirmPost(s, tokenOf(mails[1]))).status, 200);
+    assert.equal(s.store.users.byEmail('alice@example.com').username, 'Alice_3');
+    assert.equal(s.store.users.byUsername('Alice_2'), null);
+    await s.login('alice_3', 'another ivory rook');
+});
+
+test('a signup refused by a busy store or a lost race leaves the link mail to its retry', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    // The write lock is lost past the busy timeout: 503, nothing stored, nothing mailed.
+    s.store.transaction = () => { delete s.store.transaction; throw new StoreError('busy', 'database is locked'); };
+    const busy = await s.request('POST', REG, { body: good() });
+    assert.deepEqual([busy.status, busy.json.error, busy.headers['retry-after']], [503, 'server_busy', '1']);
+    assert.equal(s.store.signups.byEmail('alice@example.com'), null);
+    // Another account takes the username while the password is hashed: 409, nothing mailed.
+    const hash = s.hasher.hash.bind(s.hasher);
+    t.mock.method(s.hasher, 'hash', async (...args) => {
+        s.store.users.create({ username: 'Alice_1', email: 'first@example.com', passwordHash: 'x', emailVerified: true });
+        return hash(...args);
+    }, { times: 1 });
+    const lost = await s.request('POST', REG, { body: good() });
+    assert.deepEqual([lost.status, lost.json.error], [409, 'username_taken']);
+    // The retry, within 5 minutes, gets its link.
+    s.now.advance(60000);
+    assert.equal((await s.request('POST', REG, { body: good({ username: 'Alice_2' }) })).status, 202);
+    await s.mailer.idle();
+    assert.deepEqual(s.mailer.sent.map((m) => m.to), ['alice@example.com']);
+    assert.equal((await confirmPost(s, tokenOf(s.mailer.sent[0]))).status, 200);
+    assert.equal(s.store.users.byEmail('alice@example.com').username, 'Alice_2');
+});
+
+test('resend renews the link of a pending signup; it says nothing about the address', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    assert.equal((await s.request('POST', REG, { body: good() })).status, 202);
+    await s.mailer.idle();
+    const first = tokenOf(s.mailer.sent.at(-1));
+    s.now.advance(20 * 3600000);
+    const resend = (email) => s.request('POST', '/api/v1/auth/verify-email/resend', { body: { email } });
+    for (const email of ['alice@example.com', 'nobody@example.com']) assert.deepEqual((await resend(email)).json, { status: 'accepted' });
+    await s.mailer.idle();
+    assert.deepEqual(s.mailer.sent.map((m) => m.to), ['alice@example.com', 'alice@example.com']);
+    const second = tokenOf(s.mailer.sent[1]);
+    assert.equal((await s.request('GET', `/verify-email?token=${first}`)).status, 400, 'the new link replaces the first one');
+    assert.equal(s.store.signups.byEmail('alice@example.com').expiresAt, s.now() + 24 * 3600000);
+    s.now.advance(10 * 3600000);
+    assert.equal((await confirmPost(s, second)).status, 200, 'valid 24 h from the resend');
+    assert.equal(s.store.users.byUsername('Alice_1').emailVerified, true);
+});
+
+test('resend holds the username of a pending signup 24 h more whether or not the address has an account', async (t) => {
+    // Two identical servers, except that one has an account with the address.
+    const servers = [];
+    for (const withAccount of [false, true]) {
+        const s = await startTestServer();
+        t.after(s.close);
+        if (withAccount) await s.createUser({ username: 'owner', email: 'target@example.com' });
+        servers.push(s);
+    }
+    const resend = (s) => s.request('POST', '/api/v1/auth/verify-email/resend', { body: { email: 'TARGET@example.com' } });
+    const probes = [];
+    for (const s of servers) {
+        let transactions = 0;
+        s.store.transaction = (fn) => { transactions++; return fn(); };
+        assert.equal((await s.request('POST', REG, { body: good({ username: 'Prober', email: 'target@example.com' }) })).status, 202);
+        s.now.advance(23 * 3600000);
+        transactions = 0;
+        const r = await resend(s);
+        const { date, ...headers } = r.headers;
+        const work = transactions;
+        s.now.advance(2 * 3600000);
+        const again = await s.request('POST', REG, { body: good({ username: 'prober', email: 'other@example.com' }) });
+        probes.push([r.status, r.text, headers, work, again.status, again.json.error]);
+    }
+    assert.deepEqual(probes[0].slice(3), [1, 409, 'username_taken'], 'one transaction; still held 2 h after the first 24 h');
+    assert.deepEqual(probes[1], probes[0]);
+    // A busy store renews nothing; the answer is the same 202 for both.
+    const busy = [];
+    for (const s of servers) {
+        s.now.advance(5 * 60000);
+        s.store.transaction = () => { throw new StoreError('busy', 'database is locked'); };
+        const r = await resend(s);
+        const { date, ...headers } = r.headers;
+        busy.push([r.status, r.text, headers]);
+    }
+    assert.deepEqual(busy[0].slice(0, 2), [202, '{"status":"accepted"}']);
+    assert.deepEqual(busy[1], busy[0]);
+});
+
+test('the link of a pending signup whose username or address another account took meanwhile', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    await s.request('POST', REG, { body: good() });
+    await s.request('POST', REG, { body: good({ username: 'Bob_2', email: 'bob@example.com' }) });
+    await s.mailer.idle();
+    const [alice, bob] = s.mailer.sent.map(tokenOf);
+    // Accounts made another way (a Google sign-in, for one) with that address, and that username.
+    await s.createUser({ username: 'Alice_9', email: 'alice@example.com' });
+    await s.createUser({ username: 'bob_2', email: 'robert@example.com' });
+    for (const token of [alice, bob]) {
+        const r = await confirmPost(s, token);
+        assert.equal(r.status, 409);
+        assert.match(r.text, /Another account took this username or this e-mail address/);
+        assert.equal((await confirmPost(s, token)).status, 400, 'the signup is dropped');
+    }
+    assert.equal(s.store.users.byUsername('Alice_1'), null);
+    assert.equal(s.store.users.byEmail('bob@example.com'), null);
+});
+
+test('accounts created unconfirmed before pending signups keep their links and answers', async (t) => {
+    const s = await startTestServer();
+    t.after(s.close);
+    const old = await s.createUser({ username: 'oldtimer', email: 'old@example.com', verified: false });
+    let l = await s.request('POST', '/api/v1/auth/login', { body: { login: 'oldtimer', password: old.password } });
+    assert.deepEqual([l.status, l.json.error], [403, 'email_unverified']);
+    // A signup with its address is the "existing address" case: a held username, no link, a notice.
+    assert.equal((await s.request('POST', REG, { body: good({ email: 'old@example.com' }) })).status, 202);
+    assert.equal((await s.request('POST', '/api/v1/auth/verify-email/resend', { body: { email: 'old@example.com' } })).status, 202);
+    await s.mailer.idle();
+    assert.deepEqual(s.mailer.sent.map((m) => m.subject.replace(/ (for|on) .*/, '')).sort(), ['Confirm your e-mail address', 'Someone tried to register']);
+    const link = s.mailer.sent.find((m) => /Confirm/.test(m.subject));
+    assert.match(link.text, /oldtimer/);
+    await verifyFromMail(s, link);
+    assert.equal(s.store.users.byId(old.id).emailVerified, true);
+    assert.equal(s.store.users.byUsername('Alice_1'), null, 'the held username made no account');
+    l = await s.login('oldtimer', old.password);
+    assert.equal(l.user.id, old.id);
 });
 
 test('registration closed: 403', async (t) => {

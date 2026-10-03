@@ -479,8 +479,9 @@ curl -sS "$API/info"
 
 ### POST /auth/register
 
-Creates an account. **Auth** none. **Limits** `auth` and `auth_register` (10 registrations per hour
-per client). **Proof of work** when `POW_REGISTER_BITS` > 0.
+Creates an account: once its e-mail address is confirmed with the link sent to it, or at once
+without e-mail confirmation. **Auth** none. **Limits** `auth` and `auth_register` (10
+registrations per hour per client). **Proof of work** when `POW_REGISTER_BITS` > 0.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -491,12 +492,20 @@ per client). **Proof of work** when `POW_REGISTER_BITS` > 0.
 
 Answers:
 
-- **202 `{ "status": "verification_sent" }`** with e-mail confirmation (the default). A link valid
-  for 24 h goes to the address. The answer is the same when another account already uses the
-  address: no account is created then, and that account's owner gets a notice instead (at most
-  one per hour).
+- **202 `{ "status": "verification_sent" }`** with e-mail confirmation (the default). No account
+  exists yet: the signup waits, for 24 h, and holds its username meanwhile. A link valid for those
+  24 h goes to the address, at most one per address every 5 minutes (the resend below sends a new
+  one); the account is created, its address confirmed, when the link is used (the button of the
+  `/verify-email` page), and the player can then sign in. Until then a sign-in
+  with that username answers `invalid_credentials`, as for an unknown account, and the public
+  profile does not exist. A new signup with the same address replaces the waiting one (its
+  username is freed and its link stops working). The answer is the same when another account
+  already uses the address: no link is sent then, its owner gets a notice instead (at most one per
+  hour), and the username is held in the same way, so that nothing tells whether the address has
+  an account. A signup whose link was not used is dropped after 24 h, and its username is free
+  again.
 - **201 `{ "status": "ready" }`** without e-mail confirmation (`REQUIRE_EMAIL_VERIFICATION=false`):
-  the account can sign in at once.
+  there is no link, so the account is created at once and can sign in.
 
 Errors, checked in this order:
 
@@ -505,7 +514,8 @@ Errors, checked in this order:
 - 400 `invalid_email`;
 - 400 `weak_password`, with `reason`: `too_short`, `too_long`, `contains_username`,
   `contains_email` or `too_common`;
-- 409 `username_taken`;
+- 409 `username_taken`: an account has the username, or a waiting signup of another address
+  holds it;
 - 428 `pow_required`;
 - the hash queue errors (section 1.3);
 - 409 `email_taken`, only without e-mail confirmation (with confirmation, the answer stays 202).
@@ -557,7 +567,9 @@ Errors:
 - 401 `invalid_credentials`: the same answer, after the same time, for an unknown account, a wrong
   password and an account without a password;
 - after a correct password only: 403 `banned`, with `until` (epoch ms, `null` for a permanent
-  ban), and 403 `email_unverified` (the address is not confirmed yet).
+  ban), and 403 `email_unverified` (an account created before signups waited for their link,
+  whose address is not confirmed yet; a signup whose link was not used has no account and gets
+  `invalid_credentials`).
 
 ```sh
 TOKEN=$(curl -sS "$API/auth/login" -H 'Content-Type: application/json' \
@@ -606,8 +618,11 @@ curl -sS -X POST "$API/auth/logout" -H "Authorization: Bearer $TOKEN"
 
 Sends the e-mail confirmation link again. **Auth** none. **Limits** `auth` and `auth_mail` (10
 per hour per client). Body: `{ "email": string 1-254 }`. Answer:
-**202 `{ "status": "accepted" }`**, always. A link is sent only to an active, unconfirmed account
-with that address, at most once every 5 minutes per address.
+**202 `{ "status": "accepted" }`**, always, even when the store is busy. A request acts at most
+once every 5 minutes per address. A signup waiting with that address gets its 24 h again,
+whether or not another account uses the address, so that its username stays held as long in
+both cases. A link is sent only for that signup when the address has no account (a new link,
+valid 24 h, replaces the previous one), or for an active, unconfirmed account with that address.
 
 ### POST /auth/password/forgot
 
@@ -742,7 +757,8 @@ and "Forgot password" gives it one. Errors:
 - 403 `registration_closed`;
 - 400 `invalid_username`;
 - 410 `sso_expired`;
-- 409 `username_taken`;
+- 409 `username_taken`: an account has the username, or a waiting signup of another address
+  holds it;
 - 409 `sso_already_linked`;
 - 409 `email_taken`.
 
@@ -1603,7 +1619,7 @@ Pages for a browser, opened from the links of e-mails and by Google. Their links
 | Page | Answers |
 |---|---|
 | `GET /verify-email?token=` | 200: a "Confirm my e-mail address" button. 400: link invalid or expired. Limit `page`. |
-| `POST /verify-email` (form `token`) | 200: address confirmed. 400: link invalid, used or expired. 503 (`Retry-After: 1`): the database stayed locked; nothing changed and the link still works. Limit `auth`. |
+| `POST /verify-email` (form `token`) | 200: address confirmed (the link of a new signup creates the account then). 400: link invalid, used or expired. 409: the link of a new signup, whose username or address another account took in the meantime; no account is created. 503 (`Retry-After: 1`): the database stayed locked; nothing changed and the link still works. Limit `auth`. |
 | `GET /reset-password?token=` | 200: the new password form (password twice). 400: link invalid (also when it was mailed to an address the account no longer has). Limit `page`. |
 | `POST /reset-password` (form `token`, `newPassword`, `confirmPassword`) | 200: password changed, and every device signed out. 400: the form again with the error (the passwords differ, a weak password), or link invalid. 503 / 429: the form again with `Retry-After` when the server is busy (the password hash queue, or the database stayed locked); the link stays valid. Limits `auth` and `auth_reset`. |
 | `GET /confirm-email-change?token=` | 200: shows the new address and the account's name, with a "Use this e-mail address" button. 400: link invalid or expired (also when the account's address changed since the request). Limit `page`. |
