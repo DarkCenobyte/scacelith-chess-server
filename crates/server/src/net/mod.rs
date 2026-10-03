@@ -8,5 +8,6 @@ pub mod health;
 pub mod ip;
 pub mod limits;
 mod linked;
+pub mod ws;
 
 pub use linked::LinkedMap;
