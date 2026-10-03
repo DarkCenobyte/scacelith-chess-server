@@ -11,7 +11,8 @@ use scacelith_protocol::{ClientMsg, ErrorCode, MsgType, ServerMsg};
 
 use super::deps::{BoxFuture, GameHosts, Session, TokenValidator, ValidateError};
 use super::endpoint::{Endpoint, Outbound};
-use crate::events::NewGame;
+use crate::clock::Clock;
+use crate::events::{Anomaly, AnomalySink, NewGame};
 use crate::ids::{self, ConnId, GameId, GameIdAllocator, UserId};
 
 /// What a [`FakeHosts`] was told.
@@ -199,6 +200,10 @@ pub(crate) struct FakeTokens {
     fail: AtomicBool,
     /// Tokens validated, in order.
     seen: Mutex<Vec<String>>,
+    /// Validations left for a token, after which it is unknown.
+    left: Mutex<HashMap<String, u32>>,
+    /// The next validation waits for this gate to open.
+    gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 impl FakeTokens {
@@ -222,6 +227,16 @@ impl FakeTokens {
         self.sessions.lock().remove(token);
     }
 
+    /// The token is valid for `n` more validations only (a revocation during the Hello).
+    pub(crate) fn valid_times(&self, token: &str, n: u32) {
+        self.left.lock().insert(token.to_string(), n);
+    }
+
+    /// The next validation answers once `gate` is notified.
+    pub(crate) fn hold_next(&self, gate: Arc<tokio::sync::Notify>) {
+        *self.gate.lock() = Some(gate);
+    }
+
     pub(crate) fn set_failing(&self, fail: bool) {
         self.fail.store(fail, Ordering::SeqCst);
     }
@@ -234,12 +249,88 @@ impl FakeTokens {
 impl TokenValidator for FakeTokens {
     fn validate(&self, token: String) -> BoxFuture<Result<Option<Session>, ValidateError>> {
         self.seen.lock().push(token.clone());
+        let expired = match self.left.lock().get_mut(&token) {
+            Some(0) => true,
+            Some(n) => {
+                *n -= 1;
+                false
+            }
+            None => false,
+        };
         let result = if self.fail.load(Ordering::SeqCst) {
             Err(ValidateError::from("the store is down"))
+        } else if expired {
+            Ok(None)
         } else {
             Ok(self.sessions.lock().get(&token).cloned())
         };
-        Box::pin(async move { result })
+        let gate = self.gate.lock().take();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            result
+        })
+    }
+}
+
+/// Anomalies and certain-cheat sanctions, recorded.
+#[derive(Default)]
+pub(crate) struct RecordingAnomalies {
+    anomalies: Mutex<Vec<Anomaly>>,
+    sanctions: Mutex<Vec<(UserId, GameId, &'static str)>>,
+}
+
+impl RecordingAnomalies {
+    pub(crate) fn new() -> Arc<RecordingAnomalies> {
+        Arc::new(RecordingAnomalies::default())
+    }
+
+    pub(crate) fn anomalies(&self) -> Vec<Anomaly> {
+        self.anomalies.lock().clone()
+    }
+
+    pub(crate) fn kinds(&self) -> Vec<&'static str> {
+        self.anomalies.lock().iter().map(|a| a.kind).collect()
+    }
+
+    pub(crate) fn sanctions(&self) -> Vec<(UserId, GameId, &'static str)> {
+        self.sanctions.lock().clone()
+    }
+}
+
+impl AnomalySink for RecordingAnomalies {
+    fn record(&self, anomaly: Anomaly) {
+        self.anomalies.lock().push(anomaly);
+    }
+
+    fn sanction_certain(&self, user: UserId, game: GameId, kind: &'static str) {
+        self.sanctions.lock().push((user, game, kind));
+    }
+}
+
+/// A monotonic clock that follows tokio's clock, so that the connection tasks' timers (tokio)
+/// and timestamps (the clock) agree under paused time. The wall clock moves with it.
+#[derive(Debug)]
+pub(crate) struct TokioClock {
+    start: tokio::time::Instant,
+    mono0: f64,
+    wall0: i64,
+}
+
+impl TokioClock {
+    pub(crate) fn new(mono0: f64, wall0: i64) -> Arc<TokioClock> {
+        Arc::new(TokioClock { start: tokio::time::Instant::now(), mono0, wall0 })
+    }
+}
+
+impl Clock for TokioClock {
+    fn mono_ms(&self) -> f64 {
+        self.mono0 + self.start.elapsed().as_secs_f64() * 1000.0
+    }
+
+    fn wall_ms(&self) -> i64 {
+        self.wall0 + i64::try_from(self.start.elapsed().as_millis()).unwrap_or(i64::MAX)
     }
 }
 

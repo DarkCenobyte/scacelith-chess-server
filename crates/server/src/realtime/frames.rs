@@ -32,9 +32,3 @@ pub(crate) fn notice(code: NoticeCode, arg: f64) -> Bytes {
 pub(crate) fn ack(r#ref: u32) -> Bytes {
     Ack { r#ref }.to_bytes().unwrap_or_default()
 }
-
-/// The fatal `Error` of a code and the close code that follows it (`close_code_for`).
-pub(crate) fn fatal(r#ref: u32, code: ErrorCode) -> (Bytes, u16) {
-    let close = scacelith_protocol::close_code_for(code).unwrap_or(crate::net::ws::CLOSE_INTERNAL);
-    (error(r#ref, code, true, 0), close)
-}
