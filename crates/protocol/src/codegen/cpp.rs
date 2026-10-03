@@ -89,7 +89,8 @@ fn put(f: &Field, ty: &Type, v: &str, ind: &str) -> String {
     }
 }
 
-fn get(schema: &Schema, f: &Field, ty: &Type, v: &str) -> String {
+/// Decoding expression of a value; `rd` names the reader.
+fn get(schema: &Schema, f: &Field, ty: &Type, v: &str, rd: &str) -> String {
     match ty {
         Type::U8 | Type::U16 | Type::U32 | Type::I32 => {
             let name = match ty {
@@ -98,15 +99,15 @@ fn get(schema: &Schema, f: &Field, ty: &Type, v: &str) -> String {
                 Type::U32 => "u32",
                 _ => "i32",
             };
-            format!("r.{name}({v}, {}, {})", int_lit(f.lo(), ty), int_lit(f.hi(), ty))
+            format!("{rd}.{name}({v}, {}, {})", int_lit(f.lo(), ty), int_lit(f.hi(), ty))
         }
-        Type::U64 => format!("r.u64({v})"),
-        Type::Bool => format!("r.boolean({v})"),
-        Type::Enum(name) => format!("r.enumeration({v}, {})", schema.enum_(name).open),
-        Type::F64 => format!("r.f64({v})"),
-        Type::Id53 => format!("r.id53({v})"),
-        Type::Str8 => format!("r.str8({v}, {}, {})", f.lo(), f.hi()),
-        Type::Struct(_) => format!("get(r, {v})"),
+        Type::U64 => format!("{rd}.u64({v})"),
+        Type::Bool => format!("{rd}.boolean({v})"),
+        Type::Enum(name) => format!("{rd}.enumeration({v}, {})", schema.enum_(name).open),
+        Type::F64 => format!("{rd}.f64({v})"),
+        Type::Id53 => format!("{rd}.id53({v})"),
+        Type::Str8 => format!("{rd}.str8({v}, {}, {})", f.lo(), f.hi()),
+        Type::Struct(_) => format!("get({rd}, {v})"),
         Type::List(item) => {
             let item_field = Field {
                 name: f.name.clone(),
@@ -116,11 +117,11 @@ fn get(schema: &Schema, f: &Field, ty: &Type, v: &str) -> String {
                 doc: String::new(),
             };
             format!(
-                "r.list({v}, {}, {}, [](Reader& r, {}& x) {{ return {}; }})",
+                "{rd}.list({v}, {}, {}, [](Reader& in, {}& x) {{ return {}; }})",
                 f.hi(),
                 schema.item_min_size(item),
                 cpp_type(item),
-                get(schema, &item_field, item, "x")
+                get(schema, &item_field, item, "x", "in")
             )
         }
     }
@@ -297,6 +298,9 @@ pub fn header(schema: &Schema) -> String {
     o.line("}  // namespace CloseCode");
     o.line("// Close code that follows a fatal Error with this code (0 when this code is never fatal).");
     o.line("uint16_t closeCodeFor(ErrorCode code);");
+    o.line("// The error code a close code of that rule stands for (false for other close codes). The code");
+    o.line("// may be one this codec does not know (isValid() false), such as 243 for 4303.");
+    o.line("bool errorCodeForClose(uint16_t close, ErrorCode& code);");
     o.line("");
     o.line("// ---- message types (0x01-0x7F client -> server, 0x80-0xFF server -> client) ----");
     o.line("enum class MsgType : uint8_t {");
@@ -600,6 +604,18 @@ pub fn source(schema: &Schema) -> String {
     o.line("    return 0;");
     o.line("}");
     o.line("");
+    o.line("bool errorCodeForClose(uint16_t close, ErrorCode& code) {");
+    o.line("    if (close >= 4001 && close <= 4099) {");
+    o.line("        code = ErrorCode(close - 4000);");
+    o.line("        return true;");
+    o.line("    }");
+    o.line("    if (close >= 4300 && close <= 4315) {");
+    o.line("        code = ErrorCode(240 + (close - 4300));");
+    o.line("        return true;");
+    o.line("    }");
+    o.line("    return false;");
+    o.line("}");
+    o.line("");
     o.line("const char* messageName(MsgType t) {");
     o.line("    switch (t) {");
     for m in &schema.messages {
@@ -652,14 +668,14 @@ pub fn source(schema: &Schema) -> String {
         o.line("}");
         o.line(&format!("bool get(Reader& r, {}& s) {{", s.name));
         let gets: Vec<String> =
-            s.fields.iter().map(|f| get(schema, f, &f.ty, &format!("s.{}", f.name))).collect();
+            s.fields.iter().map(|f| get(schema, f, &f.ty, &format!("s.{}", f.name), "r")).collect();
         o.line(&format!("    return {};", gets.join(" &&\n           ")));
         o.line("}");
     }
     for m in &schema.messages {
         o.line(&format!("bool getFields(Reader& r, {}& out) {{", m.key));
         let gets: Vec<String> =
-            m.fields.iter().map(|f| get(schema, f, &f.ty, &format!("out.{}", f.name))).collect();
+            m.fields.iter().map(|f| get(schema, f, &f.ty, &format!("out.{}", f.name), "r")).collect();
         o.line(&format!("    return {};", gets.join(" &&\n           ")));
         o.line("}");
     }

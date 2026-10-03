@@ -49,15 +49,17 @@ Contents: [Conventions](#conventions) · [Transport](#transport) · [Encoding](#
 
 * **Discovery.** Before connecting, the client reads `GET /api/v1/info` (`docs/API.md`). Its
   `protocol` object is `{ "min": 1, "max": 1, "schema": <fingerprint>, "subprotocol":
-  "scacelith.rt1" }`, and `wsPort` / `wsPath` give where the WebSocket listens (the API port and
-  `/ws` by default). A client of protocol 1 is compatible when `min <= 1 <= max` and
-  `subprotocol` is `scacelith.rt1`. `schema` is informational and is never compared. An
-  incompatible server is not contacted: the client tells the player to update the game (or the
-  server) and does not retry.
-* **WebSocket.** `wss://<host>:<wsPort><wsPath>` (RFC 6455) with `Sec-WebSocket-Protocol:
-  scacelith.rt1`. A server that does not select the subprotocol is not a protocol 1 server; the
-  reference server answers an upgrade without it with HTTP 426 `{"error":
-  "unsupported_protocol", "supported": ["scacelith.rt1"]}`. The client sends no `Origin` header
+  "scacelith.rt1" }`, `wsPath` is the path of the WebSocket (`/ws` by default) and `wsPort` the
+  port it listens on, for information. A client of protocol 1 is compatible when
+  `min <= 1 <= max` and `subprotocol` is `scacelith.rt1`. `schema` is informational and is never
+  compared. An incompatible server is not contacted: the client tells the player to update the
+  game (or the server) and does not retry.
+* **WebSocket.** `wss://<host>:<port><wsPath>` (RFC 6455) with `Sec-WebSocket-Protocol:
+  scacelith.rt1`, on the host and port of the API unless the player's server address names
+  another WebSocket port (the reference client never takes the port from `wsPort`). A server that
+  does not select the subprotocol is not a protocol 1 server; the reference server answers an
+  upgrade without it with HTTP 426 `{"error": "unsupported_protocol", "supported":
+  ["scacelith.rt1"]}`. The client sends no `Origin` header
   (browsers are refused unless the server allows their origin). TLS certificates are validated
   with the operating system's store, or against a certificate the player pinned for a community
   server. No extension is negotiated: frames are never compressed.
@@ -416,7 +418,8 @@ published ranges; the experimental ranges are never published, and a published p
   (4300) when the server does not sanction it automatically. A game error is never fatal by itself,
   except when the anti-cheat sanctions a certain cheat (`CheatDetected`).
 * **A client that cannot decode** a server message (one that breaks a rule a lenient decoder
-  applies) closes with 1002, logs it and reconnects.
+  applies) ignores it and logs it; it never acts on part of a message. What it missed shows later
+  (a `MoveMade` beyond the next ply, an event `gseq` that skips one), and a `Resync` repairs it.
 * **Unknown error codes** (a later minor) are a generic refusal of the request quoted by `ref`;
   when `fatal`, the connection closes as the rule says.
 
