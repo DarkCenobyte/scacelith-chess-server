@@ -2,14 +2,14 @@
 //! [`Stream`] it opens (plain TCP or TLS over TCP).
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use rustls_pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
@@ -37,6 +37,7 @@ pub struct Endpoint {
     host: String,
     tls: Option<TlsConfig>,
     connect_timeout: Duration,
+    local: Option<IpAddr>,
 }
 
 /// Time spent opening a connection, step by step.
@@ -62,13 +63,25 @@ impl ConnectTimings {
 impl Endpoint {
     /// A server without TLS (`TLS_MODE=off`, local tests). The host is the IP address.
     pub fn plain(addr: SocketAddr) -> Endpoint {
-        Endpoint { addr, host: addr.ip().to_string(), tls: None, connect_timeout: DEFAULT_CONNECT_TIMEOUT }
+        Endpoint {
+            addr,
+            host: addr.ip().to_string(),
+            tls: None,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            local: None,
+        }
     }
 
     /// A server with TLS. `host` is the name the certificate must be valid for (also sent as SNI
     /// and in the Host header): a DNS name or an IP address, without brackets or port.
     pub fn tls(addr: SocketAddr, host: impl Into<String>, tls: TlsConfig) -> Endpoint {
-        Endpoint { addr, host: host.into(), tls: Some(tls), connect_timeout: DEFAULT_CONNECT_TIMEOUT }
+        Endpoint {
+            addr,
+            host: host.into(),
+            tls: Some(tls),
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            local: None,
+        }
     }
 
     /// Resolves `host` and builds an endpoint on its first address (TLS when `tls` is given).
@@ -87,6 +100,19 @@ impl Endpoint {
     pub fn with_connect_timeout(mut self, limit: Duration) -> Endpoint {
         self.connect_timeout = limit;
         self
+    }
+
+    /// The same endpoint, its connections opened from the local address `ip` (port of the
+    /// system's choice): tests of a server's protection per address use the loopback aliases
+    /// (`127.0.0.2`...), which Linux routes like `127.0.0.1`.
+    pub fn with_local_addr(mut self, ip: IpAddr) -> Endpoint {
+        self.local = Some(ip);
+        self
+    }
+
+    /// The local address connections are opened from, when one was chosen.
+    pub fn local_addr(&self) -> Option<IpAddr> {
+        self.local
     }
 
     /// The socket address.
@@ -120,12 +146,20 @@ impl Endpoint {
         }
     }
 
-    /// Opens a connection: TCP (no Nagle delay), then the TLS handshake when configured.
+    /// Opens a connection: TCP (no Nagle delay, from the local address when one was chosen), then
+    /// the TLS handshake when configured.
     pub async fn connect(&self) -> Result<(Stream, ConnectTimings)> {
         let fut = async {
             let mut timings = ConnectTimings::default();
             let started = Instant::now();
-            let tcp = TcpStream::connect(self.addr).await?;
+            let tcp = match self.local {
+                None => TcpStream::connect(self.addr).await?,
+                Some(ip) => {
+                    let socket = if ip.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
+                    socket.bind(SocketAddr::new(ip, 0))?;
+                    socket.connect(self.addr).await?
+                }
+            };
             tcp.set_nodelay(true)?;
             timings.tcp = started.elapsed();
             let Some(tls) = &self.tls else {

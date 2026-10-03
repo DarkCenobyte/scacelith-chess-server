@@ -210,6 +210,12 @@ impl Connection {
         self.session.close(code, reason);
     }
 
+    /// Drops the connection without a close frame, as a lost network would
+    /// ([`Session::abort`]).
+    pub fn abort(&self) {
+        self.session.abort();
+    }
+
     /// Waits until the connection has ended and returns how.
     pub async fn wait_closed(&mut self) -> CloseInfo {
         self.session.wait_closed().await

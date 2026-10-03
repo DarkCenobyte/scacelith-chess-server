@@ -94,6 +94,8 @@ enum Outgoing {
     Frame(Bytes),
     /// Start the closing handshake.
     Close { code: u16, reason: String },
+    /// Drop the connection at once, without a close frame.
+    Abort,
 }
 
 /// Masking keys from the operating system's random source, fetched 64 at a time.
@@ -222,6 +224,7 @@ impl Session {
             auto_reply: opts.auto_reply,
             partial: None,
             sent_close: None,
+            aborted: false,
             read_at: std::time::Instant::now(),
         };
         tokio::spawn(io.run(done_tx));
@@ -299,6 +302,13 @@ impl Session {
         let _ = self.tx.send(Outgoing::Close { code, reason: reason.to_string() });
     }
 
+    /// Drops the connection after the messages already queued, without a close frame nor a TLS
+    /// `close_notify`: the server sees a lost connection (tests of its reconnection handling).
+    /// The session ends with close code 1006.
+    pub fn abort(&self) {
+        let _ = self.tx.send(Outgoing::Abort);
+    }
+
     /// Waits until the connection has ended (messages not taken stay available) and returns how.
     pub async fn wait_closed(&mut self) -> CloseInfo {
         let _ = self.done.wait_for(|done| *done).await;
@@ -366,6 +376,8 @@ struct IoTask<S> {
     partial: Option<(u8, BytesMut)>,
     /// The close frame the client sent, once it did.
     sent_close: Option<(u16, String)>,
+    /// The owner dropped the connection ([`Session::abort`]).
+    aborted: bool,
     read_at: std::time::Instant,
 }
 
@@ -373,8 +385,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> IoTask<S> {
     async fn run(mut self, done: watch::Sender<bool>) {
         let info = self.serve().await;
         let _ = self.shared.close.set(info);
-        // Best effort: a TLS close_notify and a FIN.
-        let _ = tokio::time::timeout(Duration::from_secs(1), self.stream.shutdown()).await;
+        // Best effort: a TLS close_notify and a FIN (an aborted connection is only dropped).
+        if !self.aborted {
+            let _ = tokio::time::timeout(Duration::from_secs(1), self.stream.shutdown()).await;
+        }
         let _ = done.send(true);
         // Dropping `in_tx` (with `self`) ends the owner's `recv` once it took every message.
     }
@@ -401,6 +415,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> IoTask<S> {
             if let Err(e) = self.flush().await {
                 return self.ended(format!("write failed: {e}"));
             }
+            if self.aborted {
+                return CloseInfo::abnormal("aborted by the client");
+            }
             if self.sent_close.is_some() && close_deadline.is_none() {
                 close_deadline = Some(Instant::now() + self.close_timeout);
             }
@@ -408,7 +425,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> IoTask<S> {
                 out = self.out_rx.recv(), if self.sent_close.is_none() => match out {
                     Some(out) => {
                         self.queue(out);
-                        while self.sent_close.is_none() {
+                        while self.sent_close.is_none() && !self.aborted {
                             match self.out_rx.try_recv() {
                                 Ok(out) => self.queue(out),
                                 Err(_) => break,
@@ -460,6 +477,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> IoTask<S> {
         match out {
             Outgoing::Frame(bytes) => self.wbuf.extend_from_slice(&bytes),
             Outgoing::Close { code, reason } => self.queue_close(code, reason),
+            Outgoing::Abort => self.aborted = true,
         }
     }
 

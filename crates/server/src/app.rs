@@ -397,11 +397,14 @@ pub(crate) struct LaunchOptions {
     pub password_hasher: Option<Arc<dyn PasswordHasher>>,
     /// Starts the process metrics sampler (once per process).
     pub process_metrics: bool,
+    /// The OpenID provider of Google sign-in (default: Google's), for the embedded server of the
+    /// live check (`crate::embedded`).
+    pub oidc: Option<crate::auth::OidcOptions>,
 }
 
 impl Default for LaunchOptions {
     fn default() -> LaunchOptions {
-        LaunchOptions { clock: clock::system(), password_hasher: None, process_metrics: true }
+        LaunchOptions { clock: clock::system(), password_hasher: None, process_metrics: true, oidc: None }
     }
 }
 
@@ -524,6 +527,9 @@ impl Instance {
         auth_deps.clock = clock.clone();
         auth_deps.control = Some(control.clone());
         auth_deps.password_hasher = options.password_hasher.clone();
+        if let Some(oidc) = &options.oidc {
+            auth_deps.oidc = oidc.clone();
+        }
         let auth = match Auth::new(auth_deps) {
             Ok(auth) => auth,
             Err(e) => {

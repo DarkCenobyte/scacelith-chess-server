@@ -276,6 +276,20 @@ async fn client_close_handshake() {
 }
 
 #[tokio::test]
+async fn an_aborted_connection_ends_without_a_close_frame() {
+    let (mut conn, mut server) = connected().await;
+    conn.send(QueueLeave { seq: 0 }).unwrap();
+    conn.abort();
+    assert!(matches!(server.msg().await, ClientMsg::QueueLeave(_)), "queued messages go first");
+    // The stream ends: no close frame, no more bytes.
+    let mut rest = Vec::new();
+    let read = tokio::time::timeout(WAIT, server.stream.read_to_end(&mut rest)).await.unwrap();
+    assert!(read.is_err() || rest.is_empty(), "nothing after the last message: {rest:?}");
+    let info = tokio::time::timeout(WAIT, conn.wait_closed()).await.unwrap();
+    assert_eq!((info.code, info.closer), (CloseInfo::ABNORMAL, Closer::Transport));
+}
+
+#[tokio::test]
 async fn hello_refused() {
     let (listener, endpoint) = listen().await;
     tokio::spawn(async move {
@@ -652,4 +666,17 @@ async fn api_client_flows() {
     assert!(requests[3].ends_with(r#"{"mfaToken":"mfa_x","code":"123456"}"#));
     assert!(requests[5].starts_with("POST /api/v1/auth/logout HTTP/1.1\r\n"));
     assert!(requests[5].contains(&format!("Authorization: Bearer {TOKEN}\r\n")));
+}
+
+#[tokio::test]
+async fn connections_open_from_the_chosen_local_address() {
+    let (listener, endpoint) = listen().await;
+    let from = "127.0.0.2".parse().unwrap();
+    let endpoint = endpoint.with_local_addr(from);
+    assert_eq!(endpoint.local_addr(), Some(from));
+    let (connected, accepted) = tokio::join!(endpoint.connect(), listener.accept());
+    let (stream, _) = connected.unwrap();
+    let (_, peer) = accepted.unwrap();
+    assert_eq!(peer.ip(), from);
+    assert_eq!(stream.tcp().local_addr().unwrap().ip(), from);
 }
