@@ -407,7 +407,8 @@ async fn refuses_a_bad_hello_in_the_order_of_the_specification() {
     next_proto[5] = 2;
     next_proto.truncate(20); // whatever follows the prefix
     let cases: Vec<(&str, Vec<u8>, u32, ErrorCode, u16)> = vec![
-        ("another message first", QueueLeave { seq: 1 }.to_vec().unwrap(), 0, ErrorCode::HelloRequired, 4010),
+        ("another message first", QueueLeave { seq: 7 }.to_vec().unwrap(), 7, ErrorCode::HelloRequired, 4010),
+        ("a server message type first", vec![0x81, 0, 0, 0, 7], 0, ErrorCode::HelloRequired, 4010),
         ("an empty message", Vec::new(), 0, ErrorCode::HelloRequired, 4010),
         ("a Hello shorter than its prefix", full[..12].to_vec(), 1, ErrorCode::Malformed, 4001),
         ("a later protocol", next_proto, 1, ErrorCode::UnsupportedProtocol, 4002),

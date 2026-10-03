@@ -69,12 +69,17 @@ owned by root can stop the server from opening its database.
 ```sh
 sudo install -m 0640 -o root -g scacelith deploy/systemd/scacelith-server.env.example \
   /etc/scacelith/scacelith-server.env
-sudo sh -c 'umask 027 && scacelith-server gen-secret > /etc/scacelith/server-secret'
+sudo sh -c 'umask 027 && /usr/local/bin/scacelith-server gen-secret > /etc/scacelith/server-secret'
 sudo chgrp scacelith /etc/scacelith/server-secret
 sudo install -m 0640 -o root -g scacelith /dev/null /etc/scacelith/smtp-password
 sudoedit /etc/scacelith/smtp-password             # the SMTP password alone
 sudoedit /etc/scacelith/scacelith-server.env      # the values of your server
 ```
+
+Commands run through `sudo` name the binary by its full path: `sudo` replaces `PATH` with its
+`secure_path`, which leaves `/usr/local/bin` out on RHEL and its derivatives (there,
+`sudo scacelith-server ...` is not found, and the redirection above would leave an empty secret
+file behind).
 
 The environment file holds only the keys an operator must set; add any other key of
 [CONFIG.md](CONFIG.md) to it. Secrets stay in their own files (`SERVER_SECRET_FILE`,
@@ -441,7 +446,7 @@ and ports no other instance uses on the same address: `API_PORT` (and `WS_PORT`)
 
 ```sh
 sudo systemctl enable --now scacelith-server@staging
-sudo -u scacelith env SCACELITH_ENV_FILE=/etc/scacelith/staging.env scacelith-server check-config
+sudo -u scacelith env SCACELITH_ENV_FILE=/etc/scacelith/staging.env /usr/local/bin/scacelith-server check-config
 ```
 
 Give each instance its own copy of the certbot hook, with its `CERT_NAME`, `DEST` and

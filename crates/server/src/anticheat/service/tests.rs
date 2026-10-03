@@ -665,6 +665,59 @@ async fn the_sink_spawns_the_follow_up() {
     assert_eq!(anomalies[0].kind, "forged_type");
 }
 
+/// Stalls the post of the first hold until the test says the repeat returned, or for 200 ms.
+struct StalledHold {
+    log: Mutex<Vec<&'static str>>,
+    entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    repeat_returned: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl SanctionEvents for StalledHold {
+    fn sanction_pending(&self, _: SanctionPending) {
+        if let Some(tx) = self.entered.lock().take() {
+            let _ = tx.send(());
+        }
+        if let Some(rx) = self.repeat_returned.lock().take() {
+            let _ = rx.recv_timeout(Duration::from_millis(200));
+        }
+        self.log.lock().push("hold");
+    }
+
+    fn sanction_applied(&self, _: SanctionApplied) {}
+
+    fn refunds_pending(&self) {}
+}
+
+#[tokio::test]
+async fn a_repeat_returns_only_once_the_first_sanction_of_the_game_has_posted_its_hold() {
+    let w = world(&[], &["cheat"]).await;
+    let u = w.ids[0];
+    let ac = Anticheat::new(&w.config, w.store.clone(), w.clock.clone());
+    let (entered_tx, entered) = std::sync::mpsc::channel();
+    let (returned, returned_rx) = std::sync::mpsc::channel();
+    let events = Arc::new(StalledHold {
+        log: Mutex::new(Vec::new()),
+        entered: Mutex::new(Some(entered_tx)),
+        repeat_returned: Mutex::new(Some(returned_rx)),
+    });
+    ac.set_sanction_events(events.clone());
+    // The shard's sanction (illegal_move) stalls in the post of its hold...
+    let first = std::thread::spawn({
+        let ac = ac.clone();
+        move || ac.sanction(u, 9, "illegal_move")
+    });
+    entered.recv().unwrap();
+    // ...while the connection task's sanction of the same game (forged_type) comes in: it waits
+    // for the hold (the stall then lasts its 200 ms), or its caller's 4302 could reach the client
+    // before the hold reaches the lobby.
+    let repeat = ac.sanction(u, 9, "forged_type");
+    events.log.lock().push("repeat");
+    let _ = returned.send(());
+    assert_eq!(*events.log.lock(), ["hold", "repeat"]);
+    assert!(!repeat.await.applied);
+    assert!(first.join().unwrap().await.applied);
+}
+
 // ---- refunds of an automatic ban (anticheat.refunds) -------------------------------------------
 
 /// The players of the refund scenarios ([`REFUND_PLAYERS`]) with their rated records.

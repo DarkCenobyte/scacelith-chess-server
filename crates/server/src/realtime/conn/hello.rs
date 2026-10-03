@@ -198,7 +198,7 @@ fn negotiated_minor(client: u16) -> u16 {
 /// The checks of the Hello's bytes, in the order of PROTOCOL.md.
 fn check(buf: &[u8]) -> Result<Hello, Refusal> {
     if buf.first() != Some(&MsgType::Hello.to_u8()) {
-        return Err(Refusal::new("hello_required", 0, ErrorCode::HelloRequired));
+        return Err(Refusal::new("hello_required", peek_seq(buf).unwrap_or(0), ErrorCode::HelloRequired));
     }
     let Some(prefix) = HelloPrefix::read(buf) else {
         return Err(Refusal::new("malformed", peek_seq(buf).unwrap_or(0), ErrorCode::Malformed));

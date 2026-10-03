@@ -580,6 +580,122 @@ async fn an_ambiguous_body_length_gets_the_raw_400() {
 }
 
 #[tokio::test]
+async fn empty_lines_before_the_request_line_hide_no_ambiguous_body_length() {
+    let s = setup(Options::default());
+    let post =
+        |headers: &str, body: &str| format!("POST /api/v1/x HTTP/1.1\r\nHost: x\r\n{headers}\r\n{body}");
+    // httparse skips any number of empty lines before the request line, as llhttp does.
+    for (text, what) in [
+        (format!("\r\n\r\n{}", post("Content-Length: 2\r\nContent-Length: 2\r\n", "{}")), "two CRLF"),
+        (
+            format!(
+                "\n\r\n\n{}",
+                post("Content-Length: 2\r\nTransfer-Encoding: chunked\r\n", "2\r\n{}\r\n0\r\n\r\n")
+            ),
+            "bare LF and CRLF",
+        ),
+    ] {
+        let mut c = connect(&s.edge, "127.0.0.1");
+        c.io.write_all(text.as_bytes()).await.expect("write");
+        let answer = until_closed(&mut c.io, Duration::from_secs(3)).await.expect("closed");
+        assert_eq!(
+            String::from_utf8_lossy(&answer),
+            String::from_utf8_lossy(ClientError::Malformed.raw_answer()),
+            "{what}"
+        );
+    }
+    assert_eq!(s.edge.client_errors(ClientError::Malformed), 2);
+    let mut c = connect(&s.edge, "127.0.0.1");
+    let w = request(&mut c, &format!("\r\n\r\n{}", post("Content-Length: 2\r\n", "{}"))).await;
+    assert_ne!(w.status, 400, "one Content-Length is fine");
+}
+
+#[tokio::test]
+async fn a_head_larger_than_hypers_buffer_gets_the_raw_431_even_when_hyper_parses_it() {
+    let s = setup(Options::default());
+    // Whitespace after a colon is not part of the value: the head stays far under 8192 bytes of
+    // URL + names + values. In one write, hyper reads 8192 bytes, then the rest at once into a
+    // buffer grown to 16 KiB, and parses the whole head.
+    let padded = |pad: usize, headers: &str| {
+        format!("POST /api/v1/x HTTP/1.1\r\nHost: x\r\nX-Pad:{}v\r\n{headers}\r\n{{}}", " ".repeat(pad))
+    };
+    for (text, what) in [
+        (
+            padded(9300, "Content-Length: 2\r\nTransfer-Encoding: chunked\r\n"),
+            "Content-Length and chunked past the capture",
+        ),
+        (padded(9300, "Content-Length: 2\r\nContent-Length: 2\r\n"), "Content-Length twice past the capture"),
+        (padded(9300, "Content-Length: 2\r\n"), "a plain head"),
+        (format!("{}{}", "\r\n".repeat(100), padded(9100, "Content-Length: 2\r\n")), "after empty lines"),
+        // Empty lines count as sent too (llhttp skips them without counting): a capture that
+        // stops before the request line holds no header line to check.
+        (
+            format!("{}{}", "\r\n".repeat(4700), padded(0, "Content-Length: 2\r\nContent-Length: 2\r\n")),
+            "Content-Length twice after 9400 bytes of empty lines",
+        ),
+        (
+            format!(
+                "{}{}",
+                "\n".repeat(9300),
+                padded(0, "Content-Length: 2\r\nTransfer-Encoding: chunked\r\n")
+            ),
+            "Content-Length and chunked after 9300 bare LF",
+        ),
+        (format!("{}{}", "\r\n".repeat(4700), padded(0, "Content-Length: 2\r\n")), "a plain head after them"),
+        (
+            format!("{}{}", "\r\n".repeat(4607), padded(0, "Content-Length: 2\r\nContent-Length: 2\r\n")),
+            "a capture that stops in the method",
+        ),
+        (
+            format!("{}{}", "\r\n".repeat(4606), padded(0, "Content-Length: 2\r\nContent-Length: 2\r\n")),
+            "a capture that stops after the method",
+        ),
+    ] {
+        let mut c = connect(&s.edge, "127.0.0.1");
+        c.io.write_all(text.as_bytes()).await.expect("write");
+        let answer = until_closed(&mut c.io, Duration::from_secs(3)).await.expect("closed");
+        assert_eq!(
+            String::from_utf8_lossy(&answer),
+            String::from_utf8_lossy(ClientError::TooLarge.raw_answer()),
+            "{what}"
+        );
+    }
+    assert_eq!(s.edge.client_errors(ClientError::TooLarge), 9);
+    assert_eq!(reports(&s.guard), [(local(), 9.0)], "each one counts toward a block");
+    let mut c = connect(&s.edge, "127.0.0.1");
+    let w =
+        request(&mut c, &format!("GET /healthz HTTP/1.1\r\nHost: x\r\nX-Pad:{}v\r\n\r\n", " ".repeat(9000)))
+            .await;
+    assert_eq!(w.status, 200, "a head that fits in the buffer");
+    let w =
+        request(&mut c, &format!("{}GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n", "\r\n".repeat(4575))).await;
+    assert_eq!(w.status, 200, "empty lines and a head that fit in the buffer");
+}
+
+#[test]
+fn a_full_capture_overflows_unless_it_holds_a_whole_head_or_a_pipelined_fragment() {
+    // `MAX_BUF` bytes: `start`, then `fill` up to the limit.
+    let capture = |start: &str, fill: u8| {
+        let mut raw = start.as_bytes().to_vec();
+        raw.resize(MAX_BUF, fill);
+        raw
+    };
+    let empty_lines = |n: usize, then: &str| format!("{}{then}", "\r\n".repeat(n));
+    for (raw, method, overflows, what) in [
+        (capture("", b'\n'), "POST", true, "line ends only"),
+        (capture(&empty_lines(4607, "PO"), b'\n'), "POST", true, "stops in the method"),
+        (capture(&empty_lines(4606, "POST"), b'\n'), "POST", true, "stops after the method"),
+        (capture(&empty_lines(10, "POST /x HTTP/1.1\r\nX-A: "), b'a'), "POST", true, "stops in a header"),
+        (capture("POST /x HTTP/1.1\r\nHost: x\r\n\r\n", b'a'), "POST", false, "a whole head and its body"),
+        (capture(&empty_lines(4607, "PO"), b'\n'), "GET", false, "another request's method: a fragment"),
+        (capture("Host: x\r\n\r\n", b'a'), "POST", false, "the end of a pipelined head and its body"),
+        ("\r\n".repeat(MAX_BUF / 2 - 1).into_bytes(), "POST", false, "a capture that is not full"),
+    ] {
+        assert_eq!(head_overflows(&raw, method), overflows, "{what}");
+    }
+}
+
+#[tokio::test]
 async fn a_target_outside_ascii_gets_the_raw_400() {
     let s = setup(Options::default());
     // The http crate takes UTF-8 in a target; llhttp takes no byte above 0x7f.
@@ -618,6 +734,37 @@ async fn a_chunked_body_hyper_cannot_decode_gets_the_raw_400() {
     let mut c = connect(&s.edge, "127.0.0.1");
     let w = request(&mut c, &upload("2\r\n{}\r\n0\r\n\r\n")).await;
     assert_eq!(w.status, 200, "a well-formed chunked body");
+}
+
+#[tokio::test]
+async fn chunk_extensions_or_trailers_over_hypers_limits_get_the_raw_431() {
+    let s = setup(Options::default());
+    let upload = |body: &str| {
+        format!(
+            "POST /api/v1/upload HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{body}"
+        )
+    };
+    let trailers: String = (0..101).map(|i| format!("X-T{i}: v\r\n")).collect();
+    for (body, what) in [
+        (format!("2;{}\r\n{{}}\r\n0\r\n\r\n", "a".repeat(17_000)), "17000 bytes of chunk extensions"),
+        (format!("2\r\n{{}}\r\n0\r\nX-T: {}\r\n\r\n", "a".repeat(17_000)), "17000 bytes of trailers"),
+        (format!("2\r\n{{}}\r\n0\r\n{trailers}\r\n"), "101 trailer lines"),
+    ] {
+        let mut c = connect(&s.edge, "127.0.0.1");
+        c.io.write_all(upload(&body).as_bytes()).await.expect("write");
+        let answer = until_closed(&mut c.io, Duration::from_secs(3)).await.expect("closed");
+        assert_eq!(
+            String::from_utf8_lossy(&answer),
+            String::from_utf8_lossy(ClientError::TooLarge.raw_answer()),
+            "{what}"
+        );
+    }
+    assert_eq!(s.edge.client_errors(ClientError::TooLarge), 3);
+    assert_eq!(s.edge.client_errors(ClientError::Malformed), 0);
+    assert_eq!(reports(&s.guard), [(local(), 3.0)], "each one counts toward a block");
+    let mut c = connect(&s.edge, "127.0.0.1");
+    let w = request(&mut c, &upload(&format!("2;{}\r\n{{}}\r\n0\r\nX-T: v\r\n\r\n", "a".repeat(9000)))).await;
+    assert_eq!(w.status, 200, "extensions and trailers under the limits");
 }
 
 #[tokio::test]

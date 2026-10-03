@@ -17,10 +17,10 @@
 //!   8192 bytes counted as URL + header names + values, more than 64 header lines,
 //!   `Content-Length` given twice or with `Transfer-Encoding`, a target with bytes outside ASCII)
 //!   get the same raw answers, as does a chunked body hyper cannot decode once the handler that
-//!   read it is done (Node answers when the bad bytes come in, also for a route that does not
-//!   read its body). These
-//!   client errors count in `scacelith_http_client_errors_total{reason}` and 1 toward a block of
-//!   the peer (unless it is a trusted proxy);
+//!   read it is done (`431` for chunk extensions or trailers over hyper's limits, `400` for the
+//!   rest; Node answers when the bad bytes come in, also for a route that does not read its
+//!   body). These client errors count in `scacelith_http_client_errors_total{reason}` and 1
+//!   toward a block of the peer (unless it is a trusted proxy);
 //! * a connection the server closes after an answer keeps reading (and discarding) for 2 s, 1 s
 //!   after a raw answer, so the client reads the answer before the socket goes.
 //!
@@ -38,8 +38,16 @@
 //! (RUST-PORT.md section 1; `tools/rest-diff` shows each one):
 //!
 //! * header lines ending in a bare LF are accepted (httparse is lenient there);
-//! * pipelined requests are answered one after the other (the `Content-Length` lines of a
-//!   request whose head came in with the previous request are not counted);
+//! * a head of more than 9216 bytes as sent gets the raw `431` (hyper's read buffer), also when
+//!   its URL, header names and values stay under 8192 bytes: llhttp does not count the
+//!   whitespace before header values, nor the empty lines before the request line;
+//! * the 16 KiB of chunk extensions hyper allows count over the whole body (llhttp: in each
+//!   chunk), and trailers may take 16 KiB and 100 lines (llhttp: 8192 bytes and 64 lines, as a
+//!   head);
+//! * pipelined requests are answered one after the other (a request whose head came in with
+//!   the previous request is not checked for `Content-Length` lines or a head over 9216 bytes,
+//!   and gets the raw `431` when the rest of its head comes in followed by line ends, 9216 bytes
+//!   in all);
 //! * the answer to an HTTP/1.0 request has an `HTTP/1.0` status line (Node: `HTTP/1.1`);
 //! * header names are written in title case, `Www-Authenticate` for Node's `WWW-Authenticate`;
 //! * a `#fragment` in the target is dropped (Node routes it as part of the path: `404`);
@@ -56,7 +64,7 @@ use std::io;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
@@ -98,7 +106,11 @@ pub const MAX_HEADER_SIZE: usize = 8192;
 /// Header lines of a request head: Node's API sets `server.maxHeadersCount = 64`, and its
 /// parser refuses a head with more (`431`). hyper itself refuses more than 100.
 pub const MAX_HEADER_LINES: usize = 64;
-/// hyper's read buffer: a raw head larger than this is refused 431 by hyper itself.
+/// hyper's read buffer, and the most bytes of a head kept for the checks of the listener. hyper
+/// refuses a raw head larger than this (`431`) when it has read up to the limit without the end
+/// of the head, but one read may take it past the limit with the whole head (a read fills the
+/// room of a buffer grown past the limit, 16 KiB after a first read of 8 KiB): [`head_overflows`]
+/// refuses those.
 const MAX_BUF: usize = MAX_HEADER_SIZE + 1024;
 /// A raw error answer and the connection behind it last this long at most.
 const RAW_ANSWER_LINGER: Duration = Duration::from_secs(1);
@@ -276,25 +288,45 @@ fn target_of<B>(req: &Request<B>) -> String {
     }
 }
 
+/// Where the request line of a `method` request starts in `raw`, the bytes read while its head
+/// came in: after the empty lines httparse skips before it (as llhttp does). `None` when `raw`
+/// does not start with it: the head started in an earlier read (pipelined requests).
+fn request_line_start(raw: &[u8], method: &str) -> Option<usize> {
+    let start = raw.iter().position(|&b| b != b'\r' && b != b'\n')?;
+    let line = &raw[start..];
+    (line.starts_with(method.as_bytes()) && line.get(method.len()) == Some(&b' ')).then_some(start)
+}
+
+/// The header lines of a `method` request in `raw`, the bytes read while its head came in: the
+/// bytes between the request line (or the end of a line, when the head started in an earlier
+/// read) and the empty line that ends the head. `None` when `raw` stops before that line.
+fn raw_header_lines<'a>(raw: &'a [u8], method: &str) -> Option<&'a [u8]> {
+    let start = request_line_start(raw, method).unwrap_or(0);
+    let first = start + raw[start..].iter().position(|&b| b == b'\n')? + 1;
+    let mut at = first;
+    loop {
+        let len = raw[at..].iter().position(|&b| b == b'\n')?;
+        if len == 0 || raw[at..at + len] == *b"\r" {
+            return Some(&raw[first..at]);
+        }
+        at += len + 1;
+    }
+}
+
 /// A body length llhttp refuses and hyper accepts: `Content-Length` given twice (even with the
 /// same value), or together with `Transfer-Encoding`. hyper keeps one `Content-Length` of equal
 /// ones and drops it next to `Transfer-Encoding`, so the lines are counted in `raw`, the bytes
 /// read while the head came in. When `raw` holds no complete head (pipelined requests), the
-/// request passes.
-fn ambiguous_length(h: &HeaderMap, raw: &[u8]) -> bool {
+/// request passes; a head larger than the capture is refused before ([`head_overflows`]).
+fn ambiguous_length(h: &HeaderMap, raw: &[u8], method: &str) -> bool {
     if !h.contains_key(header::CONTENT_LENGTH) && !h.contains_key(header::TRANSFER_ENCODING) {
         return false;
     }
+    let Some(lines) = raw_header_lines(raw, method) else {
+        return false;
+    };
     let (mut lengths, mut chunked) = (0, false);
-    // The first line is the request line (or the end of one when the head started earlier).
-    for line in raw.split_inclusive(|&b| b == b'\n').skip(1) {
-        let Some(line) = line.strip_suffix(b"\n") else {
-            return false;
-        };
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if line.is_empty() {
-            return lengths > 1 || (lengths == 1 && chunked);
-        }
+    for line in lines.split(|&b| b == b'\n') {
         let name = line.split(|&b| b == b':').next().unwrap_or_default();
         if name.eq_ignore_ascii_case(b"content-length") {
             lengths += 1;
@@ -302,7 +334,29 @@ fn ambiguous_length(h: &HeaderMap, raw: &[u8]) -> bool {
             chunked = true;
         }
     }
-    false
+    lengths > 1 || (lengths == 1 && chunked)
+}
+
+/// A head larger than hyper's read buffer (`MAX_BUF`) that hyper parsed all the same: it parses
+/// what it has read before it checks the limit, and one read may fill a buffer that grew past
+/// the limit. The capture of such a head (`raw`, `MAX_BUF` bytes at most) stops before its end,
+/// so its lines cannot be checked: it is refused as hyper refuses the heads that come in smaller
+/// reads (`431`). The empty lines before the request line count, as hyper counts them: a capture
+/// may hold nothing else, or stop in the method. A full capture that starts elsewhere in the head
+/// (pipelined requests) is refused only when it holds nothing but line ends (the rest of its head
+/// followed by 9 KiB of them).
+fn head_overflows(raw: &[u8], method: &str) -> bool {
+    if raw.len() < MAX_BUF {
+        return false;
+    }
+    let Some(start) = raw.iter().position(|&b| b != b'\r' && b != b'\n') else {
+        return true;
+    };
+    let rest = &raw[start..];
+    if rest.len() <= method.len() {
+        return method.as_bytes().starts_with(rest);
+    }
+    request_line_start(raw, method).is_some() && raw_header_lines(raw, method).is_none()
 }
 
 /// Node's head size: URL + header names + header values.
@@ -343,7 +397,8 @@ struct Track {
     close_after: Option<Duration>,
     answered: bool,
     requests: u32,
-    /// The bytes read while waiting for a request head (at most `MAX_BUF`).
+    /// The first `MAX_BUF` bytes read while waiting for a request head (a longer head is refused:
+    /// [`head_overflows`]).
     head: Vec<u8>,
 }
 
@@ -424,7 +479,7 @@ impl ConnState {
     }
 
     /// Bytes came in: a new request starts on an idle connection; the bytes of a head are kept
-    /// for [`ambiguous_length`].
+    /// for [`ambiguous_length`] and [`head_overflows`].
     fn bytes_in(&self, data: &[u8]) {
         let mut t = self.track.lock();
         if t.phase == Phase::KeepAlive {
@@ -797,10 +852,11 @@ impl Body for ResponseBody {
     }
 }
 
-/// A request body on its way to the API: notes a chunked encoding hyper cannot decode.
+/// A request body on its way to the API: notes a chunked encoding hyper cannot decode (the
+/// client error of [`bad_encoding`]).
 struct WatchedBody {
     inner: Incoming,
-    malformed: Arc<AtomicBool>,
+    refused: Arc<OnceLock<ClientError>>,
 }
 
 impl Body for WatchedBody {
@@ -813,9 +869,9 @@ impl Body for WatchedBody {
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let frame = ready!(Pin::new(&mut self.inner).poll_frame(cx));
         if let Some(Err(e)) = &frame
-            && is_bad_encoding(e)
+            && let Some(kind) = bad_encoding(e)
         {
-            self.malformed.store(true, Ordering::Relaxed);
+            let _ = self.refused.set(kind);
         }
         Poll::Ready(frame)
     }
@@ -829,12 +885,27 @@ impl Body for WatchedBody {
     }
 }
 
-/// Whether a body error is a chunked encoding hyper's decoder refused (its errors of kind
-/// `InvalidData` / `InvalidInput`), not a connection that broke off.
-fn is_bad_encoding(e: &hyper::Error) -> bool {
-    std::error::Error::source(e)
-        .and_then(|cause| cause.downcast_ref::<io::Error>())
-        .is_some_and(|io| matches!(io.kind(), io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput))
+/// The messages of hyper's chunked decoder (1.11) for chunk extensions and trailers over its
+/// limits: errors of kind `InvalidData` with nothing else to tell them from the encoding errors
+/// (`chunk_extensions_or_trailers_over_hypers_limits_get_the_raw_431` fails if hyper renames them).
+const DECODER_LIMITS: [&str; 3] =
+    ["chunk extensions over limit", "chunk trailers bytes over limit", "chunk trailers count overflow"];
+
+/// The client error of a body error that is a chunked encoding hyper's decoder refused (its
+/// errors of kind `InvalidData` / `InvalidInput`), not a connection that broke off: too large for
+/// chunk extensions or trailers over its limits (llhttp: `HPE_CHUNK_EXTENSIONS_OVERFLOW`,
+/// `HPE_HEADER_OVERFLOW`), malformed for the others.
+fn bad_encoding(e: &hyper::Error) -> Option<ClientError> {
+    let io = std::error::Error::source(e)?.downcast_ref::<io::Error>()?;
+    match io.kind() {
+        io::ErrorKind::InvalidData
+            if io.get_ref().is_some_and(|inner| DECODER_LIMITS.contains(&inner.to_string().as_str())) =>
+        {
+            Some(ClientError::TooLarge)
+        }
+        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => Some(ClientError::Malformed),
+        _ => None,
+    }
 }
 
 impl Drop for ResponseBody {
@@ -1131,10 +1202,13 @@ impl HttpListener {
         if method == Method::CONNECT {
             return Err(ClosedWithoutAnswer);
         }
-        if node_head_size(&req) >= MAX_HEADER_SIZE || req.headers().len() > MAX_HEADER_LINES {
+        if node_head_size(&req) >= MAX_HEADER_SIZE
+            || req.headers().len() > MAX_HEADER_LINES
+            || head_overflows(&raw_head, method.as_str())
+        {
             return Ok(self.raw_error(&st, ClientError::TooLarge));
         }
-        if ambiguous_length(req.headers(), &raw_head) || !target_of(&req).is_ascii() {
+        if ambiguous_length(req.headers(), &raw_head, method.as_str()) || !target_of(&req).is_ascii() {
             return Ok(self.raw_error(&st, ClientError::Malformed));
         }
         let is_upgrade = has_token(req.headers(), header::CONNECTION, "upgrade")
@@ -1200,15 +1274,15 @@ impl HttpListener {
             }
         }
         let api = self.api.clone();
-        let malformed = Arc::new(AtomicBool::new(false));
-        let req = req.map(|inner| WatchedBody { inner, malformed: malformed.clone() });
+        let refused = Arc::new(OnceLock::new());
+        let req = req.map(|inner| WatchedBody { inner, refused: refused.clone() });
         let handled = tokio::spawn(async move {
             let res = api.handle(req, keys).await;
             (res, slot)
         })
         .await;
-        if malformed.load(Ordering::Relaxed) {
-            return Ok(self.raw_error(&st, ClientError::Malformed));
+        if let Some(&e) = refused.get() {
+            return Ok(self.raw_error(&st, e));
         }
         Ok(match handled {
             Ok((res, slot)) => self.finish(&st, res, keep_alive, head, slot),

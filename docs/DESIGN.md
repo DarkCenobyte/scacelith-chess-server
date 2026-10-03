@@ -246,7 +246,7 @@ as 60 s at most.
 * **Cross-module events** (`events`): `HostEvents` (hosts to the lobby: game ended, game recovered,
   rematch, conduct incident), `AnomalySink` (hosts and connections to the anti-cheat),
   `SessionEvents` (auth to realtime: sessions revoked), `SanctionEvents` (anti-cheat to the lobby:
-  ban applied, refunds pending). Every method posts and returns; none blocks.
+  ban pending, ban applied, refunds pending). Every method posts and returns; none blocks.
 
 ## 5. Subsystems
 
@@ -319,9 +319,11 @@ A panic in room code is caught: the request gets `Error{Internal}` and the game 
 that panicked is retried a second later). A request for a game the sender does not play gets
 `Error{NotInGame}` and the anomaly `foreign_game`. Anomalies go to `AnomalySink::record`; the kinds
 `foreign_game`, and `out_of_turn` and `illegal_move` in a synchronised position, are certain
-cheats: with `AUTO_SANCTION_CERTAIN_CHEATS` the host ends the game as a forfeit at the arrival of
-the request, sends the sender a fatal `Error{CheatDetected}` (close 4302) and calls
-`AnomalySink::sanction_certain` (6.5).
+cheats: with `AUTO_SANCTION_CERTAIN_CHEATS` the host first calls `AnomalySink::sanction_certain`
+(6.5), which tells the lobby before it returns (`SanctionEvents::sanction_pending`), so the ban
+holds before anything of it reaches the client; then it ends the game as a forfeit at the arrival
+of the request and sends the sender a fatal `Error{CheatDetected}` (close 4302). Queuing the
+forfeit, the `Error` or the close before that call would let a client that reconnects at once in.
 
 **Recovery.** At start each shard rebuilds its games from the journal: a running game is restored
 with the restart rules of 6.4 and announced to the lobby (`HostEvents::game_recovered`), a game
@@ -358,8 +360,13 @@ On success the players count as in a game, leave their queues and their live con
 A ban (`SanctionEvents::sanction_applied`, or a stored ban found at a queue join, challenge,
 rematch or game creation) kicks the player (`Notice{Banned}`, `Error{Banned}`, close 4004),
 forfeits a game in progress, and drops the player's queue entry and challenges; a stored ban found
-at Hello refuses that connection the same way. Revoked sessions close their connections
-(`Notice{SessionRevoked}`, `Error{Unauthorized}`, close 4003).
+at Hello refuses that connection the same way. A ban being written for a certain cheat
+(`SanctionEvents::sanction_pending`) is a hold enforced as a ban from that moment: claims, lobby
+requests and game creations get the ban's answers, the player's other connections are kicked and
+the game is forfeited, but the connection the cheat came from is spared (its owner closes it with
+4302). The stored ban replaces the hold (`sanction_applied`); a hold that no new ban replaces (the
+write failed, or a ban stood already) ends after 60 s (ANTICHEAT.md). Revoked sessions close their
+connections (`Notice{SessionRevoked}`, `Error{Unauthorized}`, close 4003).
 
 ### 5.5 Store (`store`)
 
@@ -522,7 +529,10 @@ connection's start, or from the first byte of a request on a kept-alive connecti
 max=1000`; the 1000th request closes the connection). While an answer is being sent, 30 s without
 a byte in or out, or 60 s since the handler produced it, destroy the connection; a request whose
 handler is still working has no such timer (the handler's own timeout answers it). Unparsable
-requests, heads over 8192 bytes or 100 header lines get raw `400`/`431` answers, count in
+requests (also `Content-Length` given twice or with `Transfer-Encoding`, a target with bytes
+outside ASCII, a chunked body that cannot be decoded) get a raw `400`; heads of 8192 bytes or more
+counted as URL + header names + values, or of more than 64 header lines or 9216 bytes as sent,
+and chunk extensions or trailers over hyper's limits get a raw `431`. They count in
 `scacelith_http_client_errors_total{reason}` and count 1 toward a block (not from a trusted proxy).
 A connection closed after an answer keeps reading for 2 s (1 s after a raw answer) so the client
 reads the answer. Then, per request: `CONNECT` closes the connection, an upgrade goes to the
@@ -795,12 +805,14 @@ waits: the first anomaly of a kind by a player in a game goes to the store write
 repeats within 1 s are coalesced into that row (`count`, `lastAt`), and a certain anomaly gets a
 job of its own (`anticheat::service`).
 
-Certain cheat with `AUTO_SANCTION_CERTAIN_CHEATS=true`: the game in progress ends `Forfeit` (a rated
-game is rated normally: the opponent wins), the player gets `Error{CheatDetected}` (fatal, close
-4302), and one store write job bans the player for `BAN_DURATION_HOURS` (source `auto`, reason
+Certain cheat with `AUTO_SANCTION_CERTAIN_CHEATS=true`: the lobby holds the player out at once
+(`SanctionEvents::sanction_pending`, 5.4), then the game in progress ends `Forfeit` (a rated game is
+rated normally: the opponent wins) and the player gets `Error{CheatDetected}` (fatal, close 4302);
+one store write job bans the player for `BAN_DURATION_HOURS` (source `auto`, reason
 `certain_cheat:<kind>`), sets the integrity level `confirmed` with the evidence and refunds the
-player's victims (6.6). Without it, `forged_type` closes the connection with `ProtocolViolation`
-(4300) and the other kinds are only recorded.
+player's victims (6.6). The ban thus holds from the detection, before the write. Without it,
+`forged_type` closes the connection with `ProtocolViolation` (4300) and the other kinds are only
+recorded.
 
 Statistical assistance detection never bans automatically. The analysis pool replays finished rated
 games with an engine and accumulates, per player and category: accuracy, average centipawn loss,

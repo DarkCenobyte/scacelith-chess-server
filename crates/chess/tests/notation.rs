@@ -89,7 +89,8 @@ fn fen_round_trips_digest_and_repetition_key() {
 
 #[test]
 fn digest_and_key_vectors() {
-    // Protocol posHash vectors and chess::Position::hash() values (chess.md sections 5 and 6).
+    // Protocol posHash vectors (PROTOCOL.md, moves and positions) and the Zobrist keys of the
+    // game's chess::Position::hash() (src/chess/chess.h).
     let start = Position::start();
     assert_eq!(start.digest(), 923_150_620);
     assert_eq!(start.digest(), 0x3706_291C);

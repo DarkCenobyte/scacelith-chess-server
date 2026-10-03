@@ -419,9 +419,11 @@ impl Anticheat {
             // Taken at once (the writer answers later): the next certain anomaly of this game is
             // a repeat.
             sanctioned.insert(key, until);
+            // Before the caller closes the connection: a reconnection finds the hold. Posted
+            // under the lock (a send that never waits): a repeat that finds the key returns after
+            // the hold is posted, so its caller's close comes after it too.
+            events.sanction_pending(SanctionPending { user, until, conn });
         }
-        // Before the caller closes the connection: a reconnection finds the hold.
-        events.sanction_pending(SanctionPending { user, until, conn });
         let cheat = CertainCheat { user, game, kind: kind.to_string(), at: t };
         let (settings, logger) = (inner.settings, inner.logger.clone());
         let fut = inner.store.write(move |db| apply_certain_sanction(db, settings, &cheat, &logger));

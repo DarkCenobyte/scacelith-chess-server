@@ -1,6 +1,7 @@
 //! GIF service: rendering threads (nice 19), the result cache and the generation quotas used by
-//! the two GIF routes (DESIGN 5.9, abuse design 3.6; the Node server's `src/gif/pool.js` and the
-//! service half of `src/http/routes/gif.js`). See docs/RUST-PORT.md.
+//! the two GIF routes (DESIGN 5.9 and API.md "Cost, cache and quotas of the GIFs"; the Node
+//! server's `src/gif/pool.js` and the service half of `src/http/routes/gif.js`). See
+//! docs/RUST-PORT.md.
 //!
 //! ```ignore
 //! let gifs = GifService::new(&config, Arc::new(GameRenderer::<ChessRules>::new()));
