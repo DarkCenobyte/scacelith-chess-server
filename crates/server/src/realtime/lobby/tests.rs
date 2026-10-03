@@ -860,6 +860,35 @@ async fn a_sanction_kicks_forfeits_and_keeps_the_player_out_until_it_ends() {
 }
 
 #[tokio::test]
+async fn a_sanction_during_the_creation_calls_the_game_off() {
+    let h = Harness::new(&[]).await;
+    let mut a = h.online(1).await;
+    let mut b = h.online(2).await;
+    assert_eq!(h.ask(&mut a, challenge("bob", 300, 0, true)).await, Ok(()));
+    let id = received_id(&b.frames());
+    a.frames();
+    // Bob accepts; Alice is banned while the game is being created (the lobby handles both
+    // messages before the creation's result).
+    b.seq += 1;
+    assert!(b.link.begin_request());
+    h.lobby.post(LobbyMsg::Request {
+        link: b.link.clone(),
+        seq: b.seq,
+        req: LobbyRequest::ChallengeAccept { id },
+    });
+    let until = START + 3_600_000;
+    h.lobby.sanction_applied(SanctionApplied { user: 1, until, reason: "engine".into(), refunds: 0 });
+    h.settle().await;
+    assert_banned_kick(&a, until);
+    assert_eq!(h.hosts.created().len(), 1);
+    let calls = h.hosts.calls();
+    assert!(calls.iter().any(|c| matches!(c, HostCall::Cancel { .. })), "{calls:?}");
+    assert_eq!(ack_or_error(&b.frames(), b.seq), Err(ErrorCode::UserUnavailable));
+    assert!(a.attached().is_empty() && b.attached().is_empty());
+    assert_eq!(h.ask(&mut b, queue_join("5+0", false)).await, Ok(()), "Bob is not in a game");
+}
+
+#[tokio::test]
 async fn a_ban_only_in_the_database_stops_the_next_game() {
     let h = Harness::new(&[]).await;
     let mut a = h.online(1).await;

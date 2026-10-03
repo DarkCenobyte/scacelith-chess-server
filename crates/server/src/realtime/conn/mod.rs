@@ -12,15 +12,16 @@
 //!   in progress attached. Up to 8 messages received meanwhile are handled after the `Welcome`.
 //! * **Session** ([`session`]): per message, a token bucket (`WS_MSG_RATE`/`WS_MSG_BURST`; over it
 //!   the message is dropped with `Error{RateLimited}` at most once a second, more than
-//!   max(10, burst) drops in 10 s is a flood), a server type byte is a forgery (certain cheat),
-//!   strict decoding (malformed), `seq` = last + 1 (else dropped, anomaly once, and a gap
-//!   resynchronises). Gestures have a bucket of their own and are dropped silently. Client pings
-//!   are answered once per 950 ms; the heartbeat pings every `HEARTBEAT_INTERVAL_MS` (the first
-//!   half an interval after the connection opened), measures the round trip (an average capped
-//!   at 2 s, a sample across a host stall left out) and closes a connection silent for
-//!   `HEARTBEAT_TIMEOUT_MS` with 1001. Lobby requests go to the lobby actor (answered there with
-//!   one `Ack` or `Error`) after the store reads they need, in order; game messages go to the
-//!   host of the game's shard.
+//!   max(10, burst) drops in 10 s is a flood), a type byte of the server's range (0x80-0xFF) is a
+//!   forgery (certain cheat), strict decoding (malformed; a second Hello is read as at the
+//!   handshake and gets a non-fatal `ProtocolViolation`), `seq` = last + 1 (else dropped, anomaly
+//!   once, and a gap resynchronises). Gestures have a bucket of their own and are dropped
+//!   silently. Client pings are answered once per 950 ms; the heartbeat pings every
+//!   `HEARTBEAT_INTERVAL_MS` (the first half an interval after the connection opened), measures
+//!   the round trip (an average capped at 2 s, a sample across a host stall left out) and closes
+//!   a connection silent for `HEARTBEAT_TIMEOUT_MS` with 1001. Lobby requests go to the lobby
+//!   actor (answered there with one `Ack` or `Error`) after the store reads they need, in order;
+//!   game messages go to the host of the game's shard.
 //! * **Writer** ([`writer`]): drains the [`Outbound`](super::Outbound) queue in batches. Every
 //!   frame the host actors and the lobby send goes through it; over `WS_SEND_BUFFER_LIMIT` bytes
 //!   waiting, the connection closes with 4303 and no `Error`.
@@ -171,8 +172,9 @@ pub(crate) async fn linger(reader: &mut WsReader) {
     while let WsEvent::Message(_) = reader.next().await {}
 }
 
-/// The claim of presence of an admitted connection: released when dropped (the lobby removes it
-/// only while it is still the account's live connection).
+/// A connection's claim of presence, taken before the claim is posted: released when dropped (the
+/// lobby removes it only while it is still the account's live connection, so releasing a claim it
+/// refused or replaced changes nothing).
 #[derive(Debug)]
 pub(crate) struct ClaimGuard {
     lobby: Lobby,
