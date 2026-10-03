@@ -150,8 +150,9 @@ Endpoints that check or hash a password can also answer one of these:
   already has `PASSWORD_HASH_WAITERS_PER_SOURCE` hashes waiting.
 
 Both errors carry a random `retryAfter` of 5 to 15 s. Nothing was changed and no failed attempt
-was counted, and a reset link stays valid. The 429 also gives back the rate-limit tokens that the
-request took.
+was counted (except on [`POST /auth/sso/google/link`](#post-authssogooglelink), whose try of the
+ticket and failure of the account were taken before the hash), and a reset link stays valid. The
+429 also gives back the rate-limit tokens that the request took.
 
 The HTML pages (section 14) answer their errors as HTML pages with the same status codes.
 

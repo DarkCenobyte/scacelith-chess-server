@@ -763,7 +763,7 @@ Endpoints (prefix `/api/v1`):
 | `POST /auth/password/reset` | auth | `{ token, newPassword }` (also the HTML form at `/reset-password`). Rates `auth`, `auth_reset` (`AUTH_RESET_PER_HOUR` 10 per hour per client, 3x per /48, shared, the form included) |
 | `POST /auth/sso/google/start` | auth | `{ codeChallenge, redirectPort }` -> `{ attemptId, authUrl, state, expiresIn }`; the redirect URI is `http://127.0.0.1:<redirectPort>/oauth2/google/<origin tag>` (the game's listener). Rate `sso_start` 30 per 10 min per client, 90 per /48, shared |
 | `POST /auth/sso/google/finish` | auth | `{ attemptId, codeVerifier, state, code, iss?, clientLabel? }` -> login answer / `{ needsUsername, ssoTicket, suggestedUsername }` / `{ needsPassword, linkTicket, username, expiresIn }`. Rate `sso_finish` 30 per min per client |
-| `POST /auth/sso/google/link` | auth | `{ linkTicket, password, clientLabel?, pow? }` -> login answer; the Google link is stored after the password, or after the code of `POST /auth/login/mfa` when MFA is on. 5 tries per ticket, the login's failure counter and proof of work; the account's address gets a notice (mail) once the link is stored. Rate `auth` |
+| `POST /auth/sso/google/link` | auth | `{ linkTicket, password, clientLabel?, pow? }` -> login answer; the Google link is stored after the password, or after the code of `POST /auth/login/mfa` when MFA is on. 5 tries per ticket (a refusal of the hash queue takes one too), the login's failure counter and proof of work; the account's address gets a notice (mail) once the link is stored. Rate `auth` |
 | `POST /auth/sso/complete` | auth | `{ ssoTicket, username }`; the address gets a notice (mail) that Google sign-in created the account. Rate `auth`, its /48 count included |
 | `GET /account/me` | auth | `{ user, ratings, sanctions (active), ban }`; `user`: `{ id, username, email, emailVerified, mfaEnabled, googleLinked, hasPassword, acceptChallenges: 'all'\|'none', createdAt, lastLoginAt, pendingEmail }` (`pendingEmail`: the address of an e-mail change waiting for its link, or null; the login answers carry the same `user`); the integrity level is NOT exposed |
 | `POST /account/password` | auth | `{ currentPassword, newPassword }`: the current password only, never a second factor (by design, even with MFA on); revokes the other sessions |
@@ -1182,8 +1182,9 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   and hashes the new one within it. A request beyond the queue, or whose budget ran out, is
   answered HTTP 503 `{ "error": "server_busy", "retryAfter": s }` with a `Retry-After` header (a
   random 5-15 s, so that the refused clients do not come back together) before anything changed:
-  no failed login is counted and a reset link stays valid. Once the queue is at least half full,
-  one client source (an IPv4 address or an IPv6 /48) may have at most
+  no failed login is counted (except the password step of a Google link, whose try of the ticket
+  and failure of the account are taken before the hash) and a reset link stays valid. Once the
+  queue is at least half full, one client source (an IPv4 address or an IPv6 /48) may have at most
   `PASSWORD_HASH_WAITERS_PER_SOURCE` (2) hashes waiting; its next request is answered 429
   `rate_limited` the same way and gets back the tokens it took from the auth rate limits (the
   local bucket, and the primary's window through `ratelimit.refund`). So one network cannot hold
