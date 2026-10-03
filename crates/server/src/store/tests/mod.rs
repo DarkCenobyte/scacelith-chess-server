@@ -1,5 +1,9 @@
 //! Tests of the store, ported from the Node store suites (store.*.test.js) to the new schema.
 
+mod account_api;
+mod accounts;
+mod migrations;
+mod moderation;
 mod support;
 
 mod smoke {

@@ -108,6 +108,12 @@ pub fn new_user(name: &str, email: Option<&str>) -> NewUser {
     }
 }
 
+/// SHA-256 of `s`, lowercase hex (the token hashes the auth module stores).
+pub fn sha(s: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(s.as_bytes()))
+}
+
 /// A finished game record (white wins by default, 40 plies, rated, 3+2).
 pub fn record(id: u64, white: u32, black: u32) -> GameRecord {
     GameRecord {
