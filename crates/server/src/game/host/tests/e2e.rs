@@ -113,6 +113,8 @@ async fn hosts_play_commit_rate_and_restart_through_their_handles() {
     });
     let update = update.expect("a RatingUpdate");
     assert_eq!((update.white.after, update.black.after), (1480, 1520));
+    // The lobby hears of the end after the RatingUpdate and the journal's commit record.
+    until("the game_ended event", || !events.ended().is_empty()).await;
     assert_eq!(events.ended().iter().map(|e| (e.game, e.rated)).collect::<Vec<_>>(), [(id, true)]);
     let row = store.games().by_id(id).await.expect("read").expect("the committed game");
     assert_eq!((row.summary.status, row.summary.reason), (GS::BlackWins.to_u8(), ER::Checkmate.to_u8()));
