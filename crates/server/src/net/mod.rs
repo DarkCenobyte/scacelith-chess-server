@@ -3,11 +3,13 @@
 //! and frame codec, and the plain-HTTP metrics endpoint. Owner: net. See docs/RUST-PORT.md.
 
 pub mod abuse;
+pub mod gate;
 pub mod guard;
 pub mod health;
 pub mod ip;
 pub mod limits;
 mod linked;
+pub mod tls;
 pub mod upgrade;
 pub mod ws;
 
