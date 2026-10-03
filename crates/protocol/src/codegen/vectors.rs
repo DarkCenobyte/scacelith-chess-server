@@ -987,6 +987,6 @@ fn lenient(b: &mut Builder<'_>, e: &EnumOf<'_>) {
     b.lenient(
         hello,
         Dir::C2s,
-        "Hello of a minor 1 client with an appended field (the server reads its own fields)",
+        "Hello of a minor 1 client with trailing bytes (the server reads its own fields)",
     );
 }

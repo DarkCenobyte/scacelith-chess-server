@@ -905,10 +905,14 @@ impl Shard {
     // ---- internals ----------------------------------------------------------------------------
 
     /// Binds `ep` as the connection of `side`, then reconnects the player (or processes the
-    /// deadlines due at its arrival when it was connected) and sends the snapshot if asked.
+    /// deadlines due at its arrival when it was connected) and sends the snapshot if asked. With a
+    /// snapshot, `ep` is bound once the outcome went out: the snapshot holds what the outcome
+    /// broadcasts (its `PlayerReconnected`, an end), so the player gets its snapshot right after
+    /// the `Welcome` and no event numbered beyond the state it still shows (PROTOCOL.md, "Ordering:
+    /// gseq"), which would make it ask for a `Resync`.
     fn bind(&mut self, game: GameId, side: Side, ep: Endpoint, snapshot: bool, timing: Timing) {
         let Some(entry) = self.rooms.get_mut(&game) else { return };
-        entry.ep[side.index()] = Some(ep.clone());
+        entry.ep[side.index()] = (!snapshot).then(|| ep.clone());
         if ep.rtt_ms() > 0 {
             entry.room.on_rtt(side, f64::from(ep.rtt_ms()));
         }
@@ -926,12 +930,13 @@ impl Shard {
             }
             None => self.reschedule(game),
         }
-        if snapshot
-            && let Some(entry) = self.rooms.get(&game)
-            && let Some(frame) =
+        if snapshot && let Some(entry) = self.rooms.get_mut(&game) {
+            entry.ep[side.index()] = Some(ep.clone());
+            if let Some(frame) =
                 guarded(&self.log, game, "snapshot failed", || entry.room.snapshot_frame(side, timing.now))
-        {
-            ep.send(frame);
+            {
+                ep.send(frame);
+            }
         }
     }
 

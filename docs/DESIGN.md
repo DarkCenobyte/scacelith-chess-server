@@ -72,8 +72,8 @@ watchdog keep-alive. A failure stops what was started and exits with 1. SIGHUP r
 certificate (`RELOADING=1`, then `READY=1`).
 
 **Shutdown** (SIGTERM or SIGINT; a second signal exits at once with 1): `STOPPING=1`,
-`STATUS=draining`; the listeners stop accepting (`/readyz` 503, upgrades 503 `shutting_down`,
-requests in progress finish within `SHUTDOWN_GRACE_MS`), the lobby's timers, the analysis and
+`STATUS=draining`; the listeners stop accepting (`/readyz` 503, upgrades 503 `shutting_down`
+with a `Retry-After` of 2 to 5 s, requests in progress finish within `SHUTDOWN_GRACE_MS`), the lobby's timers, the analysis and
 the retention purge stop, and the connections drain: `Notice{ServerShutdown, arg = grace}`,
 `SHUTDOWN_GRACE_MS`, then `Error{ShuttingDown}` and close 4008. The hosts then make their final
 commits and close their journals, the lobby ends, the API handlers still running get 5 s, the
@@ -205,7 +205,9 @@ database keeps the first one.
 clock hold of a game restored after a restart: 6.4). The opponent gets
 `GameEvent{PlayerDisconnected, arg = grace ms}`. The player's next connection says `Hello`; the
 lobby knows the game in progress, `Welcome.activeGame` names it and the host sends a
-`GameSnapshot`. After the grace without a connection: 6.4. The game client spreads its
+`GameSnapshot`. `Shard::bind` attaches the returning connection only after the outcome of
+`on_reconnect` has gone out, so the snapshot, which carries the gseq of that `PlayerReconnected`,
+comes alone right after `Welcome`, before any event. After the grace without a connection: 6.4. The game client spreads its
 reconnections so that a restart or a full server does not bring every player back at the same
 instant: full jitter (a random delay between 0.5 s and min(30 s, 2 s x 2^n)), 60 to 120 s after
 `ServerFull` (HTTP 503 at the upgrade or close 4006), a first attempt 5 to 35 s after a shutdown
@@ -556,7 +558,10 @@ tokens (400 `bad_upgrade`), `Sec-WebSocket-Version: 13` (426), a valid key (400 
 `origin_forbidden`), the subprotocol `scacelith.rt1` (426 `unsupported_protocol`); then the
 admission: `MAX_CONNECTIONS_PER_IP` per IPv4 address or IPv6 /64 (429 `too_many_connections`) and
 the server's connections against `MAX_CONNECTIONS` plus a reserve of max(16, 2 %) (503
-`server_full`), since the user is not known yet. Refusals count in
+`server_full`), since the user is not known yet, and 503 `admission_error` if the admission fails.
+`shutting_down`, `too_many_connections`, `server_full` and `admission_error` carry `Retry-After`
+and `{"error":"<reason>","retryAfter":s}`, with s drawn at random between 2 and 5 s
+(`net::upgrade::BUSY_RETRY_AFTER_SEC`, `Refusal::busy`). Refusals count in
 `scacelith_ws_handshakes_rejected_total{reason}`. On a dedicated WebSocket port the server reads
 the head itself (8 KiB, 64 header lines).
 

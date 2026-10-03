@@ -160,16 +160,18 @@ published ranges; the experimental ranges are never published, and a published p
      every error code and close code, and the [close-code rule](#errors-and-close-codes);
   4. the `Ping` and `Pong` layouts of both directions.
 * **What a minor may do**, and nothing else: add message types inside the published ranges;
-  append fields at the end of an existing message; add values to open enums; add flag bits,
+  append fields at the end of an existing S2C message; add values to open enums; add flag bits,
   capability bits and close codes; widen the bounds of a C2S field; narrow the bounds of an S2C
-  field. Nothing is removed, renumbered, renamed, retyped or moved; structs, closed enums,
-  constants and ranges never change; a retired enum value stays reserved forever. Every released
-  minor is frozen as `protocol/frozen/v1.<minor>.json`, and `protogen` refuses a schema that breaks
-  these rules.
+  field. A C2S message never gains fields, Hello included: the server decodes strictly, and the
+  frames of older clients would lack them. What clients send in addition is a new C2S message
+  type, gated by a capability bit when it is optional. Nothing is removed, renumbered, renamed,
+  retyped or moved; structs, closed enums, constants and ranges never change; a retired enum value
+  stays reserved forever. Every released minor is frozen as `protocol/frozen/v1.<minor>.json`, and
+  `protogen` refuses a schema that breaks these rules.
 * **Reading a Hello of any minor.** The server reads the 17-byte prefix first: a `proto` it does
   not support is refused with `UnsupportedProtocol` whatever follows. A Hello whose `minor` is
-  higher than the server's may carry fields the server does not know after the ones it knows:
-  the server ignores them (this is the only place where the server accepts trailing bytes).
+  higher than the server's is read the same way, except that bytes after the fields the server
+  knows are ignored (this is the only place where the server accepts trailing bytes).
 * **Fingerprint.** The schema fingerprint is the first four bytes (big-endian) of SHA-256 of the
   canonical schema (prose left out, keys sorted, no whitespace). It appears in `/api/v1/info`, the
   vectors and the logs, and is never a reason to refuse a peer.
@@ -226,8 +228,10 @@ published ranges; the experimental ranges are never published, and a published p
    * a full server (HTTP 503 at the upgrade, `ServerFull`) is retried after 60 s to 120 s;
    * after a shutdown (`Notice{ServerShutdown}`, `ShuttingDown`), the first attempt waits 5 s to
      35 s whatever *n*, which spreads the reconnection wave of a restart;
+   * a `Retry-After` (of an `/api/v1/info` answer, or of an HTTP 429 or 503 at the upgrade) makes
+     the next attempt wait at least that long, and up to half more, 10 minutes at most;
    * a player with a game in progress only has the reconnection grace to come back: attempts are
-     at most 8 s apart (unless the server gave a `Retry-After`), and the first one after a
+     at most 8 s apart (unless a `Retry-After` asks for longer), and the first one after a
      shutdown waits 1 s to 8 s;
    * for 10 minutes after losing a connection that reached `Welcome`, automatic attempts reuse
      the `/api/v1/info` answer of that connection; a 4xx answer other than 429 at the upgrade
@@ -408,9 +412,17 @@ published ranges; the experimental ranges are never published, and a published p
   within 10 s). Gestures use their own bucket (above).
 * **Client pings** beyond one per 950 ms get no `Pong`.
 * **Connections.** The server limits simultaneous WebSocket connections per address
-  (`MAX_CONNECTIONS_PER_IP`, HTTP 429 at the upgrade) and players on the whole server
-  (`MAX_CONNECTIONS`: `ServerFull` at `Hello`, except for a player whose game is in progress).
-  An upgrade answered with HTTP 429 carries `Retry-After`; the client waits that long.
+  (`MAX_CONNECTIONS_PER_IP`, HTTP 429 `too_many_connections` at the upgrade) and players on the
+  whole server (`MAX_CONNECTIONS`: `ServerFull` at `Hello`, except for a player whose game is in
+  progress; upgrades may go max(16, 2 %) beyond it for such players, and beyond that reserve an
+  upgrade gets HTTP 503 `server_full`).
+* **Waiting after a refused upgrade.** Every HTTP 429 or 503 answer to an upgrade carries
+  `Retry-After` (seconds) and the same value as `retryAfter` in its JSON body. For 429
+  `rate_limited` (the per-address limit of every HTTP request, upgrades included: `docs/API.md`)
+  it is the time until the address may send a request again; for the others
+  (`too_many_connections`, `server_full`, `shutting_down` while the server drains) a random 2 s to
+  5 s. The client waits at least that long before its next attempt
+  ([Reconnection](#connection-lifecycle)).
 * **Slow consumers.** A client that does not read its messages (more than `WS_SEND_BUFFER_LIMIT`
   bytes queued) is closed with 4303 and no `Error`; it reconnects and resynchronises.
 * **Lobby limits** have their own errors: `ChallengeLimit`, `RateLimited` for wrong private codes,

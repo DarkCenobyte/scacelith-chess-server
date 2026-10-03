@@ -625,9 +625,15 @@ async fn detach_and_attach_disconnection_events_stale_detach_ignored_snapshot_on
     h.advance(5000);
     let ew3 = Ep::new(12, 1);
     h.shard.attach(id, 1, ew3.endpoint());
-    assert_eq!(game_event(&eb.last()).0, EV::PlayerReconnected);
-    let s = snapshot(ew3.last());
+    let ServerMsg::GameEvent(back) = eb.last() else { panic!("not a GameEvent: {:?}", eb.last()) };
+    assert_eq!(back.kind, EV::PlayerReconnected);
+    // The returning player gets its snapshot alone: it holds the PlayerReconnected (its gseq).
+    let m = ew3.msgs();
+    assert_eq!(m.len(), 1, "{m:?}");
+    let s = snapshot(m[0].clone());
     assert_eq!((s.white_connected, s.running, s.white_ms), (true, Color::White, 180000 - 6000));
+    assert_eq!(s.gseq, back.gseq);
+    assert_eq!(s.gseq, h.room(id).gseq());
 }
 
 #[tokio::test]

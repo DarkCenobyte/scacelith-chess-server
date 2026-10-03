@@ -6,7 +6,10 @@
 //!
 //! * the schema of a frozen minor never changes on the wire (any change needs a new minor);
 //! * a later minor only appends: new message types in a published range; new fields at the end
-//!   of a message; new values of open enums; new flag bits, close codes, capability bits;
+//!   of a server message; new values of open enums; new flag bits, close codes, capability bits;
+//! * a client message never gains fields: the server decodes strictly and must keep accepting the
+//!   frames of older clients, which lack them; anything new that clients send is a new message
+//!   type (behind a capability bit when it is optional);
 //! * nothing frozen is removed, renamed, renumbered or retyped; a retired enum value stays
 //!   reserved forever; structs, constants, ranges and closed enums never change;
 //! * bounds of a client message may only widen (a server keeps accepting older clients); bounds
@@ -121,6 +124,13 @@ fn append_only(new: &Schema, old: &Schema, v: &str, errors: &mut Vec<String>) {
             err(format!("{}: fields were removed", m.key));
             continue;
         }
+        if m.dir == Dir::C2s && n.fields.len() > m.fields.len() {
+            err(format!(
+                "{}: fields were appended to a client message (the server would refuse the frames of older \
+                 clients): add a new message type instead",
+                m.key
+            ));
+        }
         for (a, b) in n.fields.iter().zip(&m.fields) {
             if a.name != b.name || a.ty != b.ty {
                 err(format!("{}.{}: renamed or retyped (fields may only be appended)", m.key, b.name));
@@ -222,6 +232,41 @@ mod tests {
                 .push(serde_json::json!({"name": "Other", "value": 2}));
         });
         assert_eq!(check(&new, &[old]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn client_messages_never_gain_fields_but_new_client_messages_may_come() {
+        let extra = |v: &mut Value| {
+            v["messages"].as_array_mut().unwrap().push(serde_json::json!({
+                "id": 4, "name": "Extra", "dir": "c2s",
+                "fields": [{"name": "seq", "type": "u32"}, {"name": "n", "type": "u8"}]
+            }));
+        };
+        let old = schema(|_| {});
+        // A new client message is how a later minor makes clients send more.
+        let added = schema(|v| {
+            v["minor"] = 1.into();
+            extra(v);
+        });
+        assert_eq!(check(&added, std::slice::from_ref(&old)), Vec::<String>::new());
+        // Fields appended to a client message, Hello or another, are refused.
+        let frozen = [old, added];
+        for (i, key) in [(0, "Hello"), (7, "Extra")] {
+            let new = schema(|v| {
+                v["minor"] = 2.into();
+                extra(v);
+                v["messages"][i]["fields"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({"name": "more", "type": "u8"}));
+            });
+            let errors = check(&new, &frozen);
+            let expected = if key == "Hello" { 2 } else { 1 };
+            assert_eq!(errors.len(), expected, "{errors:?}");
+            for e in &errors {
+                assert!(e.contains(&format!(": {key}: fields were appended to a client message")), "{e}");
+            }
+        }
     }
 
     #[test]
