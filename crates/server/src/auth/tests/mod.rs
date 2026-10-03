@@ -3,8 +3,10 @@
 //! ([`TestApi`]) on an in-memory store, a manual clock, a mailer that keeps its messages and a
 //! cheap Argon2id hasher.
 
+mod account;
 mod login;
 mod mfa;
+mod password;
 mod register;
 mod sessions;
 
