@@ -393,12 +393,12 @@ Restart at quiet hours, keep `SHUTDOWN_GRACE_MS` so clients receive the notice, 
 | `TLS_MODE`, `TLS_MIN_VERSION` | native, TLSv1.2 | same | the TLS gate needs native TLS, and a proxy on the same machine only moves the cost; Windows 10 WinHTTP lacks TLS 1.3 (inferred) |
 | `TLS_CERT_FILE`, `TLS_KEY_FILE` | full chain, ECDSA P-256 key | same | the key type all measurements used; RSA adds about 1 ms per handshake (inferred) |
 | `DATA_DIR` | /var/lib/scacelith | same | as in the README's systemd unit and the backup command above |
-| `SERVER_PUBLIC_HOST` | the public DNS name (A record only) | same | the default `localhost` breaks e-mail links and the Google redirect URI |
+| `SERVER_PUBLIC_HOST` | the public DNS name (A record only) | same | the default `localhost` breaks e-mail links, and Google sign-in works only for players who add the server under this name |
 | `MAIL_TRANSPORT` | smtp | smtp | the default `log` sends nothing, and `REQUIRE_EMAIL_VERIFICATION=true` then blocks new accounts |
 | `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD_FILE` | your relay | same | |
 | `SMTP_PORT`, `SMTP_SECURITY` | 587 and starttls, or 465 and tls | same | many providers, OVH included, block outbound port 25 |
 | `MAIL_FROM` | an address on a domain with SPF and DKIM at that relay | same | the default `no-reply@localhost` is rejected or marked as spam |
-| `SSO_GOOGLE_ENABLED`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET_FILE` | if Google sign-in is used | same | register the `googleRedirectUri` that `check-config` prints |
+| `SSO_GOOGLE_ENABLED`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET_FILE` | if Google sign-in is used | same | a "Desktop app" OAuth client (the README's steps), no redirect URI to register |
 | `SERVER_SECRET_FILE`, `MFA_ENCRYPTION_KEY_FILE` | required, recommended | same | back them up separately from the database |
 
 ### System

@@ -407,6 +407,7 @@ store.sessions.create({ userId, tokenHash, createdAt, expiresAt, idleExpiresAt, 
 store.sessions.byTokenHash(hash) -> { id, userId, createdAt, lastSeenAt, expiresAt, idleExpiresAt, revokedAt } | null
 store.sessions.touch(id, now, idleExpiresAt) ; revoke(id) ; revokeAllForUser(userId, exceptId?) -> [tokenHash] ; listForUser(userId) ; enforceLimit(userId, max)
 store.tokens.create({ kind, tokenHash, userId, data, expiresAt }) ; consume(kind, tokenHash, now) -> row | null (atomic single use) ; get(kind, tokenHash) ; update(kind, tokenHash, data)
+store.tokens.reserveTry(kind, tokenHash, max, now) -> row | null   // atomic: data.tries + 1 on a live row while below max
 store.signups.create({ username, email, passwordHash, tokenHash, createdAt, expiresAt }) -> id ; byUsername(name) / byEmail(email) / byTokenHash(hash) ; renew(id, { tokenHash, expiresAt }) ; delete(id)
   // pending signups (section 8): no account before the link is used
 store.sso.find(provider, subject) -> { userId } | null ; link(userId, provider, subject, email)
@@ -760,8 +761,9 @@ Endpoints (prefix `/api/v1`):
 | `POST /auth/verify-email/resend` | auth | `{ email }` -> 202 always (a pending signup gets its 24 h again, with a new link when the address has no account; an unconfirmed account gets a new link). Rates `auth`, `auth_mail` (`AUTH_MAIL_PER_HOUR` 10 per hour per client, 3x per /48, shared) |
 | `POST /auth/password/forgot` | auth | `{ email }` -> 202 always (a refusal is a 429, which says nothing about the address). Rates `auth`, `auth_forgot` (`AUTH_FORGOT_PER_HOUR` 3 per hour) and `auth_forgot_day` (`AUTH_FORGOT_PER_DAY` 10 per 24 h), per client, 3x per /48, shared; plus one mail per address every 5 minutes |
 | `POST /auth/password/reset` | auth | `{ token, newPassword }` (also the HTML form at `/reset-password`). Rates `auth`, `auth_reset` (`AUTH_RESET_PER_HOUR` 10 per hour per client, 3x per /48, shared, the form included) |
-| `POST /auth/sso/google/start` | auth | `{ codeChallenge }` -> `{ attemptId, authUrl, pollMs, expiresIn }`. Rate `sso_start` 30 per 10 min per client, 90 per /48, shared |
-| `POST /auth/sso/google/poll` | auth | `{ attemptId, codeVerifier }` -> `{ status: 'pending' }` / login answer / `{ needsUsername, ssoTicket }` |
+| `POST /auth/sso/google/start` | auth | `{ codeChallenge, redirectPort }` -> `{ attemptId, authUrl, state, expiresIn }`; the redirect URI is `http://127.0.0.1:<redirectPort>/oauth2/google/<origin tag>` (the game's listener). Rate `sso_start` 30 per 10 min per client, 90 per /48, shared |
+| `POST /auth/sso/google/finish` | auth | `{ attemptId, codeVerifier, state, code, iss?, clientLabel? }` -> login answer / `{ needsUsername, ssoTicket, suggestedUsername }` / `{ needsPassword, linkTicket, username, expiresIn }`. Rate `sso_finish` 30 per min per client |
+| `POST /auth/sso/google/link` | auth | `{ linkTicket, password, clientLabel?, pow? }` -> login answer; the Google link is stored after the password, or after the code of `POST /auth/login/mfa` when MFA is on. 5 tries per ticket, the login's failure counter and proof of work. Rate `auth` |
 | `POST /auth/sso/complete` | auth | `{ ssoTicket, username }`. Rate `auth`, its /48 count included |
 | `GET /account/me` | auth | `{ user, ratings, sanctions (active), ban }`; `user`: `{ id, username, email, emailVerified, mfaEnabled, googleLinked, hasPassword, acceptChallenges: 'all'\|'none', createdAt, lastLoginAt, pendingEmail }` (`pendingEmail`: the address of an e-mail change waiting for its link, or null; the login answers carry the same `user`); the integrity level is NOT exposed |
 | `POST /account/password` | auth | `{ currentPassword, newPassword }`: the current password only, never a second factor (by design, even with MFA on); revokes the other sessions |
@@ -785,9 +787,9 @@ Endpoints (prefix `/api/v1`):
 HTML pages outside `/api`: `GET/POST /verify-email?token=` (POST: 200, 400 for an invalid link,
 409 when another account took the username or the address of a pending signup meanwhile),
 `GET/POST /reset-password?token=`, `GET/POST /confirm-email-change?token=` (POST: 200, 400 for
-an invalid link, 409 when another account took the address meanwhile),
-`GET /auth/sso/google/callback` (auth owner). GET only shows a confirmation button; the state
-change happens on POST (link scanners must not consume tokens).
+an invalid link, 409 when another account took the address meanwhile). GET only shows a
+confirmation button; the state change happens on POST (link scanners must not consume tokens).
+Google sign-in has no page: Google sends the browser back to the game's 127.0.0.1 listener.
 
 ## 6. Game policies
 
@@ -1211,8 +1213,9 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   links), e-mail change (24 h, sent to the new address, at most one link per
   new address every 5 minutes whoever asks; a new request replaces it, a password change or reset
   cancels it, and a request that one of them overtakes gets 403 `invalid_password`: its write is a
-  compare-and-set on the password hash it checked), MFA login challenge (5 min), SSO attempt
-  (10 min), all single-use. The confirmation of an e-mail change (the link used, the new address,
+  compare-and-set on the password hash it checked), MFA login challenge (5 min), SSO attempt,
+  SSO ticket and SSO link ticket (10 min each; a link ticket allows 5 password tries), all
+  single-use. The confirmation of an e-mail change (the link used, the new address,
   the end of the reset and verification links of the former address) and a password reset (the
   link used, the new password, the pending e-mail change and the other reset links cancelled) are
   each one transaction; a store that stays locked answers 503 `server_busy` with
@@ -1240,7 +1243,10 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
   address meanwhile: the page says so, nothing is created). An expired signup frees its username
   at once and the retention purge deletes it. A Google sign-in creating an account
   (`POST /auth/sso/complete`) refuses a username held by the signup of another address like a
-  taken one; an address that only has a pending signup has no account to link. Accounts created
+  taken one; an address that only has a pending signup has no account to link. Google sign-in
+  names an existing account (`needsPassword`, with its username) only to whoever proved its
+  address to Google, and links Google to it only after its password (and second factor) in the
+  game, never by the address alone. Accounts created
   unconfirmed before this design keep their `email_verify` links and the 403 `email_unverified`
   sign-in answer. Without `REQUIRE_EMAIL_VERIFICATION` there is no link: the account is created at
   once, as before, and register and the e-mail change answer 409 `email_taken` (no link would
@@ -1378,7 +1384,8 @@ before, until it is overwritten as it is reused after each checkpoint (it is tru
 * Windows: WinHTTP for HTTPS and WebSocket (TLS by the OS, certificate validation by the OS
   trust store; optional per-server pinned SHA-256 fingerprint for self-signed community
   servers), DPAPI (`CryptProtectData`) for stored tokens, BCrypt for SHA-256 / random / PoW,
-  `ShellExecuteW` for the SSO browser. Linux test builds: OpenSSL.
+  `ShellExecuteW` for the SSO browser (it opens Google's page; Google returns to the game's
+  127.0.0.1 listener). Linux test builds: OpenSSL.
 * The client validates moves with `chess::Position` before sending (the same rules as the
   server), sends the intent when the destination is chosen, keeps the robots' physical
   animations, never flies the camera between seats online, shows the ping discreetly at the top
