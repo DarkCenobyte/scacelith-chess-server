@@ -381,17 +381,17 @@ describe('control plane: matchmaking', () => {
         end(g3.gameId);
         // The limit is reached: no more rated games between them, however made.
         shards.clear();
-        assert.deepEqual(await cp.challengeAccept({ id: pending.id, by: a }), { error: E.UserUnavailable }, 'offered before, accepted after');
+        assert.deepEqual(await cp.challengeAccept({ id: pending.id, by: a }), { error: E.RatedRepeatLimit }, 'offered before, accepted after');
         assert.deepEqual(shards.frames().map((f) => [f.connId, f.name, f.msg.state]), [[20, 'ChallengeStatus', CS.Unavailable]]);
         shards.clear();
-        assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', ...rated }), { error: E.UserUnavailable });
+        assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', ...rated }), { error: E.RatedRepeatLimit });
         assert.deepEqual(shards.frames(), [], 'nothing reaches the target');
         // A wrong time control keeps its own error.
         assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', baseSec: 420, incSec: 1, rated: true }), { error: E.RatedRequiresOfficialTc });
         assert.deepEqual(cp.challengeCreate({ from: a, target: 'bob', baseSec: 5, incSec: 0, rated: true }), { error: E.InvalidTimeControl });
         const p4 = cp.challengeCreate({ from: b, target: '', ...rated });
         shards.clear();
-        assert.deepEqual(await cp.challengeJoinCode({ code: p4.code, by: a }), { error: E.UserUnavailable });
+        assert.deepEqual(await cp.challengeJoinCode({ code: p4.code, by: a }), { error: E.RatedRepeatLimit });
         assert.equal(ch.getCode(p4.code)?.id, p4.id, 'the private game stays pending');
         assert.deepEqual(shards.frames(), [], 'and its creator is told nothing');
         assert.equal(cp.limiter.peek('joincode:u1'), 0, 'not a wrong code');

@@ -1189,7 +1189,7 @@ the generator. The HTTPS account API is described in \`docs/DESIGN.md\` section 
   a minute; \`MatchmakingCooldown\` with \`Notice{MatchmakingCooldown, arg = until}\`). Two players who
   played \`MATCH_REPEAT_LIMIT\` (3) rated games together within \`MATCH_REPEAT_WINDOW_MS\` (an hour),
   whatever made them, are no longer paired by the rated queue, and their rated challenges and private
-  games are refused with \`UserUnavailable\` (a refused \`ChallengeJoinCode\` leaves the code valid),
+  games are refused with \`RatedRepeatLimit\` (a refused \`ChallengeJoinCode\` leaves the code valid),
   their rated rematches with \`RematchUnavailable\`.`,
 
     errors: `* \`Error{ref, code, fatal, game}\`: \`ref\` is the \`seq\` of the refused request (0 when none), \`game\`

@@ -255,7 +255,7 @@ C++ (`src/net/protocol_gen.h`, namespace `net::proto`): one struct per message w
 field names (camelCase), types `uint8_t/uint16_t/uint32_t/int32_t/double/uint64_t(id53)/bool/
 std::string/std::vector<T>`, enums as `enum class` with the schema values, and:
 ```cpp
-constexpr uint16_t kProtocolVersion = 2; constexpr uint16_t kProtocolMin = 2; constexpr uint32_t kSchemaHash = 0x........;
+constexpr uint16_t kProtocolVersion = 3; constexpr uint16_t kProtocolMin = 3; constexpr uint32_t kSchemaHash = 0x........;
 constexpr const char* kWsSubprotocol = "scacelith.v1";
 enum class MsgType : uint8_t { Hello = 0x01, ..., C_Ping = 0x02, S_Ping = 0x82, ... };
 void encode(const Move& m, std::vector<uint8_t>& out);          // appends

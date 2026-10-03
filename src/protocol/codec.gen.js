@@ -10,10 +10,10 @@
 // that a client refuses.
 /* eslint-disable */
 
-export const PROTOCOL_VERSION = 2;
-export const PROTOCOL_MIN = 2;
+export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_MIN = 3;
 export const WS_SUBPROTOCOL = 'scacelith.v1';
-export const SCHEMA_HASH = 0x77977684;
+export const SCHEMA_HASH = 0xf7825229;
 
 export const enums = Object.freeze({
     Color: Object.freeze({ White: 0, Black: 1, None: 2 }),
@@ -44,7 +44,8 @@ export const enums = Object.freeze({
         NoPendingOffer: 111, FlagFell: 112, QueueNotAllowed: 200, ChallengeNotFound: 201,
         UserUnavailable: 202, ChallengeLimit: 203, CannotChallengeSelf: 204, CodeInvalid: 205,
         RatedRequiresOfficialTc: 206, MatchmakingCooldown: 207, InvalidTimeControl: 208,
-        RematchUnavailable: 209, ProtocolViolation: 240, Flood: 241, CheatDetected: 242, SlowConsumer: 243,
+        RematchUnavailable: 209, RatedRepeatLimit: 210, ProtocolViolation: 240, Flood: 241,
+        CheatDetected: 242, SlowConsumer: 243,
     }),
 });
 export const MoveFlag = Object.freeze({
@@ -181,7 +182,7 @@ function toBuffer(x) {
 // Membership tables of the enums whose values are not contiguous.
 function set8(values) { const t = new Uint8Array(256); for (const v of values) t[v] = 1; return t; }
 const EN_EndReason = set8([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 20, 21, 22, 23, 24, 25, 26]);
-const EN_ErrorCode = set8([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 240, 241, 242, 243]);
+const EN_ErrorCode = set8([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 240, 241, 242, 243]);
 
 // Direction of each type byte: 0 unknown, 1 client->server, 2 server->client.
 const DIR = new Uint8Array(256);

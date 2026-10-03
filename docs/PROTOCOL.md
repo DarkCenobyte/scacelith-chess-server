@@ -9,9 +9,9 @@ the generator. The HTTPS account API is described in `docs/DESIGN.md` section 5.
 
 | | |
 |---|---|
-| `PROTOCOL_VERSION` | 2 |
-| `PROTOCOL_MIN` | 2 |
-| `SCHEMA_HASH` | `0x77977684` (2006414980) |
+| `PROTOCOL_VERSION` | 3 |
+| `PROTOCOL_MIN` | 3 |
+| `SCHEMA_HASH` | `0xF7825229` (4152513065) |
 | WebSocket subprotocol | `scacelith.v1` |
 | Messages | 19 client->server, 16 server->client |
 
@@ -339,7 +339,7 @@ Contents: [Wire format](#wire-format) · [Versioning](#versioning-and-compatibil
   a minute; `MatchmakingCooldown` with `Notice{MatchmakingCooldown, arg = until}`). Two players who
   played `MATCH_REPEAT_LIMIT` (3) rated games together within `MATCH_REPEAT_WINDOW_MS` (an hour),
   whatever made them, are no longer paired by the rated queue, and their rated challenges and private
-  games are refused with `UserUnavailable` (a refused `ChallengeJoinCode` leaves the code valid),
+  games are refused with `RatedRepeatLimit` (a refused `ChallengeJoinCode` leaves the code valid),
   their rated rematches with `RematchUnavailable`.
 
 ## Error handling
@@ -983,6 +983,7 @@ Every enum travels as a u8; a value outside the enum is malformed.
 | 207 | `MatchmakingCooldown` |  |
 | 208 | `InvalidTimeControl` |  |
 | 209 | `RematchUnavailable` |  |
+| 210 | `RatedRepeatLimit` | rated challenge or private game refused: MATCH_REPEAT_LIMIT reached with this player |
 | 240 | `ProtocolViolation` |  |
 | 241 | `Flood` |  |
 | 242 | `CheatDetected` |  |

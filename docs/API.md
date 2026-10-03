@@ -443,7 +443,7 @@ curl -sS "$API/info"
   "name": "Scacelith",
   "serverId": "07dd26af-672a-43af-a8af-34011c7e977b",
   "motd": "",
-  "protocol": { "min": 2, "max": 2, "schema": 2006414980, "subprotocol": "scacelith.v1" },
+  "protocol": { "min": 3, "max": 3, "schema": 4152513065, "subprotocol": "scacelith.v1" },
   "wsPort": 443,
   "wsPath": "/ws",
   "registration": "open",

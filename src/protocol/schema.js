@@ -37,8 +37,8 @@
 // passant capture is actually legal ("-" otherwise) and castling is "KQkq" order or "-". This is
 // exactly the prefix of chess::Position::fen() in the game.
 
-export const PROTOCOL_VERSION = 2;
-export const PROTOCOL_MIN = 2;
+export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_MIN = 3;
 export const WS_SUBPROTOCOL = 'scacelith.v1';
 
 export const enums = {
@@ -88,6 +88,7 @@ export const enums = {
         QueueNotAllowed: 200, ChallengeNotFound: 201, UserUnavailable: 202, ChallengeLimit: 203,
         CannotChallengeSelf: 204, CodeInvalid: 205, RatedRequiresOfficialTc: 206,
         MatchmakingCooldown: 207, InvalidTimeControl: 208, RematchUnavailable: 209,
+        RatedRepeatLimit: 210,    // rated challenge or private game refused: MATCH_REPEAT_LIMIT reached with this player
         // Enums travel as u8: keep every value below 256.
         ProtocolViolation: 240, Flood: 241, CheatDetected: 242, SlowConsumer: 243,
     },
