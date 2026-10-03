@@ -4,8 +4,9 @@
 //! tampering, simultaneous results, protocol abuse, the gesture relay, the clock press across a
 //! restart and a crash.
 //!
-//! Port of the Node.js `test/integration/multiplayer.test.js`, adapted to protocol v1: a client
-//! message of an unassigned type is `Malformed` (4001), a wrong protocol version in the `Hello` is
+//! Port of the Node.js `test/integration/multiplayer.test.js`, adapted to protocol v1: a message
+//! with an unassigned type byte of the client's range is `Malformed` (4001), one of the server's
+//! range a forgery (`CheatDetected`, 4302), a wrong protocol version in the `Hello`
 //! `UnsupportedProtocol` (4002). Each test runs its own server.
 
 #[macro_use]
@@ -353,12 +354,19 @@ async fn draw_offer_and_acceptance() {
 #[tokio::test]
 async fn protocol_abuse_garbage_text_frames_and_floods_close_the_connection_the_server_stays_up() {
     let srv = server().await;
-    let acc = account(&srv, "wes").await;
+    let [acc, forger] = accounts(&srv, ["wes", "wil"]).await;
 
-    // A type byte no message has: the message does not decode.
+    // A type byte of the client's range that no message has: the message does not decode.
     let mut c = connect(&srv, &acc.token).await.expect("connected");
-    c.conn().session().send_unsequenced(&[0xEE, 1, 2, 3]).expect("sent");
+    c.conn().session().send_unsequenced(&[0x7E, 1, 2, 3]).expect("sent");
     assert_eq!(c.closed(Duration::from_secs(5)).await.code, close::MALFORMED);
+
+    // The Node.js suite's garbage starts with 0xEE: a type byte of the server's range, a forged
+    // message whatever its type (a certain cheat: closed 4302, then banned).
+    let mut f = connect(&srv, &forger.token).await.expect("connected");
+    f.conn().session().send_unsequenced(&[0xEE, 1, 2, 3]).expect("sent");
+    assert_eq!(f.closed(Duration::from_secs(5)).await.code, close::CHEAT_DETECTED);
+    banned(&srv, &forger.token).await;
 
     let mut c = connect(&srv, &acc.token).await.expect("connected");
     c.conn().session().send_frame(&Frame::new(OP_TEXT, &b"hello"[..]), true).expect("sent");
