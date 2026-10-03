@@ -82,8 +82,12 @@ mod tests {
         assert_eq!((e.status, e.code.as_ref()), (429, "too_many_attempts"));
         assert_eq!(e.extra.get("retryAfter"), Some(&Value::from(5)));
         assert_eq!(retry_after_header(&e).as_deref(), Some("5"));
+        // The password hash queue's 429 is given back and, not being a route limit, never counts
+        // toward a block of the address (http.route-refusals.test.js).
         let e = ApiError::from(AuthError::hash_rate_limited());
         assert!(e.refund_rate && e.is_exposed());
+        assert_eq!((e.status, e.abuse_weight), (429, 0.0));
+        assert_eq!(ApiError::from(AuthError::too_many_attempts(1000)).abuse_weight, 0.0);
         let e = ApiError::from(AuthError::from(StoreError::new(ErrorKind::Busy, "locked")));
         assert_eq!((e.status, e.code.as_ref()), (503, "server_busy"));
         assert_eq!(e.extra.get("retryAfter"), Some(&Value::from(1)));
