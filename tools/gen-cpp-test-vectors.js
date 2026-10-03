@@ -85,7 +85,7 @@ const snapshot = {
 };
 
 const samples = [
-    ['Hello', { seq: 1, proto: 2, schema: P.SCHEMA_HASH, client: 'Scacelith/0.1.0 win64', token: 'sct_' + 'A'.repeat(43) }],
+    ['Hello', { seq: 1, proto: 3, schema: P.SCHEMA_HASH, client: 'Scacelith/0.1.0 win64', token: 'sct_' + 'A'.repeat(43) }],
     ['Hello', { seq: 4294967295, proto: 65535, schema: 0, client: '', token: 'x'.repeat(160) }],
     ['C_Ping', { seq: 2, nonce: 0 }],
     ['C_Pong', { seq: 3, nonce: 4294967295 }],
@@ -110,8 +110,8 @@ const samples = [
     ['Rematch', { seq: 22, game: 77, accept: false }],
     ['C_Gesture', { seq: 23, game: 77, ply: 12, touch: 6, aim: 21, placed: 0, flags: 1, yaw: -3142, pitch: 1571, lean: 0 }],
     ['C_Gesture', { seq: 24, game: 9007199254740991, ply: 1199, touch: 64, aim: 64, placed: 0x7fff, flags: 7, yaw: 3142, pitch: -1571, lean: 100 }],
-    ['Welcome', { proto: 2, serverTime: 1727000000000.5, userId: 42, username: 'alice', serverName: 'Scacelith official ♔', heartbeatMs: 15000, clientPingMs: 10000, maxMsgPerSec: 20, activeGame: 0, gestureRate: 4, gestureBurst: 8 }],
-    ['Welcome', { proto: 2, serverTime: -1.5e300, userId: 0, username: '', serverName: '', heartbeatMs: 0, clientPingMs: 60000, maxMsgPerSec: 0, activeGame: 281474976710657, gestureRate: 0, gestureBurst: 0 }],
+    ['Welcome', { proto: 3, serverTime: 1727000000000.5, userId: 42, username: 'alice', serverName: 'Scacelith official ♔', heartbeatMs: 15000, clientPingMs: 10000, maxMsgPerSec: 20, activeGame: 0, gestureRate: 4, gestureBurst: 8 }],
+    ['Welcome', { proto: 3, serverTime: -1.5e300, userId: 0, username: '', serverName: '', heartbeatMs: 0, clientPingMs: 60000, maxMsgPerSec: 0, activeGame: 281474976710657, gestureRate: 0, gestureBurst: 0 }],
     ['Error', { ref: 5, code: 102, fatal: false, game: 77 }],
     ['Error', { ref: 0, code: 1, fatal: true, game: 0 }],
     ['Error', { ref: 1, code: 209, fatal: false, game: 0 }],

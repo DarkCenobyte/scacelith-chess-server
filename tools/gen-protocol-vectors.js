@@ -97,7 +97,7 @@ function snapshot(over = {}) {
 // ---- typical value of each message ---------------------------------------------------------------
 
 const TYPICAL = {
-    Hello: { seq: 1, proto: 2, schema: SCHEMA_HASH, client: 'Scacelith/1.4.0 (Windows x64)', token: TOKEN },
+    Hello: { seq: 1, proto: 3, schema: SCHEMA_HASH, client: 'Scacelith/1.4.0 (Windows x64)', token: TOKEN },
     C_Ping: { seq: 7, nonce: 123456 },
     C_Pong: { seq: 8, nonce: 0xdeadbeef },
     QueueJoin: { seq: 2, category: '3+2', rated: true },
@@ -116,7 +116,7 @@ const TYPICAL = {
     Resync: { seq: 10, game: GAME },
     Rematch: { seq: 30, game: GAME, accept: true },
     C_Gesture: { seq: 31, game: GAME, ply: 6, touch: 5, aim: 26, placed: 0, flags: 0, yaw: -212, pitch: -598, lean: 35 },
-    Welcome: { proto: 2, serverTime: T0, userId: 1017, username: 'Łukasz', serverName: 'Scacelith Community Server', heartbeatMs: 10000, clientPingMs: 10000, maxMsgPerSec: 20, activeGame: 0, gestureRate: 4, gestureBurst: 8 },
+    Welcome: { proto: 3, serverTime: T0, userId: 1017, username: 'Łukasz', serverName: 'Scacelith Community Server', heartbeatMs: 10000, clientPingMs: 10000, maxMsgPerSec: 20, activeGame: 0, gestureRate: 4, gestureBurst: 8 },
     Error: { ref: 12, code: E.IllegalMove, fatal: false, game: GAME },
     S_Ping: { nonce: 991, serverTime: T0 },
     S_Pong: { nonce: 123456, serverTime: T0 + 12.25 },
@@ -316,9 +316,9 @@ export function buildVectors() {
     ok('Move', { seq: 14, game: 0xffffffff, ply: 8, move: mv('e1g1'), posHash: 0x12345678, thinkMs: 812, drawOffer: false }, 'game = 2^32 - 1, castling e1g1');
     ok('Resign', { seq: 1, game: 1 }, 'smallest game id');
     ok('Rematch', { seq: 31, game: MAX53 - 1, accept: false }, 'decline, game = 2^53 - 2');
-    ok('Welcome', { proto: 2, serverTime: 0, userId: 0xffffffff, username: 'ユキユキユキユキ', serverName: '♜'.repeat(21) + 'x', heartbeatMs: 0, clientPingMs: 0xffffffff, maxMsgPerSec: 0xffff, activeGame: MAX53, gestureRate: 60, gestureBurst: 120 },
+    ok('Welcome', { proto: 3, serverTime: 0, userId: 0xffffffff, username: 'ユキユキユキユキ', serverName: '♜'.repeat(21) + 'x', heartbeatMs: 0, clientPingMs: 0xffffffff, maxMsgPerSec: 0xffff, activeGame: MAX53, gestureRate: 60, gestureBurst: 120 },
         'username at its maximum (24 bytes of 3-byte characters), serverName at its maximum (64 bytes), activeGame = 2^53 - 1, serverTime 0');
-    ok('Welcome', { proto: 2, serverTime: -123456.789, userId: 1, username: 'مُحَمَّد', serverName: '', heartbeatMs: 10000, clientPingMs: 0, maxMsgPerSec: 20, activeGame: GAME, gestureRate: 0, gestureBurst: 0 },
+    ok('Welcome', { proto: 3, serverTime: -123456.789, userId: 1, username: 'مُحَمَّد', serverName: '', heartbeatMs: 10000, clientPingMs: 0, maxMsgPerSec: 20, activeGame: GAME, gestureRate: 0, gestureBurst: 0 },
         'negative f64, Arabic username, empty serverName');
     ok('Error', { ref: 0, code: E.CheatDetected, fatal: true, game: 0 }, 'fatal, no request, no game');
     ok('Error', { ref: 1, code: E.Malformed, fatal: true, game: 0 }, 'smallest ErrorCode');
