@@ -84,6 +84,17 @@ impl TestServer {
         (c, w)
     }
 
+    /// A connection with `token` refused as banned (`Notice{Banned}`, `Error{Banned}`, 4004): the
+    /// notice.
+    async fn refused_as_banned(&self, token: &str) -> proto::Notice {
+        let mut c = self.connect().await;
+        c.hello(token).await;
+        let (notice, error, code) = c.kicked().await;
+        assert_eq!(notice.code, NoticeCode::Banned);
+        assert_eq!((error.code, code), (ErrorCode::Banned, 4004));
+        notice
+    }
+
     /// Two accounts paired by the matchmaker in a rated 5+0 game: (White, Black, game).
     async fn pair(&self) -> (Seat, Seat, GameId) {
         let (alice, bob) = (self.account("alice").await, self.account("bob").await);
@@ -497,26 +508,49 @@ async fn a_ban_refuses_the_hello_and_a_certain_cheat_bans_at_once() {
     assert_eq!((notice.code, notice.arg), (NoticeCode::Banned, until as f64));
     assert_eq!((error.code, code), (ErrorCode::Banned, 4004));
 
-    // A forged server message during a game: closed 4302, the game forfeited, then banned.
+    // A forged server message during a game: closed 4302, the game forfeited, and banned from
+    // that moment: a connection right after the close is refused.
     let (mut white, mut black, game) = server.pair().await;
     white.c.raw(&[MsgType::Welcome.to_u8(), 0, 0, 0, 0]).await;
     let (e, code) = white.c.refused().await;
     assert_eq!((e.code, code), (ErrorCode::CheatDetected, 4302));
+    let notice = server.refused_as_banned(&white.token).await;
     let ServerMsg::GameEnd(end) = black.c.until("GameEnd").await else { unreachable!() };
     assert_eq!((end.game, end.status, end.reason), (game, GameStatus::BlackWins, EndReason::Forfeit));
-    let mut banned = None;
-    for _ in 0..100 {
-        let mut c = server.connect().await;
-        c.hello(&white.token).await;
-        if let ServerMsg::Notice(n) = c.next().await {
-            banned = Some((n, c.refused().await));
+    // The refusal announced the end of the ban then written.
+    let white_id = server.instance().auth().validate_token(&white.token).await.unwrap().unwrap().user_id;
+    let store = server.instance().store();
+    let mut ban = None;
+    for _ in 0..250 {
+        ban = store.sanctions().active_ban(white_id, crate::clock::wall_ms()).await.expect("read");
+        if ban.is_some() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let (notice, (error, code)) = banned.expect("the ban is written");
-    assert_eq!(notice.code, NoticeCode::Banned);
-    assert_eq!((error.code, code), (ErrorCode::Banned, 4004));
+    assert_eq!(ban.expect("the ban is written").ends_at, Some(notice.arg as i64));
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn a_certain_cheat_in_a_game_bans_before_its_close() {
+    let mut server = TestServer::start(&[]).await;
+    let (mut white, mut black, game) = server.pair().await;
+    let mut board = ChessGame::default();
+    white.c.play(game, 0, &mut board, "e2e4").await;
+    for c in [&mut white.c, &mut black.c] {
+        c.until("MoveMade").await;
+    }
+    // White again, in the position both sides have: out of turn, a certain cheat.
+    let seq = white.c.next_seq();
+    let r#move = uci_to_move("d2d4").expect("a UCI move");
+    let pos_hash = Rules::digest(&board);
+    white.c.send(proto::Move { seq, game, ply: 1, r#move, pos_hash, think_ms: 200, draw_offer: false }).await;
+    let (e, code) = white.c.refused().await;
+    assert_eq!((e.code, e.game, code), (ErrorCode::CheatDetected, game, 4302));
+    server.refused_as_banned(&white.token).await;
+    let ServerMsg::GameEnd(end) = black.c.until("GameEnd").await else { unreachable!() };
+    assert_eq!((end.game, end.status, end.reason), (game, GameStatus::BlackWins, EndReason::Forfeit));
     server.stop().await;
 }
 

@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 
 use super::host::{CommitFuture, GameStore};
 use crate::events::{Anomaly, AnomalySink, GameEnded, HostEvents, IncidentKind, RematchRequest};
-use crate::ids::{GameId, UserId};
+use crate::ids::{ConnId, GameId, UserId};
 use crate::store::{CommitEntry, CommitRatings, ErrorKind, GameRecord, RatingChange, StoreError};
 
 use super::rules::{Played, Rules, Side};
@@ -171,7 +171,7 @@ pub enum Recorded {
     /// [`AnomalySink::record`].
     Anomaly(Anomaly),
     /// [`AnomalySink::sanction_certain`].
-    Sanction(UserId, GameId, &'static str),
+    Sanction(UserId, GameId, &'static str, ConnId),
 }
 
 /// How a [`RecordingEvents`] answers rematch requests.
@@ -254,11 +254,11 @@ impl RecordingEvents {
 
     /// The `sanction_certain` calls.
     #[must_use]
-    pub fn sanctions(&self) -> Vec<(UserId, GameId, &'static str)> {
+    pub fn sanctions(&self) -> Vec<(UserId, GameId, &'static str, ConnId)> {
         self.calls()
             .into_iter()
             .filter_map(|c| match c {
-                Recorded::Sanction(u, g, k) => Some((u, g, k)),
+                Recorded::Sanction(u, g, k, conn) => Some((u, g, k, conn)),
                 _ => None,
             })
             .collect()
@@ -325,8 +325,8 @@ impl AnomalySink for RecordingEvents {
         self.push(Recorded::Anomaly(anomaly));
     }
 
-    fn sanction_certain(&self, user: UserId, game: GameId, kind: &'static str) {
-        self.push(Recorded::Sanction(user, game, kind));
+    fn sanction_certain(&self, user: UserId, game: GameId, kind: &'static str, conn: ConnId) {
+        self.push(Recorded::Sanction(user, game, kind, conn));
     }
 }
 

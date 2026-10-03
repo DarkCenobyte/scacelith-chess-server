@@ -8,12 +8,12 @@ use scacelith_protocol::{self as proto, ErrorCode, NoticeCode, ServerMsg};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::{ClaimOutcome, Lobby, LobbyDeps, LobbyMsg, LobbyRequest, Timer};
+use super::{ClaimOutcome, Lobby, LobbyDeps, LobbyMsg, LobbyRequest, SANCTION_HOLD_MS, Timer};
 use crate::clock::{Clock, ManualClock};
 use crate::config::{Config, test_config};
 use crate::events::{
     GameEnded, HostEvents, IncidentKind, NewGame, RematchRequest, SanctionApplied, SanctionEvents,
-    SessionEvents,
+    SanctionPending, SessionEvents,
 };
 use crate::ids::{GameId, UserId};
 use crate::log::Logger;
@@ -886,6 +886,67 @@ async fn a_sanction_during_the_creation_calls_the_game_off() {
     assert_eq!(ack_or_error(&b.frames(), b.seq), Err(ErrorCode::UserUnavailable));
     assert!(a.attached().is_empty() && b.attached().is_empty());
     assert_eq!(h.ask(&mut b, queue_join("5+0", false)).await, Ok(()), "Bob is not in a game");
+}
+
+#[tokio::test]
+async fn a_pending_sanction_bans_at_once_spares_the_cheats_connection_and_gives_way_to_the_ban() {
+    let h = Harness::new(&[]).await;
+    let mut a = h.online(1).await;
+    let _b = h.online(2).await;
+    let game = h.hosts.next_id(1);
+    h.lobby.game_recovered(game, 1, 2);
+    let until = START + 24 * 3_600_000;
+    // The cheat came from Alice's live connection, which its owner closes (CheatDetected).
+    h.lobby.sanction_pending(SanctionPending { user: 1, until, conn: a.link.conn_id() });
+    h.settle().await;
+    assert_eq!(a.out.close_request(), None, "not kicked as banned");
+    assert!(h.hosts.calls().contains(&HostCall::Forfeit { game, user: 1 }));
+    // Banned from now on, as by a sanction: a reconnection, a request, a game.
+    assert_eq!(h.claim(&h.connect(1, 11), None).await, ClaimOutcome::Banned { until });
+    assert_eq!(h.ask(&mut a, queue_join("5+0", false)).await, Err(ErrorCode::Banned));
+    h.game_ended(game, 1, 2);
+    assert_eq!(h.rematch(game, 2, 1, false).await, Err(ErrorCode::RematchUnavailable));
+    // The stored ban replaces the hold and outlasts it; the cheat's connection stays spared.
+    let stored = until + 7;
+    h.lobby.sanction_applied(SanctionApplied { user: 1, until: stored, reason: "cheat".into(), refunds: 0 });
+    h.settle().await;
+    assert_eq!(a.out.close_request(), None);
+    h.clock.advance(SANCTION_HOLD_MS as f64);
+    h.timer(Timer::Sweep).await;
+    assert_eq!(h.claim(&h.connect(1, 12), None).await, ClaimOutcome::Banned { until: stored });
+}
+
+#[tokio::test]
+async fn a_pending_sanction_kicks_the_other_connections_and_holds_a_minute_when_no_ban_comes() {
+    let h = Harness::new(&[]).await;
+    let mut a = h.online(1).await;
+    let mut b = h.online(2).await;
+    assert_eq!(h.ask(&mut a, challenge("bob", 300, 0, true)).await, Ok(()));
+    let id = received_id(&b.frames());
+    a.frames();
+    // Bob accepts; a cheat of Alice from a connection she no longer has is detected while the
+    // game is being created.
+    b.seq += 1;
+    assert!(b.link.begin_request());
+    h.lobby.post(LobbyMsg::Request {
+        link: b.link.clone(),
+        seq: b.seq,
+        req: LobbyRequest::ChallengeAccept { id },
+    });
+    let until = START + 24 * 3_600_000;
+    h.lobby.sanction_pending(SanctionPending { user: 1, until, conn: 99 });
+    h.settle().await;
+    assert_banned_kick(&a, until);
+    let calls = h.hosts.calls();
+    assert!(calls.iter().any(|c| matches!(c, HostCall::Cancel { .. })), "{calls:?}");
+    assert_eq!(ack_or_error(&b.frames(), b.seq), Err(ErrorCode::UserUnavailable));
+    h.release(&a);
+    // No ban comes (its write failed): the hold ends a minute after the cheat.
+    let again = h.connect(1, 11);
+    h.clock.advance((SANCTION_HOLD_MS - 1) as f64);
+    assert_eq!(h.claim(&again, None).await, ClaimOutcome::Banned { until });
+    h.clock.advance(1.0);
+    assert!(matches!(h.claim(&again, None).await, ClaimOutcome::Admitted { .. }));
 }
 
 #[tokio::test]

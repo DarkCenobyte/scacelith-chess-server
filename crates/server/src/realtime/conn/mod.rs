@@ -13,7 +13,8 @@
 //! * **Session** ([`session`]): per message, a token bucket (`WS_MSG_RATE`/`WS_MSG_BURST`; over it
 //!   the message is dropped with `Error{RateLimited}` at most once a second, more than
 //!   max(10, burst) drops in 10 s is a flood), a type byte of the server's range (0x80-0xFF) is a
-//!   forgery (certain cheat), strict decoding (malformed; a second Hello is read as at the
+//!   forgery (certain cheat: the sanction comes first, so that the ban holds before the 4302
+//!   close reaches the client), strict decoding (malformed; a second Hello is read as at the
 //!   handshake and gets a non-fatal `ProtocolViolation`), `seq` = last + 1 (else dropped, anomaly
 //!   once, and a gap resynchronises). Gestures have a bucket of their own and are dropped
 //!   silently. Client pings are answered once per 950 ms; the heartbeat pings every

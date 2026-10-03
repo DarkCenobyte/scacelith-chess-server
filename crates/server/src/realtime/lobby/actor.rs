@@ -16,8 +16,8 @@ use super::{ClaimOutcome, LobbyMsg, LobbyRequest, Timer};
 use crate::anticheat::notices::{REFUND_POLL_MS, RETRY_MS, RefundHost, RefundNotices, RefundPost};
 use crate::clock::SharedClock;
 use crate::config::Config;
-use crate::events::{GameEnded, IncidentKind, NewGame, RematchRequest, SanctionApplied};
-use crate::ids::{self, GameId, UserId};
+use crate::events::{GameEnded, IncidentKind, NewGame, RematchRequest, SanctionApplied, SanctionPending};
+use crate::ids::{self, ConnId, GameId, UserId};
 use crate::log::{self, Logger};
 use crate::matching::challenges::{
     Challenge, ChallengeKind, ChallengePlayer, Challenges, CreateRequest, Started, TargetUser,
@@ -46,6 +46,10 @@ const PLAYER_LIMIT_WINDOW_MS: u64 = 60_000;
 const EXPIRE_EVERY: Duration = Duration::from_secs(1);
 /// Ban cache and rate limit sweep.
 const SWEEP_EVERY: Duration = Duration::from_secs(10);
+/// How long a sanction being written holds its player out at most (ms): the stored ban replaces
+/// the hold when it lands, and none comes when the write fails or a ban stood already (the next
+/// claim or request reads that one).
+pub(crate) const SANCTION_HOLD_MS: i64 = 60_000;
 
 /// What the lobby needs.
 pub(crate) struct LobbyDeps {
@@ -182,6 +186,16 @@ struct Queued {
     rated: bool,
 }
 
+/// The hold of a sanction being written: the player counts as banned until `until` (the end of
+/// the ban being written) while `expires_at` (wall-clock ms) is not reached.
+#[derive(Clone, Copy, Debug)]
+struct Hold {
+    until: i64,
+    expires_at: i64,
+    /// The connection the cheat came from, closed by its owner (0: none).
+    spared: ConnId,
+}
+
 /// The lobby actor.
 pub(crate) struct LobbyActor {
     config: Arc<Config>,
@@ -205,6 +219,8 @@ pub(crate) struct LobbyActor {
     queued: HashMap<UserId, Queued>,
     /// User to ban end (sanctions told to the lobby).
     bans: HashMap<UserId, i64>,
+    /// The holds of the sanctions being written.
+    holds: HashMap<UserId, Hold>,
     creations: HashMap<u64, Creation>,
     next_token: u64,
     /// The rating refund notices (their tasks post to our inbox).
@@ -295,6 +311,7 @@ impl LobbyActor {
             starting: HashSet::new(),
             queued: HashMap::new(),
             bans: HashMap::new(),
+            holds: HashMap::new(),
             creations: HashMap::new(),
             next_token: 0,
             refunds,
@@ -359,6 +376,7 @@ impl LobbyActor {
             LobbyMsg::SessionsRevoked { user, token_hashes } => {
                 self.sessions_revoked(user, token_hashes.as_deref())
             }
+            LobbyMsg::SanctionPending(p) => self.sanction_pending(p),
             LobbyMsg::SanctionApplied(s) => self.sanction_applied(s),
             LobbyMsg::RefundsPending => self.refunds.poll(),
             LobbyMsg::Refund(event) => {
@@ -438,12 +456,24 @@ impl LobbyActor {
         link.end_request();
     }
 
-    /// End of the user's ban: the cached one, else the stored one read by the caller.
+    /// End of the user's ban: the cached one, else the later of a hold's and the stored one read
+    /// by the caller.
     fn ban_until(&self, user: UserId, now: i64, stored: Option<i64>) -> i64 {
         match self.bans.get(&user) {
             Some(&until) if until > now => until,
-            _ => stored.unwrap_or(0),
+            _ => self.held_until(user, now).max(stored.unwrap_or(0)),
         }
+    }
+
+    /// End of the ban a sanction is writing for the user, while its hold lasts (0: none).
+    fn held_until(&self, user: UserId, now: i64) -> i64 {
+        self.holds.get(&user).filter(|h| h.expires_at > now).map_or(0, |h| h.until)
+    }
+
+    /// Whether the lobby was told of the user's ban (a sanction, or a hold), which it enforced
+    /// then.
+    fn ban_known(&self, user: UserId, now: i64) -> bool {
+        self.bans.get(&user).is_some_and(|&until| until > now) || self.held_until(user, now) > now
     }
 
     /// Whether the user is banned now. A ban found only in the database (given with the admin
@@ -454,7 +484,7 @@ impl LobbyActor {
         if until <= now {
             return false;
         }
-        if self.bans.get(&user).is_none_or(|&cached| cached <= now) {
+        if !self.ban_known(user, now) {
             self.enforce_ban(user, until, "stored ban");
         }
         true
@@ -964,7 +994,7 @@ impl LobbyActor {
             return self.finish_creation(creation, Err(ErrorCode::AlreadyInGame), &[]);
         }
         let now = self.now();
-        if [white, black].iter().any(|u| self.bans.get(u).is_some_and(|&until| until > now)) {
+        if [white, black].iter().any(|&u| self.ban_known(u, now)) {
             return self.finish_creation(creation, Err(ErrorCode::UserUnavailable), &[]);
         }
         self.starting.insert(white);
@@ -992,7 +1022,7 @@ impl LobbyActor {
             CreateResult::Banned(banned) => {
                 let users: Vec<UserId> = banned.iter().map(|&(u, _)| u).collect();
                 for (user, until) in banned {
-                    if self.bans.get(&user).is_none_or(|&cached| cached <= now) {
+                    if !self.ban_known(user, now) {
                         self.enforce_ban(user, until, "stored ban");
                     }
                 }
@@ -1007,7 +1037,7 @@ impl LobbyActor {
                 // forfeit, so the game is called off as if the ban had come first.
                 let banned: Vec<UserId> = [creation.white, creation.black]
                     .into_iter()
-                    .filter(|u| self.bans.get(u).is_some_and(|&until| until > now))
+                    .filter(|&u| self.ban_known(u, now))
                     .collect();
                 if !banned.is_empty() {
                     self.hosts.cancel(game);
@@ -1189,25 +1219,48 @@ impl LobbyActor {
 
     // ---- sanctions and sessions -----------------------------------------------------------------
 
+    /// A ban for a certain cheat is being written: the player is held out as if banned until
+    /// `until`, from now on and for [`SANCTION_HOLD_MS`] at most. The connection the cheat came
+    /// from is spared (its owner closes it with `CheatDetected`), any other is kicked.
+    fn sanction_pending(&mut self, p: SanctionPending) {
+        let expires_at = self.now() + SANCTION_HOLD_MS;
+        self.holds.insert(p.user, Hold { until: p.until, expires_at, spared: p.conn });
+        log_security!(self.log, "sanction pending", { "userId": p.user, "until": p.until });
+        self.exclude(p.user, p.until, p.conn);
+    }
+
+    /// A sanction is stored: it replaces the hold, if any (whose connection stays spared).
     fn sanction_applied(&mut self, s: SanctionApplied) {
         let end = if s.until > 0 { s.until } else { self.now() + reads::PERMANENT_BAN_HOLD_MS };
+        let spared = self.holds.remove(&s.user).map_or(0, |h| h.spared);
         self.bans.insert(s.user, end);
-        self.enforce_ban(s.user, end, &s.reason);
+        log_security!(self.log, "sanction applied", { "userId": s.user, "until": end, "reason": s.reason });
+        self.exclude(s.user, end, spared);
         if s.refunds > 0 {
             self.refunds.poll();
         }
     }
 
-    /// A banned player is kicked, forfeits their running game and leaves the queue and their
-    /// challenges.
+    /// Enforces a ban found in the database, as a sanction is.
     fn enforce_ban(&mut self, user: UserId, end: i64, reason: &str) {
         log_security!(self.log, "sanction applied", { "userId": user, "until": end, "reason": reason });
-        self.kick(
-            user,
-            "banned",
-            proto::close_code_for(ErrorCode::Banned).unwrap_or(4004),
-            &[frames::notice(NoticeCode::Banned, end as f64), frames::error(0, ErrorCode::Banned, true, 0)],
-        );
+        self.exclude(user, end, 0);
+    }
+
+    /// A banned player is kicked (but from `spared`, a connection its owner closes itself; 0:
+    /// none), forfeits their running game and leaves the queue and their challenges.
+    fn exclude(&mut self, user: UserId, end: i64, spared: ConnId) {
+        if self.presence.get(user).is_some_and(|link| link.conn_id() != spared) {
+            self.kick(
+                user,
+                "banned",
+                proto::close_code_for(ErrorCode::Banned).unwrap_or(4004),
+                &[
+                    frames::notice(NoticeCode::Banned, end as f64),
+                    frames::error(0, ErrorCode::Banned, true, 0),
+                ],
+            );
+        }
         if let Some(&game) = self.active_games.get(&user) {
             self.hosts.forfeit_user(game, user);
         }
@@ -1233,6 +1286,7 @@ impl LobbyActor {
         let now = self.now();
         self.limits.sweep();
         self.bans.retain(|_, until| *until > now);
+        self.holds.retain(|_, h| h.expires_at > now);
     }
 }
 

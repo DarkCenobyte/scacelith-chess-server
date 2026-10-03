@@ -204,7 +204,7 @@ async fn the_forfeit_of_a_certain_cheat_read_after_a_stall_takes_the_arrival_of_
             ((GS::WhiteWins, ER::Forfeit), arrival),
             "after {plies} plies"
         );
-        assert_eq!(h.events.sanctions(), [(2, id, "out_of_turn")]);
+        assert_eq!(h.events.sanctions(), [(2, id, "out_of_turn", 20)]);
         assert_eq!(eb.closed().map(|c| c.code), Some(close::CHEAT_DETECTED));
         h.drain();
         assert!(h.events.conduct().is_empty(), "after {plies} plies");

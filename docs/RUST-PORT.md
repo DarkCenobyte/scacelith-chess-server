@@ -236,7 +236,7 @@ Frozen as "version 1" at the end of the rewrite. Generated from `protocol/scacel
 ## 8. Interfaces between modules
 
 Cross-module events and notification traits live in `crate::events` (`NewGame`, `GameEnded`,
-`RematchRequest`, `Anomaly`, `SanctionApplied`, `HostEvents`, `AnomalySink`, `SessionEvents`,
+`RematchRequest`, `Anomaly`, `SanctionPending`, `SanctionApplied`, `HostEvents`, `AnomalySink`, `SessionEvents`,
 `SanctionEvents`, `Noop`). A module calls a trait object (`Arc<dyn HostEvents>`...) and never
 the concrete type of its peer; `app::start` wires the implementations. Trait methods never block:
 they post to an actor or enqueue a store job.
@@ -314,7 +314,8 @@ Used by the HTTP Bearer hook and by the Hello. Revocations call `SessionEvents`.
 
 Implements `AnomalySink` (the first anomaly of a user, game and kind enqueued on the store writer
 before `record` returns, repeats merged into that row once a second; automatic sanction of certain
-cheats; `Anticheat::flush` at shutdown), applies sanctions and refunds (calls `SanctionEvents`), stores
+cheats, announced to the lobby before `sanction_certain` returns; `Anticheat::flush` at shutdown),
+applies sanctions and refunds (calls `SanctionEvents`), stores
 reports, runs the analysis workers (Stockfish pool, `anticheat::analysis`) on the analysis queue
 and the integrity updates, and provides the `admin` commands.
 

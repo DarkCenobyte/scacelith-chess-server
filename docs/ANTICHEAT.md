@@ -65,6 +65,15 @@ It is idempotent within a game: several certain anomalies of the same game (even
 different shards) produce one ban. Another game is another offence and gets its own ban. In a
 shard the database work runs on the store writer thread (section 1).
 
+The ban holds from the moment the cheat is detected, before it is written: the sanction first
+tells the lobby (`SanctionEvents::sanction_pending`, with the end of the ban being written),
+which from then on answers the player's `Hello`s, lobby requests and games as for a ban, kicks
+their other connections and forfeits their game. The host or the connection that detected the
+cheat calls `AnomalySink::sanction_certain` before it sends the forfeit, the
+`Error{CheatDetected}` and the 4302 close, so a client that reconnects at once is refused
+(`Notice{Banned}`, 4004). The stored ban replaces this hold; a hold that no new ban replaces (the
+write failed, or a ban stood already, which the next `Hello` reads) ends after 60 s.
+
 ### Rating refunds
 
 When a player is banned as a cheater, the rating points their opponents lost to them are given

@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 
 use crate::clock::ManualClock;
 use crate::config::{Config, test_config};
-use crate::events::{SanctionApplied, SanctionEvents};
+use crate::events::{SanctionApplied, SanctionEvents, SanctionPending};
 use crate::ids::{GameId, UserId};
 use crate::matching::elo::{self, EloSettings, Record};
 use crate::store::tests::support::new_user;
@@ -251,6 +251,7 @@ pub fn hold_writer(store: &Store) -> impl Drop {
 /// Records the sanction events.
 #[derive(Default)]
 pub struct Recorder {
+    pub pending: Mutex<Vec<SanctionPending>>,
     pub applied: Mutex<Vec<SanctionApplied>>,
     pub refunds_pending: AtomicUsize,
 }
@@ -258,6 +259,10 @@ pub struct Recorder {
 impl Recorder {
     pub fn new() -> Arc<Recorder> {
         Arc::new(Recorder::default())
+    }
+
+    pub fn pending(&self) -> Vec<SanctionPending> {
+        self.pending.lock().clone()
     }
 
     pub fn applied(&self) -> Vec<SanctionApplied> {
@@ -270,6 +275,10 @@ impl Recorder {
 }
 
 impl SanctionEvents for Recorder {
+    fn sanction_pending(&self, pending: SanctionPending) {
+        self.pending.lock().push(pending);
+    }
+
     fn sanction_applied(&self, sanction: SanctionApplied) {
         self.applied.lock().push(sanction);
     }

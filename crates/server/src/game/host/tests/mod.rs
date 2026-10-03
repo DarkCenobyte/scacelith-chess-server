@@ -555,7 +555,7 @@ async fn a_game_message_from_a_non_player_is_foreign_game_sanctioned_and_the_gam
         a[0].detail,
         serde_json::json!({ "info": format!("message type {}", MsgType::Resign.to_u8()) })
     );
-    assert_eq!(h.events.sanctions(), [(99, id, "foreign_game")]);
+    assert_eq!(h.events.sanctions(), [(99, id, "foreign_game", 77)], "the connection it came from");
     assert_eq!(ep.closed().map(|c| c.code), Some(close::CHEAT_DETECTED));
     assert!(!h.room(id).is_over());
 }
@@ -579,7 +579,7 @@ async fn a_certain_cheat_forfeits_the_game_when_auto_sanction_is_on() {
     assert_eq!(eb.types(), [MsgType::GameEnd]);
     assert_eq!(result(h.room(id)), (GS::BlackWins, ER::Forfeit));
     assert_eq!(ew.closed().map(|c| c.code), Some(close::CHEAT_DETECTED));
-    assert_eq!(h.events.sanctions().iter().map(|s| s.2).collect::<Vec<_>>(), ["out_of_turn"]);
+    assert_eq!(h.events.sanctions(), [(1, id, "out_of_turn", 10)]);
     let c = h.shard.counters();
     assert_eq!(c.rejects.get("NotYourTurn"), Some(&1));
     assert_eq!(c.ended_by_reason.get("Forfeit"), Some(&1));

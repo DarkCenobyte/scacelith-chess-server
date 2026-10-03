@@ -2,6 +2,11 @@
 //! sanction of certain protocol cheats ([`Anticheat`], the [`AnomalySink`] of the hosts and the
 //! connections).
 //!
+//! A sanction is announced to the lobby ([`SanctionEvents::sanction_pending`]) before
+//! [`AnomalySink::sanction_certain`] returns, so the ban holds before its caller closes the
+//! cheater's connection; the store job and its follow-up ([`SanctionEvents::sanction_applied`])
+//! come after.
+//!
 //! Every write goes through the store's single writer thread, which runs its jobs in submission
 //! order: the anomalies recorded right before a commit of finished games are written before it
 //! (the commit's analysis queue policy sees them), and a certain anomaly before the ban it causes.
@@ -28,8 +33,8 @@ use super::refunds::log_refunds;
 use super::sanction::{AppliedSanction, CertainCheat, SanctionSettings, apply_certain_sanction};
 use crate::clock::SharedClock;
 use crate::config::Config;
-use crate::events::{Anomaly, AnomalySink, Noop, SanctionApplied, SanctionEvents};
-use crate::ids::{GameId, UserId};
+use crate::events::{Anomaly, AnomalySink, Noop, SanctionApplied, SanctionEvents, SanctionPending};
+use crate::ids::{ConnId, GameId, UserId};
 use crate::log::Logger;
 use crate::metrics::{self, Counter, CounterVec};
 use crate::store::{NewAnomaly, Severity, Store, StoreError};
@@ -327,7 +332,8 @@ impl Anticheat {
     /// Automatic sanction of a certain cheat: a ban of `BAN_DURATION_HOURS` (source `auto`),
     /// integrity level `confirmed` with the evidence appended, a security event, the rating
     /// refunds of the player's victims ([`apply_certain_sanction`], one store job queued before
-    /// this returns), then [`SanctionEvents::sanction_applied`] for a new ban and
+    /// this returns, after [`SanctionEvents::sanction_pending`]: the lobby holds the player out
+    /// meanwhile), then [`SanctionEvents::sanction_applied`] for a new ban and
     /// [`SanctionEvents::refunds_pending`] when refunds were given. Idempotent within a game:
     /// several certain anomalies of one game make one ban, also while the first one is being
     /// written. Does nothing when `AUTO_SANCTION_CERTAIN_CHEATS` is off.
@@ -340,9 +346,21 @@ impl Anticheat {
         game: GameId,
         kind: &str,
     ) -> impl Future<Output = SanctionResult> + Send + 'static + use<> {
-        let submitted = self.submit_sanction(user, game, kind);
-        let inner = self.inner.clone();
+        self.sanction_from(user, game, kind, 0)
+    }
+
+    /// [`Anticheat::sanction`] of a cheat that came from connection `conn` (0: none), which the
+    /// lobby's hold spares: its owner closes it with `CheatDetected`.
+    fn sanction_from(
+        &self,
+        user: UserId,
+        game: GameId,
+        kind: &str,
+        conn: ConnId,
+    ) -> impl Future<Output = SanctionResult> + Send + 'static + use<> {
         let events = self.events();
+        let submitted = self.submit_sanction(user, game, kind, conn, &*events);
+        let inner = self.inner.clone();
         let kind = kind.to_string();
         async move {
             let (key, fut) = match submitted {
@@ -363,13 +381,16 @@ impl Anticheat {
         }
     }
 
-    /// The synchronous part of [`Anticheat::sanction`]: the idempotency check and the store job.
+    /// The synchronous part of [`Anticheat::sanction`]: the idempotency check, the lobby's hold
+    /// and the store job.
     #[allow(clippy::type_complexity)]
     fn submit_sanction(
         &self,
         user: UserId,
         game: GameId,
         kind: &str,
+        conn: ConnId,
+        events: &dyn SanctionEvents,
     ) -> Result<
         (
             (UserId, GameId),
@@ -383,6 +404,8 @@ impl Anticheat {
         }
         let t = inner.clock.wall_ms();
         let key = (user, game);
+        // The end of the ban the job creates (unless one stands already).
+        let until = t + inner.settings.ban_hours * HOUR_MS;
         {
             let mut sanctioned = inner.sanctioned.lock();
             if let Some(&seen) = sanctioned.get(&key)
@@ -395,8 +418,10 @@ impl Anticheat {
             }
             // Taken at once (the writer answers later): the next certain anomaly of this game is
             // a repeat.
-            sanctioned.insert(key, t + inner.settings.ban_hours * HOUR_MS);
+            sanctioned.insert(key, until);
         }
+        // Before the caller closes the connection: a reconnection finds the hold.
+        events.sanction_pending(SanctionPending { user, until, conn });
         let cheat = CertainCheat { user, game, kind: kind.to_string(), at: t };
         let (settings, logger) = (inner.settings, inner.logger.clone());
         let fut = inner.store.write(move |db| apply_certain_sanction(db, settings, &cheat, &logger));
@@ -514,8 +539,8 @@ impl AnomalySink for Anticheat {
         self.record_anomaly(&anomaly);
     }
 
-    fn sanction_certain(&self, user: UserId, game: GameId, kind: &'static str) {
-        let fut = self.sanction(user, game, kind);
+    fn sanction_certain(&self, user: UserId, game: GameId, kind: &'static str, conn: ConnId) {
+        let fut = self.sanction_from(user, game, kind, conn);
         spawn_detached(async move {
             fut.await;
         });

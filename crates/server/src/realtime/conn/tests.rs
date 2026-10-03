@@ -14,6 +14,8 @@ use scacelith_protocol::{
 use tokio::io::{AsyncWriteExt, DuplexStream};
 
 use super::{ConnContext, ConnSettings, serve};
+use crate::anticheat::Anticheat;
+use crate::anticheat::testing::hold_writer;
 use crate::clock::{ManualClock, SharedClock};
 use crate::config::{Config, test_config};
 use crate::events::{GameEnded, HostEvents};
@@ -26,7 +28,7 @@ use crate::net::ws::{AdmissionPermit, CLOSE_TIMEOUT, WsConnection, WsSettings};
 use crate::realtime::drain::{Drain, DrainPhase};
 use crate::realtime::endpoint::Endpoint;
 use crate::realtime::link::ConnLink;
-use crate::realtime::lobby::{ClaimOutcome, Lobby, LobbyDeps, LobbyMsg, Timer};
+use crate::realtime::lobby::{ClaimOutcome, Lobby, LobbyDeps, LobbyMsg, SANCTION_HOLD_MS, Timer};
 use crate::realtime::testing::{FakeHosts, FakeTokens, HostCall, RecordingAnomalies, TokioClock, name};
 use crate::store::tests::support::TempDir;
 use crate::store::{NewSanction, NewUser, SanctionKind, Source, Store, StoreOptions};
@@ -711,6 +713,41 @@ async fn treats_a_server_type_as_a_certain_cheat() {
         assert_eq!(rig.anomalies.kinds(), ["forged_type"]);
         assert_eq!(rig.anomalies.sanctions(), [(user, 0, "forged_type")]);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_certain_cheat_bans_before_its_close_and_a_ban_that_never_lands_holds_a_minute() {
+    let rig = Rig::new(&[]).await;
+    let game = rig.game_in_progress().await;
+    // The real anti-cheat, whose ban is never written: the store's writer is held.
+    let ac = Anticheat::new(rig.config(), rig.store.clone(), rig.clock.clone());
+    ac.set_sanction_events(Arc::new(rig.lobby.clone()));
+    let ctx = Arc::new(ConnContext { anomalies: Arc::new(ac), ..clone_ctx(&rig.ctx) });
+    let writer = hold_writer(&rig.store);
+    let mut c = rig.connect_with(&ctx);
+    c.hello(ALICE).await;
+    assert_eq!(c.welcome().await.active_game, game);
+    let before = rig.clock.wall_ms();
+    c.raw(&[MsgType::Welcome.to_u8(), 0, 0, 0, 0]).await;
+    let (e, code) = c.refused().await;
+    assert_eq!((e.code, code), (ErrorCode::CheatDetected, 4302), "its own close, not the ban's");
+    let after = rig.clock.wall_ms();
+    assert!(rig.hosts.calls().contains(&HostCall::Forfeit { game, user: 1 }));
+    // Right after the close: refused, with the end of the ban being written.
+    let mut again = rig.connect_with(&ctx);
+    again.hello(ALICE).await;
+    let ServerMsg::Notice(n) = again.next().await else { panic!("a notice first") };
+    let ban_ms = rig.config().ban_duration_hours * 3_600_000;
+    assert_eq!(n.code, NoticeCode::Banned);
+    assert!((before + ban_ms..=after + ban_ms).contains(&(n.arg as i64)), "{n:?}");
+    let (e, code) = again.refused().await;
+    assert_eq!((e.code, code), (ErrorCode::Banned, 4004));
+    // The ban does not land: the hold ends a minute later.
+    tokio::time::sleep(Duration::from_millis(SANCTION_HOLD_MS as u64)).await;
+    let mut back = rig.connect_with(&ctx);
+    back.hello(ALICE).await;
+    back.welcome().await;
+    drop(writer);
 }
 
 #[tokio::test(start_paused = true)]

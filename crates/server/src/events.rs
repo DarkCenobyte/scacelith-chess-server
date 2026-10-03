@@ -6,7 +6,7 @@
 //! | [`HostEvents`] | game host actors | the lobby (realtime) |
 //! | [`AnomalySink`] | game host actors, connection tasks | the anti-cheat service |
 //! | [`SessionEvents`] | auth (sessions revoked) | realtime (closes the connections) |
-//! | [`SanctionEvents`] | anti-cheat (ban applied, refunds) | the lobby (realtime) |
+//! | [`SanctionEvents`] | anti-cheat (ban pending, ban applied, refunds) | the lobby (realtime) |
 //!
 //! Every method is synchronous and must not block: implementations post a message to their actor
 //! or enqueue a store job and return. [`Noop`] implements every trait for tests.
@@ -18,7 +18,7 @@ pub use scacelith_protocol::{EndReason, ErrorCode, GameStatus, PlayerInfo};
 
 pub use crate::matching::conduct::IncidentKind;
 
-use crate::ids::{GameId, UserId};
+use crate::ids::{ConnId, GameId, UserId};
 
 /// A game to create on a host actor.
 #[derive(Clone, Debug, PartialEq)]
@@ -75,6 +75,16 @@ pub struct Anomaly {
     pub pos_matched: bool,
 }
 
+/// A ban for a certain cheat that the anti-cheat is writing ([`SanctionEvents::sanction_pending`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SanctionPending {
+    pub user: UserId,
+    /// Wall-clock end of the ban being written (ms).
+    pub until: i64,
+    /// The connection the cheat came from, which its owner closes with `CheatDetected` (0: none).
+    pub conn: ConnId,
+}
+
 /// A ban applied by the anti-cheat or an administrator.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SanctionApplied {
@@ -111,8 +121,13 @@ pub trait AnomalySink: Send + Sync + 'static {
     fn record(&self, anomaly: Anomaly);
 
     /// A certain cheat (forged message type, ...) when `AUTO_SANCTION_CERTAIN_CHEATS` is on:
-    /// sanctions the user. The caller forfeits the user's games itself.
-    fn sanction_certain(&self, user: UserId, game: GameId, kind: &'static str);
+    /// sanctions the user. `conn` is the connection the cheat came from (0: none): the caller
+    /// closes it with `CheatDetected` and forfeits the user's games itself.
+    ///
+    /// The ban holds from the moment this returns ([`SanctionEvents::sanction_pending`] is
+    /// called before), so the caller calls it before it queues anything that tells the client
+    /// (the forfeit, the `Error`, the close): a client that reconnects then is refused.
+    fn sanction_certain(&self, user: UserId, game: GameId, kind: &'static str, conn: ConnId);
 }
 
 /// Session revocations (password change, sign-out everywhere, deletion, ban).
@@ -125,6 +140,11 @@ pub trait SessionEvents: Send + Sync + 'static {
 
 /// Sanctions and refunds, for the lobby (kick, forfeit, refund notices).
 pub trait SanctionEvents: Send + Sync + 'static {
+    /// A ban for a certain cheat is being written: the lobby enforces it at once, as a hold that
+    /// [`SanctionEvents::sanction_applied`] replaces with the stored ban, or that ends by itself
+    /// a minute later when no new ban comes (the write failed, or a ban stood already).
+    fn sanction_pending(&self, pending: SanctionPending);
+
     fn sanction_applied(&self, sanction: SanctionApplied);
 
     /// New rating refunds may be waiting to be announced (`Notice{RatingRestored}`).
@@ -146,7 +166,7 @@ impl HostEvents for Noop {
 
 impl AnomalySink for Noop {
     fn record(&self, _: Anomaly) {}
-    fn sanction_certain(&self, _: UserId, _: GameId, _: &'static str) {}
+    fn sanction_certain(&self, _: UserId, _: GameId, _: &'static str, _: ConnId) {}
 }
 
 impl SessionEvents for Noop {
@@ -154,6 +174,7 @@ impl SessionEvents for Noop {
 }
 
 impl SanctionEvents for Noop {
+    fn sanction_pending(&self, _: SanctionPending) {}
     fn sanction_applied(&self, _: SanctionApplied) {}
     fn refunds_pending(&self) {}
 }

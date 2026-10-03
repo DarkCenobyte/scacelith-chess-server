@@ -401,12 +401,15 @@ async fn a_certain_cheat_writes_anomaly_ban_integrity_and_refunds_and_makes_one_
     assert!(ac.record_anomaly(&anomaly(a, 42, "illegal_move", Value::Null, true)).certain);
     let until = NOW + w.config.ban_duration_hours * HOUR;
     let first = ac.sanction(a, 42, "illegal_move");
+    // The lobby holds Ann out before the ban is written.
+    assert_eq!(events.pending(), [SanctionPending { user: a, until, conn: 0 }]);
     // The second certain anomaly of the game, while the writer has not answered yet.
     assert_eq!(
         ac.sanction(a, 42, "out_of_turn").await,
         SanctionResult { ban_until: until, applied: false, refunds: 0 }
     );
     assert_eq!(first.await, SanctionResult { ban_until: until, applied: true, refunds: 1 });
+    assert_eq!(events.pending().len(), 1, "one hold per ban");
 
     assert_eq!(w.store.anomalies().for_user(a, 10).await.unwrap()[0].severity, Severity::Certain);
     let ban = w.store.sanctions().active_ban(a, NOW).await.unwrap().unwrap();
@@ -606,11 +609,11 @@ async fn the_sanction_is_off_without_auto_sanction_certain_cheats() {
     let u = w.ids[0];
     let (ac, events) = w.anticheat();
     assert_eq!(ac.sanction(u, 2, "illegal_move").await, SanctionResult::default());
-    AnomalySink::sanction_certain(&ac, u, 3, "forged_type");
+    AnomalySink::sanction_certain(&ac, u, 3, "forged_type", 7);
     barrier(&w.store).await;
     assert!(w.store.sanctions().list(u).await.unwrap().is_empty());
     assert_eq!(w.store.integrity().get(u).await.unwrap().level, IntegrityLevel::None);
-    assert!(events.applied().is_empty());
+    assert!(events.pending().is_empty() && events.applied().is_empty());
 }
 
 #[tokio::test]
@@ -648,8 +651,14 @@ async fn the_sink_spawns_the_follow_up() {
     let (ac, events) = w.anticheat();
     let sink: Arc<dyn AnomalySink> = Arc::new(ac.clone());
     sink.record(anomaly(u, 4, "forged_type", json!({ "type": 200 }), false));
-    sink.sanction_certain(u, 4, "forged_type");
+    sink.sanction_certain(u, 4, "forged_type", 7);
+    // The hold is announced before the call returns, with the connection the cheat came from;
+    // the ban follows once written.
+    let until = NOW + w.config.ban_duration_hours * HOUR;
+    assert_eq!(events.pending(), [SanctionPending { user: u, until, conn: 7 }]);
+    assert!(events.applied().is_empty());
     assert!(eventually(|| events.applied().len() == 1).await);
+    assert_eq!(events.applied()[0].until, until, "the hold announced the ban's end");
     assert_eq!(events.applied()[0].reason, "certain_cheat:forged_type");
     let anomalies = w.store.anomalies().for_user(u, 10).await.unwrap();
     assert_eq!(anomalies.len(), 1);
