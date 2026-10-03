@@ -743,14 +743,18 @@ listener and opens nothing. It posts `finish` and `link` only to the server that
 
 A Google account is never linked to an existing account by its address alone, whether or not
 the server confirmed the address (`REQUIRE_EMAIL_VERIFICATION`). An account that Google created
-is linked when it is created.
+is linked when it is created. The account's address gets a mail when Google sign-in creates an
+account and when it is added to an existing one (after the password and the code), never on a
+later sign-in: it names the account, the server and the time (UTC), and says what to do if it was
+not the owner. The mail never holds a code, a token or an IP address, and a mail that cannot be
+sent does not change the sign-in.
 
 **Accepted residual.** A player talked into sending the whole 127.0.0.1 address bar (it holds the
 code) to someone who started the attempt gives that person a session on an account already
 linked to that Google account (its two-step verification still applies), or a new account bound
 to the player's Google account. In the `needsPassword` case that person still needs the
 account's password. RFC 8252 has no fix for this in the protocol; the device-code flow is not an
-option.
+option. The mails above warn the owner of the address in both cases.
 
 #### POST /auth/sso/google/start
 

@@ -6,7 +6,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import net from 'node:net';
 import { ssoOriginTag } from '../../src/auth/oidc.js';
+import { createMailer } from '../../src/mail/index.js';
 import { sha256Hex } from '../../src/security/keys.js';
 import { createPasswordHasher } from '../../src/security/password.js';
 import { solvePow } from '../../src/security/pow.js';
@@ -38,13 +40,15 @@ function pkce() {
 
 /**
  * A test server with Google sign-in and a fake Google. `shared`: another setup() whose provider,
- * store and clock this server uses (one server, another configuration).
+ * store and clock this server uses (one server, another configuration). `mailer`: as for
+ * startTestServer.
  */
-async function setup(env = {}, shared = null) {
+async function setup(env = {}, shared = null, { mailer } = {}) {
     let s = null;
     // The provider signs with the server's (fake) clock, read once the server exists.
     const idp = shared ? shared.idp : await startFakeOidc({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, now: () => s.now() });
-    s = await startTestServer({ env: { ...SSO_ENV, ...env }, oidcEndpoints: idp.endpoints, ...(shared ? { store: shared.s.store, now: shared.s.now } : {}) });
+    s = await startTestServer({ env: { ...SSO_ENV, ...env }, oidcEndpoints: idp.endpoints, mailer,
+        ...(shared ? { store: shared.s.store, now: shared.s.now } : {}) });
     const post = (p, body, opts = {}) => s.request('POST', p, { body, ...opts });
     /** The game's start, its listener on `port`. */
     async function start({ port = PORT, ip } = {}) {
@@ -692,4 +696,103 @@ test('the SQLite store: the link step, its try counter in one UPDATE, and the ne
     r = await signIn();
     assert.equal(r.status, 200, r.text);
     assert.equal(r.json.user.id, id);
+});
+
+// ---- security notices: a Google-made account, Google added to an account ----------------------
+
+const CREATED = /^A .+ account was created with your Google account$/;
+const ADDED = /^Google sign-in was added to your .+ account$/;
+const notices = (s) => s.mailer.sent.filter((m) => CREATED.test(m.subject) || ADDED.test(m.subject));
+/** The subjects of the notices sent to `to`, every queued mail handled first. */
+async function noticesTo(s, to) {
+    await s.mailer.idle();
+    return notices(s).filter((m) => m.to === to).map((m) => m.subject);
+}
+
+test('notices: one mail when Google creates an account, one when Google is added after the password (and the code); none on a plain Google sign-in; no secret in them', async (t) => {
+    const x = await setup();
+    t.after(x.close);
+    const { s, idp } = x;
+    const name = s.config.serverName;
+    const a = await x.start({ ip: VICTIM });
+    const q = idp.authorize(a.authUrl, claims());
+    const r = await x.finish(a, q, {}, { ip: VICTIM });
+    assert.deepEqual(await noticesTo(s, 'magnus@gmail.com'), [], 'nothing before the account exists');
+    const c = await x.post(COMPLETE, { ssoTicket: r.json.ssoTicket, username: 'MagnusH' }, { ip: VICTIM });
+    assert.equal(c.status, 200, c.text);
+    assert.deepEqual(await noticesTo(s, 'magnus@gmail.com'), [`A ${name} account was created with your Google account`]);
+    const created = notices(s)[0].text;
+    for (const part of ['Hello MagnusH', '"MagnusH"', new Date(s.now()).toUTCString(), '"Sign out everywhere"', `administrator of ${name}`]) {
+        assert.ok(created.includes(part), part);
+    }
+    for (let i = 0; i < 2; i++) assert.equal((await x.signIn(claims())).r.status, 200);
+    assert.equal((await noticesTo(s, 'magnus@gmail.com')).length, 1, 'a plain Google sign-in sends nothing');
+
+    // Google added to a password account: once its password passes.
+    await s.createUser({ username: 'Judit', email: 'judit@gmail.com', password: PW });
+    const j = await x.signIn(claims({ sub: '2001', email: 'judit@gmail.com' }), { ip: VICTIM });
+    assert.equal(j.r.json.needsPassword, true, j.r.text);
+    assert.equal((await x.link(j.r.json.linkTicket, 'wrong password 1')).status, 401);
+    assert.deepEqual(await noticesTo(s, 'judit@gmail.com'), [], 'not for a wrong password');
+    const l = await x.link(j.r.json.linkTicket, PW, {}, { ip: VICTIM });
+    assert.equal(l.status, 200, l.text);
+    assert.deepEqual(await noticesTo(s, 'judit@gmail.com'), [`Google sign-in was added to your ${name} account`]);
+    const added = notices(s).at(-1).text;
+    for (const part of ['Hello Judit', '"Judit"', new Date(s.now()).toUTCString(), '"Forgot password"', '"Sign out everywhere"', `administrator of ${name}`]) {
+        assert.ok(added.includes(part), part);
+    }
+    assert.equal((await x.signIn(claims({ sub: '2001', email: 'judit@gmail.com' }))).r.status, 200);
+    assert.equal((await noticesTo(s, 'judit@gmail.com')).length, 1, 'the next Google sign-in sends nothing');
+
+    // With two-step verification: only once the code passes.
+    await s.createUser({ username: 'Hou', email: 'hou@gmail.com', password: PW });
+    const secret = await enableMfa(s, 'Hou');
+    const h = await x.signIn(claims({ sub: '2002', email: 'hou@gmail.com' }));
+    const step = await x.link(h.r.json.linkTicket, PW);
+    assert.equal(step.json.mfaRequired, true, step.text);
+    assert.equal((await x.post(MFA, { mfaToken: step.json.mfaToken, code: totp(secret, s.now() - 3600000) })).status, 401);
+    assert.deepEqual(await noticesTo(s, 'hou@gmail.com'), [], 'not before the code');
+    const m = await x.post(MFA, { mfaToken: step.json.mfaToken, code: totp(secret, s.now()) });
+    assert.equal(m.status, 200, m.text);
+    assert.equal((await noticesTo(s, 'hou@gmail.com')).length, 1);
+
+    // Never a code, state, ticket, token, password, PKCE verifier, link or IP address.
+    const secrets = [q.code, q.state, a.attemptId, a.verifier, r.json.ssoTicket, c.json.token, j.r.json.linkTicket, l.json.token,
+        step.json.mfaToken, m.json.token, PW, VICTIM, '198.51.100'];
+    assert.equal(notices(s).length, 3);
+    for (const mail of notices(s)) {
+        for (const v of secrets) assert.ok(!mail.text.includes(v) && !mail.subject.includes(v), `${mail.subject}: ${v}`);
+        assert.doesNotMatch(mail.text, /\b(sct|sso|mfa)_|https?:\/\/|\b\d{1,3}(\.\d{1,3}){3}\b/);
+    }
+});
+
+test('notices: an SMTP failure never fails the Google sign-in; with MAIL_TRANSPORT=none nothing reaches the SMTP server', async (t) => {
+    // An SMTP server that drops every connection.
+    let connections = 0;
+    const smtp = net.createServer((c) => { connections++; c.destroy(); });
+    await new Promise((r) => smtp.listen(0, '127.0.0.1', r));
+    t.after(() => new Promise((r) => smtp.close(r)));
+    for (const transport of ['smtp', 'none']) {
+        const env = { MAIL_TRANSPORT: transport, SMTP_HOST: '127.0.0.1', SMTP_PORT: String(smtp.address().port) };
+        const x = await setup(env, null, { mailer: (config, log) => createMailer({ config, log }) });
+        t.after(x.close);
+        const { s } = x;
+        const before = capturedLogs.length, connected = connections;
+        const { r } = await x.signIn(claims());
+        const c = await x.post(COMPLETE, { ssoTicket: r.json.ssoTicket, username: 'MagnusH' });
+        assert.equal(c.status, 200, `${transport}: ${c.text}`);
+        await s.createUser({ username: 'Judit', email: 'judit@gmail.com', password: PW });
+        const j = await x.signIn(claims({ sub: '2001', email: 'judit@gmail.com' }));
+        const l = await x.link(j.r.json.linkTicket, PW);
+        assert.equal(l.status, 200, `${transport}: ${l.text}`);
+        await s.mailer.idle();
+        const failed = capturedLogs.slice(before).filter((line) => line.includes('e-mail not sent'));
+        if (transport === 'smtp') {
+            assert.ok(connections >= connected + 2, 'both notices went to the SMTP server');
+            for (const tpl of ['ssoAccountCreated', 'ssoLinked']) assert.ok(failed.some((line) => line.includes(tpl)), tpl);
+        } else {
+            assert.equal(connections, connected, 'MAIL_TRANSPORT=none');
+            assert.deepEqual(failed, []);
+        }
+    }
 });

@@ -20,8 +20,11 @@
 //             username } when an account with a password uses the address.
 //  4. link    { linkTicket, password }: the account's password, typed in the game (5 tries per
 //             ticket, the login's failure counter and proof of work). The link is stored then, or,
-//             with two-step verification on, once POST /auth/login/mfa accepts a code.
-//  5. complete (new accounts) { ssoTicket, username } creates the account, links it and logs in.
+//             with two-step verification on, once POST /auth/login/mfa accepts a code; the
+//             account's address gets a notice (mail ssoLinked).
+//  5. complete (new accounts) { ssoTicket, username } creates the account, links it and logs in;
+//             the address gets a notice (mail ssoAccountCreated). A sign-in by an existing link
+//             sends none.
 //
 // INVARIANT: A Google identity is attached to an existing account only after the person proved
 // the Google address (ID token, email_verified) AND the account (its current password, plus its
@@ -171,9 +174,11 @@ export function createSso(svc) {
      * factor) was proven for `proven` ({ sub, email, pwh }), in one transaction with the checks
      * that the account is still the one proven: active, the same address and password hash, two-step
      * verification as it was (410 sso_expired otherwise). 409 sso_already_linked when the Google
-     * identity was linked to another account meanwhile. The link confirms the address.
+     * identity was linked to another account meanwhile. The link confirms the address, and the
+     * address gets a notice (mail ssoLinked).
      */
     function linkProven(user, proven, ip, { expectMfa }) {
+        let linked = null;
         try {
             svc.atomically(() => {
                 const u = store.users.byId(user.id);
@@ -188,12 +193,14 @@ export function createSso(svc) {
                     throw err;
                 }
                 if (!u.emailVerified) store.users.update(u.id, { emailVerified: true });
+                linked = u;
             });
         } catch (err) {
             if (err && err.code === 'busy' && !err.expose) throw serverBusy(1);
             throw err;
         }
         events.record('sso_linked', { userId: user.id, ip, detail: { provider: PROVIDER, method: expectMfa ? 'password+totp' : 'password' } });
+        svc.mail('ssoLinked', linked.email, { username: linked.username, when: new Date(now()) });
     }
 
     /** POST /auth/sso/google/link: the account's password, typed in the game, before its Google link. */
@@ -259,6 +266,7 @@ export function createSso(svc) {
         store.sso.link(id, PROVIDER, d.sub, d.email);
         events.record('sso_account_created', { userId: id, ip, detail: { provider: PROVIDER } });
         const user = store.users.byId(id);
+        svc.mail('ssoAccountCreated', user.email, { username: user.username, when: new Date(now()) });
         return login.sessionAnswer(user, { clientLabel, ip, method: PROVIDER });
     }
 
