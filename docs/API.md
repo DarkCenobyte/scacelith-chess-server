@@ -601,7 +601,8 @@ gone. Errors:
 - 401 `invalid_code`;
 - 403 `banned`, 403 `email_unverified`;
 - after the password step of a Google link (`POST /auth/sso/google/link`) only: 410
-  `sso_expired` (the account changed meanwhile) and 409 `sso_already_linked`.
+  `sso_expired` (the account changed meanwhile), 409 `sso_already_linked`, and 503 `server_busy`
+  with `retryAfter: 1` (the store stayed locked: nothing was linked; start again from the game).
 
 ```sh
 curl -sS "$API/auth/login/mfa" -H 'Content-Type: application/json' \

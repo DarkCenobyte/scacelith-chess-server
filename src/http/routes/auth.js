@@ -10,7 +10,8 @@
 //        -> 200 { token, expiresAt, user } | 200 { mfaRequired: true, mfaToken, expiresIn }
 //        errors: 401 invalid_credentials, 403 email_unverified | banned{until}, 428 pow_required, 429 too_many_attempts{retryAfter}
 //   POST /auth/login/mfa       { mfaToken, code? , recoveryCode? } -> 200 { token, expiresAt, user }
-//        errors: 401 invalid_mfa_token | invalid_code, 403 banned, 429
+//        errors: 401 invalid_mfa_token | invalid_code, 403 banned | email_unverified, 429, and after a Google link step
+//                410 sso_expired, 409 sso_already_linked, 503 server_busy{retryAfter: 1}
 //   POST /auth/logout, /auth/logout-all (bearer) -> 200 { status: 'logged_out' }
 //   GET  /auth/sessions (bearer) -> { sessions: [{ id, createdAt, lastSeenAt, expiresAt, clientLabel, current }] }
 //   DELETE /auth/sessions/:id (bearer) -> { status: 'revoked' } | 404
