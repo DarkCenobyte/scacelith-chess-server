@@ -980,12 +980,15 @@ the generator. The HTTPS account API is described in \`docs/DESIGN.md\` section 
    in a game restored after a restart, below) and the opponent receives
    \`GameEvent{PlayerDisconnected, arg = grace ms}\`. The client reconnects with
    exponential backoff and full jitter (attempt n waits a uniform random time between 0.5 s and
-   min(30 s, 2 s x 2^n); n is reset by a successful \`Welcome\`), sends a new \`Hello\` (seq starts
-   again at 1 on the new connection) and receives \`Welcome\` then \`GameSnapshot\`. A full server
-   (HTTP 503 at the upgrade, \`Error{ServerFull}\` or close 4006) is retried after 60 s to 120 s.
-   After a shutdown (\`Notice{ServerShutdown}\`, \`Error{ShuttingDown}\` or close 4008) the first
-   attempt waits 5 s to 35 s, which spreads the reconnection wave of a restart, and the first HTTP
-   503 that follows is the restart, retried like a failure (a later one is a full server again).
+   min(30 s, 2 s x 2^n); n starts again at 0 only after a connection that stayed up for 60 s after
+   its \`Welcome\`, so a server that closes right after \`Welcome\` is not called again every 0.5 s
+   to 2 s), sends a new \`Hello\` (seq starts again at 1 on the new connection) and receives
+   \`Welcome\` then \`GameSnapshot\`. A full server (HTTP 503 at the upgrade, \`Error{ServerFull}\`
+   or close 4006) is retried after 60 s to 120 s. After a shutdown (\`Notice{ServerShutdown}\`,
+   \`Error{ShuttingDown}\` or close 4008) the first attempt after a connection that reached
+   \`Welcome\` waits 5 s to 35 s whatever n, which spreads the reconnection wave of a restart, and
+   the first HTTP 503 that follows is the restart, retried like a failure (a later one is a full
+   server again).
    A player whose game is in progress only has the reconnection grace to come back: at least
    \`RECONNECT_GRACE_MIN_MS\` (15 s by default), and \`RECOVERY_GRACE_MS\` (90 s by default) for a
    game the server restored after a restart. Their attempts are 8 s apart at most, whatever the
