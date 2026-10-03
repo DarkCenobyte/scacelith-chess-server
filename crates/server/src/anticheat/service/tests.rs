@@ -143,6 +143,80 @@ async fn non_certain_anomalies_are_coalesced_while_their_job_waits_for_the_write
 }
 
 #[tokio::test]
+async fn a_flood_of_repeats_costs_one_row_per_flush_period_even_with_an_idle_writer() {
+    let w = world(&[], &["ann"]).await;
+    let a = w.ids[0];
+    let g = next_game_id();
+    let (ac, _) = w.anticheat();
+    // A client that sends a pointless claim every 20 ms: the writer is idle between them.
+    for _ in 0..50 {
+        ac.record_anomaly(&anomaly(a, g, "nothing_to_claim", Value::Null, true));
+        ac.record_anomaly(&anomaly(a, g, "bad_seq", Value::Null, true));
+        barrier(&w.store).await;
+        w.clock.advance(20.0);
+    }
+    // The first anomaly of each kind is written at once (the analysis queue policy sees it);
+    // the repeats of the next second wait for one batch.
+    let rows = |kind: &str, rows: &[crate::store::Anomaly]| rows.iter().filter(|r| r.kind == kind).count();
+    let written = w.store.anomalies().for_user(a, 1000).await.unwrap();
+    assert_eq!((rows("nothing_to_claim", &written), rows("bad_seq", &written)), (1, 1));
+    assert!(eventually(|| ac.pending_count() == 0).await, "the timer writes the repeats");
+    barrier(&w.store).await;
+    let written = w.store.anomalies().for_user(a, 1000).await.unwrap();
+    assert_eq!((rows("nothing_to_claim", &written), rows("bad_seq", &written)), (2, 2));
+    let counted: u64 = written
+        .iter()
+        .filter(|r| r.kind == "bad_seq")
+        .map(|r| r.detail.as_ref().and_then(|d| d.get("count")).and_then(Value::as_u64).unwrap_or(1))
+        .sum();
+    assert_eq!(counted, 50, "every repeat is counted");
+    // A second later, the next anomaly of the kind is written at once again.
+    w.clock.advance(f64::from(FLUSH_MS));
+    ac.record_anomaly(&anomaly(a, g, "bad_seq", Value::Null, true));
+    barrier(&w.store).await;
+    assert_eq!(ac.pending_count(), 0);
+    assert_eq!(rows("bad_seq", &w.store.anomalies().for_user(a, 1000).await.unwrap()), 3);
+}
+
+#[tokio::test]
+async fn flush_writes_the_waiting_repeats_at_once() {
+    let w = world(&[], &["ann"]).await;
+    let a = w.ids[0];
+    let g = next_game_id();
+    let (ac, _) = w.anticheat();
+    ac.record_anomaly(&anomaly(a, g, "flood", Value::Null, false));
+    barrier(&w.store).await;
+    w.clock.advance(5.0);
+    ac.record_anomaly(&anomaly(a, g, "flood", Value::Null, false));
+    ac.record_anomaly(&anomaly(a, g, "flood", Value::Null, false));
+    barrier(&w.store).await;
+    assert_eq!(ac.pending_count(), 1, "the repeats wait for the timer");
+    ac.flush();
+    barrier(&w.store).await;
+    assert_eq!(ac.pending_count(), 0);
+    let rows = w.store.anomalies().for_user(a, 10).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    let repeats = rows.iter().find_map(|r| r.detail.as_ref()?.get("count")).cloned();
+    assert_eq!(repeats, Some(json!(2)));
+}
+
+#[test]
+fn outside_a_runtime_the_repeats_are_written_with_the_next_writer_turn() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let w = rt.block_on(world(&[], &["ann"]));
+    let a = w.ids[0];
+    let g = next_game_id();
+    let (ac, _) = w.anticheat();
+    ac.record_anomaly(&anomaly(a, g, "bad_seq", Value::Null, false));
+    rt.block_on(barrier(&w.store));
+    ac.record_anomaly(&anomaly(a, g, "bad_seq", Value::Null, false));
+    assert_eq!(ac.pending_count(), 1);
+    rt.block_on(barrier(&w.store));
+    assert_eq!(ac.pending_count(), 0, "no timer to wait for");
+    assert_eq!(rt.block_on(w.store.anomalies().for_user(a, 10)).unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn certain_anomalies_get_a_job_of_their_own() {
     let w = world(&[], &["ann"]).await;
     let a = w.ids[0];
@@ -183,8 +257,9 @@ async fn unknown_kinds_are_recorded_as_info_under_the_label_unknown() {
     let (ac, _) = w.anticheat();
     let long: &'static str = "x123456789x123456789x123456789x123456789-cut";
     ac.record_anomaly(&anomaly(a, 0, "weird\nkind", Value::Null, false));
-    // One label for every unknown kind: written apart, they are not coalesced.
+    // One label for every unknown kind: written a batching period apart, they are not coalesced.
     barrier(&w.store).await;
+    w.clock.advance(f64::from(FLUSH_MS));
     ac.record_anomaly(&anomaly(a, 0, long, Value::Null, false));
     barrier(&w.store).await;
     let rows = w.store.anomalies().for_user(a, 10).await.unwrap();
@@ -289,6 +364,24 @@ async fn anomalies_recorded_before_a_commit_are_seen_by_its_analysis_queue_polic
     assert_eq!(priority(flagged.id), Some(Priority::Signal), "the anomaly was stored before the commit");
     assert_eq!(priority(plain.id), Some(Priority::Ordinary));
     assert_eq!(w.store.anomalies().for_user(a, 10).await.unwrap()[0].kind, "clock_implausible");
+}
+
+#[tokio::test]
+async fn the_first_anomaly_of_a_game_is_written_before_its_commit_even_right_after_another_game() {
+    let w = world(&[], &["ann", "ben"]).await;
+    let (a, b) = (w.ids[0], w.ids[1]);
+    let (ac, _) = w.anticheat();
+    let first = game(a, b, WHITE_WINS, NOW);
+    let second = game(b, a, WHITE_WINS, NOW);
+    ac.record_anomaly(&anomaly(a, first.id, "clock_implausible", Value::Null, true));
+    barrier(&w.store).await;
+    // The same kind by the same player a moment later, in another game: not a repeat.
+    w.clock.advance(10.0);
+    ac.record_anomaly(&anomaly(a, second.id, "clock_implausible", Value::Null, true));
+    w.store.finish_batch(vec![second.clone()]).await.unwrap();
+    let jobs = w.store.analysis().next(10, Some("w".into()), NOW).await.unwrap();
+    let priority = jobs.iter().find(|j| j.game_id == second.id).map(|j| j.priority);
+    assert_eq!(priority, Some(Priority::Signal), "the anomaly was stored before the commit");
 }
 
 #[tokio::test]
