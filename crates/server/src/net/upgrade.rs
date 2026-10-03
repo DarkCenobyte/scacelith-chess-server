@@ -29,6 +29,7 @@ use crate::http::json::stringify;
 use crate::log::Logger;
 use crate::log_error;
 use crate::metrics::{self, Counter, CounterVec, Histogram};
+use crate::security::ratelimit::random_retry_after;
 
 /// The path of the upgrade.
 pub const WS_PATH: &str = "/ws";
@@ -40,6 +41,11 @@ pub const MAX_HEAD_BYTES: usize = 8192;
 pub const MAX_HEADER_LINES: usize = 64;
 /// How long a refused socket may take to read its answer.
 pub const REFUSAL_LINGER: Duration = Duration::from_secs(1);
+/// The range of the random `Retry-After` (seconds) of the 429 and 503 refusals that only time
+/// ends (too many connections, a full or draining server). Short: the game waits up to half
+/// more than it says, and a player with a game in progress must still come back within the
+/// reconnection grace (at least 15 s), as with the game's own 8 s between attempts at most.
+pub const BUSY_RETRY_AFTER_SEC: (u64, u64) = (2, 5);
 
 const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -249,6 +255,16 @@ impl Refusal {
         Refusal { status, reason, extra: Vec::new(), body }
     }
 
+    /// A 429 or 503 refusal that only time ends, answered `{"error":"<reason>","retryAfter":s}`
+    /// with `Retry-After: s`, `s` drawn in [`BUSY_RETRY_AFTER_SEC`] so that the clients refused
+    /// together do not all come back together.
+    pub fn busy(status: u16, reason: impl Into<Cow<'static, str>>) -> Refusal {
+        let mut r = Refusal::new(status, reason);
+        let s = random_retry_after(BUSY_RETRY_AFTER_SEC.0, BUSY_RETRY_AFTER_SEC.1);
+        r.body = stringify(&json!({ "error": r.reason.as_ref(), "retryAfter": s }));
+        r.header("Retry-After", s.to_string())
+    }
+
     fn header(mut self, name: &'static str, value: impl Into<String>) -> Refusal {
         self.extra.push((name, value.into()));
         self
@@ -306,7 +322,7 @@ impl Refusal {
     }
 }
 
-/// Why the admission hook refused a connection.
+/// Why the admission hook refused a connection (answered as a [`Refusal::busy`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionRefusal {
     /// HTTP status (429 for one address, 503 for the whole server).
@@ -474,7 +490,7 @@ impl WsEndpoint {
             return refused(refusal);
         }
         if !self.is_accepting() {
-            return refused(Refusal::new(503, "shutting_down"));
+            return refused(Refusal::busy(503, "shutting_down"));
         }
         if req.method != "GET" {
             return refused(Refusal::new(405, "method_not_allowed").header("Allow", "GET"));
@@ -515,10 +531,10 @@ impl WsEndpoint {
             None => AdmissionPermit::none(),
             Some(adm) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| adm.acquire(ip))) {
                 Ok(Ok(permit)) => permit,
-                Ok(Err(r)) => return refused(Refusal::new(r.status, r.error)),
+                Ok(Err(r)) => return refused(Refusal::busy(r.status, r.error)),
                 Err(_) => {
                     log_error!(self.log, "admission failed", {"err": {"message": "the admission hook panicked"}});
-                    return refused(Refusal::new(503, "admission_error"));
+                    return refused(Refusal::busy(503, "admission_error"));
                 }
             },
         };
@@ -768,7 +784,9 @@ mod tests {
         let r = ep.check(&with("sec-websocket-version", "8"), peer()).unwrap_err();
         assert_eq!(r.extra, [("Sec-WebSocket-Version", "13".to_string())]);
         ep.set_accepting(false);
-        assert_eq!(ep.check(&request(&[]), peer()).unwrap_err().reason, "shutting_down");
+        let r = ep.check(&request(&[]), peer()).unwrap_err();
+        assert_eq!((r.status, r.reason.as_ref()), (503, "shutting_down"));
+        busy_secs(&r);
         assert_eq!(
             ep.check(&with("upgrade", "h2c"), peer()).unwrap_err().reason,
             "shutting_down",
@@ -815,10 +833,63 @@ mod tests {
         let first = ep.check(&request(&[]), peer()).expect("admitted");
         assert_eq!(*limit.0.lock(), 1);
         let r = ep.check(&request(&[]), peer()).unwrap_err();
-        assert_eq!((r.status, r.body.as_str()), (429, r#"{"error":"too_many_connections"}"#));
+        assert_eq!((r.status, r.reason.as_ref()), (429, "too_many_connections"));
+        busy_secs(&r);
         assert_eq!(ep.check(&with("upgrade", "x"), peer()).unwrap_err().reason, "bad_upgrade", "never asked");
         drop(first);
         assert_eq!(*limit.0.lock(), 0, "released once");
+    }
+
+    /// The `Retry-After` of a [`Refusal::busy`], in its range and the same in the body.
+    fn busy_secs(r: &Refusal) -> u64 {
+        let [("Retry-After", s)] = r.extra.as_slice() else { panic!("one Retry-After: {:?}", r.extra) };
+        let secs: u64 = s.parse().expect("seconds");
+        assert!((BUSY_RETRY_AFTER_SEC.0..=BUSY_RETRY_AFTER_SEC.1).contains(&secs), "{secs}");
+        assert_eq!(r.body, format!(r#"{{"error":"{}","retryAfter":{secs}}}"#, r.reason));
+        secs
+    }
+
+    struct Refuse(AdmissionRefusal);
+
+    impl Admission for Refuse {
+        fn acquire(&self, _ip: IpAddr) -> Result<AdmissionPermit, AdmissionRefusal> {
+            Err(self.0.clone())
+        }
+    }
+
+    struct Broken;
+
+    impl Admission for Broken {
+        fn acquire(&self, _ip: IpAddr) -> Result<AdmissionPermit, AdmissionRefusal> {
+            panic!("an admission bug")
+        }
+    }
+
+    #[test]
+    fn refusals_that_only_time_ends_carry_a_retry_after() {
+        let refusal = |ep: WsEndpoint| ep.check(&request(&[]), peer()).unwrap_err();
+        let (ep, _) = endpoint(&Config::for_tests());
+        let r = refusal(ep.admission(Refuse(AdmissionRefusal::too_many_connections())));
+        assert_eq!((r.status, r.reason.as_ref()), (429, "too_many_connections"));
+        let secs = busy_secs(&r);
+        let text = String::from_utf8(r.to_bytes()).expect("ascii");
+        assert!(text.starts_with("HTTP/1.1 429 Too Many Requests\r\n"), "{text}");
+        assert!(text.contains(&format!("\r\nRetry-After: {secs}\r\n\r\n")), "{text}");
+        let res = r.to_response();
+        assert_eq!(res.headers()["retry-after"], secs.to_string().as_str());
+        let (ep, _) = endpoint(&Config::for_tests());
+        let r = refusal(ep.admission(Refuse(AdmissionRefusal::server_full())));
+        assert_eq!((r.status, r.reason.as_ref()), (503, "server_full"));
+        busy_secs(&r);
+        let (ep, _) = endpoint(&Config::for_tests());
+        let r = refusal(ep.admission(Broken));
+        assert_eq!((r.status, r.reason.as_ref()), (503, "admission_error"));
+        busy_secs(&r);
+        let drawn: HashSet<u64> = (0..200).map(|_| busy_secs(&Refusal::busy(503, "server_full"))).collect();
+        assert!(drawn.len() > 1, "drawn at random: {drawn:?}");
+        // The other refusals end with a change of the request, not with time.
+        let (ep, _) = endpoint(&Config::for_tests());
+        assert!(ep.check(&with("upgrade", "x"), peer()).unwrap_err().extra.is_empty());
     }
 
     #[test]
