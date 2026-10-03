@@ -46,17 +46,27 @@ pub const PASSWORD: &str = "correct horse battery";
 pub async fn new_account(d: &mut Duo, ip: std::net::IpAddr, user: &str, email: &str) {
     use crate::http::Req;
     d.step(&format!("{user}-register"), ip, 202, |_| {
-        Req::post("/api/v1/auth/register").json(serde_json::json!({"username": user, "email": email, "password": PASSWORD}))
+        Req::post("/api/v1/auth/register")
+            .json(serde_json::json!({"username": user, "email": email, "password": PASSWORD}))
     })
     .await;
     let link = format!("{user}.verify");
     d.mail(&format!("{user}-verification-mail"), email, Some(&link)).await;
-    d.step(&format!("{user}-verify"), ip, 200, |s| Req::post("/verify-email").form(&[("token", &s.v(&link))])).await;
+    d.step(&format!("{user}-verify"), ip, 200, |s| {
+        Req::post("/verify-email").form(&[("token", &s.v(&link))])
+    })
+    .await;
     login(d, ip, user, PASSWORD, &format!("{user}.token")).await;
 }
 
 /// Signs in `login` with `password` and saves the token as `var`.
-pub async fn login(d: &mut Duo, ip: std::net::IpAddr, login: &str, password: &str, var: &str) -> crate::duo::Pair {
+pub async fn login(
+    d: &mut Duo,
+    ip: std::net::IpAddr,
+    login: &str,
+    password: &str,
+    var: &str,
+) -> crate::duo::Pair {
     use crate::http::Req;
     let p = d
         .step(&format!("{var}-login"), ip, 200, |_| {
@@ -116,11 +126,19 @@ pub fn profiles() -> Vec<Profile> {
         },
         Profile {
             name: "closed",
-            about: "registration closed, GIFs off, a message of the day, other limits",
+            about: "registration closed, a message of the day",
             env: vec![
                 ("REGISTRATION", "closed"),
-                ("GIF_ENABLED", "false"),
                 ("SERVER_MOTD", "Maintenance at 18:00 UTC"),
+                ("POW_REGISTER_BITS", "0"),
+            ],
+            scenarios: vec![("closed", variants::closed)],
+        },
+        Profile {
+            name: "custom",
+            about: "GIFs off, no custom time controls, two categories, other account rules, a 2 KiB body limit",
+            env: vec![
+                ("GIF_ENABLED", "false"),
                 ("ALLOW_CUSTOM_TIME_CONTROLS", "false"),
                 ("RATED_CATEGORIES", "3+2,10+0"),
                 ("USERNAME_MIN", "4"),
@@ -129,13 +147,25 @@ pub fn profiles() -> Vec<Profile> {
                 ("HTTP_BODY_LIMIT", "2048"),
                 ("POW_REGISTER_BITS", "0"),
             ],
-            scenarios: vec![("closed", variants::closed)],
+            scenarios: vec![("custom", variants::custom)],
         },
         Profile {
             name: "proxy",
             about: "TLS_MODE=proxy: plain HTTP behind a trusted proxy, X-Forwarded-For",
             env: vec![("TLS_MODE", "proxy"), ("TRUSTED_PROXIES", "127.0.0.1"), ("POW_REGISTER_BITS", "0")],
             scenarios: vec![("proxy", variants::proxy)],
+        },
+        Profile {
+            name: "abuse",
+            about: "the per-address layer with low numbers: its threshold, the address block, requests in progress",
+            env: vec![
+                ("HTTP_RATE_PER_IP", "60"),
+                ("ABUSE_BLOCK_REFUSALS_PER_MIN", "10"),
+                ("ABUSE_BLOCK_BASE_SEC", "3"),
+                ("IP_MAX_INFLIGHT", "2"),
+                ("POW_REGISTER_BITS", "0"),
+            ],
+            scenarios: vec![("abuse", variants::abuse)],
         },
     ]
 }

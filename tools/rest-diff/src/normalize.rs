@@ -81,7 +81,9 @@ pub fn normalize(resp: &Resp, ctx: &Context) -> Normalized {
         Body::Empty
     } else if content_type.starts_with("application/json") {
         match json::parse(&resp.body) {
-            Ok(v) => Body::Json { value: normalize_json(None, v, ctx), compact: json::is_compact(&resp.body) },
+            Ok(v) => {
+                Body::Json { value: normalize_json(None, v, ctx), compact: json::is_compact(&resp.body) }
+            }
             Err(_) => Body::Text(normalize_text(&String::from_utf8_lossy(&resp.body), ctx)),
         }
     } else if content_type.starts_with("text/") || content_type.starts_with("application/x-chess-pgn") {
@@ -182,7 +184,9 @@ pub fn normalize_json(key: Option<&str>, v: J, ctx: &Context) -> J {
             items
                 .into_iter()
                 .map(|x| match (key, &x) {
-                    (Some("recoveryCodes"), J::Str(s, _)) if is_recovery_code(s) => J::Mask("recovery-code".into()),
+                    (Some("recoveryCodes"), J::Str(s, _)) if is_recovery_code(s) => {
+                        J::Mask("recovery-code".into())
+                    }
                     _ => normalize_json(key, x, ctx),
                 })
                 .collect(),
@@ -195,7 +199,9 @@ pub fn normalize_json(key: Option<&str>, v: J, ctx: &Context) -> J {
                 return J::Mask(format!("game:{label}"));
             }
             match key {
-                Some(k) if TIME_KEYS.contains(&k) && f > 1e12 => J::Approx { label: "time", value: f, tol: 30_000.0 },
+                Some(k) if TIME_KEYS.contains(&k) && f > 1e12 => {
+                    J::Approx { label: "time", value: f, tol: 30_000.0 }
+                }
                 Some("retryAfter") => J::Approx { label: "seconds", value: f, tol: 1.0 },
                 Some("spentMs" | "clockMs") => J::Approx { label: "clock-ms", value: f, tol: 5_000.0 },
                 _ => J::Num(n),
@@ -219,11 +225,7 @@ pub fn normalize_json(key: Option<&str>, v: J, ctx: &Context) -> J {
                 Some("state" | "attemptId") if is_b64url(&s) && s.len() >= 20 => J::Mask("sso-state".into()),
                 _ => {
                     let t = normalize_text(&s, ctx);
-                    if t == s {
-                        J::Str(s, raw)
-                    } else {
-                        J::Str(t.clone(), json::escape(&t))
-                    }
+                    if t == s { J::Str(s, raw) } else { J::Str(t.clone(), json::escape(&t)) }
                 }
             }
         }
@@ -342,6 +344,9 @@ mod tests {
              {[%clk 0:03:00.0] [%emt 0:00:01.7]}",
             &ctx,
         );
-        assert_eq!(t, "filename=\"scacelith-<G1>.pgn\" 41000000000012 ?token=<token> {[%clk <clock>] [%emt <clock>]}");
+        assert_eq!(
+            t,
+            "filename=\"scacelith-<G1>.pgn\" 41000000000012 ?token=<token> {[%clk <clock>] [%emt <clock>]}"
+        );
     }
 }

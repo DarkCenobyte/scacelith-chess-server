@@ -59,7 +59,11 @@ async fn bodies(d: &mut Duo) {
         ("type-upper", Req::post(LOGIN).body_bytes("Application/JSON", body()), 401),
         ("type-params", Req::post(LOGIN).body_bytes("application/json; foo=bar", body()), 401),
         ("type-json-suffix", Req::post(LOGIN).body_bytes("application/problem+json", body()), 415),
-        ("type-form", Req::post(LOGIN).body_bytes("application/x-www-form-urlencoded", b"login=a&password=b".to_vec()), 415),
+        (
+            "type-form",
+            Req::post(LOGIN).body_bytes("application/x-www-form-urlencoded", b"login=a&password=b".to_vec()),
+            415,
+        ),
         ("type-spaces", Req::post(LOGIN).body_bytes(" application/json ", body()), 401),
         ("type-multipart", Req::post(LOGIN).body_bytes("multipart/form-data; boundary=x", body()), 415),
         ("empty-body-typed", Req::post(LOGIN).body_bytes("application/json", Vec::new()), 400),
@@ -73,12 +77,45 @@ async fn bodies(d: &mut Duo) {
         ("json-number", Req::post(LOGIN).body_bytes("application/json", b"12".to_vec()), 400),
         ("json-whitespace", Req::post(LOGIN).body_bytes("application/json", b"  ".to_vec()), 400),
         ("json-bom", Req::post(LOGIN).body_bytes("application/json", b"\xef\xbb\xbf{}".to_vec()), 400),
-        ("json-invalid-utf8", Req::post(LOGIN).body_bytes("application/json", b"{\"login\":\"\xff\"}".to_vec()), 400),
-        ("json-duplicate-key", Req::post(LOGIN).body_bytes("application/json", br#"{"login":"a","login":"nobody","password":"x"}"#.to_vec()), 401),
-        ("json-deep", Req::post(LOGIN).body_bytes("application/json", format!("{}{}", "[".repeat(200), "]".repeat(200)).into_bytes()), 400),
-        ("json-deep-object", Req::post(LOGIN).body_bytes("application/json", format!("{{\"a\":{}1{}}}", "[".repeat(150), "]".repeat(150)).into_bytes()), 400),
-        ("json-escape-unicode", Req::post(LOGIN).body_bytes("application/json", backslashes(r#"{"login":"BSu006eobody","password":"x"}"#)), 401),
-        ("json-nul-char", Req::post(LOGIN).body_bytes("application/json", backslashes(r#"{"login":"aBSu0000","password":"x"}"#)), 400),
+        (
+            "json-invalid-utf8",
+            Req::post(LOGIN).body_bytes("application/json", b"{\"login\":\"\xff\"}".to_vec()),
+            400,
+        ),
+        (
+            "json-duplicate-key",
+            Req::post(LOGIN)
+                .body_bytes("application/json", br#"{"login":"a","login":"nobody","password":"x"}"#.to_vec()),
+            401,
+        ),
+        (
+            "json-deep",
+            Req::post(LOGIN).body_bytes(
+                "application/json",
+                format!("{}{}", "[".repeat(200), "]".repeat(200)).into_bytes(),
+            ),
+            400,
+        ),
+        (
+            "json-deep-object",
+            Req::post(LOGIN).body_bytes(
+                "application/json",
+                format!("{{\"a\":{}1{}}}", "[".repeat(150), "]".repeat(150)).into_bytes(),
+            ),
+            400,
+        ),
+        (
+            "json-escape-unicode",
+            Req::post(LOGIN)
+                .body_bytes("application/json", backslashes(r#"{"login":"BSu006eobody","password":"x"}"#)),
+            401,
+        ),
+        (
+            "json-nul-char",
+            Req::post(LOGIN)
+                .body_bytes("application/json", backslashes(r#"{"login":"aBSu0000","password":"x"}"#)),
+            400,
+        ),
     ];
     for (name, req, expect) in cases {
         let at = next(&mut n);
@@ -93,8 +130,14 @@ async fn bodies(d: &mut Duo) {
         v.extend_from_slice(b"\"}");
         v
     };
-    d.step("body-at-limit", fresh_ip(), 400, |_| Req::post(LOGIN).body_bytes("application/json", fill(16384))).await;
-    d.step("body-over-limit", fresh_ip(), 413, |_| Req::post(LOGIN).body_bytes("application/json", fill(16385)).fresh()).await;
+    d.step("body-at-limit", fresh_ip(), 400, |_| {
+        Req::post(LOGIN).body_bytes("application/json", fill(16384))
+    })
+    .await;
+    d.step("body-over-limit", fresh_ip(), 413, |_| {
+        Req::post(LOGIN).body_bytes("application/json", fill(16385)).fresh()
+    })
+    .await;
     d.step("body-declared-over-limit", fresh_ip(), 413, |_| {
         raw("POST /api/v1/auth/login HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: 999999\r\n\r\n{")
     })
@@ -103,12 +146,18 @@ async fn bodies(d: &mut Duo) {
         Req::get("/api/v1/info").body_bytes("application/json", vec![b' '; 20000]).fresh()
     })
     .await;
-    d.step("body-on-get-small", fresh_ip(), 200, |_| Req::get("/api/v1/info").body_bytes("application/json", b"{}".to_vec())).await;
+    d.step("body-on-get-small", fresh_ip(), 200, |_| {
+        Req::get("/api/v1/info").body_bytes("application/json", b"{}".to_vec())
+    })
+    .await;
     d.step("body-on-unknown-path", fresh_ip(), 404, |_| {
         Req::post("/api/v1/nope").body_bytes("application/json", fill(20000)).fresh()
     })
     .await;
-    d.step("body-on-405", fresh_ip(), 405, |_| Req::post("/api/v1/info").body_bytes("application/json", fill(20000)).fresh()).await;
+    d.step("body-on-405", fresh_ip(), 405, |_| {
+        Req::post("/api/v1/info").body_bytes("application/json", fill(20000)).fresh()
+    })
+    .await;
     // Chunked bodies.
     d.step("body-chunked", fresh_ip(), 401, |_| {
         raw("POST /api/v1/auth/login HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\nf\r\n{\"login\":\"nobod\r\n12\r\ny\",\"password\":\"x\"}\r\n0\r\n\r\n")
@@ -148,7 +197,11 @@ async fn schemas(d: &mut Duo) {
         ("client-label-too-long", json!({"login": "a", "password": "b", "clientLabel": "c".repeat(65)}), 400),
         ("client-label-null", json!({"login": "a", "password": "b", "clientLabel": null}), 400),
         ("pow-not-object", json!({"login": "a", "password": "b", "pow": "x"}), 400),
-        ("pow-unknown-field", json!({"login": "a", "password": "b", "pow": {"challenge": "c", "nonce": "1", "x": 1}}), 400),
+        (
+            "pow-unknown-field",
+            json!({"login": "a", "password": "b", "pow": {"challenge": "c", "nonce": "1", "x": 1}}),
+            400,
+        ),
         ("pow-missing-nonce", json!({"login": "a", "password": "b", "pow": {"challenge": "c"}}), 400),
         ("unicode-length", json!({"login": "é".repeat(254), "password": "x"}), 401),
         ("astral-length", json!({"login": "\u{1F600}".repeat(127), "password": "x"}), 401),
@@ -163,18 +216,53 @@ async fn schemas(d: &mut Duo) {
     let ip = fresh_ip();
     let others = vec![
         ("register-empty", "/api/v1/auth/register", json!({}), 400),
-        ("register-username-long", "/api/v1/auth/register", json!({"username": "u".repeat(65), "email": "a@b.c", "password": "x"}), 400),
-        ("register-email-long", "/api/v1/auth/register", json!({"username": "u", "email": format!("{}@b.cd", "e".repeat(251)), "password": "x"}), 400),
+        (
+            "register-username-long",
+            "/api/v1/auth/register",
+            json!({"username": "u".repeat(65), "email": "a@b.c", "password": "x"}),
+            400,
+        ),
+        (
+            "register-email-long",
+            "/api/v1/auth/register",
+            json!({"username": "u", "email": format!("{}@b.cd", "e".repeat(251)), "password": "x"}),
+            400,
+        ),
         ("resend-number", "/api/v1/auth/verify-email/resend", json!({"email": 5}), 400),
         ("forgot-extra", "/api/v1/auth/password/forgot", json!({"email": "a@b.cd", "x": true}), 400),
-        ("reset-token-long", "/api/v1/auth/password/reset", json!({"token": "t".repeat(129), "newPassword": "x"}), 400),
+        (
+            "reset-token-long",
+            "/api/v1/auth/password/reset",
+            json!({"token": "t".repeat(129), "newPassword": "x"}),
+            400,
+        ),
         ("mfa-token-missing", "/api/v1/auth/login/mfa", json!({"code": "123456"}), 400),
         ("mfa-no-code", "/api/v1/auth/login/mfa", json!({"mfaToken": "mfa_x"}), 401),
-        ("mfa-code-long", "/api/v1/auth/login/mfa", json!({"mfaToken": "mfa_x", "code": "1".repeat(33)}), 400),
-        ("sso-start-schema", "/api/v1/auth/sso/google/start", json!({"codeChallenge": "x", "redirectPort": 80}), 0),
+        (
+            "mfa-code-long",
+            "/api/v1/auth/login/mfa",
+            json!({"mfaToken": "mfa_x", "code": "1".repeat(33)}),
+            400,
+        ),
+        (
+            "sso-start-schema",
+            "/api/v1/auth/sso/google/start",
+            json!({"codeChallenge": "x", "redirectPort": 80}),
+            0,
+        ),
         ("sso-finish-schema", "/api/v1/auth/sso/google/finish", json!({}), 0),
-        ("sso-link-schema", "/api/v1/auth/sso/google/link", json!({"linkTicket": "sso_x", "password": "p"}), 0),
-        ("sso-complete-schema", "/api/v1/auth/sso/complete", json!({"ssoTicket": "sso_x", "username": "abc"}), 0),
+        (
+            "sso-link-schema",
+            "/api/v1/auth/sso/google/link",
+            json!({"linkTicket": "sso_x", "password": "p"}),
+            0,
+        ),
+        (
+            "sso-complete-schema",
+            "/api/v1/auth/sso/complete",
+            json!({"ssoTicket": "sso_x", "username": "abc"}),
+            0,
+        ),
     ];
     for (name, path, body, expect) in others {
         d.step(&format!("schema-{name}"), ip, expect, |_| Req::post(path).json(body.clone())).await;
@@ -218,6 +306,12 @@ async fn framing(d: &mut Duo) {
         ("fragment", "GET /api/v1/info#frag HTTP/1.1\r\nHost: {host}\r\n\r\n".into(), 0),
         ("raw-quote-in-query", "GET /api/v1/info?a=\"b\" HTTP/1.1\r\nHost: {host}\r\n\r\n".into(), 0),
         ("raw-utf8-in-path", "GET /api/v1/players/\u{e9}t\u{e9} HTTP/1.1\r\nHost: {host}\r\n\r\n".into(), 0),
+        ("raw-utf8-in-query", "GET /api/v1/info?q=\u{e9} HTTP/1.1\r\nHost: {host}\r\n\r\n".into(), 0),
+        ("raw-utf8-in-header-value", "GET /api/v1/info HTTP/1.1\r\nHost: {host}\r\nX-A: \u{e9}\r\n\r\n".into(), 0),
+        ("raw-del-in-path", "GET /api/v1/info\x7f HTTP/1.1\r\nHost: {host}\r\n\r\n".into(), 0),
+        ("cl-list-same", "POST /api/v1/auth/login HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: 2, 2\r\n\r\n{}".into(), 0),
+        ("cl-and-te", "POST /api/v1/auth/login HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n".into(), 0),
+        ("te-chunked-bad-ending", "POST /api/v1/auth/login HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}XX0\r\n\r\n".into(), 0),
         ("nul-in-header", "GET /api/v1/info HTTP/1.1\r\nHost: {host}\r\nX-A: a\0b\r\n\r\n".into(), 0),
         ("ctl-in-target", "GET /api/v1/info?\x01 HTTP/1.1\r\nHost: {host}\r\n\r\n".into(), 0),
     ];
@@ -226,7 +320,8 @@ async fn framing(d: &mut Duo) {
     }
     // Header sizes: Node's limit is 8192 bytes counted as URL + header names + values (the
     // ephemeral ports have 5 digits: "localhost:NNNNN" is 15 characters).
-    let big = |n: usize| format!("GET /api/v1/info HTTP/1.1\r\nHost: {{host}}\r\nX-Big: {}\r\n\r\n", "b".repeat(n));
+    let big =
+        |n: usize| format!("GET /api/v1/info HTTP/1.1\r\nHost: {{host}}\r\nX-Big: {}\r\n\r\n", "b".repeat(n));
     let at_limit = 8192 - "/api/v1/info".len() - "Host".len() - 15 - "X-Big".len();
     d.step("header-head-8192", fresh_ip(), 0, |_| raw(&big(at_limit))).await;
     d.step("header-head-8193", fresh_ip(), 0, |_| raw(&big(at_limit + 1))).await;
@@ -242,11 +337,26 @@ async fn framing(d: &mut Duo) {
         s.push_str("\r\n");
         s
     };
+    // Header lines (Host included): `headers-N` sends N + 1.
     for n in [50, 63, 64, 65, 98, 99, 100] {
         d.step(&format!("headers-{n}"), fresh_ip(), 0, |_| raw(&many(n))).await;
     }
     d.step("headers-1000", fresh_ip(), 0, |_| raw(&many(1000))).await;
     d.step("headers-3000", fresh_ip(), 0, |_| raw(&many(3000))).await;
+    let same_name = |n: usize| {
+        let lines: String = (0..n).map(|i| format!("Cookie: c{i}=1\r\n")).collect();
+        format!("GET /api/v1/info HTTP/1.1\r\nHost: {{host}}\r\n{lines}\r\n")
+    };
+    d.step("headers-63-same-name", fresh_ip(), 0, |_| raw(&same_name(63))).await;
+    d.step("headers-64-same-name", fresh_ip(), 0, |_| raw(&same_name(64))).await;
+    let upgrade = |n: usize| {
+        let lines: String = (0..n).map(|i| format!("X-H{i}: v\r\n")).collect();
+        format!(
+            "GET /ws HTTP/1.1\r\nHost: {{host}}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{lines}\r\n"
+        )
+    };
+    d.step("headers-64-upgrade", fresh_ip(), 0, |_| raw(&upgrade(59))).await;
+    d.step("headers-65-upgrade", fresh_ip(), 0, |_| raw(&upgrade(60))).await;
 }
 
 /// Forms of the `Authorization` header on a session endpoint and an optional-session one.
@@ -287,11 +397,15 @@ async fn authorization(d: &mut Duo) {
         })
         .await;
     }
-    d.step("auth-on-none-route", ip, 200, |_| Req::get("/api/v1/info").header("Authorization", "Bearer x")).await;
+    d.step("auth-on-none-route", ip, 200, |_| Req::get("/api/v1/info").header("Authorization", "Bearer x"))
+        .await;
     d.step("auth-two-headers", ip, 0, |_| {
         Req::get("/api/v1/account/me").header("Authorization", "Bearer a").header("Authorization", "Bearer b")
     })
     .await;
-    d.step("auth-before-body", ip, 401, |_| Req::post("/api/v1/account/password").body_bytes("text/plain", b"x".to_vec())).await;
+    d.step("auth-before-body", ip, 401, |_| {
+        Req::post("/api/v1/account/password").body_bytes("text/plain", b"x".to_vec())
+    })
+    .await;
     d.step("auth-before-404-param", ip, 401, |_| Req::new("DELETE", "/api/v1/auth/sessions/abc")).await;
 }

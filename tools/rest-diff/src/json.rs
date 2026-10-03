@@ -308,13 +308,16 @@ impl Parser<'_> {
                         b't' => out.push('\t'),
                         b'u' => {
                             let hi = self.hex4()?;
-                            let c = if (0xD800..0xDC00).contains(&hi) && self.s[self.pos..].starts_with(b"\\u") {
-                                self.pos += 2;
-                                let lo = self.hex4()?;
-                                char::from_u32(0x10000 + ((hi - 0xD800) << 10) + (lo.wrapping_sub(0xDC00) & 0x3FF))
-                            } else {
-                                char::from_u32(hi)
-                            };
+                            let c =
+                                if (0xD800..0xDC00).contains(&hi) && self.s[self.pos..].starts_with(b"\\u") {
+                                    self.pos += 2;
+                                    let lo = self.hex4()?;
+                                    char::from_u32(
+                                        0x10000 + ((hi - 0xD800) << 10) + (lo.wrapping_sub(0xDC00) & 0x3FF),
+                                    )
+                                } else {
+                                    char::from_u32(hi)
+                                };
                             out.push(c.unwrap_or('\u{FFFD}'));
                         }
                         _ => return Err(self.err("invalid escape")),

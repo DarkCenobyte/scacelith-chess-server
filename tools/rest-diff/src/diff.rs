@@ -88,16 +88,22 @@ fn compare_headers(node: &Normalized, rust: &Normalized, out: &mut Vec<Differenc
         let names_a: Vec<&str> = a.iter().map(|(k, _)| k.as_str()).collect();
         let names_b: Vec<&str> = b.iter().map(|(k, _)| k.as_str()).collect();
         if names_a != names_b {
-            out.push(Difference::new(format!("header name case {name}"), names_a.join(","), names_b.join(",")));
+            out.push(Difference::new(
+                format!("header name case {name}"),
+                names_a.join(","),
+                names_b.join(","),
+            ));
         }
         let equal = match name.as_str() {
             // The length follows the body: compared when the raw bodies are identical, the body
             // comparison covers the rest.
             "content-length" => !same_raw_body || a == b,
-            "retry-after" => a.iter().zip(&b).all(|((_, x), (_, y))| match (x.parse::<i64>(), y.parse::<i64>()) {
-                (Ok(p), Ok(q)) => (p - q).abs() <= 1,
-                _ => x == y,
-            }),
+            "retry-after" => {
+                a.iter().zip(&b).all(|((_, x), (_, y))| match (x.parse::<i64>(), y.parse::<i64>()) {
+                    (Ok(p), Ok(q)) => (p - q).abs() <= 1,
+                    _ => x == y,
+                })
+            }
             _ => a.iter().zip(&b).all(|((_, x), (_, y))| x == y),
         };
         if !equal {

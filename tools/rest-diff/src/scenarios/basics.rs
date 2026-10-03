@@ -15,7 +15,8 @@ pub fn run(d: &mut Duo) -> BoxFut<'_> {
         d.step("info-head", ip, 200, |_| Req::new("HEAD", "/api/v1/info")).await;
         d.step("info-options", ip, 204, |_| Req::new("OPTIONS", "/api/v1/info")).await;
         d.step("info-post", ip, 405, |_| Req::post("/api/v1/info")).await;
-        d.step("info-put-json", ip, 405, |_| Req::new("PUT", "/api/v1/info").json(serde_json::json!({}))).await;
+        d.step("info-put-json", ip, 405, |_| Req::new("PUT", "/api/v1/info").json(serde_json::json!({})))
+            .await;
         d.step("info-delete", ip, 405, |_| Req::new("DELETE", "/api/v1/info")).await;
         d.step("info-patch", ip, 405, |_| Req::new("PATCH", "/api/v1/info")).await;
         d.step("info-double-trailing-slash", ip, 404, |_| Req::get("/api/v1/info//")).await;
@@ -45,7 +46,10 @@ pub fn run(d: &mut Duo) -> BoxFut<'_> {
 
         // Methods of paths with several routes (Allow lists them in route order).
         d.step("account-preferences-get", ip, 405, |_| Req::get("/api/v1/account/preferences")).await;
-        d.step("account-preferences-options", ip, 204, |_| Req::new("OPTIONS", "/api/v1/account/preferences")).await;
+        d.step("account-preferences-options", ip, 204, |_| {
+            Req::new("OPTIONS", "/api/v1/account/preferences")
+        })
+        .await;
         d.step("account-me-options", ip, 204, |_| Req::new("OPTIONS", "/api/v1/account/me")).await;
         d.step("sessions-options", ip, 204, |_| Req::new("OPTIONS", "/api/v1/auth/sessions")).await;
         d.step("session-id-options", ip, 204, |_| Req::new("OPTIONS", "/api/v1/auth/sessions/1")).await;
@@ -74,7 +78,8 @@ pub fn run(d: &mut Duo) -> BoxFut<'_> {
         d.step("players-encoded-slash", ip, 400, |_| Req::get("/api/v1/players/a%2Fb")).await;
         d.step("players-plus", ip, 404, |_| Req::get("/api/v1/players/a+b")).await;
         d.step("games-bad-encoding", ip, 400, |_| Req::get("/api/v1/games/%ZZ")).await;
-        d.step("session-bad-encoding-unauth", ip, 0, |_| Req::new("DELETE", "/api/v1/auth/sessions/%ZZ")).await;
+        d.step("session-bad-encoding-unauth", ip, 0, |_| Req::new("DELETE", "/api/v1/auth/sessions/%ZZ"))
+            .await;
 
         // The request target.
         let long_query = format!("/api/v1/info?q={}", "a".repeat(4100));

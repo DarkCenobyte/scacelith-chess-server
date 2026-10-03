@@ -123,7 +123,10 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    let accepted = match std::fs::read_to_string(&opts.accepted).map_err(|e| e.to_string()).and_then(|t| report::parse_accepted(&t)) {
+    let accepted = match std::fs::read_to_string(&opts.accepted)
+        .map_err(|e| e.to_string())
+        .and_then(|t| report::parse_accepted(&t))
+    {
         Ok(a) => a,
         Err(e) => {
             eprintln!("rest-diff: {}: {e}", opts.accepted.display());
@@ -132,11 +135,17 @@ async fn main() -> ExitCode {
     };
     for p in [&opts.programs.node, &opts.programs.rust] {
         if !p.exists() {
-            eprintln!("rest-diff: {} not found (build the server with `cargo build -p scacelith-server`)", p.display());
+            eprintln!(
+                "rest-diff: {} not found (build the server with `cargo build -p scacelith-server`)",
+                p.display()
+            );
             return ExitCode::from(2);
         }
     }
-    let work = opts.work.clone().unwrap_or_else(|| std::env::temp_dir().join(format!("rest-diff-{}", std::process::id())));
+    let work = opts
+        .work
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("rest-diff-{}", std::process::id())));
     if let Err(e) = std::fs::create_dir_all(&work) {
         eprintln!("rest-diff: {}: {e}", work.display());
         return ExitCode::from(2);
@@ -150,7 +159,9 @@ async fn main() -> ExitCode {
     };
 
     let mut report = Report { accepted, ..Report::default() };
-    for profile in profiles.iter().filter(|p| opts.profiles.is_empty() || opts.profiles.iter().any(|n| n == p.name)) {
+    for profile in
+        profiles.iter().filter(|p| opts.profiles.is_empty() || opts.profiles.iter().any(|n| n == p.name))
+    {
         let chosen: Vec<_> = profile
             .scenarios
             .iter()
@@ -160,7 +171,8 @@ async fn main() -> ExitCode {
             continue;
         }
         eprintln!("== profile {}: starting the servers", profile.name);
-        let env: Vec<(String, String)> = profile.env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let env: Vec<(String, String)> =
+            profile.env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         let dir = work.join(profile.name);
         let (node_dir, rust_dir) = (dir.join("node"), dir.join("rust"));
         let (node, rust) = tokio::join!(

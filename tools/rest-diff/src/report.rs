@@ -82,6 +82,8 @@ pub struct Report {
     pub steps: Vec<StepRecord>,
     /// Harness warnings (a status both servers gave but the scenario did not expect...).
     pub warnings: Vec<String>,
+    /// Limits measured by the bursts: requests let through before the first refusal.
+    pub limits: Vec<String>,
     /// Endpoints requested (method and path template).
     pub endpoints: Vec<String>,
     /// Profiles run.
@@ -205,7 +207,8 @@ impl Report {
         let mut out = String::new();
         let with_diff = self.steps.iter().filter(|s| !s.diffs.is_empty()).count();
         let open_steps = self.steps.iter().filter(|s| s.diffs.iter().any(|(_, r)| r.is_none())).count();
-        let accepted: usize = self.steps.iter().map(|s| s.diffs.iter().filter(|(_, r)| r.is_some()).count()).sum();
+        let accepted: usize =
+            self.steps.iter().map(|s| s.diffs.iter().filter(|(_, r)| r.is_some()).count()).sum();
         let _ = writeln!(out, "rest-diff: Node.js server (reference) vs Rust server");
         let _ = writeln!(out, "profiles: {}", self.profiles.join(", "));
         let _ = writeln!(
@@ -220,12 +223,14 @@ impl Report {
         let _ = writeln!(out, "\n== Open differences ==");
         let mut any = false;
         for s in &self.steps {
-            let open: Vec<&Difference> = s.diffs.iter().filter(|(_, r)| r.is_none()).map(|(d, _)| d).collect();
+            let open: Vec<&Difference> =
+                s.diffs.iter().filter(|(_, r)| r.is_none()).map(|(d, _)| d).collect();
             if open.is_empty() {
                 continue;
             }
             any = true;
-            let _ = writeln!(out, "\n[{}] {}  (node {} / rust {})", s.id, s.request, s.statuses.0, s.statuses.1);
+            let _ =
+                writeln!(out, "\n[{}] {}  (node {} / rust {})", s.id, s.request, s.statuses.0, s.statuses.1);
             for d in open {
                 let _ = writeln!(out, "  {}:\n    node: {}\n    rust: {}", d.aspect, d.node, d.rust);
             }
@@ -256,6 +261,12 @@ impl Report {
             }
             if lines.len() > 6 {
                 let _ = writeln!(out, "    ... and {} more", lines.len() - 6);
+            }
+        }
+        if !self.limits.is_empty() {
+            let _ = writeln!(out, "\n== Measured limits (requests let through before the first 429) ==");
+            for l in &self.limits {
+                let _ = writeln!(out, "  {l}");
             }
         }
         let _ = writeln!(out, "\n== Harness warnings ==");

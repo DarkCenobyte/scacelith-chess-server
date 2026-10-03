@@ -204,8 +204,16 @@ impl Server {
         if let Some(e) = child.stderr.take() {
             spawn_reader(e, lines.clone());
         }
-        let mut server =
-            Server { kind, api_port, dir: dir.to_path_buf(), target, env, programs: programs.clone(), child, lines };
+        let mut server = Server {
+            kind,
+            api_port,
+            dir: dir.to_path_buf(),
+            target,
+            env,
+            programs: programs.clone(),
+            child,
+            lines,
+        };
         server.wait_ready().await?;
         Ok(server)
     }
@@ -215,14 +223,22 @@ impl Server {
         let mut client = Client::new(self.target.clone(), IpAddr::V4(Ipv4Addr::LOCALHOST));
         loop {
             if let Ok(Some(status)) = self.child.try_wait() {
-                return Err(format!("{} exited during start-up ({status}):\n{}", self.kind.name(), self.tail(30)));
+                return Err(format!(
+                    "{} exited during start-up ({status}):\n{}",
+                    self.kind.name(),
+                    self.tail(30)
+                ));
             }
             let r = client.send(&Req::get("/api/v1/info").fresh()).await;
             if r.status == 200 {
                 return Ok(());
             }
             if Instant::now() > deadline {
-                return Err(format!("{} did not answer /api/v1/info within 60 s:\n{}", self.kind.name(), self.tail(30)));
+                return Err(format!(
+                    "{} did not answer /api/v1/info within 60 s:\n{}",
+                    self.kind.name(),
+                    self.tail(30)
+                ));
             }
             tokio::time::sleep(Duration::from_millis(150)).await;
         }

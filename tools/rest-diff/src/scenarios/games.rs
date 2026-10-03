@@ -19,7 +19,11 @@ fn get_as(user: &str, target: impl Fn(&Side) -> String) -> impl Fn(&Side) -> Req
 }
 
 /// A POST with the session `<user>.token` and a JSON body computed from the side.
-fn post_as(path: &'static str, user: &str, body: impl Fn(&Side) -> serde_json::Value) -> impl Fn(&Side) -> Req {
+fn post_as(
+    path: &'static str,
+    user: &str,
+    body: impl Fn(&Side) -> serde_json::Value,
+) -> impl Fn(&Side) -> Req {
     let token = format!("{user}.token");
     move |s: &Side| Req::post(path).bearer(&s.v(&token)).json(body(s))
 }
@@ -41,28 +45,65 @@ pub fn run(d: &mut Duo) -> BoxFut<'_> {
             }
         }
         // G1: Black mates (fool's mate), rated 3+2.
-        d.play("G1", "gwen", "hugo", "hugo", &script(180, 2, true, &["f2f3", "e7e5", "g2g4", "d8h4"], End::OnBoard)).await;
+        d.play(
+            "G1",
+            "gwen",
+            "hugo",
+            "hugo",
+            &script(180, 2, true, &["f2f3", "e7e5", "g2g4", "d8h4"], End::OnBoard),
+        )
+        .await;
         // G2: Black resigns, rated 3+2.
-        d.play("G2", "gwen", "hugo", "hugo", &script(180, 2, true, &["e2e4", "e7e5", "g1f3"], End::Resign { white: false }))
-            .await;
+        d.play(
+            "G2",
+            "gwen",
+            "hugo",
+            "hugo",
+            &script(180, 2, true, &["e2e4", "e7e5", "g1f3"], End::Resign { white: false }),
+        )
+        .await;
         // G3: an agreed draw, rated 3+2.
-        d.play("G3", "gwen", "hugo", "hugo", &script(180, 2, true, &["e2e4", "e7e5", "g1f3", "b8c6"], End::DrawAgreed)).await;
+        d.play(
+            "G3",
+            "gwen",
+            "hugo",
+            "hugo",
+            &script(180, 2, true, &["e2e4", "e7e5", "g1f3", "b8c6"], End::DrawAgreed),
+        )
+        .await;
         // G4: casual 5+0, White resigns.
-        d.play("G4", "gwen", "hugo", "hugo", &script(300, 0, false, &["d2d4", "d7d5"], End::Resign { white: true })).await;
+        d.play(
+            "G4",
+            "gwen",
+            "hugo",
+            "hugo",
+            &script(300, 0, false, &["d2d4", "d7d5"], End::Resign { white: true }),
+        )
+        .await;
         // G5: aborted before the first move.
         d.play("G5", "gwen", "hugo", "hugo", &script(180, 2, true, &[], End::Abort { white: true })).await;
         // G6: a custom time control (7+3, never rated), Black resigns.
-        d.play("G6", "gwen", "hugo", "hugo", &script(420, 3, false, &["c2c4", "e7e5", "b1c3"], End::Resign { white: false }))
-            .await;
+        d.play(
+            "G6",
+            "gwen",
+            "hugo",
+            "hugo",
+            &script(420, 3, false, &["c2c4", "e7e5", "b1c3"], End::Resign { white: false }),
+        )
+        .await;
         // G7: ivy (White) against gwen, rated 3+2, a promotion, then Black resigns.
         d.play(
             "G7",
             "ivy",
             "gwen",
             "gwen",
-            &script(180, 2, true, &["a2a4", "b7b5", "a4b5", "a7a6", "b5a6", "c8b7", "a6b7", "b8c6", "b7a8q"], End::Resign {
-                white: false,
-            }),
+            &script(
+                180,
+                2,
+                true,
+                &["a2a4", "b7b5", "a4b5", "a7a6", "b5a6", "c8b7", "a6b7", "b8c6", "b7a8q"],
+                End::Resign { white: false },
+            ),
         )
         .await;
 
@@ -87,13 +128,31 @@ async fn account_games(d: &mut Duo) {
     let list = |q: &'static str| get_as("gwen", move |_| format!("/api/v1/account/games{q}"));
     d.step("history", ip, 200, list("")).await;
     d.step("history-no-token", ip, 401, |_| Req::get("/api/v1/account/games")).await;
-    d.step("history-head", ip, 0, |s| Req::new("HEAD", "/api/v1/account/games").bearer(&s.v("gwen.token"))).await;
+    d.step("history-head", ip, 0, |s| Req::new("HEAD", "/api/v1/account/games").bearer(&s.v("gwen.token")))
+        .await;
     let p = d.step("history-limit-2", ip, 200, list("?limit=2")).await;
     d.save(&p, "gwen.next", "next");
-    d.step("history-page-2", ip, 200, get_as("gwen", |s| format!("/api/v1/account/games?limit=2&before={}", s.v("gwen.next"))))
-        .await;
-    d.step("history-before-g2", ip, 200, get_as("gwen", |s| format!("/api/v1/account/games?before={}", s.game("G2")))).await;
-    d.step("history-before-g1", ip, 200, get_as("gwen", |s| format!("/api/v1/account/games?before={}", s.game("G1")))).await;
+    d.step(
+        "history-page-2",
+        ip,
+        200,
+        get_as("gwen", |s| format!("/api/v1/account/games?limit=2&before={}", s.v("gwen.next"))),
+    )
+    .await;
+    d.step(
+        "history-before-g2",
+        ip,
+        200,
+        get_as("gwen", |s| format!("/api/v1/account/games?before={}", s.game("G2"))),
+    )
+    .await;
+    d.step(
+        "history-before-g1",
+        ip,
+        200,
+        get_as("gwen", |s| format!("/api/v1/account/games?before={}", s.game("G1"))),
+    )
+    .await;
     for (id, q) in [
         ("history-limit-1", "?limit=1"),
         ("history-limit-50", "?limit=50"),
@@ -141,17 +200,33 @@ async fn account_games(d: &mut Duo) {
 async fn game_records(d: &mut Duo) {
     let ip = fresh_ip();
     for g in ["G1", "G2", "G3", "G4", "G5", "G6", "G7"] {
-        d.step(&format!("record-{g}"), ip, 200, move |s: &Side| Req::get(format!("/api/v1/games/{}", s.game(g)))).await;
-        d.step(&format!("pgn-{g}"), ip, 200, move |s: &Side| Req::get(format!("/api/v1/games/{}/pgn", s.game(g)))).await;
+        d.step(&format!("record-{g}"), ip, 200, move |s: &Side| {
+            Req::get(format!("/api/v1/games/{}", s.game(g)))
+        })
+        .await;
+        d.step(&format!("pgn-{g}"), ip, 200, move |s: &Side| {
+            Req::get(format!("/api/v1/games/{}/pgn", s.game(g)))
+        })
+        .await;
     }
     // The players see `you` and `reportable`; another player sees the public record.
     let ip = fresh_ip();
     d.step("record-as-white", ip, 200, get_as("gwen", |s| format!("/api/v1/games/{}", s.game("G1")))).await;
     d.step("record-as-black", ip, 200, get_as("hugo", |s| format!("/api/v1/games/{}", s.game("G1")))).await;
     d.step("record-as-other", ip, 200, get_as("ivy", |s| format!("/api/v1/games/{}", s.game("G1")))).await;
-    d.step("record-aborted-as-player", ip, 200, get_as("gwen", |s| format!("/api/v1/games/{}", s.game("G5")))).await;
-    d.step("record-bad-token", ip, 401, |s| Req::get(format!("/api/v1/games/{}", s.game("G1"))).bearer("sct_nope")).await;
-    d.step("pgn-with-token", ip, 200, get_as("gwen", |s| format!("/api/v1/games/{}/pgn", s.game("G2")))).await;
+    d.step(
+        "record-aborted-as-player",
+        ip,
+        200,
+        get_as("gwen", |s| format!("/api/v1/games/{}", s.game("G5"))),
+    )
+    .await;
+    d.step("record-bad-token", ip, 401, |s| {
+        Req::get(format!("/api/v1/games/{}", s.game("G1"))).bearer("sct_nope")
+    })
+    .await;
+    d.step("pgn-with-token", ip, 200, get_as("gwen", |s| format!("/api/v1/games/{}/pgn", s.game("G2"))))
+        .await;
     d.step("pgn-head", ip, 0, |s| Req::new("HEAD", format!("/api/v1/games/{}/pgn", s.game("G2")))).await;
     d.step("record-head", ip, 0, |s| Req::new("HEAD", format!("/api/v1/games/{}", s.game("G2")))).await;
     let ip = fresh_ip();
@@ -202,8 +277,17 @@ async fn gifs(d: &mut Duo) {
     }
     d.step("gif-letters", ip, 400, get_as("hugo", |_| "/api/v1/games/abc/gif".into())).await;
     d.step("gif-unknown", ip, 404, get_as("hugo", |_| "/api/v1/games/999999/gif".into())).await;
-    d.step("gif-head", ip, 0, |s| Req::new("HEAD", format!("/api/v1/games/{}/gif", s.game("G1"))).bearer(&s.v("hugo.token"))).await;
-    d.step("gif-large-g3", ip, 200, get_as("hugo", |s| format!("/api/v1/games/{}/gif?size=large&delay=3000", s.game("G3")))).await;
+    d.step("gif-head", ip, 0, |s| {
+        Req::new("HEAD", format!("/api/v1/games/{}/gif", s.game("G1"))).bearer(&s.v("hugo.token"))
+    })
+    .await;
+    d.step(
+        "gif-large-g3",
+        ip,
+        200,
+        get_as("hugo", |s| format!("/api/v1/games/{}/gif?size=large&delay=3000", s.game("G3"))),
+    )
+    .await;
 
     let fools = "1. f3 e5 2. g4 Qh4# 0-1";
     let post = |body: serde_json::Value| post_as("/api/v1/gif", "gwen", move |_| body.clone());
@@ -234,8 +318,20 @@ async fn gifs(d: &mut Duo) {
     d.step("post-gif-too-large", ip, 413, post(json!({"pgn": "x".repeat(140_000)}))).await;
     // hugo's 4th and 5th renders within the minute: the player's render limit.
     let scholar = "[White \"Ann\"]\n[Black \"Bob\"]\n[WhiteElo \"1500\"]\n\n1. e4 e5 2. Qh5 Nc6 3. Bc4 Nf6 4. Qxf7# 1-0";
-    d.step("post-gif-hugo", ip, 200, post_as("/api/v1/gif", "hugo", move |_| json!({"pgn": scholar, "size": "small"}))).await;
-    d.step("post-gif-render-limit", ip, 429, post_as("/api/v1/gif", "hugo", move |_| json!({"pgn": scholar, "size": "large"}))).await;
+    d.step(
+        "post-gif-hugo",
+        ip,
+        200,
+        post_as("/api/v1/gif", "hugo", move |_| json!({"pgn": scholar, "size": "small"})),
+    )
+    .await;
+    d.step(
+        "post-gif-render-limit",
+        ip,
+        429,
+        post_as("/api/v1/gif", "hugo", move |_| json!({"pgn": scholar, "size": "large"})),
+    )
+    .await;
     d.step("gif-cached-after-limit", ip, 200, gif("")).await;
 }
 
@@ -267,9 +363,16 @@ async fn players(d: &mut Duo) {
     }
     let p = d.step("games-page-1", ip, 200, |_| Req::get("/api/v1/players/gwen/games?limit=3")).await;
     d.save(&p, "gwen.pnext", "next");
-    let p = d.step("games-page-2", ip, 200, |s| Req::get(format!("/api/v1/players/gwen/games?limit=3&before={}", s.v("gwen.pnext")))).await;
+    let p = d
+        .step("games-page-2", ip, 200, |s| {
+            Req::get(format!("/api/v1/players/gwen/games?limit=3&before={}", s.v("gwen.pnext")))
+        })
+        .await;
     d.save(&p, "gwen.pnext", "next");
-    d.step("games-page-3", ip, 200, |s| Req::get(format!("/api/v1/players/gwen/games?limit=3&before={}", s.v("gwen.pnext")))).await;
+    d.step("games-page-3", ip, 200, |s| {
+        Req::get(format!("/api/v1/players/gwen/games?limit=3&before={}", s.v("gwen.pnext")))
+    })
+    .await;
     d.step("profile-with-token", ip, 200, get_as("ivy", |_| "/api/v1/players/hugo".into())).await;
     d.step("profile-bad-token", ip, 401, |_| Req::get("/api/v1/players/hugo").bearer("sct_nope")).await;
 }
@@ -295,7 +398,13 @@ async fn leaderboard(d: &mut Duo) {
     ] {
         d.step(id, ip, 0, move |_| Req::get(format!("/api/v1/leaderboard{q}"))).await;
     }
-    d.step("leaderboard-with-token", ip, 200, get_as("gwen", |_| "/api/v1/leaderboard?category=3%2B2".into())).await;
+    d.step(
+        "leaderboard-with-token",
+        ip,
+        200,
+        get_as("gwen", |_| "/api/v1/leaderboard?category=3%2B2".into()),
+    )
+    .await;
     d.step("leaderboard-post", ip, 405, |_| Req::post("/api/v1/leaderboard")).await;
 }
 
@@ -304,43 +413,148 @@ async fn reports(d: &mut Duo) {
     let ip = fresh_ip();
     let report = |body: fn(&Side) -> serde_json::Value| post_as("/api/v1/reports", "gwen", body);
     d.step("report-no-token", ip, 401, |s| {
-        Req::post("/api/v1/reports").json(json!({"gameId": s.game("G1"), "reported": "hugo", "category": "cheating"}))
+        Req::post("/api/v1/reports")
+            .json(json!({"gameId": s.game("G1"), "reported": "hugo", "category": "cheating"}))
     })
     .await;
-    d.step("report-bad-category", ip, 400, report(|s| json!({"gameId": s.game("G1"), "reported": "hugo", "category": "rude"}))).await;
-    d.step("report-missing-reported", ip, 400, report(|s| json!({"gameId": s.game("G1"), "category": "other"}))).await;
-    d.step("report-bad-game-id", ip, 0, report(|_| json!({"gameId": "12a", "reported": "hugo", "category": "other"}))).await;
-    d.step("report-negative-game-id", ip, 0, report(|_| json!({"gameId": -1, "reported": "hugo", "category": "other"}))).await;
+    d.step(
+        "report-bad-category",
+        ip,
+        400,
+        report(|s| json!({"gameId": s.game("G1"), "reported": "hugo", "category": "rude"})),
+    )
+    .await;
+    d.step(
+        "report-missing-reported",
+        ip,
+        400,
+        report(|s| json!({"gameId": s.game("G1"), "category": "other"})),
+    )
+    .await;
+    d.step(
+        "report-bad-game-id",
+        ip,
+        0,
+        report(|_| json!({"gameId": "12a", "reported": "hugo", "category": "other"})),
+    )
+    .await;
+    d.step(
+        "report-negative-game-id",
+        ip,
+        0,
+        report(|_| json!({"gameId": -1, "reported": "hugo", "category": "other"})),
+    )
+    .await;
     d.step("report-long-comment", ip, 400, report(|s| {
         json!({"gameId": s.game("G1"), "reported": "hugo", "category": "other", "comment": "x".repeat(501)})
     }))
     .await;
-    d.step("report-long-name", ip, 400, report(|s| json!({"gameId": s.game("G1"), "reported": "h".repeat(25), "category": "other"}))).await;
-    d.step("report-extra-field", ip, 400, report(|s| json!({"gameId": s.game("G1"), "reported": "hugo", "category": "other", "x": 1}))).await;
-    d.step("report-not-opponent", ip, 403, report(|s| json!({"gameId": s.game("G1"), "reported": "ivy", "category": "other"}))).await;
-    d.step("report-self", ip, 403, report(|s| json!({"gameId": s.game("G1"), "reported": "gwen", "category": "other"}))).await;
-    d.step("report-unknown-game", ip, 403, report(|_| json!({"gameId": 999_999, "reported": "hugo", "category": "other"}))).await;
-    d.step("report-unknown-player", ip, 403, report(|s| json!({"gameId": s.game("G1"), "reported": "nobody", "category": "other"}))).await;
+    d.step(
+        "report-long-name",
+        ip,
+        400,
+        report(|s| json!({"gameId": s.game("G1"), "reported": "h".repeat(25), "category": "other"})),
+    )
+    .await;
+    d.step(
+        "report-extra-field",
+        ip,
+        400,
+        report(|s| json!({"gameId": s.game("G1"), "reported": "hugo", "category": "other", "x": 1})),
+    )
+    .await;
+    d.step(
+        "report-not-opponent",
+        ip,
+        403,
+        report(|s| json!({"gameId": s.game("G1"), "reported": "ivy", "category": "other"})),
+    )
+    .await;
+    d.step(
+        "report-self",
+        ip,
+        403,
+        report(|s| json!({"gameId": s.game("G1"), "reported": "gwen", "category": "other"})),
+    )
+    .await;
+    d.step(
+        "report-unknown-game",
+        ip,
+        403,
+        report(|_| json!({"gameId": 999_999, "reported": "hugo", "category": "other"})),
+    )
+    .await;
+    d.step(
+        "report-unknown-player",
+        ip,
+        403,
+        report(|s| json!({"gameId": s.game("G1"), "reported": "nobody", "category": "other"})),
+    )
+    .await;
     d.step("reportable-before", ip, 200, get_as("gwen", |s| format!("/api/v1/games/{}", s.game("G1")))).await;
     d.step("report", ip, 202, report(|s| {
         json!({"gameId": s.game("G1"), "reported": "hugo", "category": "cheating", "comment": "engine-like play"})
     }))
     .await;
-    d.step("report-duplicate", ip, 202, report(|s| json!({"gameId": s.game("G1"), "reported": "hugo", "category": "abuse"}))).await;
+    d.step(
+        "report-duplicate",
+        ip,
+        202,
+        report(|s| json!({"gameId": s.game("G1"), "reported": "hugo", "category": "abuse"})),
+    )
+    .await;
     d.step("reportable-after", ip, 200, get_as("gwen", |s| format!("/api/v1/games/{}", s.game("G1")))).await;
     d.step("report-case-string-id", ip, 202, report(|s| {
         json!({"gameId": s.game("G2").to_string(), "reported": "HUGO", "category": "abuse", "comment": "tab\tand\u{7}bell"})
     }))
     .await;
-    d.step("report-g3", ip, 202, report(|s| json!({"gameId": s.game("G3"), "reported": "hugo", "category": "other"}))).await;
-    d.step("report-g4", ip, 202, report(|s| json!({"gameId": s.game("G4"), "reported": "hugo", "category": "other"}))).await;
-    d.step("report-aborted", ip, 0, report(|s| json!({"gameId": s.game("G5"), "reported": "hugo", "category": "other"}))).await;
-    d.step("report-g6", ip, 0, report(|s| json!({"gameId": s.game("G6"), "reported": "hugo", "category": "other"}))).await;
-    d.step("report-g7", ip, 0, report(|s| json!({"gameId": s.game("G7"), "reported": "ivy", "category": "other"}))).await;
-    d.step("reportable-quota-used", ip, 200, get_as("gwen", |s| format!("/api/v1/games/{}", s.game("G7")))).await;
-    d.step("report-by-hugo", ip, 202, post_as("/api/v1/reports", "hugo", |s| {
-        json!({"gameId": s.game("G1"), "reported": "gwen", "category": "other"})
-    }))
+    d.step(
+        "report-g3",
+        ip,
+        202,
+        report(|s| json!({"gameId": s.game("G3"), "reported": "hugo", "category": "other"})),
+    )
+    .await;
+    d.step(
+        "report-g4",
+        ip,
+        202,
+        report(|s| json!({"gameId": s.game("G4"), "reported": "hugo", "category": "other"})),
+    )
+    .await;
+    d.step(
+        "report-aborted",
+        ip,
+        0,
+        report(|s| json!({"gameId": s.game("G5"), "reported": "hugo", "category": "other"})),
+    )
+    .await;
+    d.step(
+        "report-g6",
+        ip,
+        0,
+        report(|s| json!({"gameId": s.game("G6"), "reported": "hugo", "category": "other"})),
+    )
+    .await;
+    d.step(
+        "report-g7",
+        ip,
+        0,
+        report(|s| json!({"gameId": s.game("G7"), "reported": "ivy", "category": "other"})),
+    )
+    .await;
+    d.step("reportable-quota-used", ip, 200, get_as("gwen", |s| format!("/api/v1/games/{}", s.game("G7"))))
+        .await;
+    d.step(
+        "report-by-hugo",
+        ip,
+        202,
+        post_as(
+            "/api/v1/reports",
+            "hugo",
+            |s| json!({"gameId": s.game("G1"), "reported": "gwen", "category": "other"}),
+        ),
+    )
     .await;
 }
 
@@ -349,9 +563,27 @@ async fn export_and_deletion(d: &mut Duo) {
     let ip = fresh_ip();
     d.step("me-ratings", ip, 200, get_as("gwen", |_| "/api/v1/account/me".into())).await;
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    d.step("export-gwen", ip, 200, post_as("/api/v1/account/export", "gwen", |_| json!({"password": PASSWORD}))).await;
-    d.step("export-hugo", ip, 200, post_as("/api/v1/account/export", "hugo", |_| json!({"password": PASSWORD}))).await;
-    d.step("delete-ivy", ip, 200, post_as("/api/v1/account/delete", "ivy", |_| json!({"password": PASSWORD}))).await;
+    d.step(
+        "export-gwen",
+        ip,
+        200,
+        post_as("/api/v1/account/export", "gwen", |_| json!({"password": PASSWORD})),
+    )
+    .await;
+    d.step(
+        "export-hugo",
+        ip,
+        200,
+        post_as("/api/v1/account/export", "hugo", |_| json!({"password": PASSWORD})),
+    )
+    .await;
+    d.step(
+        "delete-ivy",
+        ip,
+        200,
+        post_as("/api/v1/account/delete", "ivy", |_| json!({"password": PASSWORD})),
+    )
+    .await;
     deleted_views(d, ip).await;
 }
 
@@ -362,6 +594,12 @@ async fn deleted_views(d: &mut Duo, ip: IpAddr) {
     d.step("deleted-player-games", ip, 200, |_| Req::get("/api/v1/players/gwen/games?limit=1")).await;
     d.step("deleted-profile", ip, 404, |_| Req::get("/api/v1/players/ivy")).await;
     d.step("deleted-profile-games", ip, 404, |_| Req::get("/api/v1/players/ivy/games")).await;
-    d.step("deleted-gif", ip, 200, get_as("gwen", |s| format!("/api/v1/games/{}/gif?size=small", s.game("G7")))).await;
+    d.step(
+        "deleted-gif",
+        ip,
+        200,
+        get_as("gwen", |s| format!("/api/v1/games/{}/gif?size=small", s.game("G7"))),
+    )
+    .await;
     d.step("deleted-leaderboard", ip, 200, |_| Req::get("/api/v1/leaderboard?category=3%2B2")).await;
 }

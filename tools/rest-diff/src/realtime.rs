@@ -205,14 +205,17 @@ impl Rt {
         match kind {
             Kind::Rust => {
                 let opts = ConnectOptions { client_name: "rest-diff".into(), ..ConnectOptions::default() };
-                let conn = Connection::connect(endpoint, token, &opts).await.map_err(|e| format!("v1 connect: {e}"))?;
+                let conn = Connection::connect(endpoint, token, &opts)
+                    .await
+                    .map_err(|e| format!("v1 connect: {e}"))?;
                 Ok(Rt { inner: Inner::V1(Box::new(conn)) })
             }
             Kind::Node => {
                 let mut opts = SessionOptions::new("scacelith.v1");
                 opts.auto_reply = Some(p3_pong);
-                let mut session =
-                    Session::connect(endpoint, &opts).await.map_err(|e| format!("protocol 3 connect: {e}"))?;
+                let mut session = Session::connect(endpoint, &opts)
+                    .await
+                    .map_err(|e| format!("protocol 3 connect: {e}"))?;
                 let mut hello = p3_message(P3_HELLO);
                 hello.put_u16_le(3);
                 hello.put_u32_le(P3_SCHEMA_HASH);
@@ -226,7 +229,9 @@ impl Rt {
                         .map_err(|e| format!("protocol 3 Welcome: {e}"))?;
                     match msg.payload.first() {
                         Some(&P3_WELCOME) => break,
-                        Some(&P3_ERROR) => return Err(format!("Hello refused: {:?}", p3_decode(&msg.payload))),
+                        Some(&P3_ERROR) => {
+                            return Err(format!("Hello refused: {:?}", p3_decode(&msg.payload)));
+                        }
                         _ => {}
                     }
                 }
@@ -310,7 +315,12 @@ pub struct GameScript {
 
 /// Plays `script` between two signed-in players (White challenges Black by name); returns the
 /// game id once both players saw the end.
-pub async fn play(white: &mut Rt, black: &mut Rt, black_name: &str, script: &GameScript) -> Result<u64, String> {
+pub async fn play(
+    white: &mut Rt,
+    black: &mut Rt,
+    black_name: &str,
+    script: &GameScript,
+) -> Result<u64, String> {
     white.send(Cmd::Challenge {
         target: black_name,
         base_sec: script.base_sec,

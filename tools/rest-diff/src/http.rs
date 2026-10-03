@@ -96,7 +96,8 @@ impl Req {
 
     /// An `application/x-www-form-urlencoded` body.
     pub fn form(self, fields: &[(&str, &str)]) -> Req {
-        let body = fields.iter().map(|(k, v)| format!("{}={}", form_escape(k), form_escape(v))).collect::<Vec<_>>();
+        let body =
+            fields.iter().map(|(k, v)| format!("{}={}", form_escape(k), form_escape(v))).collect::<Vec<_>>();
         self.body_bytes("application/x-www-form-urlencoded", body.join("&").into_bytes())
     }
 
@@ -344,13 +345,17 @@ impl Client {
     }
 }
 
-fn failure(e: String) -> Resp {
+/// A failed exchange: no complete answer.
+pub fn failure(e: String) -> Resp {
     Resp { error: Some(e), at_ms: now_ms(), ..Resp::default() }
 }
 
 /// Wall time in ms since the epoch.
 pub fn now_ms() -> f64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
 }
 
 /// Writes the request and reads one answer: (answer, connection reusable, closed before any
@@ -461,7 +466,8 @@ async fn read_answer(conn: &mut Conn, head_only: bool) -> Result<Resp, (String, 
     if head_only || status == 204 || status == 304 {
         return Ok(resp);
     }
-    let chunked = resp.header("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+    let chunked =
+        resp.header("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
     if chunked {
         resp.chunked = true;
         match read_chunked(conn).await {
@@ -545,6 +551,9 @@ mod tests {
         let raw = Req::raw(b"GET / HTTP/1.1\r\nHost: {host}\r\n\r\n".to_vec());
         assert_eq!(raw.bytes("h:2"), b"GET / HTTP/1.1\r\nHost: h:2\r\n\r\n");
         assert_eq!(form_escape("a b&c=é"), "a+b%26c%3D%C3%A9");
-        assert_eq!(String::from_utf8(Req::post("/p").bytes("h")).unwrap(), "POST /p HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(
+            String::from_utf8(Req::post("/p").bytes("h")).unwrap(),
+            "POST /p HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n"
+        );
     }
 }
