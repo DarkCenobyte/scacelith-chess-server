@@ -16,7 +16,7 @@ pub const MINOR: u16 = 0;
 /// WebSocket subprotocol token (`Sec-WebSocket-Protocol`).
 pub const SUBPROTOCOL: &str = "scacelith.rt1";
 /// Fingerprint of the schema (first 4 bytes of SHA-256 of its canonical form): informational.
-pub const FINGERPRINT: u32 = 0x498a5fd9;
+pub const FINGERPRINT: u32 = 0x05d4f428;
 /// Capability bits this codec knows (`Hello.caps`, `Welcome.caps`).
 pub const CAPS: u64 = 0x0;
 /// Largest client message, in bytes (type byte included). The server refuses a larger WebSocket message from
@@ -1235,7 +1235,7 @@ impl MsgType {
             Self::Resync => 13,
             Self::Rematch => 14,
             Self::ClientGesture => 29,
-            Self::Welcome => 52,
+            Self::Welcome => 54,
             Self::Error => 15,
             Self::ServerPing => 13,
             Self::ServerPong => 13,
@@ -1276,7 +1276,7 @@ impl MsgType {
             Self::Resync => 13,
             Self::Rematch => 14,
             Self::ClientGesture => 29,
-            Self::Welcome => 139,
+            Self::Welcome => 141,
             Self::Error => 15,
             Self::ServerPing => 13,
             Self::ServerPong => 13,
@@ -2035,7 +2035,7 @@ impl Message for Rematch {
 
 /// `C_Gesture` (0x28, client to server). The player's live, cosmetic state in game `game`, relayed to the
 /// opponent byte for byte (server Gesture) and never answered, stored or looked at beyond decoding. Sent when
-/// it changes and at least once a second, paced by Welcome.gestureRate and gestureBurst.
+/// it changes and at least every Welcome.gestureIdleMs, paced by Welcome.gestureRate and gestureBurst.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClientGesture {
     /// Number of the message on its connection: 1 for the Hello, then one more per message.
@@ -2143,15 +2143,18 @@ pub struct Welcome {
     pub gesture_rate: u16,
     /// Gesture burst above gestureRate (0 when gestureRate is 0) (0..=120).
     pub gesture_burst: u16,
+    /// Longest time a client lets pass without sending a gesture for its game in progress while nothing
+    /// changes, ms (GESTURE_IDLE_MS; 0 when gestureRate is 0; a client clamps it to 1000..10000).
+    pub gesture_idle_ms: u16,
 }
 
 impl Message for Welcome {
     const TYPE: MsgType = MsgType::Welcome;
-    const MIN_LEN: usize = 52;
-    const MAX_LEN: usize = 139;
+    const MIN_LEN: usize = 54;
+    const MAX_LEN: usize = 141;
 
     fn encoded_len(&self) -> usize {
-        1 + 48 + 1 + self.username.len() + 1 + self.server_name.len()
+        1 + 50 + 1 + self.username.len() + 1 + self.server_name.len()
     }
 
     fn validate(&self) -> Result<(), EncodeError> {
@@ -2179,6 +2182,7 @@ impl Message for Welcome {
         out.put_u64_le(self.active_game);
         out.put_u16_le(self.gesture_rate);
         out.put_u16_le(self.gesture_burst);
+        out.put_u16_le(self.gesture_idle_ms);
     }
 
     fn read_fields(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
@@ -2197,6 +2201,7 @@ impl Message for Welcome {
             active_game: r.id53("activeGame")?,
             gesture_rate: Reader::bounded(r.u16()?, "gestureRate", 0, 60)?,
             gesture_burst: Reader::bounded(r.u16()?, "gestureBurst", 0, 120)?,
+            gesture_idle_ms: r.u16()?,
         })
     }
 }

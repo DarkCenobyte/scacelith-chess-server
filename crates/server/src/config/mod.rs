@@ -509,6 +509,7 @@ config_struct! {
     "CLIENT_PING_INTERVAL_MS" => client_ping_interval_ms: i64,
     "GESTURE_RATE" => gesture_rate: i64,
     "GESTURE_BURST" => gesture_burst: i64,
+    "GESTURE_IDLE_MS" => gesture_idle_ms: i64,
     "HTTP_BODY_LIMIT" => http_body_limit: i64,
     "AUTH_RATE_PER_IP" => auth_rate_per_ip: i64,
     "AUTH_RATE_PER_PREFIX" => auth_rate_per_prefix: i64,

@@ -135,6 +135,7 @@ fn typical(schema: &Schema, key: &str) -> Value {
             "proto": 1, "minor": 0, "caps": 0, "serverTime": T0, "userId": 1017, "username": "Łukasz",
             "serverName": "Scacelith Community Server", "heartbeatMs": 10_000, "clientPingMs": 10_000,
             "maxMsgPerSec": 20, "msgBurst": 40, "activeGame": 0, "gestureRate": 4, "gestureBurst": 8,
+            "gestureIdleMs": 1000,
         }),
         "Error" => json!({ "ref": 12, "code": e("ErrorCode", "IllegalMove"), "fatal": false, "game": GAME }),
         "S_Ping" => json!({ "nonce": 991, "serverTime": T0 }),
@@ -477,12 +478,12 @@ fn edge_cases(b: &mut Builder<'_>, e: &EnumOf<'_>) {
     b.ok("Welcome", with(&welcome, json!({
         "serverTime": 0.0, "userId": U32, "username": "ユキユキユキユキ", "serverName": format!("{}x", "♜".repeat(21)),
         "heartbeatMs": 0, "clientPingMs": U32, "maxMsgPerSec": 0xffff, "msgBurst": 0xffff, "activeGame": MAX53,
-        "gestureRate": 60, "gestureBurst": 120,
-    })), "username and serverName at their maximum (24 and 64 bytes), activeGame = 2^53 - 1, serverTime 0");
+        "gestureRate": 60, "gestureBurst": 120, "gestureIdleMs": 0xffff,
+    })), "username and serverName at their maximum (24 and 64 bytes), activeGame = 2^53 - 1, serverTime 0, gestureIdleMs above the range a client keeps");
     b.ok("Welcome", with(&welcome, json!({
         "serverTime": -123_456.789, "userId": 1, "username": "مُحَمَّد", "serverName": "", "clientPingMs": 0, "activeGame": GAME,
-        "gestureRate": 0, "gestureBurst": 0,
-    })), "negative f64, Arabic username, empty serverName, a game to resume");
+        "gestureRate": 0, "gestureBurst": 0, "gestureIdleMs": 0,
+    })), "negative f64, Arabic username, empty serverName, a game to resume, no gesture relay");
     b.ok(
         "Welcome",
         with(&welcome, json!({ "minor": 0xffff, "caps": MAX53 })),

@@ -431,6 +431,7 @@ fn welcome_to_json(m: &Welcome) -> Value {
     o.insert("activeGame".into(), m.active_game.into());
     o.insert("gestureRate".into(), m.gesture_rate.into());
     o.insert("gestureBurst".into(), m.gesture_burst.into());
+    o.insert("gestureIdleMs".into(), m.gesture_idle_ms.into());
     Value::Object(o)
 }
 
@@ -450,6 +451,7 @@ fn welcome_from_json(v: &Value) -> Option<Welcome> {
         active_game: uint(v, "activeGame")?,
         gesture_rate: uint(v, "gestureRate")?,
         gesture_burst: uint(v, "gestureBurst")?,
+        gesture_idle_ms: uint(v, "gestureIdleMs")?,
     })
 }
 

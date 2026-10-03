@@ -412,7 +412,7 @@ async fn gestures_are_relayed_live_to_the_opponent_only_never_echoed_and_moves_s
     let srv = server().await;
     let [mut a, mut b] = players(&srv, ["gus", "ivy"]).await;
     let w = a.client.welcome();
-    assert_eq!((w.gesture_rate, w.gesture_burst), (4, 8));
+    assert_eq!((w.gesture_rate, w.gesture_burst, w.gesture_idle_ms), (4, 8, 1000));
     let id = challenge_game(&mut a, &mut b, 180, 2, false).await;
     assert!(snapshot_of(&a, id).auto_press, "AUTO_PRESS_CLOCK default");
     let mut t = Table::new(id);

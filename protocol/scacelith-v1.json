@@ -417,7 +417,7 @@
     },
     {
       "id": 40, "name": "Gesture", "dir": "c2s",
-      "doc": "The player's live, cosmetic state in game `game`, relayed to the opponent byte for byte (server Gesture) and never answered, stored or looked at beyond decoding. Sent when it changes and at least once a second, paced by Welcome.gestureRate and gestureBurst.",
+      "doc": "The player's live, cosmetic state in game `game`, relayed to the opponent byte for byte (server Gesture) and never answered, stored or looked at beyond decoding. Sent when it changes and at least every Welcome.gestureIdleMs, paced by Welcome.gestureRate and gestureBurst.",
       "fields": [
         { "name": "seq", "type": "u32" },
         { "name": "game", "type": "id53" },
@@ -448,7 +448,8 @@
         { "name": "msgBurst", "type": "u16", "doc": "message burst a client may send above it (WS_MSG_BURST)" },
         { "name": "activeGame", "type": "id53", "doc": "the player's game in progress (0 = none)" },
         { "name": "gestureRate", "type": "u16", "max": 60, "doc": "gestures per second the server relays, sustained (0 = no relay: send none)" },
-        { "name": "gestureBurst", "type": "u16", "max": 120, "doc": "gesture burst above gestureRate (0 when gestureRate is 0)" }
+        { "name": "gestureBurst", "type": "u16", "max": 120, "doc": "gesture burst above gestureRate (0 when gestureRate is 0)" },
+        { "name": "gestureIdleMs", "type": "u16", "doc": "longest time a client lets pass without sending a gesture for its game in progress while nothing changes, ms (GESTURE_IDLE_MS; 0 when gestureRate is 0; a client clamps it to 1000..10000)" }
       ]
     },
     {

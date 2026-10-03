@@ -147,10 +147,15 @@ until the press is charged like any thinking time.
 
 **Gestures.** The player's head, the piece in hand, where it is aimed and a move placed before the
 clock press reach the opponent live as `Gesture` (C2S `0x28`), relayed as the server `Gesture`
-(`0xA6`) and never stored. A gesture never touches the `WS_MSG_RATE` bucket nor gets a
-`RateLimited` answer: it has a bucket of its own (`GESTURE_RATE` per second, `GESTURE_BURST`; both
-announced in `Welcome`, 0 and 0 when `GESTURE_RATE=0`), and one beyond it is dropped silently with
-its seq still counted. More drops in 10 s than max(50, 10 x `GESTURE_BURST`, `GESTURE_RATE` x
+(`0xA6`) and never stored. A client sends one whenever its state changes and at least every
+`Welcome.gestureIdleMs` while nothing changes (`GESTURE_IDLE_MS`, 1 s by default, 1 s to 10 s; 0
+when `GESTURE_RATE=0`). These keepalives let the opponent's client tell a player who sits still
+from one whose gestures stopped, and they are most of the relay's work in a calm game: a longer
+interval saves that CPU, and the receivers, whose timeouts follow it, notice a silence later. The
+server announces the interval and never checks that a client keeps it. A gesture never touches
+the `WS_MSG_RATE` bucket nor gets a `RateLimited` answer: it has a bucket of its own
+(`GESTURE_RATE` per second, `GESTURE_BURST`; both announced in `Welcome`, 0 and 0 when
+`GESTURE_RATE=0`), and one beyond it is dropped silently with its seq still counted. More drops in 10 s than max(50, 10 x `GESTURE_BURST`, `GESTURE_RATE` x
 (`HEARTBEAT_TIMEOUT_MS` + `HEARTBEAT_INTERVAL_MS` + 250 ms)) is a flood (close 4301): the last term
 is what a client pacing its gestures at the rate sends during the longest silence a connection
 survives, which may arrive at once. The buckets and their drop windows run on the monotonic clock.
@@ -556,9 +561,9 @@ message that is not a `Hello`, is `HelloRequired` (4010); the `Hello` must carry
 (`ProtocolViolation`, 4300). Then come the token (an invalid one: `Unauthorized`, 4003), e-mail
 verification (`EmailUnverified`, 4011), the stored ban and the lobby's claim (section 3), and
 `Welcome` with `minor` = min(client, 0), `caps` = client & `CAPS`, the server time, the player,
-`heartbeatMs`, `clientPingMs`, `maxMsgPerSec`, `msgBurst`, `activeGame`, `gestureRate` and
-`gestureBurst`. Up to 8 messages that arrive during the authentication are kept; a ninth is a
-flood. After `Welcome`:
+`heartbeatMs`, `clientPingMs`, `maxMsgPerSec`, `msgBurst`, `activeGame`, `gestureRate`,
+`gestureBurst` and `gestureIdleMs`. Up to 8 messages that arrive during the authentication are
+kept; a ninth is a flood. After `Welcome`:
 
 * `WS_MSG_RATE` per second with a burst of `WS_MSG_BURST`: a message beyond it is dropped (its seq
   still counted), with `Error{RateLimited}` at most once per second; more than max(10,

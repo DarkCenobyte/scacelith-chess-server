@@ -79,6 +79,8 @@ pub(crate) struct ConnSettings {
     pub flood_drops: u32,
     pub gesture_rate: f64,
     pub gesture_burst: f64,
+    /// The gesture keepalive announced in `Welcome` (ms; `GESTURE_IDLE_MS`).
+    pub gesture_idle_ms: u16,
     /// Gesture drops in 10 s past which gestures are a flood.
     pub gesture_flood_drops: u32,
     pub hello_timeout_ms: f64,
@@ -107,6 +109,7 @@ impl ConnSettings {
             flood_drops: u32::try_from(config.ws_msg_burst.max(10)).unwrap_or(u32::MAX),
             gesture_rate,
             gesture_burst,
+            gesture_idle_ms: u16::try_from(config.gesture_idle_ms.max(0)).unwrap_or(u16::MAX),
             gesture_flood_drops: gesture_flood.min(f64::from(u32::MAX)) as u32,
             hello_timeout_ms: f(config.ws_hello_timeout_ms),
             heartbeat_interval_ms: f(config.heartbeat_interval_ms),

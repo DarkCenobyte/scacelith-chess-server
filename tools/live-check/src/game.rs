@@ -1,9 +1,9 @@
-//! The game part: a server with two shards, proof of work on registration and no GIFs; a bot that
-//! queues in rated 3+2 and plays random legal moves; then the C++ test `net_live_server_game`
-//! (registration with the proof of work, sign-in, queue, 12 plies against the bot, resignation,
-//! rating update) and `net_live_account_server_settings` (an e-mail change refused for the bot's
-//! address, then applied at once on a server without e-mail confirmation, and the GIFs turned
-//! off).
+//! The game part: a server with two shards, proof of work on registration, no GIFs and a gesture
+//! keepalive of its own; a bot that queues in rated 3+2 and plays random legal moves; then the C++
+//! test `net_live_server_game` (registration with the proof of work, sign-in, the keepalive of the
+//! Welcome, queue, 12 plies against the bot, resignation, rating update) and
+//! `net_live_account_server_settings` (an e-mail change refused for the bot's address, then
+//! applied at once on a server without e-mail confirmation, and the GIFs turned off).
 
 use std::time::Duration;
 
@@ -21,6 +21,9 @@ const CPP_USER: &str = "cppplayer";
 const CPP_PASSWORD: &str = "live check password 1234";
 /// The bot's account; its address is the one the settings test finds taken.
 const BOT: &str = "livebot";
+/// `GESTURE_IDLE_MS` of the server, which the C++ client must read in its `Welcome` (not the
+/// default, 1000).
+const GESTURE_IDLE_MS: &str = "2500";
 
 /// Registers `name` on a server that asks for a proof of work: the first request gets the
 /// challenge (428 `pow_required`), the second carries its solution.
@@ -47,8 +50,14 @@ async fn register_with_pow(api: &ApiClient, name: &str) -> Result<(), String> {
 }
 
 pub(crate) async fn run(ctx: &Ctx) -> i32 {
-    let mut srv =
-        ctx.server().workers(2).env("POW_REGISTER_BITS", "12").env("GIF_ENABLED", "false").start().await;
+    let mut srv = ctx
+        .server()
+        .workers(2)
+        .env("POW_REGISTER_BITS", "12")
+        .env("GIF_ENABLED", "false")
+        .env("GESTURE_IDLE_MS", GESTURE_IDLE_MS)
+        .start()
+        .await;
     let pin = srv.pin();
     println!("[game] server on {}:{} (API + WSS), certificate SHA-256 {pin}", ctx.host, srv.addr.port());
     let code = play(ctx, &srv, &pin).await;
@@ -89,7 +98,7 @@ async fn play(ctx: &Ctx, srv: &TestServer, pin: &str) -> i32 {
         Ok::<_, scacelith_client::ClientError>(id)
     });
 
-    let live = format!("{}:{}:{pin}:{CPP_USER}:{CPP_PASSWORD}", ctx.host, srv.addr.port());
+    let live = format!("{}:{}:{pin}:{CPP_USER}:{CPP_PASSWORD}:{GESTURE_IDLE_MS}", ctx.host, srv.addr.port());
     let mut code = run_cpp(ctx, "net_live_server_game", &[("SCACELITH_NET_LIVE", &live)]).await;
     let game_id = match tokio::time::timeout(Duration::from_secs(30), bot).await {
         Ok(Ok(Ok(id))) => Some(id),
