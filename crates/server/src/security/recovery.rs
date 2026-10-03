@@ -3,7 +3,7 @@
 //! under the derived recovery pepper, bound to the account.
 
 use crate::security::encoding::{fill_random, js_is_space, utf16_len};
-use crate::security::keys::hmac_sha256;
+use crate::security::keys::{hmac_sha256, safe_eq};
 
 /// Codes per generation.
 pub const RECOVERY_CODE_COUNT: usize = 10;
@@ -69,6 +69,14 @@ pub fn hash_typed_recovery_code(pepper: &[u8], user_id: i64, typed: &str) -> Opt
     normalize_recovery_code(typed).map(|n| hash_recovery_code(pepper, user_id, &n))
 }
 
+/// True when the typed code is the one stored as `stored_hash` (hex, see
+/// [`hash_recovery_code`]); compared in constant time. The store normally finds and consumes a
+/// code by its hash in one statement; this is for a hash already at hand.
+pub fn recovery_code_matches(pepper: &[u8], user_id: i64, typed: &str, stored_hash: &str) -> bool {
+    hash_typed_recovery_code(pepper, user_id, typed)
+        .is_some_and(|h| safe_eq(h.as_bytes(), stored_hash.as_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -127,8 +135,12 @@ mod tests {
         assert_eq!(hash_recovery_code(&pepper, 1, &n), h1);
         assert_ne!(hash_recovery_code(&pepper, 2, &n), h1);
         assert_ne!(hash_recovery_code(&random_bytes::<32>(), 1, &n), h1);
-        assert_eq!(hash_typed_recovery_code(&pepper, 1, "ABCD EFGH JK"), Some(h1));
+        assert_eq!(hash_typed_recovery_code(&pepper, 1, "ABCD EFGH JK"), Some(h1.clone()));
         assert_eq!(hash_typed_recovery_code(&pepper, 1, "nope"), None);
+        assert!(recovery_code_matches(&pepper, 1, "abcd efgh jk", &h1));
+        assert!(!recovery_code_matches(&pepper, 2, "abcd-efgh-jk", &h1));
+        assert!(!recovery_code_matches(&pepper, 1, "abcd-efgh-jm", &h1));
+        assert!(!recovery_code_matches(&pepper, 1, "nope", &h1));
     }
 
     #[test]
