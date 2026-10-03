@@ -36,7 +36,7 @@ impl Rules for ChessRules {
     }
 
     fn fullmove(&self) -> u32 {
-        self.0.fullmove().into()
+        self.0.fullmove()
     }
 
     fn in_check(&self) -> bool {
