@@ -74,11 +74,11 @@ async fn crash_child_plain() {
             j.append(Move, 5000 + u64::from(i % 5), &payload(i), f64::from(i)).unwrap();
             i += 1;
         }
-        let upto = i - 1;
+        let (upto, segs) = (i - 1, j.stats().segments);
         let flush = j.flush();
         tokio::spawn(async move {
             if flush.await.is_ok() {
-                println!("ack {upto}");
+                println!("ack {upto} {segs}");
             }
         });
         tokio::task::yield_now().await;
@@ -116,11 +116,12 @@ async fn crash_child_compacting() {
             s[4..].copy_from_slice(&SNAPSHOT_MARK.to_le_bytes());
             j.append(Snapshot, game, &s, -2.0).unwrap();
         }
-        let (upto, segs) = (i - 1, j.stats().segments);
+        let (upto, stats) = (i - 1, j.stats());
+        let (segs, snapshots) = (stats.segments, stats.snapshots);
         let flush = j.flush();
         tokio::spawn(async move {
             if flush.await.is_ok() {
-                println!("ack {upto} {committed} {segs}");
+                println!("ack {upto} {committed} {segs} {snapshots}");
             }
         });
         tokio::task::yield_now().await;
@@ -179,10 +180,12 @@ fn runtime() -> tokio::runtime::Runtime {
 /// One plain crash run; returns the segments left on disk.
 fn crash_run(fsync: bool) -> usize {
     let dir = TempDir::new("crash");
-    let mut last_ack = 0;
+    let (mut last_ack, mut segs) = (0, 0);
+    // Killed once it has rotated a few times (a slow I/O thread makes large batches).
     kill_when("journal::tests::crash::crash_child_plain", dir.path(), fsync, |f| {
         last_ack = last_ack.max(f[0]);
-        last_ack >= 6000
+        segs = segs.max(f[1]);
+        last_ack >= 6000 && segs >= 3
     });
     runtime().block_on(async {
         let j =
@@ -227,12 +230,15 @@ fn crash_simulation_sigkill_mid_writes_fsync_on() {
 /// One compacting crash run.
 fn compacting_crash_run(fsync: bool) {
     let dir = TempDir::new("crash-compacting");
-    let (mut last_ack, mut last_commit, mut max_segs) = (0, 0, 0);
+    let (mut last_ack, mut last_commit, mut max_segs, mut written_snapshots) = (0, 0, 0, 0);
+    // Killed once it has compacted a few times (a slow I/O thread makes large batches, and so
+    // fewer rotations).
     kill_when("journal::tests::crash::crash_child_compacting", dir.path(), fsync, |f| {
         last_ack = last_ack.max(f[0]);
         last_commit = last_commit.max(f[1]);
         max_segs = max_segs.max(f[2]);
-        last_ack >= 15_000
+        written_snapshots = written_snapshots.max(f[3]);
+        last_ack >= 15_000 && written_snapshots >= 10
     });
     runtime().block_on(async {
         let j =

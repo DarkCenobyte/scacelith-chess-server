@@ -24,9 +24,17 @@ async fn a_failed_batch_fails_every_flush_waiting_for_it_and_is_counted_and_logg
     j.flush().await.unwrap();
     let errors = ERRORS.get();
     let logs = super::LogCapture::start();
-    j.set_write_batch_override(Some(fail_once(ErrorKind::Other, "EIO: i/o error, write")));
+    // The failing write waits until both flushes wait for it.
+    let (go, gate) = std::sync::mpsc::channel::<()>();
+    let mut fail = fail_once(ErrorKind::Other, "EIO: i/o error, write");
+    j.set_write_batch_override(Some(Box::new(move |batch: &[u8]| {
+        let _ = gate.recv_timeout(std::time::Duration::from_secs(5));
+        fail(batch)
+    })));
     j.append(Move, 1, b"m1", 2.0).unwrap();
     let (a, b) = (j.flush(), j.flush());
+    go.send(()).unwrap();
+    drop(go); // later batches pass the gate at once
     let (a, b) = (a.await.unwrap_err(), b.await.unwrap_err());
     assert_eq!(a, b, "every flush of the batch gets its error");
     assert!(
