@@ -1,6 +1,6 @@
 //! HTTPS API framework and routes: router, answers and headers, JSON bodies and schema checks,
-//! authentication, per-route and per-account rate limits, handler timeout, every `/api/v1`
-//! endpoint and the HTML pages. See docs/RUST-PORT.md.
+//! authentication, per-route and per-account rate limits, handler timeout, the CORS allow-list,
+//! every `/api/v1` endpoint and the HTML pages. See docs/RUST-PORT.md.
 //!
 //! A route module registers its endpoints on a [`Router`]:
 //!
@@ -17,6 +17,7 @@
 pub mod answer;
 pub mod api;
 pub mod body;
+pub mod cors;
 pub mod ctx;
 pub mod json;
 pub mod pages;

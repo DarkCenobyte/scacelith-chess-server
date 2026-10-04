@@ -92,9 +92,10 @@ password inline only to stay short.
   ignored. A `+` decodes to a space: the endpoints that take a time-control category accept both
   `3%2B2` and `3+2`.
 - **Methods.** `HEAD` is `GET` without the body. `OPTIONS` on an existing path answers 204 with an
-  `Allow` header. Any other method that the path does not have answers 405 `method_not_allowed`
-  with `Allow`. The health endpoints are the exception: every method but `GET` and `HEAD`,
-  `OPTIONS` included, answers 405 `method_not_allowed` with `Allow: GET, HEAD`.
+  `Allow` header (and the headers of a CORS preflight, below). Any other method that the path
+  does not have answers 405 `method_not_allowed` with `Allow`. The health endpoints are the
+  exception: every method but `GET` and `HEAD`, `OPTIONS` included, answers 405
+  `method_not_allowed` with `Allow: GET, HEAD`.
 - The request target may not exceed 4096 characters (414 `uri_too_long`).
 - **Unreadable requests.** A request that the server cannot parse gets an empty answer, with
   `Connection: close` and no JSON body, and the connection closes: 400 (a malformed request line,
@@ -103,9 +104,42 @@ password inline only to stay short.
   bytes, counted as the target plus the header names and values, more than 64 header lines, or
   chunk extensions or trailers that are too large) or 408 (a request head that did not arrive
   within 10 s).
-- **No CORS.** The API serves the game, not web pages. No `Access-Control-*` header is ever sent,
-  so a web page cannot read an answer. Because only JSON bodies are taken, a cross-site write
-  would need a preflight, and that preflight fails.
+- **CORS: an allow-list, off by default.** The API serves the game, which sends no `Origin`.
+  With `CORS_ORIGINS` empty (the default) no `Access-Control-*` header is ever sent, so no web
+  page can read an answer. `CORS_ORIGINS` lists the web origins whose pages may call the API from
+  a browser, each exactly as browsers send it in `Origin`: `https://host` or `https://host:port`,
+  in lower case, without a path, a trailing slash or the default port; `http://` only for
+  `localhost`, `127.0.0.1` and `[::1]` (local development); no wildcard
+  ([CONFIG.md](CONFIG.md)). The official server sets
+  `CORS_ORIGINS=https://scacelith.com,https://www.scacelith.com` for its website. Then:
+  - Every answer of the API for a path under `/api/v1`, successes and errors alike (401, 404,
+    405, 415, 428 `pow_required`, 429, 503...), carries `Vary: Origin`. When the request's
+    `Origin` is byte for byte one of the listed origins, it also carries
+    `Access-Control-Allow-Origin: <that origin>` and
+    `Access-Control-Expose-Headers: Retry-After, Content-Disposition` (`Content-Type` and
+    `Content-Length` are readable anyway), so a listed page reads the error codes, `Retry-After`
+    and the file names of the PGN and GIF downloads. The 429 `rate_limited` of the per-address
+    layer (section 1.5) carries the same headers on these paths.
+  - A preflight (`OPTIONS` with `Access-Control-Request-Method`) from a listed origin on an
+    existing path answers 204, without a body, with `Allow`,
+    `Access-Control-Allow-Origin: <that origin>`, `Access-Control-Allow-Methods` (the methods
+    of `Allow`), `Access-Control-Allow-Headers: Authorization, Content-Type`,
+    `Access-Control-Max-Age: 600` and `Vary: Origin`. It needs no token and counts toward no
+    account budget and no endpoint limit; like any request, it takes one token of the
+    per-address layer. A browser reuses a preflight for 10 minutes, for one URL and method.
+  - `Access-Control-Allow-Credentials` is never sent, nor `Access-Control-Allow-Origin: *`: a page
+    sends its session token in `Authorization: Bearer`, as the game does. The API sets no cookie.
+  - The HTML pages (section 14), the health endpoints (section 15), the empty answers to
+    unreadable requests and the 500 of the listener carry no CORS header. The WebSocket does not
+    use CORS: `WS_ALLOWED_ORIGINS` lists the pages that may open it.
+  - For a page of an origin that is not listed, nothing changes: no `Access-Control-*` header,
+    so the browser keeps the answer from the page. A cross-site write cannot get through either:
+    the API takes only JSON bodies and the token comes in `Authorization`, so the browser sends a
+    preflight first, and the preflight's answer has no `Access-Control-Allow-Origin` for that
+    origin: the browser never sends the write.
+  - `Cross-Origin-Resource-Policy: same-origin` stays on every answer. The Fetch standard applies
+    it to `no-cors` requests only (an image or a script that another site embeds), never to the
+    `cors` requests of a listed page.
 
 ### 1.3 Answers and errors
 
@@ -123,8 +157,9 @@ password inline only to stay short.
   endpoints' `GET` and `HEAD` (section 15), the 429 `rate_limited` of the per-address layer
   (section 1.5) and a 500 `internal_error` when the API fails outright. They carry the same
   headers except `Cross-Origin-Resource-Policy`, and their `Content-Type` is `application/json`
-  without a charset. The empty answers to unreadable requests (section 1.2) carry none of these
-  headers.
+  without a charset. With `CORS_ORIGINS` set, the 429 of a path under `/api/v1` also carries the
+  CORS headers (section 1.2). The empty answers to unreadable requests (section 1.2) carry none
+  of these headers.
 - An answer must be read within 60 s of the moment the server has it ready, which only matters
   for the large ones (a GIF, the data export, a long PGN): the server closes the connection of a
   client that has not taken it all by then. The time the server takes to prepare an answer (a GIF

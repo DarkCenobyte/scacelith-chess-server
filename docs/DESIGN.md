@@ -653,6 +653,15 @@ query and body validation, the handler under its timeout, and the answer with it
   `Referrer-Policy: no-referrer`, a `Content-Security-Policy` (strict for HTML pages), and
   `Strict-Transport-Security` with native TLS. JSON errors are `{ "error": "<snake_case_code>",
   "message": "...", "retryAfter"?: s }`, with `Retry-After` when `retryAfter` is set.
+* **CORS** (`http::cors`): off unless `CORS_ORIGINS` lists web origins (the official server lists
+  its website). Then every answer under `/api/v1` (health paths excepted) carries `Vary: Origin`,
+  and one to a request whose `Origin` is byte for byte a listed origin also carries
+  `Access-Control-Allow-Origin` with it and `Access-Control-Expose-Headers: Retry-After,
+  Content-Disposition`, errors included, as does the listener's per-address 429. The `OPTIONS`
+  answer of an existing path to a preflight adds `Access-Control-Allow-Methods` (the `Allow`
+  list), `Access-Control-Allow-Headers: Authorization, Content-Type` and
+  `Access-Control-Max-Age: 600`; it comes before authentication and the rates. Never
+  `Access-Control-Allow-Credentials`, never `*`.
 * **Route groups** (`http::routes`, registered in this order): `info`, `auth`, `account`, `sso`,
   `players`, `games`, `leaderboard`, `reports`, `account_games`, `account_export`, `gif`, then the
   HTML pages `/verify-email`, `/reset-password` and `/confirm-email-change` (a GET shows a
@@ -979,6 +988,13 @@ checkpoint (it is truncated to 64 MiB and removed when the server stops). A back
 
 * **TLS everywhere**: the HTTPS API and WSS, with native TLS or behind a TLS-terminating proxy
   (`TRUSTED_PROXIES`). HSTS with native TLS. Plain text only with `ALLOW_INSECURE_DEV`.
+* **Browsers**: the API serves the game. A web page reads its answers only when its origin is in
+  `CORS_ORIGINS` (empty by default), and never with credentials: the token travels in
+  `Authorization`, the API sets no cookie. A page of any other site reads nothing, and its
+  cross-site writes stop at their preflight (JSON bodies and `Authorization` are not "simple").
+  `Cross-Origin-Resource-Policy: same-origin` keeps other sites from embedding answers (it only
+  applies to `no-cors` requests, so the listed pages are not affected). The WebSocket refuses
+  browsers unless `WS_ALLOWED_ORIGINS` lists them; the HTML pages run no script.
 * **Per-server trust boundary** (client side, section 10): credentials, tokens and pinned
   certificates are stored per server origin (`host:apiPort`) and only sent to that origin. The
   WebSocket goes to the same host. Redirects are not followed with credentials.

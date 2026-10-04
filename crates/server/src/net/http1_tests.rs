@@ -1017,3 +1017,48 @@ async fn a_shutdown_lets_the_request_in_progress_finish_and_closes() {
     assert_eq!((w.status, w.header("connection")), (200, Some("close")));
     assert!(until_closed(&mut busy.io, Duration::from_secs(3)).await.is_some());
 }
+
+#[tokio::test]
+async fn the_per_address_429_of_an_api_path_carries_the_cors_headers() {
+    const SITE: &str = "https://scacelith.com";
+    let s = setup(Options { env: Box::new(|c| c.cors_origins = vec![SITE.into()]), ..Options::default() });
+    let ask =
+        |target: &str, origin: &str| format!("GET {target} HTTP/1.1\r\nHost: x\r\nOrigin: {origin}\r\n\r\n");
+    let mut c = connect(&s.edge, "127.0.0.1");
+    let w = request(&mut c, &ask("/api/v1/echo-ip", SITE)).await;
+    assert_eq!(
+        (w.status, w.header("access-control-allow-origin"), w.header("vary")),
+        (200, Some(SITE), Some("Origin"))
+    );
+    let w = request(&mut c, &ask("/api/v1/healthz", SITE)).await;
+    assert_eq!((w.status, w.header("access-control-allow-origin"), w.header("vary")), (200, None, None));
+    while s.guard.request_tokens(local()).expect("a bucket") >= 1.0 {
+        request(&mut c, "GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n").await;
+    }
+    let w = request(&mut c, &ask("/api/v1/info", SITE)).await;
+    assert_eq!((w.status, w.json()["error"].clone()), (429, json!("rate_limited")));
+    assert_eq!(w.header("access-control-allow-origin"), Some(SITE));
+    assert_eq!(w.header("access-control-expose-headers"), Some("Retry-After, Content-Disposition"));
+    assert_eq!((w.header("vary"), w.header("retry-after")), (Some("Origin"), Some("3")));
+    assert_eq!(w.header("access-control-allow-credentials"), None);
+    let w = request(&mut c, &ask("/api/v1/info", "https://evil.example")).await;
+    assert_eq!(
+        (w.status, w.header("access-control-allow-origin"), w.header("vary")),
+        (429, None, Some("Origin"))
+    );
+    for target in ["/healthz", "/api/v1/readyz", "/verify-email?token=x"] {
+        let w = request(&mut c, &ask(target, SITE)).await;
+        assert_eq!(
+            (w.status, w.header("access-control-allow-origin"), w.header("vary")),
+            (429, None, None),
+            "{target}"
+        );
+    }
+    s.guard.apply_blocks(&[BlockOrder::new(local(), 120_000.0, 2)]);
+    let w = request(&mut c, &ask("/api/v1/info", SITE)).await;
+    assert_eq!(
+        (w.status, w.header("connection"), w.header("access-control-allow-origin")),
+        (429, Some("close"), Some(SITE)),
+        "a blocked address too"
+    );
+}

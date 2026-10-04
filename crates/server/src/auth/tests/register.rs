@@ -515,6 +515,40 @@ async fn proof_of_work_on_registration_is_required_verified_single_use_expiring_
     assert_eq!(reg(good(json!({ "username": "_bad" })), ip).await.status, 400);
 }
 
+/// A web page of `CORS_ORIGINS` registers as the game does: its preflight, the 428 with the
+/// challenge and the registration itself are readable; a page elsewhere reads none of them.
+#[tokio::test]
+async fn a_listed_web_page_reads_the_proof_of_work_challenge_and_registers() {
+    const SITE: &str = "https://scacelith.com";
+    let h = Harness::with_env(&[("POW_REGISTER_BITS", "8"), ("CORS_ORIGINS", SITE)]).await;
+    let ip = "203.0.113.9";
+    let pre = h
+        .call_from(ip, Method::OPTIONS, REG)
+        .header("origin", SITE)
+        .header("access-control-request-method", "POST")
+        .header("access-control-request-headers", "content-type")
+        .send()
+        .await;
+    assert_eq!((pre.status, pre.header("access-control-allow-origin")), (204, Some(SITE)));
+    assert_eq!(pre.header("access-control-allow-methods"), Some("POST, OPTIONS"));
+    assert_eq!(pre.header("access-control-allow-headers"), Some("Authorization, Content-Type"));
+    let reg = |body: Value, origin: &str| {
+        h.call_from(ip, Method::POST, REG).header("origin", origin).json(&body).send()
+    };
+    let r = reg(good(json!({})), SITE).await;
+    assert_eq!((r.status, r.json()["error"].clone()), (428, json!("pow_required")));
+    assert_eq!((r.header("access-control-allow-origin"), r.header("vary")), (Some(SITE), Some("Origin")));
+    let challenge = r.json()["pow"]["challenge"].as_str().unwrap().to_owned();
+    let nonce = solve_pow(&challenge, 8);
+    let r = reg(good(json!({ "pow": { "challenge": challenge, "nonce": nonce } })), SITE).await;
+    assert_eq!((r.status, r.header("access-control-allow-origin")), (202, Some(SITE)));
+    let r =
+        reg(good(json!({ "username": "Bob_2", "email": "bob@example.com" })), "https://evil.example").await;
+    assert_eq!((r.status, r.header("access-control-allow-origin")), (428, None));
+    let page = h.call(Method::GET, "/verify-email?token=x").header("origin", SITE).send().await;
+    assert_eq!((page.header("access-control-allow-origin"), page.header("vary")), (None, None));
+}
+
 #[tokio::test]
 async fn per_address_limit_on_the_auth_endpoints() {
     let h = Harness::with_env(&[("AUTH_RATE_PER_IP", "3")]).await;

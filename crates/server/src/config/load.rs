@@ -11,6 +11,7 @@ use indexmap::IndexMap;
 use super::keys::{KEYS, KeySpec, Kind, OBSOLETE};
 use super::{Category, Config, ConfigError, Derived, sso_origin_tag};
 use crate::util::ip::IpMatcher;
+use crate::util::origin::check_web_origin;
 use crate::util::{encoding, errno, js, path};
 
 /// Largest integer a setting may hold (JavaScript's `Number.MAX_SAFE_INTEGER`).
@@ -414,6 +415,11 @@ fn derive<'a>(
         && let Err(e) = IpMatcher::parse(v.list("TRUSTED_PROXIES"))
     {
         errors.push(format!("TRUSTED_PROXIES: {e}."));
+    }
+    for origin in v.list("CORS_ORIGINS") {
+        if let Err(reason) = check_web_origin(origin) {
+            errors.push(format!("CORS_ORIGINS: \"{origin}\" {reason}."));
+        }
     }
 
     // WORKERS: game shards and runtime threads.
