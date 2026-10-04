@@ -126,7 +126,10 @@ password inline only to stay short.
     of `Allow`), `Access-Control-Allow-Headers: Authorization, Content-Type`,
     `Access-Control-Max-Age: 600` and `Vary: Origin`. It needs no token and counts toward no
     account budget and no endpoint limit; like any request, it takes one token of the
-    per-address layer. A browser reuses a preflight for 10 minutes, for one URL and method.
+    per-address layer. A browser reuses a preflight for 10 minutes, for every method and header it
+    allowed, but only for that exact URL, query string included (another game id or page of
+    results needs its own). A request without `Authorization` and without a JSON body, such as
+    `GET /info` or `GET /leaderboard`, needs no preflight.
   - `Access-Control-Allow-Credentials` is never sent, nor `Access-Control-Allow-Origin: *`: a page
     sends its session token in `Authorization: Bearer`, as the game does. The API sets no cookie.
   - The HTML pages (section 14), the health endpoints (section 15), the empty answers to
