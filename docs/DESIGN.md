@@ -657,11 +657,12 @@ query and body validation, the handler under its timeout, and the answer with it
   its website). Then every answer under `/api/v1` (health paths excepted) carries `Vary: Origin`,
   and one to a request whose `Origin` is byte for byte a listed origin also carries
   `Access-Control-Allow-Origin` with it and `Access-Control-Expose-Headers: Retry-After,
-  Content-Disposition`, errors included, as does the listener's per-address 429. The `OPTIONS`
-  answer of an existing path to a preflight adds `Access-Control-Allow-Methods` (the `Allow`
-  list), `Access-Control-Allow-Headers: Authorization, Content-Type` and
-  `Access-Control-Max-Age: 600`; it comes before authentication and the rates. Never
-  `Access-Control-Allow-Credentials`, never `*`.
+  Content-Disposition`, errors included, as does the listener's per-address 429 on these paths. The
+  `OPTIONS` answer of an existing path to a preflight carries, instead of Expose-Headers,
+  `Access-Control-Allow-Methods` (the `Allow` list), `Access-Control-Allow-Headers: Authorization,
+  Content-Type` and `Access-Control-Max-Age: 600`; it comes before authentication and the rates (not
+  before the per-address layer: a preflight refused there is a failed preflight, a network error for
+  the page). Never `Access-Control-Allow-Credentials`, never `*`.
 * **Route groups** (`http::routes`, registered in this order): `info`, `auth`, `account`, `sso`,
   `players`, `games`, `leaderboard`, `reports`, `account_games`, `account_export`, `gif`, then the
   HTML pages `/verify-email`, `/reset-password` and `/confirm-email-change` (a GET shows a

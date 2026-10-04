@@ -6,10 +6,11 @@
 //! `Origin` is byte for byte one of the listed origins, also `Access-Control-Allow-Origin` with
 //! that origin and `Access-Control-Expose-Headers` (`Retry-After`, `Content-Disposition`). The
 //! `OPTIONS` answer of an existing path to a preflight (`Access-Control-Request-Method`) from a
-//! listed origin also carries `Access-Control-Allow-Methods` (the `Allow` list),
-//! `Access-Control-Allow-Headers` (`Authorization`, `Content-Type`) and
-//! `Access-Control-Max-Age: 600`. No answer ever carries `Access-Control-Allow-Credentials` or
-//! `*`: pages send the bearer token in `Authorization`, never a cookie.
+//! listed origin carries, instead of `Access-Control-Expose-Headers`,
+//! `Access-Control-Allow-Methods` (the `Allow` list), `Access-Control-Allow-Headers`
+//! (`Authorization`, `Content-Type`) and `Access-Control-Max-Age: 600`. No answer ever carries
+//! `Access-Control-Allow-Credentials` or `*`: pages send the bearer token in `Authorization`, never
+//! a cookie.
 //!
 //! `Cross-Origin-Resource-Policy: same-origin` stays on every answer of the API: the Fetch
 //! standard applies it only to `no-cors` requests (an `<img>` or a `<script>` of another site,

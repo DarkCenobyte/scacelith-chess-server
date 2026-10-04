@@ -28,7 +28,7 @@
 //! WebSocket endpoint when this listener carries upgrades; an HTTP/1.1 request without `Host` gets
 //! `400` and an `Expect` other than `100-continue` gets `417` (both chunked and empty, as Node);
 //! the protection per address takes a request token and an in-flight slot (`429 rate_limited`,
-//! with the API's CORS headers for a path under `/api/v1`);
+//! with the API's CORS headers for a path under `/api/v1`, the health paths excepted);
 //! `GET`/`HEAD` of the health paths are answered here; everything else goes to [`Api::handle`] in
 //! its own task (never cancelled by a disconnect; the in-flight slot is held until its answer is
 //! sent). Every answer but the raw ones and the WebSocket refusals gets `Date`, then
@@ -1091,8 +1091,10 @@ impl HttpListener {
         self.listener_json(429, &body, &extra)
     }
 
-    /// The per-address 429 of `req`: for a path under `/api/v1`, with the CORS headers of the API
-    /// (`CORS_ORIGINS`), so that a listed web page can read the refusal and its `Retry-After`.
+    /// The per-address 429 of `req`: for a path under `/api/v1` (the health paths excepted), with
+    /// the CORS headers of the API (`CORS_ORIGINS`), so that a listed web page can read the
+    /// refusal and its `Retry-After`. Only the answer to a request does: a refused preflight is
+    /// not an ok answer, which a browser keeps from the page (a network error).
     fn refused<B>(&self, req: &Request<B>, retry_after_ms: f64, close: bool) -> Response<Bytes> {
         let mut res = self.rate_limited(retry_after_ms, close);
         self.api.cors().check(req.method(), req.uri().path(), req.headers()).finish(res.headers_mut(), false);

@@ -935,7 +935,8 @@ async fn cors_preflight_of_a_listed_origin_needs_no_token_and_takes_no_limit() {
     let r = s.t.request(Method::OPTIONS, "/api/v1/body").header("origin", SITE).send().await;
     assert_eq!((r.status, cors_of(&r)), (204, ALLOWED));
     assert_eq!(r.header("access-control-allow-methods"), None);
-    // A path that does not exist: the preflight fails (404), the error stays readable.
+    // A path that does not exist: the preflight fails (404 is not an ok status), so a browser
+    // never sends the request and its page sees a network error.
     let r = preflight("/api/v1/nothing", SITE).send().await;
     assert_eq!((r.status, r.header("access-control-allow-methods")), (404, None));
 }

@@ -115,11 +115,11 @@ password inline only to stay short.
   - Every answer of the API for a path under `/api/v1`, successes and errors alike (401, 404,
     405, 415, 428 `pow_required`, 429, 503...), carries `Vary: Origin`. When the request's
     `Origin` is byte for byte one of the listed origins, it also carries
-    `Access-Control-Allow-Origin: <that origin>` and
-    `Access-Control-Expose-Headers: Retry-After, Content-Disposition` (`Content-Type` and
-    `Content-Length` are readable anyway), so a listed page reads the error codes, `Retry-After`
-    and the file names of the PGN and GIF downloads. The 429 `rate_limited` of the per-address
-    layer (section 1.5) carries the same headers on these paths.
+    `Access-Control-Allow-Origin: <that origin>` and, except on the answer to a preflight (next
+    point), `Access-Control-Expose-Headers: Retry-After, Content-Disposition` (`Content-Type`
+    and `Content-Length` are readable anyway), so a listed page reads the error codes,
+    `Retry-After` and the file names of the PGN and GIF downloads. The 429 `rate_limited` of
+    the per-address layer (section 1.5) carries the same headers on these paths.
   - A preflight (`OPTIONS` with `Access-Control-Request-Method`) from a listed origin on an
     existing path answers 204, without a body, with `Allow`,
     `Access-Control-Allow-Origin: <that origin>`, `Access-Control-Allow-Methods` (the methods
@@ -130,6 +130,12 @@ password inline only to stay short.
     allowed, but only for that exact URL, query string included (another game id or page of
     results needs its own). A request without `Authorization` and without a JSON body, such as
     `GET /info` or `GET /leaderboard`, needs no preflight.
+  - Any other answer to a preflight is a failed preflight, even with the CORS headers: a 404
+    for a path that does not exist, or the 429 of the per-address layer when the address has no
+    token left. The browser then does not send the request, and the page sees a network error,
+    without the answer or its `Retry-After`; a page should allow for a rate limit when the
+    server seemed reachable a moment before. Only a request that needs no preflight, or whose
+    preflight the browser still holds, reads its own 429.
   - `Access-Control-Allow-Credentials` is never sent, nor `Access-Control-Allow-Origin: *`: a page
     sends its session token in `Authorization: Bearer`, as the game does. The API sets no cookie.
   - The HTML pages (section 14), the health endpoints (section 15), the empty answers to
@@ -160,9 +166,9 @@ password inline only to stay short.
   endpoints' `GET` and `HEAD` (section 15), the 429 `rate_limited` of the per-address layer
   (section 1.5) and a 500 `internal_error` when the API fails outright. They carry the same
   headers except `Cross-Origin-Resource-Policy`, and their `Content-Type` is `application/json`
-  without a charset. With `CORS_ORIGINS` set, the 429 of a path under `/api/v1` also carries the
-  CORS headers (section 1.2). The empty answers to unreadable requests (section 1.2) carry none
-  of these headers.
+  without a charset. With `CORS_ORIGINS` set, the 429 of a path under `/api/v1` (the health
+  paths excepted) also carries the CORS headers (section 1.2). The empty answers to unreadable
+  requests (section 1.2) carry none of these headers.
 - An answer must be read within 60 s of the moment the server has it ready, which only matters
   for the large ones (a GIF, the data export, a long PGN): the server closes the connection of a
   client that has not taken it all by then. The time the server takes to prepare an answer (a GIF
