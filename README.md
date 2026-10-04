@@ -71,7 +71,7 @@ them from the tag, and their build provenance and the binary's SBOM are attested
 download with the GitHub CLI:
 
 ```sh
-gh attestation verify scacelith-server-0.9.0-x86_64-linux-musl.tar.gz --repo DarkCenobyte/scacelith-chess-server
+gh attestation verify scacelith-server-0.9.1-x86_64-linux-musl.tar.gz --repo DarkCenobyte/scacelith-chess-server
 ```
 
 ## Build
@@ -727,7 +727,7 @@ new advisories and changes on the game's side. CodeQL (`.github/workflows/codeql
 each a week after its release.
 
 A release is published by pushing the tag `v` + the workspace version of `Cargo.toml`
-(`v0.9.0`): the release workflow (`.github/workflows/release.yml`) checks that they match, runs the
+(`v0.9.1`): the release workflow (`.github/workflows/release.yml`) checks that they match, runs the
 CI again on the tagged commit, builds the static binary from scratch, writes its SBOM, attests both
 and publishes the GitHub release (a pre-release when the version has a suffix, such as `-rc.1`).
 Started by hand, it builds the same files and keeps them as workflow artifacts without publishing
