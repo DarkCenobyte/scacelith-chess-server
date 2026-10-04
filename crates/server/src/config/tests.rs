@@ -501,6 +501,61 @@ fn abuse_exempt_is_parsed_at_load() {
 }
 
 #[test]
+fn cors_origins_are_checked_at_load() {
+    assert!(ok(&[]).cors_origins.is_empty(), "no CORS by default");
+    assert_eq!(spec("CORS_ORIGINS").unwrap().section, Section::Server);
+    let c =
+        ok(&[("CORS_ORIGINS", " https://scacelith.com , https://www.scacelith.com,,http://localhost:8080 ")]);
+    assert_eq!(
+        c.cors_origins,
+        ["https://scacelith.com", "https://www.scacelith.com", "http://localhost:8080"]
+    );
+    let local = ok(&[(
+        "CORS_ORIGINS",
+        "http://127.0.0.1:8080,http://[::1]:8080,https://play.example.org:8443,https://[::ffff:102:304]",
+    )]);
+    assert_eq!(local.cors_origins.len(), 4);
+    for (bad, message) in [
+        ("*", "\"*\" is a wildcard: list each origin, such as https://www.example.org."),
+        ("null", "\"null\" is the origin of sandboxed and local pages, which cannot be allowed."),
+        (
+            "https://scacelith.com/",
+            "\"https://scacelith.com/\" must have no path, query or fragment, not even a trailing slash; \
+             write \"https://scacelith.com\".",
+        ),
+        ("https://Scacelith.com", "\"https://Scacelith.com\" must be in lower case, as browsers send it"),
+        (
+            "https://scacelith.com:443",
+            "\"https://scacelith.com:443\" names the default port 443, which browsers leave out; write \
+             \"https://scacelith.com\".",
+        ),
+        ("http://scacelith.com", "\"http://scacelith.com\" uses http://, which is accepted for localhost"),
+        ("scacelith.com", "\"scacelith.com\" must start with https://"),
+        ("https://*.scacelith.com", "\"https://*.scacelith.com\" has an invalid host name"),
+        ("https://user@scacelith.com", "must not hold a user name or password."),
+        (
+            "HTTPS://Scacelith.com:443/",
+            "\"HTTPS://Scacelith.com:443/\" must be in lower case, as browsers send it; write \
+             \"https://scacelith.com\".",
+        ),
+        (
+            "http://scacelith.com:80/",
+            "\"http://scacelith.com:80/\" uses http://, which is accepted for localhost",
+        ),
+        (
+            "https://[::ffff:1.2.3.4]",
+            "\"https://[::ffff:1.2.3.4]\" has its IPv6 address in a form browsers do not send",
+        ),
+    ] {
+        let e = err(&[("CORS_ORIGINS", &format!("https://scacelith.com,{bad}"))]);
+        assert!(e.contains(&format!("CORS_ORIGINS: {message}")) || e.contains(message), "{bad}: {e}");
+        assert!(e.contains("CORS_ORIGINS: \""), "{e}");
+    }
+    let e = err(&[("CORS_ORIGINS", "https://a.example/,https://b.example/")]);
+    assert_eq!(e.matches("CORS_ORIGINS: ").count(), 2, "every bad entry is named: {e}");
+}
+
+#[test]
 fn check_config_warns_when_ip_max_connections_is_below_twice_max_connections_per_ip() {
     let warns = |o: &[(&str, &str)]| -> Vec<String> {
         ok(o).warnings_for_cores(64).into_iter().filter(|w| w.starts_with("IP_MAX_CONNECTIONS")).collect()
@@ -766,7 +821,7 @@ fn check_config_prints_every_key_in_table_order_then_the_derived_values() {
     let mut want: Vec<String> = KEYS.iter().map(|k| camel_case(k.name)).collect();
     want.extend(["ssoOrigin", "ssoRedirectTag", "categories"].map(String::from));
     assert_eq!(keys, want);
-    assert_eq!(keys.len(), 158);
+    assert_eq!(keys.len(), 159);
     assert_eq!(d["serverSecret"], "<set>");
     assert_eq!(d["mfaEncryptionKey"], "<unset>");
     assert_eq!(d["smtpPassword"], "<set>");

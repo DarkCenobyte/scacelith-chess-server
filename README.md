@@ -71,7 +71,7 @@ them from the tag, and their build provenance and the binary's SBOM are attested
 download with the GitHub CLI:
 
 ```sh
-gh attestation verify scacelith-server-0.9.0-x86_64-linux-musl.tar.gz --repo DarkCenobyte/scacelith-chess-server
+gh attestation verify scacelith-server-0.9.1-x86_64-linux-musl.tar.gz --repo DarkCenobyte/scacelith-chess-server
 ```
 
 ## Build
@@ -374,6 +374,11 @@ the limit, the better layout for a server that expects to be full.
   account. A change of e-mail address is confirmed through a link sent to the new address (with
   `REQUIRE_EMAIL_VERIFICATION`; without it the address changes at once), and the former address
   is told. The data download holds no password hash, two-step secret, token or anti-cheat data.
+- Web pages in a browser can read the API's answers only from the origins listed in
+  `CORS_ORIGINS` (empty by default: no CORS header at all). The official server lists its website,
+  `CORS_ORIGINS=https://scacelith.com,https://www.scacelith.com`, whose account pages call the
+  API from the browser with the same bearer tokens as the game; credentials (cookies) are never
+  allowed ([docs/API.md](docs/API.md), section 1.2).
 
 ## Animated GIFs of games
 
@@ -722,7 +727,7 @@ new advisories and changes on the game's side. CodeQL (`.github/workflows/codeql
 each a week after its release.
 
 A release is published by pushing the tag `v` + the workspace version of `Cargo.toml`
-(`v0.9.0`): the release workflow (`.github/workflows/release.yml`) checks that they match, runs the
+(`v0.9.1`): the release workflow (`.github/workflows/release.yml`) checks that they match, runs the
 CI again on the tagged commit, builds the static binary from scratch, writes its SBOM, attests both
 and publishes the GitHub release (a pre-release when the version has a suffix, such as `-rc.1`).
 Started by hand, it builds the same files and keeps them as workflow artifacts without publishing

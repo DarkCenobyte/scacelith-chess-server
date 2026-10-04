@@ -823,3 +823,201 @@ async fn query_schemas_always_name_the_field() {
         json!({"error": "invalid_request", "message": "unknown field \"x\"", "field": "x"})
     );
 }
+
+// ---- CORS (CORS_ORIGINS) --------------------------------------------------------------------------
+
+const SITE: &str = "https://scacelith.com";
+const ACAO: &str = "access-control-allow-origin";
+
+fn cors_setup() -> Setup {
+    start_with(
+        config_with(|c| c.cors_origins = vec![SITE.into(), "http://localhost:8080".into()]),
+        router_under_test(),
+        false,
+    )
+}
+
+/// The CORS headers of an answer: allow-origin, expose-headers, vary.
+fn cors_of(r: &testing::TestResponse) -> (Option<&str>, Option<&str>, Option<&str>) {
+    (r.header(ACAO), r.header("access-control-expose-headers"), r.header("vary"))
+}
+
+const ALLOWED: (Option<&str>, Option<&str>, Option<&str>) =
+    (Some(SITE), Some("Retry-After, Content-Disposition"), Some("Origin"));
+
+#[tokio::test]
+async fn cors_a_listed_origin_reads_successes_and_errors() {
+    let s = cors_setup();
+    let r = s.t.get("/api/v1/echo/x").header("origin", SITE).send().await;
+    assert_eq!((r.status, cors_of(&r)), (200, ALLOWED));
+    assert_eq!(r.header("cross-origin-resource-policy"), Some("same-origin"), "kept: no-cors requests only");
+    assert_eq!(r.header("access-control-allow-credentials"), None);
+    let r = s.t.get("/api/v1/file").header("origin", SITE).send().await;
+    assert_eq!((r.status, cors_of(&r)), (200, ALLOWED));
+    assert!(r.header("content-disposition").is_some(), "readable through expose-headers");
+    let local = s.t.get("/api/v1/echo/x").header("origin", "http://localhost:8080").send().await;
+    assert_eq!(local.header(ACAO), Some("http://localhost:8080"));
+    // Errors: authentication, no such endpoint, wrong method, wrong body type, a limit, a handler
+    // error, a timeout, the error of a handler with its own status.
+    let r = s.t.get("/api/v1/private").header("origin", SITE).send().await;
+    assert_eq!((r.status, cors_of(&r)), (401, ALLOWED));
+    let r = s.t.get("/api/v1/private").header("origin", SITE).bearer("sct_nope").send().await;
+    assert_eq!((r.status, cors_of(&r)), (401, ALLOWED));
+    let r = s.t.get("/api/v1/nothing").header("origin", SITE).send().await;
+    assert_eq!((r.status, cors_of(&r)), (404, ALLOWED));
+    let r = s.t.request(Method::DELETE, "/api/v1/echo/x").header("origin", SITE).send().await;
+    assert_eq!((r.status, cors_of(&r)), (405, ALLOWED));
+    let r = s.t.post("/api/v1/body").header("origin", SITE).body("text/plain", "x").send().await;
+    assert_eq!((r.status, cors_of(&r)), (415, ALLOWED));
+    for _ in 0..2 {
+        assert_eq!(s.t.get("/api/v1/limited").header("origin", SITE).send().await.status, 200);
+    }
+    let r = s.t.get("/api/v1/limited").header("origin", SITE).send().await;
+    assert_eq!((r.status, cors_of(&r)), (429, ALLOWED));
+    assert_eq!(r.header("retry-after"), Some("30"));
+    let r = s.t.get("/api/v1/boom").header("origin", SITE).send().await;
+    assert_eq!((r.status, cors_of(&r)), (500, ALLOWED));
+    let r = s.t.get("/api/v1/slow").header("origin", SITE).send().await;
+    assert_eq!((r.status, cors_of(&r)), (503, ALLOWED));
+    let r = s.t.get("/api/v1/teapot").header("origin", SITE).send().await;
+    assert_eq!((r.status, cors_of(&r)), (418, ALLOWED));
+    let r = s.t.request(Method::HEAD, "/api/v1/echo/x").header("origin", SITE).send().await;
+    assert_eq!((r.status, cors_of(&r)), (200, ALLOWED));
+}
+
+#[tokio::test]
+async fn cors_the_account_budget_refusal_is_readable() {
+    let s = start_with(
+        config_with(|c| {
+            c.cors_origins = vec![SITE.into()];
+            c.user_rate_per_min = 4;
+        }),
+        quota_routes(Default::default()),
+        false,
+    );
+    for _ in 0..2 {
+        assert_eq!(s.t.get("/api/v1/b").bearer(TOKEN).header("origin", SITE).send().await.status, 200);
+    }
+    let r = s.t.get("/api/v1/b").bearer(TOKEN).header("origin", SITE).send().await;
+    assert_eq!((r.status, r.json()["error"].clone(), cors_of(&r)), (429, json!("rate_limited"), ALLOWED));
+    assert!(r.header("retry-after").is_some());
+}
+
+#[tokio::test]
+async fn cors_preflight_of_a_listed_origin_needs_no_token_and_takes_no_limit() {
+    let s = cors_setup();
+    let preflight = |path: &str, origin: &str| {
+        s.t.request(Method::OPTIONS, path)
+            .header("origin", origin)
+            .header("access-control-request-method", "POST")
+            .header("access-control-request-headers", "authorization, content-type")
+    };
+    let r = preflight("/api/v1/body", SITE).send().await;
+    assert_eq!((r.status, r.header("allow")), (204, Some("POST, OPTIONS")));
+    assert_eq!(r.header(ACAO), Some(SITE));
+    assert_eq!(r.header("access-control-allow-methods"), Some("POST, OPTIONS"));
+    assert_eq!(r.header("access-control-allow-headers"), Some("Authorization, Content-Type"));
+    assert_eq!(r.header("access-control-max-age"), Some("600"));
+    assert_eq!(r.header("vary"), Some("Origin"));
+    assert_eq!(r.header("access-control-allow-credentials"), None);
+    assert_eq!(r.header("access-control-expose-headers"), None);
+    assert!(r.body.is_empty() && r.header("content-length").is_none());
+    let r = preflight("/api/v1/echo/x", SITE).send().await;
+    assert_eq!(r.header("access-control-allow-methods"), Some("GET, HEAD, OPTIONS"));
+    // A route that wants a session, one with a limit: the preflight needs neither.
+    let r = preflight("/api/v1/private", SITE).send().await;
+    assert_eq!((r.status, r.header(ACAO)), (204, Some(SITE)));
+    for _ in 0..5 {
+        assert_eq!(preflight("/api/v1/limited", SITE).send().await.status, 204);
+    }
+    assert_eq!(s.t.get("/api/v1/limited").send().await.status, 200, "the limit is untouched");
+    // An OPTIONS without Access-Control-Request-Method is no preflight: the plain CORS headers.
+    let r = s.t.request(Method::OPTIONS, "/api/v1/body").header("origin", SITE).send().await;
+    assert_eq!((r.status, cors_of(&r)), (204, ALLOWED));
+    assert_eq!(r.header("access-control-allow-methods"), None);
+    // A path that does not exist: the preflight fails (404 is not an ok status), so a browser
+    // never sends the request and its page sees a network error.
+    let r = preflight("/api/v1/nothing", SITE).send().await;
+    assert_eq!((r.status, r.header("access-control-allow-methods")), (404, None));
+}
+
+#[tokio::test]
+async fn cors_an_unlisted_origin_gets_no_access_control_header() {
+    let s = cors_setup();
+    for origin in
+        ["https://evil.example", "https://scacelith.com.evil.example", "https://Scacelith.com", "null"]
+    {
+        let r = s.t.get("/api/v1/echo/x").header("origin", origin).send().await;
+        assert_eq!((r.status, cors_of(&r)), (200, (None, None, Some("Origin"))), "{origin}");
+        let r = s.t.get("/api/v1/private").header("origin", origin).send().await;
+        assert_eq!((r.status, r.header(ACAO)), (401, None), "{origin}");
+        let r =
+            s.t.request(Method::OPTIONS, "/api/v1/body")
+                .header("origin", origin)
+                .header("access-control-request-method", "POST")
+                .send()
+                .await;
+        assert_eq!((r.status, r.header("allow")), (204, Some("POST, OPTIONS")));
+        assert!(
+            r.header_names().iter().all(|n| !n.starts_with("access-control-")),
+            "{origin}: {:?}",
+            r.header_names()
+        );
+        assert_eq!(r.header("vary"), Some("Origin"));
+    }
+    let r = s.t.get("/api/v1/echo/x").send().await;
+    assert_eq!(cors_of(&r), (None, None, Some("Origin")), "no Origin: Vary all the same");
+}
+
+#[tokio::test]
+async fn cors_pages_and_health_paths_are_left_alone() {
+    let s = cors_setup();
+    for path in ["/page", "/page-error", "/healthz", "/api/v1/healthz", "/api/v1/readyz", "/nope"] {
+        let r = s.t.get(path).header("origin", SITE).send().await;
+        assert_eq!(cors_of(&r), (None, None, None), "{path}");
+    }
+    let r =
+        s.t.request(Method::OPTIONS, "/api/v1/healthz")
+            .header("origin", SITE)
+            .header("access-control-request-method", "GET")
+            .send()
+            .await;
+    assert_eq!((r.status, r.header(ACAO), r.header("vary")), (405, None, None));
+    let r =
+        s.t.request(Method::OPTIONS, "/page")
+            .header("origin", SITE)
+            .header("access-control-request-method", "POST")
+            .send()
+            .await;
+    assert_eq!((r.status, r.header(ACAO), r.header("vary")), (204, None, None));
+}
+
+#[tokio::test]
+async fn cors_unset_changes_nothing() {
+    let s = start();
+    let r = s.t.get("/api/v1/echo/x").header("origin", SITE).send().await;
+    assert_eq!(cors_of(&r), (None, None, None));
+    assert_eq!(
+        r.header_names(),
+        [
+            "cache-control",
+            "x-content-type-options",
+            "referrer-policy",
+            "x-frame-options",
+            "cross-origin-resource-policy",
+            "content-security-policy",
+            "content-type",
+            "content-length"
+        ]
+    );
+    let r =
+        s.t.request(Method::OPTIONS, "/api/v1/body")
+            .header("origin", SITE)
+            .header("access-control-request-method", "POST")
+            .send()
+            .await;
+    assert_eq!((r.status, r.header("allow")), (204, Some("POST, OPTIONS")));
+    assert!(r.header_names().iter().all(|n| !n.starts_with("access-control-") && *n != "vary"));
+    let r = s.t.get("/api/v1/nothing").header("origin", SITE).send().await;
+    assert_eq!(cors_of(&r), (None, None, None));
+}

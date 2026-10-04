@@ -31,7 +31,7 @@ built below, alone and in an archive with these docs, `.env.example` and the `de
 files; check a download before installing it (GitHub CLI):
 
 ```sh
-gh attestation verify scacelith-server-0.9.0-x86_64-linux-musl --repo DarkCenobyte/scacelith-chess-server
+gh attestation verify scacelith-server-0.9.1-x86_64-linux-musl --repo DarkCenobyte/scacelith-chess-server
 sha256sum -c SHA256SUMS --ignore-missing
 ```
 

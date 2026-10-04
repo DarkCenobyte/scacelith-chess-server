@@ -450,6 +450,7 @@ config_struct! {
     "SHARD_BASE" => shard_base: i64,
     "INSTANCE_ID" => instance_id: String,
     "WS_ALLOWED_ORIGINS" => ws_allowed_origins: Vec<String>,
+    "CORS_ORIGINS" => cors_origins: Vec<String>,
     "SHUTDOWN_GRACE_MS" => shutdown_grace_ms: i64,
     "LISTEN_BACKLOG" => listen_backlog: i64,
     "TLS_MODE" => tls_mode: TlsMode,

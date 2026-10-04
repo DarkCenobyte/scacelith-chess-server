@@ -1,6 +1,7 @@
 //! The API request pipeline (DESIGN 5.9, docs/API.md 1): request target checks, the health
 //! paths, routing, authentication, the account budget, route rates, query and body validation,
-//! the handler under its timeout, and the answer with its headers.
+//! the handler under its timeout, and the answer with its headers, the CORS headers of
+//! `CORS_ORIGINS` included (`http::cors`).
 //!
 //! The listener (`net`) admits each request first (blocks, per-address rates, in-flight slots)
 //! and answers `GET`/`HEAD` of the health paths itself; [`Api::handle`] does everything after.
@@ -20,6 +21,7 @@ use serde_json::{Map, Value, json};
 
 use super::answer::{Answer, ApiError, Payload};
 use super::body::{BODY_TIMEOUT, parse_body, read_body};
+use super::cors::{Cors, CorsCheck};
 use super::ctx::{AuthInfo, Authenticator, Ctx, DynAuthenticator, NoAuthenticator};
 use super::json;
 use super::rates::{RateLimits, UserBudget};
@@ -177,6 +179,7 @@ impl ApiBuilder {
         let close_hooks = Mutex::new(self.router.take_close_hooks());
         Arc::new(Api {
             hsts: self.config.tls_mode == TlsMode::Native,
+            cors: Cors::new(&self.config.cors_origins),
             rates: Arc::new(RateLimits::new(self.clock.clone(), shared)),
             budget: UserBudget::new(&self.config, self.clock.clone()),
             router: self.router,
@@ -236,6 +239,7 @@ pub struct Api {
     body_timeout: Duration,
     handler_timeout: Duration,
     hsts: bool,
+    cors: Cors,
     handlers: Arc<Handlers>,
 }
 
@@ -246,11 +250,13 @@ impl std::fmt::Debug for Api {
 }
 
 /// What the pipeline learnt before a failure: the metric label, whether errors render as HTML,
-/// and the rate tokens to give back on a refunded error.
+/// and the rate tokens to give back on a refunded error; and whether the answer is that of a CORS
+/// preflight.
 struct Progress {
     label: Cow<'static, str>,
     page: bool,
     taken: Option<Arc<Mutex<Vec<super::rates::Taken>>>>,
+    preflight: bool,
 }
 
 /// An answer before it becomes a response.
@@ -336,6 +342,11 @@ impl Api {
         &self.config
     }
 
+    /// The CORS allow-list (`CORS_ORIGINS`), also used by the listener's own 429.
+    pub fn cors(&self) -> &Cors {
+        &self.cors
+    }
+
     /// Waits until no handler task runs any more, at most `limit` (the server's shutdown, once the
     /// listeners stopped: the late handlers may still use the store, the mailer or the GIF pool).
     /// Returns whether every handler ended.
@@ -374,11 +385,14 @@ impl Api {
     {
         let started = Instant::now();
         let head = req.method() == Method::HEAD;
-        let mut progress = Progress { label: Cow::Borrowed("unmatched"), page: false, taken: None };
-        let reply = match self.run(req, &client, &mut progress).await {
+        let cors = self.cors.check(req.method(), req.uri().path(), req.headers());
+        let mut progress =
+            Progress { label: Cow::Borrowed("unmatched"), page: false, taken: None, preflight: false };
+        let mut reply = match self.run(req, &client, &mut progress, &cors).await {
             Ok(reply) => reply,
             Err(err) => self.failure(err, &progress, &client),
         };
+        cors.finish(&mut reply.headers, progress.preflight);
         let ms = started.elapsed().as_secs_f64() * 1000.0;
         let m = http_metrics();
         m.requests.with(&[&progress.label, reply.status.as_str()]).inc();
@@ -395,6 +409,7 @@ impl Api {
         h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
         h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
         h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+        // Kept with CORS: the Fetch standard applies it to no-cors requests only (http::cors).
         h.insert(
             HeaderName::from_static("cross-origin-resource-policy"),
             HeaderValue::from_static("same-origin"),
@@ -411,6 +426,7 @@ impl Api {
         req: Request<B>,
         client: &AddressKeys,
         progress: &mut Progress,
+        cors: &CorsCheck,
     ) -> Result<Reply, ApiError>
     where
         B: Body<Data = Bytes> + Send + Unpin + 'static,
@@ -454,7 +470,10 @@ impl Api {
             RouteMatch::OtherMethods(methods) => {
                 let allow = allow_header(&methods);
                 if method == Method::OPTIONS {
-                    return self.answer(Answer::no_content().header("Allow", allow));
+                    // No authentication, no budget, no route rate: a preflight carries no token.
+                    let mut reply = self.answer(Answer::no_content().header("Allow", allow.as_str()))?;
+                    progress.preflight = cors.add_preflight(&mut reply.headers, &allow);
+                    return Ok(reply);
                 }
                 return Err(method_not_allowed(&allow));
             }

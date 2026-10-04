@@ -285,6 +285,18 @@ pub static KEYS: &[KeySpec] = &[
     )
     .default(""),
     key(
+        "CORS_ORIGINS",
+        Server,
+        List,
+        "Web origins whose pages may call the API from a browser (CORS, docs/API.md section 1.2). Each \
+         one exactly as browsers send it in the Origin header: https://host or https://host:port, in \
+         lower case, with no path, no trailing slash and no default port (:443, :80); http:// only for \
+         localhost, 127.0.0.1 and [::1] (local development); no wildcard. Credentials (cookies) are \
+         never allowed: pages send the bearer token. Empty: no CORS header at all. The official server \
+         sets https://scacelith.com,https://www.scacelith.com. An invalid entry stops the start.",
+    )
+    .default(""),
+    key(
         "SHUTDOWN_GRACE_MS",
         Server,
         Int,

@@ -8,6 +8,7 @@
 //! * [`hash`]: SHA-256, HMAC-SHA-256, constant-time comparison.
 //! * [`random`]: random bytes, tokens, UUID v4, unbiased integers (system generator).
 //! * [`ip`]: client address normalisation and address/CIDR lists.
+//! * [`origin`]: web origins as browsers send them (`CORS_ORIGINS`).
 //! * [`path`]: `path.resolve` and `path.join` (lexical).
 //! * [`errno`]: `ENOENT`-style names of I/O errors.
 //! * [`time`]: the `Date.prototype.toUTCString` format.
@@ -18,6 +19,7 @@ pub mod hash;
 pub mod ip;
 pub mod js;
 pub mod json;
+pub mod origin;
 pub mod path;
 pub mod random;
 pub mod time;
