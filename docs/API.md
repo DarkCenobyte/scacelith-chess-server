@@ -1764,7 +1764,9 @@ curl -sS "$API/leaderboard?category=3%2B2&limit=10"
 
 - The list holds the top 100 rated records with at least `minGames` (`PROVISIONAL_GAMES`) counted
   games. It leaves out deleted accounts and confirmed cheaters.
-- The server computes it again at most every 10 seconds; `updatedAt` says when.
+- The server computes it again at most every 10 seconds; `updatedAt` says when. One computation
+  of a category runs at a time: meanwhile the other requests get the previous list, or wait for
+  the computation when there is none yet.
 
 Errors: 400 `invalid_category`, 400 `invalid_limit`, 503 `busy`.
 
