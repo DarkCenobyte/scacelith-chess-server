@@ -484,6 +484,31 @@ async fn a_first_google_sign_in_finishes_with_the_games_verifier_then_a_username
 }
 
 #[tokio::test]
+async fn a_new_account_that_cannot_be_linked_is_not_created_and_its_ticket_still_works() {
+    let x = Sso::new(&[]).await;
+    let h = &x.h;
+    let r = x.sign_in(claims(json!({}))).await;
+    let ticket = r.json()["ssoTicket"].as_str().unwrap().to_owned();
+    let complete = || x.post(COMPLETE, json!({ "ssoTicket": ticket, "username": "Magnus" }));
+    h.break_writes("fail_link", "INSERT ON sso_identities").await;
+    assert_eq!(complete().await.status, 500);
+    h.mend("fail_link").await;
+    assert!(
+        h.store.users().by_username("Magnus".into()).await.unwrap().is_none(),
+        "no account without its link"
+    );
+    assert!(h.store.users().by_email("magnus@gmail.com".into()).await.unwrap().is_none());
+    assert!(events_of(h, "sso_account_created").await.is_empty());
+    let c = complete().await;
+    assert_eq!(c.status, 200, "{}", c.text());
+    assert_eq!(c.json()["user"]["googleLinked"], true);
+    assert_eq!(
+        google_link(h, "1098765").await,
+        Some(h.store.users().by_username("Magnus".into()).await.unwrap().unwrap().id)
+    );
+}
+
+#[tokio::test]
 async fn a_linked_account_with_two_step_verification_gets_the_mfa_step_then_a_google_totp_session() {
     let x = Sso::new(&[]).await;
     let h = &x.h;

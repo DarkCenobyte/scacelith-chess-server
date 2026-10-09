@@ -4,6 +4,7 @@
 //! cheap Argon2id hasher.
 
 mod account;
+mod atomic;
 mod email_change;
 mod export;
 mod fake_oidc;
@@ -38,7 +39,7 @@ use crate::log::Logger;
 use crate::mail::{CustomTransport, Mailer, MailerOptions, OutgoingMail};
 use crate::security::password::{Argon2Hasher, Argon2Params, HashFailure, PasswordHasher, Verified};
 use crate::store::{
-    GameOutcome, GameSummary, NewUser, RatingFn, RatingRecord, SecurityEvent, SideOutcome, Store,
+    GameOutcome, GameSummary, NewUser, RatingFn, RatingRecord, SecurityEvent, SideOutcome, Store, StoreError,
     StoreOptions, User, status,
 };
 
@@ -469,6 +470,33 @@ impl Harness {
         let mail = self.last_mail().await;
         let link = link_in(&mail.text).expect("a link");
         token_of(&link).expect("a token in the link")
+    }
+
+    /// Makes every write of `event` (a trigger's event, such as `UPDATE OF revoked_at ON
+    /// sessions`) fail with an SQLite error until [`Harness::mend`]: a failure in the middle of
+    /// the transaction of a request.
+    pub(crate) async fn break_writes(&self, name: &str, event: &str) {
+        let sql = format!(
+            "CREATE TRIGGER {name} BEFORE {event} BEGIN SELECT RAISE(ABORT, 'injected failure'); END"
+        );
+        self.store
+            .write(move |db| db.connection().execute_batch(&sql).map_err(StoreError::from))
+            .await
+            .expect("a trigger");
+    }
+
+    /// Removes the trigger `name` of [`Harness::break_writes`].
+    pub(crate) async fn mend(&self, name: &str) {
+        let sql = format!("DROP TRIGGER {name}");
+        self.store
+            .write(move |db| db.connection().execute_batch(&sql).map_err(StoreError::from))
+            .await
+            .expect("no trigger");
+    }
+
+    /// The account's sessions that are not revoked (as stored, whatever the cache holds).
+    pub(crate) async fn unrevoked_sessions(&self, id: UserId) -> usize {
+        self.store.sessions().list_for_user(id).await.expect("a read").len()
     }
 }
 

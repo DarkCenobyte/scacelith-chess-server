@@ -1033,7 +1033,9 @@ checkpoint (it is truncated to 64 MiB and removed when the server stops). A back
   keeps a SHA-256 digest of the hash the password matched, and `POST /auth/login/mfa` fails with
   `invalid_mfa_token` when the stored hash is no longer that one. So a password reset always wins
   against a login, a rehash or a password change in flight, and no session is opened with a password
-  the reset replaced.
+  the reset replaced. The re-authenticated account changes (password, address, deletion, disabling
+  two-step verification, new recovery codes) are written the same way: only while the stored hash is
+  still the one the request's password matched, in the transaction of the change.
 * **Sessions and tokens**: session tokens and every single-use token are 32 random bytes, stored as
   SHA-256 only. Session lookups are cached 30 s (positive and negative); the API drops revoked
   sessions from the cache at once. Single-use tokens: e-mail verification (24 h), password reset
@@ -1041,9 +1043,11 @@ checkpoint (it is truncated to 64 MiB and removed when the server stops). A back
   a reset or a password change ends the account's other reset links), e-mail change (24 h, sent to
   the new address; a new request replaces it, a password change or reset cancels it), MFA login step
   (5 minutes), SSO attempt, ticket and link ticket (10 minutes each; a link ticket allows 5 password
-  tries). Confirming an e-mail change and a password reset are each one transaction; a store that
-  stays locked answers 503 `server_busy` with `retryAfter: 1`, nothing changed and the link still
-  valid.
+  tries). Confirming an e-mail change, a password reset and a password change are each one
+  transaction, with the revocation of the sessions and the end of the links they call for; the
+  session cache and the WebSocket connections hear of a revocation only once it committed. A failure
+  changes nothing: a store that stays locked answers 503 `server_busy` with `retryAfter: 1`, any other
+  failure 500, and the old password, the sessions and the link stay as they were.
 * **TOTP**: RFC 6238 (HMAC-SHA1, 6 digits, 30 s, one step either way), 20-byte secrets sealed with
   AES-256-GCM (`v1.` format, bound to the account), replay refused (the last step used is stored).
   10 recovery codes (`xxxx-xxxx-xx`, 50 bits) stored as HMAC-SHA256 under a derived pepper, single
