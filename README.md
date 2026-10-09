@@ -658,9 +658,14 @@ analysis backlog, the skipped games, and the analysis engines running and sharin
 `scacelith_anticheat_analysis_engines*`), the retention purge (`scacelith_retention_*`), the
 process (`scacelith_process_*`: CPU, memory, file descriptors, threads), how late the async
 runtime runs its timers (`scacelith_runtime_lateness_*`), the stalls of the game host actors and
-the time given back to the players for them (`scacelith_game_stall_*`), and the gesture relay
-(`scacelith_gestures_*`). `/healthz` answers while the process runs, `/readyz` while it accepts
-players. The logs (stdout, one JSON object per line) are described in
+the time given back to the players for them (`scacelith_game_stall_*`), the gesture relay
+(`scacelith_gestures_*`), the work waiting inside the process and what the server refused because
+of it (`scacelith_game_inbox_messages`, `scacelith_journal_pending_bytes`,
+`scacelith_db_write_queue`, `scacelith_games_refused_busy_total`,
+`scacelith_db_writes_refused_total`), and the free disk space
+(`scacelith_database_disk_free_bytes`, `scacelith_journal_disk_free_bytes`). Alert rules:
+[docs/SIZING.md](docs/SIZING.md#alert-rules). `/healthz` answers while the process runs, `/readyz`
+while it accepts players. The logs (stdout, one JSON object per line) are described in
 [docs/DEPLOY.md](docs/DEPLOY.md) (section 7).
 
 ## Scaling

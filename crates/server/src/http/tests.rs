@@ -1021,3 +1021,48 @@ async fn cors_unset_changes_nothing() {
     let r = s.t.get("/api/v1/nothing").header("origin", SITE).send().await;
     assert_eq!(cors_of(&r), (None, None, None));
 }
+
+#[tokio::test]
+async fn a_request_that_may_write_is_refused_while_the_database_writer_is_far_behind() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let backlogged = Arc::new(AtomicBool::new(true));
+    let ran = Arc::new(AtomicUsize::new(0));
+    let mut r = Router::new();
+    r.get("/read", RouteOpts::new(), |_| async { Ok(Answer::json(json!({"ok": true}))) });
+    let count = ran.clone();
+    r.post("/write", RouteOpts::new().rate(RateSpec::new("w", 1.0, 60000)), move |_| {
+        let count = count.clone();
+        async move {
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(Answer::no_content())
+        }
+    });
+    r.page(Method::POST, "/form", RouteOpts::new(), |_| async { Ok(Answer::html("<p>done</p>")) });
+    let flag = backlogged.clone();
+    let config = Arc::new(config_with(|_| {}));
+    let api = Api::builder(config, r).write_backlog(move || flag.load(Ordering::SeqCst)).build();
+    let t = TestApi::new(api);
+    assert_eq!(t.get("/api/v1/read").send().await.status, 200);
+    // Registered by the first request.
+    let refused_total = || crate::metrics::counter("scacelith_db_writes_refused_total", "").get();
+    let refused = refused_total();
+    // Refused before anything runs, the route's rate included; the reads go on.
+    for _ in 0..2 {
+        let w = t.post("/api/v1/write").send().await;
+        assert_eq!((w.status, w.json()["error"].clone()), (503, json!("server_busy")));
+        let after = w.json()["retryAfter"].as_u64().expect("a retryAfter");
+        assert!((2..=5).contains(&after), "{after}");
+        assert_eq!(w.header("retry-after"), Some(after.to_string().as_str()));
+    }
+    let page = t.post("/form").send().await;
+    assert_eq!(page.status, 503);
+    assert!(page.text().contains("Server error"), "an HTML page: {}", page.text());
+    assert_eq!(t.get("/api/v1/read").send().await.status, 200);
+    assert_eq!(ran.load(Ordering::SeqCst), 0);
+    assert_eq!(refused_total(), refused + 3);
+    // Once the writer caught up, the request runs and its rate is still whole.
+    backlogged.store(false, Ordering::SeqCst);
+    assert_eq!(t.post("/api/v1/write").send().await.status, 204);
+    assert_eq!(t.post("/api/v1/write").send().await.status, 429);
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+}

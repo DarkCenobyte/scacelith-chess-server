@@ -1,5 +1,5 @@
-//! Metrics of the journal (names, help texts and buckets of the Node server). The two gauges carry
-//! a `shard` label, as the Node supervisor added to these per-worker gauges.
+//! Metrics of the journal (names, help texts and buckets of the Node server). The gauges carry a
+//! `shard` label, as the Node supervisor added to these per-worker gauges.
 
 use std::sync::LazyLock;
 
@@ -43,6 +43,14 @@ pub(super) static SEGMENTS: LazyLock<GaugeVec> = LazyLock::new(|| {
 
 pub(super) static DISK_BYTES: LazyLock<GaugeVec> = LazyLock::new(|| {
     metrics::gauge_vec("scacelith_journal_disk_bytes", "Size of the journal segments on disk", &["shard"])
+});
+
+pub(super) static PENDING_BYTES: LazyLock<GaugeVec> = LazyLock::new(|| {
+    metrics::gauge_vec(
+        "scacelith_journal_pending_bytes",
+        "Bytes appended to the journal and not handed to its I/O thread yet (set by the game host's beat)",
+        &["shard"],
+    )
 });
 
 /// Registers the counters and histograms at once, so that they show at 0 before their first event

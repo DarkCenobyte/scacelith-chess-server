@@ -24,6 +24,7 @@ use crate::matching::matchmaker::{MatchSettings, Matchmaker, PAIR_RETRY_DELAY_MS
 use crate::net::limits::SharedLimits;
 use crate::realtime::endpoint::{Endpoint, Outbound};
 use crate::realtime::link::{ConnCmd, ConnLink};
+use crate::realtime::metrics;
 use crate::realtime::testing::{CreateMode, FakeHosts, HostCall, drain, name};
 use crate::store::{NewSanction, NewUser, SanctionKind, Source, Store, StoreOptions};
 
@@ -1087,6 +1088,61 @@ async fn a_failed_host_answers_with_its_error_and_frees_the_players() {
     let code = pending_code(&a.frames(), seq);
     assert_eq!(h.ask(&mut b, LobbyRequest::ChallengeJoinCode { code }).await, Err(ErrorCode::ShuttingDown));
     assert_eq!(h.ask(&mut b, queue_join("5+0", false)).await, Ok(()));
+}
+
+#[tokio::test]
+async fn a_saturated_server_refuses_new_games_and_keeps_what_was_asked_before() {
+    let h = Harness::new(&[]).await;
+    let mut a = h.online(1).await;
+    let mut b = h.online(2).await;
+    let mut c = h.online(3).await;
+    // Asked before the hosts fell behind: a direct challenge, a private code, a search.
+    assert_eq!(h.ask(&mut a, challenge("bob", 300, 0, false)).await, Ok(()));
+    let id = received_id(&b.frames());
+    let seq = h.request(&mut a, challenge("", 300, 0, false)).await;
+    let code = pending_code(&a.frames(), seq);
+    h.hosts.set_saturated(true);
+    let refused = metrics::lobby().refused_busy.get();
+    assert_eq!(h.ask(&mut c, queue_join("5+0", false)).await, Err(ErrorCode::RateLimited));
+    assert_eq!(h.ask(&mut c, challenge("alice", 300, 0, false)).await, Err(ErrorCode::RateLimited));
+    assert_eq!(h.ask(&mut b, LobbyRequest::ChallengeAccept { id }).await, Err(ErrorCode::RateLimited));
+    assert_eq!(
+        h.ask(&mut c, LobbyRequest::ChallengeJoinCode { code: code.clone() }).await,
+        Err(ErrorCode::RateLimited)
+    );
+    assert!(metrics::lobby().refused_busy.get() >= refused + 4);
+    assert!(h.hosts.created().is_empty(), "no game created");
+    assert!(c.frames().iter().all(|f| !matches!(f, ServerMsg::QueueStatus(_))), "c never searched");
+    // Nothing was spent: the challenge and the code are still open once the hosts caught up (an
+    // unknown code would be CodeInvalid; this one finds its creator playing).
+    h.hosts.set_saturated(false);
+    assert_eq!(h.ask(&mut b, LobbyRequest::ChallengeAccept { id }).await, Ok(()));
+    assert_eq!(h.hosts.created().len(), 1);
+    assert_eq!(
+        h.ask(&mut c, LobbyRequest::ChallengeJoinCode { code }).await,
+        Err(ErrorCode::UserUnavailable)
+    );
+    assert_eq!(h.ask(&mut c, queue_join("5+0", false)).await, Ok(()));
+}
+
+#[tokio::test]
+async fn a_pairing_refused_by_saturated_hosts_is_tried_again() {
+    let h = Harness::new(&[]).await;
+    let mut a = h.online(1).await;
+    let mut b = h.online(2).await;
+    h.hosts.set_mode(CreateMode::Fail(ErrorCode::RateLimited));
+    let refused = metrics::lobby().refused_busy.get();
+    assert_eq!(h.pair(&mut a, &mut b, "5+0", false).await, None);
+    assert!(metrics::lobby().refused_busy.get() > refused);
+    h.hosts.set_mode(CreateMode::Ok);
+    h.clock.advance(PAIR_RETRY_DELAY_MS as f64);
+    h.timer(Timer::MatchTick).await;
+    assert_eq!(h.hosts.created().len(), 2, "tried again once the delay is over");
+    let game = a.attached()[0];
+    // A rematch refused the same way is unavailable, as for a busy player.
+    h.game_ended(game, 1, 2);
+    h.hosts.set_mode(CreateMode::Fail(ErrorCode::RateLimited));
+    assert_eq!(h.rematch(game, 2, 1, false).await, Err(ErrorCode::RematchUnavailable));
 }
 
 // ---- refund notices -----------------------------------------------------------------------------

@@ -4,6 +4,12 @@
 //! A job is queued when it is submitted, not when its future is first polled: two jobs submitted
 //! one after the other by the same task run in that order, whatever happens to their futures.
 //! The anti-cheat relies on it (anomalies written before the batch that queues the analysis).
+//!
+//! The queue itself has no bound: a job is never refused for its length, since game commits and
+//! the other jobs of the server must run. Its producers keep it short (one commit in flight per
+//! game host, the HTTP requests in progress), and the HTTP layer refuses requests that would
+//! write while it holds [`WRITE_BACKLOG_BUSY`] jobs or more (`Store::writes_backlogged`); its
+//! length is the gauge `scacelith_db_write_queue`.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -18,11 +24,16 @@ use tokio::sync::oneshot;
 use super::conn::{self, DbPath, Role, Tuning};
 use super::db::{Db, SharedCtx};
 use super::error::{Result, StoreError};
+use super::metrics::WRITE_QUEUE;
 use crate::{log_error, log_warn};
 
 /// How long [`Writer::close`] waits for the jobs already queued: longer than `busy_timeout` (5 s),
 /// so that a last job that waits once for another process's write lock is still answered.
 pub(crate) const CLOSE_TIMEOUT: Duration = Duration::from_millis(7000);
+
+/// Jobs waiting from which the writer counts as backlogged: about a second of writes for a slow
+/// disk, and hundreds of times what it holds in ordinary operation.
+pub const WRITE_BACKLOG_BUSY: usize = 10_000;
 
 type Task = Box<dyn FnOnce(&mut WriterConn) + Send>;
 type Cancel = Box<dyn FnOnce() + Send>;
@@ -195,6 +206,7 @@ impl Writer {
             }
         };
         if accepted {
+            WRITE_QUEUE.inc();
             self.queue.ready.notify_one();
         }
         async move {
@@ -207,6 +219,11 @@ impl Writer {
                 Err(_) => Err(StoreError::panicked().into()),
             }
         }
+    }
+
+    /// Jobs waiting (the one running aside).
+    pub(crate) fn backlog(&self) -> usize {
+        self.queue.state.lock().jobs.len()
     }
 
     /// Runs the jobs already queued, then `PRAGMA optimize` and closes the connection. Jobs not
@@ -244,6 +261,7 @@ impl Writer {
         }
         for msg in jobs {
             if let Msg::Job(job) = msg {
+                WRITE_QUEUE.dec();
                 (job.cancel)();
             }
         }
@@ -277,6 +295,7 @@ fn run(queue: Arc<Queue>, mut w: WriterConn) {
                 return;
             }
             Some(Msg::Job(job)) => {
+                WRITE_QUEUE.dec();
                 let run = {
                     let mut st = queue.state.lock();
                     st.current = Some(job.cancel);

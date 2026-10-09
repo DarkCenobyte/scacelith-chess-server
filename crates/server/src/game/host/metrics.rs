@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 use scacelith_protocol::{EndReason, ErrorCode};
 
-use crate::metrics::{self, Counter, CounterVec, Gauge, Histogram};
+use crate::metrics::{self, Counter, CounterVec, Gauge, GaugeVec, Histogram};
 
 /// Why a gesture was not relayed (label of `scacelith_gestures_dropped_total`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -22,16 +22,19 @@ pub enum GestureDrop {
     Malformed,
     /// The opponent's connection already holds a backlog.
     Backlog,
+    /// The host's inbox already holds `GESTURE_INBOX_MAX` gestures (dropped before reaching it).
+    Overload,
 }
 
 impl GestureDrop {
     /// Every reason, in label order.
-    pub const ALL: [GestureDrop; 5] = [
+    pub const ALL: [GestureDrop; 6] = [
         GestureDrop::NoGame,
         GestureDrop::NotPlayer,
         GestureDrop::NoOpponent,
         GestureDrop::Backlog,
         GestureDrop::Malformed,
+        GestureDrop::Overload,
     ];
 
     /// The metric label.
@@ -43,6 +46,7 @@ impl GestureDrop {
             GestureDrop::NoOpponent => "no_opponent",
             GestureDrop::Malformed => "malformed",
             GestureDrop::Backlog => "backlog",
+            GestureDrop::Overload => "overload",
         }
     }
 }
@@ -132,7 +136,8 @@ struct Global {
     stall_credit: Counter,
     timer_late: Histogram,
     gestures: Counter,
-    gesture_drops: [Counter; 5],
+    gesture_drops: [Counter; 6],
+    inbox: GaugeVec,
 }
 
 static GLOBAL: LazyLock<Global> = LazyLock::new(|| {
@@ -201,12 +206,29 @@ static GLOBAL: LazyLock<Global> = LazyLock::new(|| {
         ),
         gestures: metrics::counter("scacelith_gestures_relayed_total", "Gestures relayed to the opponent"),
         gesture_drops: GestureDrop::ALL.map(|d| drops.with(&[d.as_str()])),
+        inbox: metrics::gauge_vec(
+            "scacelith_game_inbox_messages",
+            "Messages waiting in the inbox of a game host (set by its beat)",
+            &["shard"],
+        ),
     }
 });
 
 /// Sets the number of draining shards (at start).
 pub(super) fn draining_shards(n: usize) {
     GLOBAL.draining.set(n as f64);
+}
+
+/// A gesture dropped before the inbox of its host (counted by the host's `Backlog`, which the
+/// host's [`Counters`] include).
+pub(super) fn gesture_overload() {
+    let i = GestureDrop::ALL.iter().position(|&d| d == GestureDrop::Overload).unwrap_or(0);
+    GLOBAL.gesture_drops[i].inc();
+}
+
+/// The gauge of the messages waiting in the inbox of a shard's host.
+pub(super) fn inbox_gauge(shard: u32) -> Gauge {
+    GLOBAL.inbox.with(&[&shard.to_string()])
 }
 
 /// The meters of one host: every event goes to the process-wide metrics and to the host's

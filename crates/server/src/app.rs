@@ -44,6 +44,7 @@
 use std::fmt;
 use std::net::SocketAddr;
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -515,6 +516,9 @@ impl Instance {
         log_info!(log, "database ready", {
             "path": store.path(), "applied": migrations.applied, "version": migrations.version, "serverId": server_id,
         });
+        if options.process_metrics {
+            register_disk_metrics(&config);
+        }
         // The lobby's handle exists before its actor: the auth service announces revoked
         // sessions into its inbox, and the hosts the games they recover.
         let (lobby, inbox) = Lobby::channel();
@@ -596,6 +600,10 @@ impl Instance {
             .guard(guard.clone())
             .readiness(readiness.clone())
             .page_renderer(pages::layout::error_page_renderer(config.server_name.clone()))
+            .write_backlog({
+                let store = store.clone();
+                move || store.writes_backlogged()
+            })
             .build();
         let admissions = Admissions::from_config(&config, clock.clone());
         let settings = WsSettings {
@@ -784,6 +792,26 @@ impl Background {
         self.sweep.abort();
         tokio::join!(self.pool.stop(), self.retention.stop());
     }
+}
+
+/// The free space of the database's and the journal's file systems (0 while it cannot be read).
+/// Nothing deletes the game history: the alerts of docs/SIZING.md watch these.
+fn register_disk_metrics(config: &Config) {
+    let free = |path: PathBuf| move || crate::sys::disk_free_bytes(&path).map_or(f64::NAN, |b| b as f64);
+    if config.db_path != ":memory:" {
+        let db = Path::new(&config.db_path);
+        let dir = db.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        metrics::gauge_fn(
+            "scacelith_database_disk_free_bytes",
+            "Bytes free on the file system of DB_PATH",
+            free(dir.to_path_buf()),
+        );
+    }
+    metrics::gauge_fn(
+        "scacelith_journal_disk_free_bytes",
+        "Bytes free on the file system of JOURNAL_DIR",
+        free(PathBuf::from(&config.journal_dir)),
+    );
 }
 
 /// The game shards of this instance: `SHARD_BASE .. SHARD_BASE + WORKERS`.

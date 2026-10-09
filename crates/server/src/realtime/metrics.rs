@@ -100,7 +100,9 @@ pub(crate) struct LobbyMetrics {
     pub challenges_open: Gauge,
     pub created: CounterVec,
     pub create_failed: Counter,
+    pub refused_busy: Counter,
     pub kicks: CounterVec,
+    pub inbox: Gauge,
 }
 
 /// The lobby's metrics.
@@ -119,11 +121,17 @@ pub(crate) fn lobby() -> &'static LobbyMetrics {
             &["source"],
         ),
         create_failed: metrics::counter("scacelith_games_create_failed_total", "Game creations that failed"),
+        refused_busy: metrics::counter(
+            "scacelith_games_refused_busy_total",
+            "Queue joins, challenges, acceptances, private codes and pairings refused with RateLimited while \
+             every game host or the database writer had too much work waiting",
+        ),
         kicks: metrics::counter_vec(
             "scacelith_presence_kicks_total",
             "Connections kicked by the lobby",
             &["reason"],
         ),
+        inbox: metrics::gauge("scacelith_lobby_inbox_messages", "Messages waiting in the lobby's inbox"),
     });
     &M
 }

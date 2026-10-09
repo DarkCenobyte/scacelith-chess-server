@@ -25,7 +25,8 @@ use tokio::sync::oneshot;
 use tokio::task::{Id as TaskId, JoinError, JoinSet};
 
 use super::commit::{CommitError, Done, GameStore, Stored, TaskKind};
-use super::metrics::{Counters, GestureDrop, Meter, RecoveryDrop};
+use super::inbox::Backlog;
+use super::metrics::{self, Counters, GestureDrop, Meter, RecoveryDrop};
 use crate::clock::SharedClock;
 use crate::config::Config;
 use crate::events::{Anomaly, AnomalySink, HostEvents, NewGame, RematchRequest};
@@ -37,6 +38,7 @@ use crate::game::timers::TimerSet;
 use crate::ids::{ConnId, GameId, GameIdAllocator, UserId};
 use crate::journal::Journal;
 use crate::log::{self, Logger};
+use crate::metrics::Gauge;
 use crate::realtime::Endpoint;
 use crate::store::StoreError;
 use crate::{log_error, log_info, log_warn};
@@ -116,6 +118,8 @@ pub(super) struct Shared {
     last_stall_end: AtomicI64,
     stall_min_ms: i64,
     stall_credit_max_ms: i64,
+    /// What waits for the actor.
+    pub(super) backlog: Backlog,
 }
 
 impl Shared {
@@ -128,6 +132,7 @@ impl Shared {
             last_stall_end: AtomicI64::new(i64::MIN),
             stall_min_ms: settings.stall_min_ms,
             stall_credit_max_ms: settings.stall_credit_max_ms,
+            backlog: Backlog::default(),
         }
     }
 
@@ -314,6 +319,8 @@ pub struct Shard {
     active: usize,
     pub(super) meter: Meter,
     shared: Arc<Shared>,
+    /// `scacelith_game_inbox_messages` of the shard.
+    inbox_gauge: Gauge,
     /// Time of the latest beat (`None`: no stall detection yet, or shut down).
     beat: Option<i64>,
     /// Start of the stall the latest beat detected, until its timers ran.
@@ -381,6 +388,7 @@ impl Shard {
             timers: TimerSet::new(),
             active: 0,
             meter: Meter::new(),
+            inbox_gauge: metrics::inbox_gauge(deps.shard),
             beat: None,
             stall_from: None,
             last_stall_end: i64::MIN,
@@ -464,10 +472,21 @@ impl Shard {
         self.timers.len()
     }
 
-    /// What the host counted.
+    /// What the host counted (the gestures dropped before its inbox aside: [`HostStats`]
+    /// includes them).
+    ///
+    /// [`HostStats`]: super::HostStats
     #[must_use]
     pub fn counters(&self) -> &Counters {
         &self.meter.counts
+    }
+
+    /// Publishes what waits for the host (every beat): the journal bytes not handed to its I/O
+    /// thread (read for placement) and the gauges.
+    pub(super) fn publish_backlog(&self) {
+        let pending = self.journal.as_ref().map_or(0, Journal::publish_pending);
+        self.shared.backlog.set_journal_pending(pending);
+        self.inbox_gauge.set(self.shared.backlog.messages() as f64);
     }
 
     /// Publishes the load numbers to the handles.

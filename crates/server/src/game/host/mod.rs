@@ -16,6 +16,10 @@
 //! to `GAME_STALL_CREDIT_MAX_MS` earlier), and only then fires the deadlines due by that beat, so
 //! that a flag that fell during the stall overtakes no request that waited through it.
 //!
+//! The inbox is unbounded, but what it holds is counted (`inbox`): gestures beyond
+//! [`GESTURE_INBOX_MAX`] are dropped before it, every other message is delivered, and a host
+//! with too much waiting ([`HostHandle::busy`]) gets no new game ([`Hosts::place`]).
+//!
 //! [`HostHandle`] is the cheap, cloneable way in: every method posts to the inbox and returns
 //! (only [`HostHandle::create`] waits for the game id). The realtime connection tasks call
 //! [`HostHandle::client`], [`HostHandle::gesture`], [`HostHandle::attach`],
@@ -28,6 +32,7 @@
 //! is logged and the actor goes on with the next message.
 
 mod commit;
+mod inbox;
 mod metrics;
 mod shard;
 
@@ -49,6 +54,7 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 pub use self::commit::{CommitFuture, GameStore, JOURNAL_GATE_TRIES, LookupFuture, MAX_BACKOFF_MS, Stored};
+pub use self::inbox::{GESTURE_INBOX_MAX, INBOX_BUSY, JOURNAL_PENDING_BUSY};
 pub use self::metrics::{Counters, GestureDrop, RecoveryDrop};
 pub use self::shard::{Recovery, RulesFactory, SLOT_MS, Shard, ShardDeps, ShardSettings};
 
@@ -156,6 +162,11 @@ pub struct HostStats {
 
 impl HostStats {
     fn of(shard: &Shard) -> HostStats {
+        let mut counters = shard.counters().clone();
+        let refused = shard.shared().backlog.refused();
+        if refused > 0 {
+            *counters.gesture_drops.entry(GestureDrop::Overload.as_str()).or_default() += refused;
+        }
         HostStats {
             shard: shard.shard,
             games: shard.games(),
@@ -164,7 +175,7 @@ impl HostStats {
             commit_in_flight: shard.commit_in_flight(),
             timers: shard.timers(),
             players: shard.players(),
-            counters: shard.counters().clone(),
+            counters,
         }
     }
 }
@@ -182,6 +193,12 @@ enum Msg {
     Cancel { game: GameId },
     Stats { reply: oneshot::Sender<HostStats> },
     Shutdown { reply: oneshot::Sender<()> },
+}
+
+impl Msg {
+    fn is_gesture(&self) -> bool {
+        matches!(self, Msg::Gesture { .. })
+    }
 }
 
 /// The way into one host actor (see the module documentation). Cheap to clone. Messages posted
@@ -221,8 +238,16 @@ impl HostHandle {
     }
 
     fn post(&self, msg: Msg) {
+        self.shared.backlog.posting();
+        self.send(msg);
+    }
+
+    /// Sends a message counted in the backlog.
+    fn send(&self, msg: Msg) {
         // The host is gone only after the shutdown: nothing to do then.
-        let _ = self.tx.send(msg);
+        if let Err(mpsc::error::SendError(msg)) = self.tx.send(msg) {
+            self.shared.backlog.taken(msg.is_gesture());
+        }
     }
 
     /// A strictly decoded game request (Move, Resign, DrawOffer, DrawAnswer, DrawClaim, Abort,
@@ -233,9 +258,12 @@ impl HostHandle {
         self.post(Msg::Client { user, msg, ep, recv_at });
     }
 
-    /// A raw `C_Gesture` frame, relayed to the opponent (validated here).
+    /// A raw `C_Gesture` frame, relayed to the opponent (validated here). Dropped at once when
+    /// [`GESTURE_INBOX_MAX`] gestures already wait for the host.
     pub fn gesture(&self, game: GameId, user: UserId, frame: Bytes) {
-        self.post(Msg::Gesture { game, user, frame });
+        if self.shared.backlog.posting_gesture() {
+            self.send(Msg::Gesture { game, user, frame });
+        }
     }
 
     /// Binds the player's connection to the game and sends it a `GameSnapshot`
@@ -289,6 +317,20 @@ impl HostHandle {
         }
     }
 
+    /// Whether the host has too much work waiting to take a new game: [`INBOX_BUSY`] messages in
+    /// its inbox, or [`JOURNAL_PENDING_BUSY`] bytes of journal records not handed to its I/O
+    /// thread.
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        self.shared.backlog.busy()
+    }
+
+    /// Messages waiting in the host's inbox, and the gestures among them.
+    #[must_use]
+    pub fn inbox(&self) -> (usize, usize) {
+        (self.shared.backlog.messages(), self.shared.backlog.gestures())
+    }
+
     /// Whether a stall of this host overlaps the time since `since_mono_ms`.
     #[must_use]
     pub fn stall_during(&self, since_mono_ms: f64) -> bool {
@@ -314,6 +356,8 @@ pub struct Hosts {
     /// The shard directories claimed, released once the hosts shut down.
     claims: Mutex<Vec<ShardClaim>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// The database, whose write backlog also refuses new games.
+    store: Store,
 }
 
 impl std::fmt::Debug for Hosts {
@@ -381,6 +425,7 @@ impl Hosts {
             by_shard: [None; MAX_SHARDS as usize],
             claims: Mutex::new(Vec::new()),
             tasks: Mutex::new(Vec::new()),
+            store: deps.store.clone(),
         };
         for shard in all {
             let at = ShardAt { shard, draining: !shards.contains(&shard), server_id: server_id.as_deref() };
@@ -509,9 +554,9 @@ impl Hosts {
         } else {
             log_info!(logger, "game host started", { "shard": shard, "recovered": n });
         }
-        let (tx, inbox) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
         let handle = HostHandle { shard, draining, tx, shared: core.shared(), clock: deps.clock.clone() };
-        let task = tokio::spawn(run(core, inbox));
+        let task = tokio::spawn(run(core, Inbox { rx, shared: handle.shared.clone() }));
         Ok(Started::Host(handle, task, claim))
     }
 
@@ -524,21 +569,38 @@ impl Hosts {
 
     /// Where to create a game: the `preferred` shard when it is one of the instance's range,
     /// else the host of the range with the fewest games (the lowest shard on a tie). A draining
-    /// host is never chosen.
+    /// host, or a busy one ([`HostHandle::busy`]), is never chosen: `None` when every host of the
+    /// range is busy.
     #[must_use]
-    pub fn pick(&self, preferred: Option<u32>) -> &HostHandle {
-        let mut range = self.handles.iter().filter(|h| !h.draining);
-        if let Some(h) = preferred.and_then(|s| self.handles.iter().find(|h| h.shard == s && !h.draining)) {
-            return h;
+    pub fn pick(&self, preferred: Option<u32>) -> Option<&HostHandle> {
+        let free = |h: &&HostHandle| !h.draining && !h.busy();
+        if let Some(h) = preferred.and_then(|s| self.handles.iter().filter(free).find(|h| h.shard == s)) {
+            return Some(h);
         }
-        // `start` always starts the hosts of a non-empty range.
-        let mut best = range.next().expect("a host of the range");
-        for h in range {
-            if h.load().games < best.load().games {
-                best = h;
+        let mut best: Option<&HostHandle> = None;
+        for h in self.handles.iter().filter(free) {
+            if best.is_none_or(|b| h.load().games < b.load().games) {
+                best = Some(h);
             }
         }
         best
+    }
+
+    /// The host to create a new game on ([`Hosts::pick`]), or `None` when the server is saturated:
+    /// every host of the range is busy, or the database has [`crate::store::WRITE_BACKLOG_BUSY`]
+    /// write jobs waiting or more (a new game is refused with `RateLimited` then).
+    #[must_use]
+    pub fn place(&self, preferred: Option<u32>) -> Option<&HostHandle> {
+        if self.store.writes_backlogged() {
+            return None;
+        }
+        self.pick(preferred)
+    }
+
+    /// Whether a new game would be refused for now ([`Hosts::place`]).
+    #[must_use]
+    pub fn saturated(&self) -> bool {
+        self.place(None).is_none()
     }
 
     /// Every host, in shard order (draining ones included).
@@ -640,11 +702,38 @@ async fn step(shard: &mut Shard, msg: Msg) -> ControlFlow<()> {
     ControlFlow::Break(())
 }
 
+/// The receiving end of a host's inbox: what it hands out leaves the host's backlog.
+struct Inbox {
+    rx: mpsc::UnboundedReceiver<Msg>,
+    shared: Arc<Shared>,
+}
+
+impl Inbox {
+    fn taken(&self, msg: Msg) -> Msg {
+        self.shared.backlog.taken(msg.is_gesture());
+        msg
+    }
+
+    async fn recv(&mut self) -> Option<Msg> {
+        let msg = self.rx.recv().await?;
+        Some(self.taken(msg))
+    }
+
+    fn try_recv(&mut self) -> Option<Msg> {
+        let msg = self.rx.try_recv().ok()?;
+        Some(self.taken(msg))
+    }
+
+    fn len(&self) -> usize {
+        self.rx.len()
+    }
+}
+
 /// Handles the messages already in the inbox, not those that arrive meanwhile (a busy inbox
 /// cannot hold a beat back); `Break` once the host shut down.
-async fn drain(shard: &mut Shard, inbox: &mut mpsc::UnboundedReceiver<Msg>) -> ControlFlow<()> {
+async fn drain(shard: &mut Shard, inbox: &mut Inbox) -> ControlFlow<()> {
     for _ in 0..inbox.len() {
-        let Ok(msg) = inbox.try_recv() else { break };
+        let Some(msg) = inbox.try_recv() else { break };
         step(shard, msg).await?;
     }
     ControlFlow::Continue(())
@@ -655,7 +744,7 @@ async fn drain(shard: &mut Shard, inbox: &mut mpsc::UnboundedReceiver<Msg>) -> C
 /// overtaken by the timer of that deadline), then the timers, commits and compaction. After a
 /// detected stall, what reached the inbox meanwhile goes first too, then the timers due by that
 /// beat. `Break` once the host shut down.
-async fn beat(shard: &mut Shard, inbox: &mut mpsc::UnboundedReceiver<Msg>) -> ControlFlow<()> {
+async fn beat(shard: &mut Shard, inbox: &mut Inbox) -> ControlFlow<()> {
     drain(shard, inbox).await?;
     let t = shard.now();
     if shielded(shard, "game host beat failed", |s| s.heartbeat(t)) == Some(true) {
@@ -663,11 +752,12 @@ async fn beat(shard: &mut Shard, inbox: &mut mpsc::UnboundedReceiver<Msg>) -> Co
         drain(shard, inbox).await?;
         shielded(shard, "game host beat failed", Shard::after_stall);
     }
+    shard.publish_backlog();
     ControlFlow::Continue(())
 }
 
 /// The actor of one host (see the module documentation).
-async fn run(mut shard: Shard, mut inbox: mpsc::UnboundedReceiver<Msg>) {
+async fn run(mut shard: Shard, mut inbox: Inbox) {
     let mut ticks = tokio::time::interval(Duration::from_millis(SLOT_MS as u64));
     ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {

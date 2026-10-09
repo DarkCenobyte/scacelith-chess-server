@@ -203,7 +203,7 @@ Errors that any endpoint can give:
 | 415 | `unsupported_media_type` | The body is not `application/json`, or its charset is not UTF-8. |
 | 429 | `rate_limited` | A rate limit (section 1.5): `retryAfter` plus a `Retry-After` header. |
 | 500 | `internal_error` | An unexpected failure. The server logs it. |
-| 503 | `server_busy` | The database stayed locked while the session token was checked (`retryAfter: 1`, section 1.4). |
+| 503 | `server_busy` | The database stayed locked while the session token was checked (`retryAfter: 1`, section 1.4). Also, for a `POST`, `PUT`, `PATCH` or `DELETE`, the database has too many writes waiting: the request was not run, and its rate limits took nothing (`retryAfter` of 2 to 5 s). |
 | 503 | `timeout` | The server did not answer within 30 s (60 s for the export, 45 s for the GIFs with the default settings). |
 
 The read endpoints (sections 10 to 12) and the export answer 503 `busy` with `retryAfter: 1`

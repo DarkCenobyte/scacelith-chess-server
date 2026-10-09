@@ -259,6 +259,8 @@ Disk life = space for the database ÷ daily growth. Space for the database is th
 
 The average is taken as 40 % of the evening peak (inferred): a VPS-1 full of calm games every evening with the defaults (9,300) averages about 3,700, and one full of games without gestures (26,000) about 10,400, which fills the database space of a 40 GB disk in about 12 days. Nothing archives finished games: plan the disk, or move old games out, before it fills.
 
+**Keeping the history.** The server never deletes finished games, ratings or analyses by itself: the retention above only removes what expires. Keep the disk ahead of the growth instead: alert on `scacelith_database_disk_free_bytes` and `scacelith_journal_disk_free_bytes` ([Alert rules](#alert-rules)), keep 20 % of the disk free (SQLite needs room for its WAL, and `admin backup` for a full copy), and grow the disk, or move the server to a larger one with a backup and a restore ([DEPLOY.md](DEPLOY.md) section 10), when the alert says it fills within a week. On a full disk the journal writes fail (the games in progress lose their crash safety, and finished games are committed without it: [Storage engine](#storage-engine)), and so do the database's.
+
 ### Disk I/O
 
 An NVMe disk (about 20,000 writes of 4 KB per second) is not a limit: each shard writes at most about 20 journal batches per second with their `fdatasync` from the 50 ms flushes, plus one before each commit batch, and the database commits at most one batch per shard every `DB_COMMIT_MS` besides the occasional account, session and security writes (inferred).
@@ -318,6 +320,19 @@ Behind a reverse proxy (`TLS_MODE=proxy`) only the request budget, the requests 
 ### When the server is full
 
 `MAX_CONNECTIONS` counts the signed-in players of the whole server. A newcomer beyond it still completes the TLS handshake and the WebSocket upgrade, is refused at `Hello` with `ServerFull`, and the game waits 60 to 120 s before trying again: 1,000 newcomers waiting for a place cost about 0.02 vCore (inferred: each attempt reads `/api/v1/info` and opens the WebSocket, two TLS connections, about 1.5 ms). `scacelith_ws_hello_total{result="server_full"}` counts these refusals: it is the metric that shows a full server. A player whose game is in progress is still admitted at `Hello`, whatever the count. So that such a player can reach `Hello`, WebSocket upgrades may go max(16, 2 %) beyond `MAX_CONNECTIONS`; beyond that reserve the upgrade gets HTTP 503 (`scacelith_ws_handshakes_rejected_total{reason="server_full"}`), and for up to 5 s after such a refusal, or while the server holds 1.2 times `MAX_CONNECTIONS`, the TLS gate lets only `MAX_PENDING_HANDSHAKES` ÷ 2 new connections per second through (128 on VPS-1) and closes the others before any TLS work (`scacelith_tls_refused_total{reason="server_full"}`). That bounds the TLS work while shedding to about 0.09 vCore on VPS-1 (inferred: 128 × 0.7 ms). On the default shared port the API is slowed down with the upgrades; a separate `WS_PORT` keeps the API outside that limit.
+
+### When the server falls behind
+
+The work waiting inside the process is counted and, where it can be, bounded, so that a host that falls behind (an overloaded CPU, a stalled disk) does not grow its memory without limit. Nothing that carries a move, a clock, a result or a connection's lifecycle is ever dropped: the server refuses new work instead.
+
+| Queue | Bound and reaction | Metric |
+|---|---|---|
+| Inbox of a game host | Gestures are replaceable: beyond 8,192 waiting (`GESTURE_INBOX_MAX`, about 170 ms of the gestures of 6,000 games of moving players), a new one is dropped before the inbox. With 16,384 messages or more waiting (`INBOX_BUSY`), the host takes no new game. | `scacelith_game_inbox_messages{shard}`, `scacelith_gestures_dropped_total{reason="overload"}` |
+| Journal records not handed to the shard's I/O thread | Grows while a write does not return (a stuck disk). At 16 MiB (`JOURNAL_PENDING_BUSY`, minutes of records of a busy shard) the host takes no new game. | `scacelith_journal_pending_bytes{shard}` |
+| Database write jobs | One writer thread runs them in order. With 10,000 or more waiting (`WRITE_BACKLOG_BUSY`, about a second of writes for a slow disk), API requests that may write (`POST`, `PUT`, `PATCH`, `DELETE`) get 503 `server_busy` with a `retryAfter` of 2 to 5 s before anything runs, and no new game is created. Game commits and the server's own jobs always wait their turn. | `scacelith_db_write_queue`, `scacelith_db_writes_refused_total` |
+| Inbox of the lobby | Bounded by its sources: 8 requests in flight per connection, `MAX_CONNECTIONS`. | `scacelith_lobby_inbox_messages` |
+
+A new game goes to the least loaded host that is not busy. When every host of the range is busy, or the database writer is that far behind, the server takes no new game: a queue join, a challenge, its acceptance and a private code get `Error{RateLimited}` (nothing is kept: the challenge and the code stay open), a pairing already made is tried again after the matchmaker's delay, and a rematch is refused (`RematchUnavailable`); `scacelith_games_refused_busy_total` counts these refusals. The games in progress go on. In ordinary operation these queues hold a few hundred messages and a few jobs at most, so none of these bounds is reached; any refusal means the machine is overloaded or its disk stalls ([Alert rules](#alert-rules)).
 
 ### Restarts
 
@@ -480,13 +495,16 @@ It keeps one entry per source address seen in the last minute (at most 65,536), 
 | `scacelith_process_cpu_ratio`, `scacelith_runtime_lateness_p99_ms` | CPU (in cores: 1 = one core) above 70 % of the vCores at the peak; a rising lateness of the runtime's 10 ms timer (ready tasks waiting for a runtime thread) |
 | `scacelith_ws_connections`, `scacelith_ws_players`, `scacelith_process_rss_bytes` | connections and memory against the memory figure and `MAX_CONNECTIONS` |
 | `scacelith_process_open_fds`, `scacelith_process_max_fds` | file descriptors against their limit |
-| `scacelith_games_active`, `scacelith_gestures_relayed_total`, `scacelith_gestures_dropped_total{reason}` | r = the relayed rate ÷ (2 × games in progress) ([Gestures](#gestures)); `backlog` drops mean slow players or an overloaded server, `rate` drops a client beyond `GESTURE_RATE` (every gesture of a modified client with `GESTURE_RATE=0`) |
+| `scacelith_games_active`, `scacelith_gestures_relayed_total`, `scacelith_gestures_dropped_total{reason}` | r = the relayed rate ÷ (2 × games in progress) ([Gestures](#gestures)); `backlog` drops mean slow players or an overloaded server, `overload` drops a game host far behind ([When the server falls behind](#when-the-server-falls-behind)), `rate` drops a client beyond `GESTURE_RATE` (every gesture of a modified client with `GESTURE_RATE=0`) |
 | `scacelith_game_stall_ms`, `scacelith_game_timer_late_ms` | stalls of a game host (the games do not charge them to the players, up to `GAME_STALL_CREDIT_MAX_MS`); frequent ones of 100 ms or more mean an overloaded machine, CPU steal or a slow disk |
 | `scacelith_tls_refused_total{reason}`, `scacelith_tls_hello_waiting`, `scacelith_tls_handshakes_pending` | `handshakes` or `per_ip` refusals outside restarts (not enough CPU for the handshakes, or a shared address), `hello_timeout` and `bad_hello` from scanners |
 | `scacelith_http_rate_limited_total{limit}`, `scacelith_tls_refused_total{reason}` (`blocked`, `conn_rate`, `conn_open`), `scacelith_abuse_blocks_total{scope,level}`, `scacelith_abuse_blocked{scope}` | the protection per address: refusals of ordinary players (a school, a carrier's address: `ABUSE_EXEMPT`), blocks at level 4 from the same sources (an edge rule, [Floods](#floods)); each block is logged (`ip blocked`) |
 | `scacelith_ws_hello_total{result="server_full"}`, `scacelith_ws_handshakes_rejected_total{reason="server_full"}` | newcomers refused at login by `MAX_CONNECTIONS`, the sign of a full server; upgrades refused (HTTP 503) once its reserve is in use too, after which the TLS gate sheds (`scacelith_tls_refused_total{reason="server_full"}`) |
 | `scacelith_password_hash_rejected_total{reason}`, `scacelith_password_hash_queued`, `scacelith_password_hash_wait_ms` | `queue_full` or `timeout` outside an attack: not enough CPU for the logins; `source_limit`: clients held to `PASSWORD_HASH_WAITERS_PER_SOURCE` waiting hashes while the queue was at least half full |
 | `scacelith_journal_disk_bytes` (per shard) | more than about (`JOURNAL_COMPACT_SEGMENTS` + 1) × 16 MiB |
+| `scacelith_game_inbox_messages{shard}`, `scacelith_journal_pending_bytes{shard}`, `scacelith_db_write_queue`, `scacelith_lobby_inbox_messages` | the work waiting inside the process: a few hundred messages, a few KiB and a few jobs in ordinary operation; a steady rise means the machine cannot keep up (CPU or disk) |
+| `scacelith_games_refused_busy_total`, `scacelith_db_writes_refused_total` | any increase: new games or API writes refused because the hosts or the database writer were far behind ([When the server falls behind](#when-the-server-falls-behind)) |
+| `scacelith_database_disk_free_bytes`, `scacelith_journal_disk_free_bytes` | the free space left for the database and the journal; nothing deletes the game history ([Growth](#growth)) |
 | `scacelith_journal_errors_total`, `scacelith_game_commit_unjournaled_total` | any increase: the journal cannot be written, and finished games are committed without it; fix the disk |
 | `scacelith_game_recovery_dropped_total{reason}` | at a start, games of the journal the database already held (`in_database`: the trace of a stop right after a commit, or of commits made without the journal) or whose player it did not know (`unknown_player`: a database older than the journal, docs/DEPLOY.md section 10) |
 | `scacelith_game_shards_draining` | above 0 after a change of `WORKERS` or `SHARD_BASE` (or of the cores with `WORKERS=auto`): shards outside the range still serving the games of their journal (docs/DEPLOY.md section 11); 0 again after the next restart once these games ended |
@@ -518,6 +536,25 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "Scacelith dropped games of unknown players at its start: was an older database restored?"
+      - alert: ScacelithFallingBehind
+        # New games or API writes refused: the game hosts or the database writer are far behind
+        # (an overloaded CPU, a stalled disk).
+        expr: increase(scacelith_games_refused_busy_total[5m]) > 0 or increase(scacelith_db_writes_refused_total[5m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Scacelith refuses new games or writes on {{ $labels.instance }}: check the CPU and the disk"
+      - alert: ScacelithDiskFillsSoon
+        # At the pace of the last day, the database's or the journal's disk is full within a week.
+        expr: predict_linear(scacelith_database_disk_free_bytes[1d], 7 * 86400) < 0 or predict_linear(scacelith_journal_disk_free_bytes[1d], 7 * 86400) < 0
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: "The disk of Scacelith on {{ $labels.instance }} fills within a week: grow it"
+      - alert: ScacelithDiskAlmostFull
+        expr: scacelith_database_disk_free_bytes < 2e9 or scacelith_journal_disk_free_bytes < 2e9
+        labels: { severity: critical }
+        annotations:
+          summary: "Less than 2 GB free for Scacelith on {{ $labels.instance }}: the journal and the commits will fail"
 ```
 
 ## Risks, largest first

@@ -314,12 +314,21 @@ anything, and spawns the actor. The actor handles its inbox one message at a tim
 messages and its detach stay ordered), and a 10 ms beat (`MissedTickBehavior::Delay`) fires due
 deadlines, detects stalls (6.1), starts commits and builds compaction snapshots (at most 2 per
 beat). A beat first handles the messages already in the inbox, never those that arrive meanwhile,
-so a busy inbox cannot hold the timers back. `HostHandle` is the cloneable way in: `client` (a
-strictly decoded game request with its read time), `gesture`, `attach` (binds a connection and
-sends it a `GameSnapshot`), `detach`, `rtt`, `forfeit_user`, `decline_rematch`, `create`, `cancel`
-(a game whose creation came after the lobby's timeout: `ServerAborted`, no conduct incident),
-`load` and `stats`. `Hosts::pick` places a new game (5.4). The host talks back through
-`HostEvents` and `AnomalySink`.
+so a busy inbox cannot hold the timers back. The inbox is unbounded, but what it holds is counted
+(`game::host::inbox`): a gesture, which the next one supersedes, is dropped before it when
+`GESTURE_INBOX_MAX` (8,192) gestures wait (`scacelith_gestures_dropped_total{reason="overload"}`);
+every other message (requests, attach and detach, creations, cancels, forfeits, rematch windows,
+the shutdown) is always delivered. A host with `INBOX_BUSY` (16,384) messages waiting, or
+`JOURNAL_PENDING_BUSY` (16 MiB) of journal records not handed to its I/O thread, is busy and gets
+no new game (`Hosts::pick`); the games it holds go on. Each beat exports the counts
+(`scacelith_game_inbox_messages`, `scacelith_journal_pending_bytes`).
+
+`HostHandle` is the cloneable way in: `client` (a strictly decoded game request with its read
+time), `gesture`, `attach` (binds a connection and sends it a `GameSnapshot`), `detach`, `rtt`,
+`forfeit_user`, `decline_rematch`, `create`, `cancel` (a game whose creation came after the
+lobby's timeout: `ServerAborted`, no conduct incident), `load`, `busy` and `stats`.
+`Hosts::place` places a new game (5.4). The host talks back through `HostEvents` and
+`AnomalySink`.
 
 A panic in room code is caught: the request gets `Error{Internal}` and the game goes on (a timer
 that panicked is retried a second later). A request for a game the sender does not play gets
@@ -381,8 +390,13 @@ store or a host afterwards runs in spawned tasks that report back. Its timers: t
 refund notice poll (5 s). Game creation: a player already busy gets `AlreadyInGame`, a player with
 a cached ban `UserUnavailable`; a creation task reads the stored bans (a ban found there is
 enforced, not only cached), reads the ratings again for challenges and rematches, and asks
-`Hosts::pick` for a host (the rematch's former shard, otherwise the host with the fewest games).
-On success the players count as in a game, leave their queues and their live connections attach.
+`Hosts::place` for a host (the rematch's former shard, otherwise the host with the fewest games,
+among the hosts of the range that are not busy: 5.3). On success the players count as in a game,
+leave their queues and their live connections attach. While the server is saturated (every host
+of the range busy, or the store's writer backlogged: `GameHosts::saturated`), a queue join, a
+challenge, its acceptance and a private code are answered `RateLimited` before anything is kept or
+spent, and a creation already under way fails with `RateLimited` (a pairing is tried again after
+the matchmaker's hold, a rematch gets `RematchUnavailable`).
 A ban (`SanctionEvents::sanction_applied`, or a stored ban found at a queue join, challenge,
 rematch or game creation) kicks the player (`Notice{Banned}`, `Error{Banned}`, close 4004),
 forfeits a game in progress, and drops the player's queue entry and challenges; a stored ban found
@@ -404,7 +418,11 @@ embedded in the binary and recorded in `schema_migrations`.
 * **Writer.** One thread, one connection, one FIFO: a job is queued when it is submitted, and each
   runs in its own `BEGIN IMMEDIATE` transaction. Two jobs submitted one after the other run in that
   order, which the anti-cheat relies on (anomalies before the commit that reads them, a certain
-  anomaly before the ban it causes).
+  anomaly before the ban it causes). No job is refused for the queue's length
+  (`scacelith_db_write_queue`); from `WRITE_BACKLOG_BUSY` (10,000) jobs waiting the store is
+  backlogged (`Store::writes_backlogged`): the API refuses the requests that may write (`POST`,
+  `PUT`, `PATCH`, `DELETE`: 503 `server_busy` before authentication, rates and body) and no new
+  game is created, until the writer catches up.
 * **Readers.** `query_only` connections on the blocking pool; a read started after a write job
   answered sees that write.
 * **API.** `Store::read` and `Store::write` run a closure on a `Db`, which has a typed API per

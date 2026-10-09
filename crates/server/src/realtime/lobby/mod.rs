@@ -31,7 +31,12 @@
 //! The inbox is unbounded; what can be in it is bounded by its sources: one claim and one release
 //! per connection, `MAX_LOBBY_IN_FLIGHT` (8) requests per
 //! connection, one creation, rematch or conduct result per game, and the rare auth and anti-cheat
-//! events.
+//! events. Its length is the gauge `scacelith_lobby_inbox_messages`.
+//!
+//! While the server takes no new game ([`GameHosts::saturated`](super::GameHosts::saturated):
+//! every game host busy, or the database writer far behind), the requests that would create one
+//! (`QueueJoin`, `ChallengeCreate`, `ChallengeAccept`, `ChallengeJoinCode`) get `RateLimited`
+//! before anything is kept or spent.
 
 mod actor;
 
