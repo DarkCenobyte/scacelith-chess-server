@@ -467,8 +467,8 @@ pub(crate) mod tests {
         let (cp, kp) = (Path::new("c.pem"), Path::new("k.pem"));
         let ok = certified_key_from_pem(a.cert_pem.as_bytes(), a.key_pem.as_bytes(), cp, kp).expect("valid");
         assert_eq!(ok.cert[0].as_ref(), a.der.as_slice());
-        let mismatch = certified_key_from_pem(a.cert_pem.as_bytes(), b.key_pem.as_bytes(), cp, kp);
-        assert!(matches!(mismatch, Err(CertError::KeyMismatch)), "{mismatch:?}");
+        let mismatch = certified_key_from_pem(a.cert_pem.as_bytes(), b.key_pem.as_bytes(), cp, kp).err();
+        assert!(matches!(mismatch, Some(CertError::KeyMismatch)), "{mismatch:?}");
         assert!(matches!(
             certified_key_from_pem(b"", a.key_pem.as_bytes(), cp, kp),
             Err(CertError::NoCertificate(_))

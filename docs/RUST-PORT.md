@@ -87,8 +87,9 @@ scacelith-chess-server/
   crates/server           scacelith-server: the server library and binary, migrations
   crates/client           scacelith-client: Rust client SDK (integration tests, `scacelith-bench`)
   assets/                 GIF fonts and piece set (embedded at build time)
-  test/fixtures           shared vectors (Elo, protocol, chess cross-check, the server's PGN files);
-                          the game keeps copies of the Elo and protocol vectors and of the PGN files
+  test/fixtures           shared vectors (Elo, protocol, chess cross-check, the server's PGN files)
+                          and the fixed inputs of the security tests (security-vectors.json); the
+                          game keeps copies of the Elo and protocol vectors and of the PGN files
   tools/                  chess cross-check generator (C++), interop check, live-check, rest-diff
   bench/                  benchmark harness (docs/BENCHMARK.md)
   deploy/systemd          example unit and its companion files (docs/DEPLOY.md)

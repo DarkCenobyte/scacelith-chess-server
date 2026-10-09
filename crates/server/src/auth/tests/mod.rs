@@ -17,8 +17,8 @@ mod register;
 mod sessions;
 mod sso;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use http::Method;
 use parking_lot::Mutex;
@@ -37,15 +37,23 @@ use crate::ids::UserId;
 use crate::log::Logger;
 use crate::mail::{CustomTransport, Mailer, MailerOptions, OutgoingMail};
 use crate::security::password::{Argon2Hasher, Argon2Params, HashFailure, PasswordHasher, Verified};
+use crate::security::testing::random_password;
 use crate::store::{
     GameOutcome, GameSummary, NewUser, RatingFn, RatingRecord, SecurityEvent, SideOutcome, Store,
     StoreOptions, User, status,
 };
 
-/// The password of the test accounts.
-pub(crate) const PW: &str = "correct horse battery";
-/// Another valid password.
-pub(crate) const NEW_PW: &str = "a brand new passphrase";
+/// The password of the test accounts: drawn at random once per test run.
+pub(crate) fn pw() -> &'static str {
+    static PW: LazyLock<String> = LazyLock::new(random_password);
+    &PW
+}
+
+/// Another valid password, drawn at random once per test run.
+pub(crate) fn new_pw() -> &'static str {
+    static NEW_PW: LazyLock<String> = LazyLock::new(random_password);
+    &NEW_PW
+}
 /// A day in milliseconds.
 pub(crate) const DAY_MS: i64 = 86_400_000;
 /// The wall clock at the start of a test: 2026-09-28 12:00:00 UTC.
@@ -372,9 +380,9 @@ impl Harness {
         self.get_as(token, "/api/v1/account/me").await.status
     }
 
-    /// Inserts a verified account `<name>@example.com` with the password [`PW`].
+    /// Inserts a verified account `<name>@example.com` with the password [`pw`].
     pub(crate) async fn create_user(&self, name: &str) -> UserId {
-        self.create_user_with(name, Some(&format!("{}@example.com", name.to_lowercase())), Some(PW), true)
+        self.create_user_with(name, Some(&format!("{}@example.com", name.to_lowercase())), Some(pw()), true)
             .await
     }
 

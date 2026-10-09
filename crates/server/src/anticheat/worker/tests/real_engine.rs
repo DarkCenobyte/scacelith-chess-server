@@ -344,11 +344,11 @@ async fn real_engine_features_separate_an_assisted_player_from_human_stand_ins_a
             .collect()
     };
     let fresh = Population::new(Some(profile.clone()), clock.clone());
-    for uid in HONEST {
-        let hist = history(uid);
+    for human in HONEST {
+        let hist = history(human);
         for k in 1..=hist.len() {
             let level = score_player(&hist[..k], &fresh, &PriorsOnly).level;
-            assert_eq!(level, IntegrityLevel::None, "human {uid} after {k} games");
+            assert_eq!(level, IntegrityLevel::None, "human {human} after {k} games");
         }
     }
     let day_one = score_player(&cheat_records, &fresh, &PriorsOnly);
@@ -373,11 +373,11 @@ async fn real_engine_features_separate_an_assisted_player_from_human_stand_ins_a
             update_population_from_game(&pop, &PriorsOnly, &features, |_| IntegrityLevel::None);
         }
     }
-    for uid in HONEST {
-        let hist = history(uid);
+    for human in HONEST {
+        let hist = history(human);
         for k in 1..=hist.len() {
             let level = score_player(&hist[..k], &pop, &PriorsOnly).level;
-            assert_eq!(level, IntegrityLevel::None, "human {uid} after {k} games (learned)");
+            assert_eq!(level, IntegrityLevel::None, "human {human} after {k} games (learned)");
         }
     }
     let mut chrono = cheat_records;

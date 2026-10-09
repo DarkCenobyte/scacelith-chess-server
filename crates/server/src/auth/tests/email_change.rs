@@ -7,7 +7,7 @@ use std::sync::Arc;
 use http::Method;
 use serde_json::{Value, json};
 
-use super::{CountingHasher, Harness, NEW_PW, PW, Setup, link_in, token_of};
+use super::{CountingHasher, Harness, Setup, link_in, new_pw, pw, token_of};
 use crate::http::testing::TestResponse;
 use crate::ids::UserId;
 use crate::mail::OutgoingMail;
@@ -21,7 +21,7 @@ const FORM: &str = "application/x-www-form-urlencoded";
 async fn setup(env: &[(&'static str, &str)]) -> (Harness, UserId, String) {
     let h = Harness::with_env(env).await;
     let id = h.create_user("alice").await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     (h, id, token)
 }
 
@@ -80,10 +80,10 @@ async fn reset_link(h: &Harness, from: usize) -> String {
 async fn with_confirmation_a_link_goes_to_the_new_address_a_notice_to_the_current_one_then_the_page_confirms()
 {
     let (h, id, token) = setup(&[]).await;
-    let other = h.token("alice", PW).await;
+    let other = h.token("alice", pw()).await;
     let before = sent_count(&h).await;
 
-    let r = change(&h, &token, json!({ "newEmail": " Nora@Example.ORG ", "password": PW })).await;
+    let r = change(&h, &token, json!({ "newEmail": " Nora@Example.ORG ", "password": pw() })).await;
     assert_eq!((r.status, r.json()), (202, json!({ "status": "verification_sent" })));
     // Nothing changes before the link is used; the pending address shows.
     let view = me(&h, &token).await;
@@ -154,11 +154,11 @@ async fn with_confirmation_a_link_goes_to_the_new_address_a_notice_to_the_curren
     assert!(again.text().contains("invalid, was already used, or has expired"));
     assert_eq!(page(&h, &tk).await.status, 400);
     assert_eq!(
-        h.post("/api/v1/auth/login", json!({ "login": "nora@example.org", "password": PW })).await.status,
+        h.post("/api/v1/auth/login", json!({ "login": "nora@example.org", "password": pw() })).await.status,
         200
     );
     assert_eq!(
-        h.post("/api/v1/auth/login", json!({ "login": "alice@example.com", "password": PW })).await.status,
+        h.post("/api/v1/auth/login", json!({ "login": "alice@example.com", "password": pw() })).await.status,
         401
     );
 }
@@ -166,11 +166,11 @@ async fn with_confirmation_a_link_goes_to_the_new_address_a_notice_to_the_curren
 #[tokio::test]
 async fn a_taken_address_gets_the_same_answer_and_its_owner_the_throttled_notice_never_a_link() {
     let (h, id, token) = setup(&[]).await;
-    let bob = h.create_user_with("bob", Some("bob@example.org"), Some(PW), true).await;
-    let free = change(&h, &token, json!({ "newEmail": "free@example.org", "password": PW })).await;
+    let bob = h.create_user_with("bob", Some("bob@example.org"), Some(pw()), true).await;
+    let free = change(&h, &token, json!({ "newEmail": "free@example.org", "password": pw() })).await;
     let free_view = me(&h, &token).await;
     let before = sent_count(&h).await;
-    let taken = change(&h, &token, json!({ "newEmail": "BOB@example.org", "password": PW })).await;
+    let taken = change(&h, &token, json!({ "newEmail": "BOB@example.org", "password": pw() })).await;
     assert_eq!((taken.status, taken.json()), (free.status, free.json()));
     assert_eq!(taken.json(), json!({ "status": "verification_sent" }));
     let view = me(&h, &token).await;
@@ -202,7 +202,7 @@ async fn a_taken_address_gets_the_same_answer_and_its_owner_the_throttled_notice
     // Within the hour, no second notice to the owner; the requester's notice still goes.
     let before = sent_count(&h).await;
     assert_eq!(
-        change(&h, &token, json!({ "newEmail": "bob@example.org", "password": PW })).await.status,
+        change(&h, &token, json!({ "newEmail": "bob@example.org", "password": pw() })).await.status,
         202
     );
     let mails = mails_since(&h, before).await;
@@ -213,15 +213,15 @@ async fn a_taken_address_gets_the_same_answer_and_its_owner_the_throttled_notice
 async fn one_confirmation_mail_per_new_address_every_5_minutes_and_the_link_already_mailed_keeps_working() {
     let (h, id, token) = setup(&[]).await;
     h.create_user("bob").await;
-    let bob = h.token("bob", PW).await;
+    let bob = h.token("bob", pw()).await;
     let from = sent_count(&h).await;
     for _ in 0..10 {
-        let r = change(&h, &token, json!({ "newEmail": "victim@example.net", "password": PW })).await;
+        let r = change(&h, &token, json!({ "newEmail": "victim@example.net", "password": pw() })).await;
         assert_eq!((r.status, r.json()), (202, json!({ "status": "verification_sent" })));
         h.advance(1000);
     }
     // Another player asking for the same address within the 5 minutes: the same answer, no mail.
-    let r = change(&h, &bob, json!({ "newEmail": "victim@example.net", "password": PW })).await;
+    let r = change(&h, &bob, json!({ "newEmail": "victim@example.net", "password": pw() })).await;
     assert_eq!((r.status, r.json()), (202, json!({ "status": "verification_sent" })));
     assert_eq!(me(&h, &bob).await["pendingEmail"], "victim@example.net");
     let mails = mails_since(&h, from).await;
@@ -239,7 +239,7 @@ async fn one_confirmation_mail_per_new_address_every_5_minutes_and_the_link_alre
     // 5 minutes later, a request mails a new link, which replaces the first one.
     h.advance(5 * 60_000);
     let from = sent_count(&h).await;
-    change(&h, &token, json!({ "newEmail": "victim@example.net", "password": PW })).await;
+    change(&h, &token, json!({ "newEmail": "victim@example.net", "password": pw() })).await;
     let mails = mails_since(&h, from).await;
     assert_eq!(mails.iter().filter(|m| m.to == "victim@example.net").count(), 1);
     let second = link_token(to(&mails, "victim@example.net"));
@@ -264,30 +264,30 @@ async fn invalid_and_same_addresses_are_refused_before_the_password_is_checked()
     assert_eq!(events_of(&h, "reauth_failed").await.len(), 1);
     let r = change(&h, &token, json!({ "newEmail": "nora@example.org" })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (400, json!("invalid_request")));
-    assert_eq!(h.post(EMAIL, json!({ "newEmail": "nora@example.org", "password": PW })).await.status, 401);
+    assert_eq!(h.post(EMAIL, json!({ "newEmail": "nora@example.org", "password": pw() })).await.status, 401);
     assert_eq!(me(&h, &token).await["pendingEmail"], Value::Null);
 }
 
 #[tokio::test]
 async fn two_step_verification_needs_a_code_and_the_reauth_failures_count_with_the_deletion() {
     let (h, id, token) = setup(&[("AUTH_FAILURES_PER_ACCOUNT", "3")]).await;
-    let s = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": PW })).await;
+    let s = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": pw() })).await;
     let secret = base32_decode(s.json()["secret"].as_str().unwrap()).unwrap();
     let en =
         h.post_as(&token, "/api/v1/account/mfa/totp/enable", json!({ "code": totp(&secret, h.now()) })).await;
     h.advance(30_000);
-    let r = change(&h, &token, json!({ "newEmail": "nora@example.org", "password": PW })).await;
+    let r = change(&h, &token, json!({ "newEmail": "nora@example.org", "password": pw() })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (403, json!("mfa_code_required")));
     let r = change(
         &h,
         &token,
-        json!({ "newEmail": "nora@example.org", "password": PW, "code": totp(&secret, h.now()) }),
+        json!({ "newEmail": "nora@example.org", "password": pw(), "code": totp(&secret, h.now()) }),
     )
     .await;
     assert_eq!(r.status, 202);
     let code = en.json()["recoveryCodes"][0].clone();
     let r =
-        change(&h, &token, json!({ "newEmail": "nina@example.org", "password": PW, "recoveryCode": code }))
+        change(&h, &token, json!({ "newEmail": "nina@example.org", "password": pw(), "recoveryCode": code }))
             .await;
     assert_eq!(r.status, 202);
     assert_eq!(h.store.mfa().count_recovery_codes(id).await.unwrap(), 9, "the recovery code is used up");
@@ -302,7 +302,7 @@ async fn two_step_verification_needs_a_code_and_the_reauth_failures_count_with_t
     let r = h.post_as(&token, "/api/v1/account/delete", json!({ "password": "nope nope nope" })).await;
     assert_eq!(r.json()["error"], "invalid_password");
     let r =
-        change(&h, &token, json!({ "newEmail": "x@example.org", "password": PW, "code": "123456" })).await;
+        change(&h, &token, json!({ "newEmail": "x@example.org", "password": pw(), "code": "123456" })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (429, json!("too_many_attempts")));
 }
 
@@ -310,10 +310,10 @@ async fn two_step_verification_needs_a_code_and_the_reauth_failures_count_with_t
 async fn a_new_request_replaces_the_pending_one_and_an_expired_link_does_nothing() {
     let (h, id, token) = setup(&[]).await;
     let from = sent_count(&h).await;
-    change(&h, &token, json!({ "newEmail": "first@example.org", "password": PW })).await;
+    change(&h, &token, json!({ "newEmail": "first@example.org", "password": pw() })).await;
     let first = link_token(to(&mails_since(&h, from).await, "first@example.org"));
     let from = sent_count(&h).await;
-    change(&h, &token, json!({ "newEmail": "second@example.org", "password": PW })).await;
+    change(&h, &token, json!({ "newEmail": "second@example.org", "password": pw() })).await;
     let second = link_token(to(&mails_since(&h, from).await, "second@example.org"));
     assert_eq!(me(&h, &token).await["pendingEmail"], "second@example.org");
     let rows: i64 = h
@@ -341,9 +341,9 @@ async fn a_new_request_replaces_the_pending_one_and_an_expired_link_does_nothing
 async fn an_address_taken_between_the_request_and_the_confirmation_is_refused_and_nothing_changes() {
     let (h, id, token) = setup(&[]).await;
     let from = sent_count(&h).await;
-    change(&h, &token, json!({ "newEmail": "nora@example.org", "password": PW })).await;
+    change(&h, &token, json!({ "newEmail": "nora@example.org", "password": pw() })).await;
     let tk = link_token(to(&mails_since(&h, from).await, "nora@example.org"));
-    h.create_user_with("nora", Some("nora@example.org"), Some(PW), true).await;
+    h.create_user_with("nora", Some("nora@example.org"), Some(pw()), true).await;
     assert_eq!(page(&h, &tk).await.status, 200, "the page itself does not tell");
     let before = sent_count(&h).await;
     let r = confirm(&h, &tk).await;
@@ -359,7 +359,7 @@ async fn an_address_taken_between_the_request_and_the_confirmation_is_refused_an
 async fn the_unique_index_decides_when_the_address_is_taken_at_the_last_moment() {
     let (h, id, token) = setup(&[]).await;
     let from = sent_count(&h).await;
-    change(&h, &token, json!({ "newEmail": "nora@example.org", "password": PW })).await;
+    change(&h, &token, json!({ "newEmail": "nora@example.org", "password": pw() })).await;
     let tk = link_token(to(&mails_since(&h, from).await, "nora@example.org"));
     // The lookup of the confirmation does not see the other account: it appears only when the
     // address is written (as if another process had won the race), and the index refuses it.
@@ -390,10 +390,14 @@ async fn the_unique_index_decides_when_the_address_is_taken_at_the_last_moment()
 async fn a_new_password_cancels_a_pending_change_and_a_change_ends_the_links_of_the_former_address() {
     let (h, id, token) = setup(&[]).await;
     let from = sent_count(&h).await;
-    change(&h, &token, json!({ "newEmail": "nora@example.org", "password": PW })).await;
+    change(&h, &token, json!({ "newEmail": "nora@example.org", "password": pw() })).await;
     let tk = link_token(to(&mails_since(&h, from).await, "nora@example.org"));
     let r = h
-        .post_as(&token, "/api/v1/account/password", json!({ "currentPassword": PW, "newPassword": NEW_PW }))
+        .post_as(
+            &token,
+            "/api/v1/account/password",
+            json!({ "currentPassword": pw(), "newPassword": new_pw() }),
+        )
         .await;
     assert_eq!(r.status, 200);
     assert_eq!(me(&h, &token).await["pendingEmail"], Value::Null);
@@ -406,7 +410,7 @@ async fn a_new_password_cancels_a_pending_change_and_a_change_ends_the_links_of_
     let reset = reset_link(&h, from).await;
     h.advance(5 * 60_000); // one confirmation mail per address every 5 minutes
     let from = sent_count(&h).await;
-    change(&h, &token, json!({ "newEmail": "nora@example.org", "password": NEW_PW })).await;
+    change(&h, &token, json!({ "newEmail": "nora@example.org", "password": new_pw() })).await;
     let tk2 = link_token(to(&mails_since(&h, from).await, "nora@example.org"));
     assert_eq!(confirm(&h, &tk2).await.status, 200);
     let rr = h
@@ -418,7 +422,7 @@ async fn a_new_password_cancels_a_pending_change_and_a_change_ends_the_links_of_
     assert_eq!((rr.status, rr.json()["error"].clone()), (400, json!("invalid_token")));
 
     // A password reset cancels a pending change too.
-    change(&h, &token, json!({ "newEmail": "zoe@example.org", "password": NEW_PW })).await;
+    change(&h, &token, json!({ "newEmail": "zoe@example.org", "password": new_pw() })).await;
     let from = sent_count(&h).await;
     h.post("/api/v1/auth/password/forgot", json!({ "email": "nora@example.org" })).await;
     let reset2 = reset_link(&h, from).await;
@@ -437,7 +441,7 @@ async fn hooked(env: &[(&'static str, &str)]) -> (Harness, Arc<CountingHasher>, 
     let counter = CountingHasher::new();
     let h = Harness::build(Setup { hasher: Some(counter.clone()), ..Setup::env(env) }).await;
     let id = h.create_user("alice").await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     (h, counter, id, token)
 }
 
@@ -453,11 +457,11 @@ fn store_after_next_check(h: &Harness, counter: &CountingHasher, id: UserId, pas
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_new_password_stored_right_after_the_check_stops_the_change_and_a_rehash_does_not() {
-    for (password, refused) in [(NEW_PW, true), (PW, false)] {
+    for (password, refused) in [(new_pw(), true), (pw(), false)] {
         let (h, counter, id, token) = hooked(&[]).await;
         store_after_next_check(&h, &counter, id, password);
         let before = sent_count(&h).await;
-        let r = change(&h, &token, json!({ "newEmail": "evil@attacker.example", "password": PW })).await;
+        let r = change(&h, &token, json!({ "newEmail": "evil@attacker.example", "password": pw() })).await;
         let mails = mails_since(&h, before).await;
         if !refused {
             // A sign-in's rehash of the same password is not a new password.
@@ -475,8 +479,8 @@ async fn a_new_password_stored_right_after_the_check_stops_the_change_and_a_reha
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn without_confirmation_a_new_password_stored_after_the_check_stops_the_change_too() {
     let (h, counter, id, token) = hooked(&[("REQUIRE_EMAIL_VERIFICATION", "0")]).await;
-    store_after_next_check(&h, &counter, id, NEW_PW);
-    let r = change(&h, &token, json!({ "newEmail": "evil@attacker.example", "password": PW })).await;
+    store_after_next_check(&h, &counter, id, new_pw());
+    let r = change(&h, &token, json!({ "newEmail": "evil@attacker.example", "password": pw() })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (403, json!("invalid_password")));
     assert_eq!(h.user(id).await.email.as_deref(), Some("alice@example.com"));
 }
@@ -485,7 +489,7 @@ async fn without_confirmation_a_new_password_stored_after_the_check_stops_the_ch
 async fn a_reset_link_stored_for_the_former_address_after_the_change_does_not_work() {
     let (h, id, token) = setup(&[]).await;
     let from = sent_count(&h).await;
-    change(&h, &token, json!({ "newEmail": "nora@example.org", "password": PW })).await;
+    change(&h, &token, json!({ "newEmail": "nora@example.org", "password": pw() })).await;
     let tk = link_token(to(&mails_since(&h, from).await, "nora@example.org"));
     assert_eq!(confirm(&h, &tk).await.status, 200);
     // A "forgot password" for the former address that read the account before the change stores
@@ -510,7 +514,7 @@ async fn a_reset_link_stored_for_the_former_address_after_the_change_does_not_wo
         .await;
     assert_eq!((rr.status, rr.json()["error"].clone()), (400, json!("invalid_token")));
     assert_eq!(
-        h.post("/api/v1/auth/login", json!({ "login": "nora@example.org", "password": PW })).await.status,
+        h.post("/api/v1/auth/login", json!({ "login": "nora@example.org", "password": pw() })).await.status,
         200
     );
 }
@@ -521,9 +525,9 @@ async fn a_busy_store_answers_503_server_busy_and_changes_nothing_and_the_links_
     let file = dir.0.join("scacelith.db").display().to_string();
     let h = Harness::build(Setup { db_path: Some(file.clone()), ..Setup::default() }).await;
     let id = h.create_user("alice").await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     let from = sent_count(&h).await;
-    change(&h, &token, json!({ "newEmail": "nora@example.org", "password": PW })).await;
+    change(&h, &token, json!({ "newEmail": "nora@example.org", "password": pw() })).await;
     let tk = link_token(to(&mails_since(&h, from).await, "nora@example.org"));
     let from = sent_count(&h).await;
     h.post("/api/v1/auth/password/forgot", json!({ "email": "alice@example.com" })).await;
@@ -536,17 +540,17 @@ async fn a_busy_store_answers_503_server_busy_and_changes_nothing_and_the_links_
     let r = confirm(&h, &tk).await;
     assert_eq!((r.status, r.header("retry-after")), (503, Some("1")));
     assert!(r.text().contains("busy"), "{}", r.text());
-    let again = change(&h, &token, json!({ "newEmail": "zoe@example.org", "password": PW })).await;
+    let again = change(&h, &token, json!({ "newEmail": "zoe@example.org", "password": pw() })).await;
     let body = again.json();
     assert_eq!((again.status, &body["error"], &body["retryAfter"]), (503, &json!("server_busy"), &json!(1)));
-    let rr = h.post("/api/v1/auth/password/reset", json!({ "token": reset, "newPassword": NEW_PW })).await;
+    let rr = h.post("/api/v1/auth/password/reset", json!({ "token": reset, "newPassword": new_pw() })).await;
     assert_eq!((rr.status, rr.json()["error"].clone()), (503, json!("server_busy")));
     other.execute_batch("ROLLBACK").unwrap();
 
     assert_eq!(h.user(id).await.email.as_deref(), Some("alice@example.com"));
     assert_eq!(me(&h, &token).await["pendingEmail"], "nora@example.org");
     assert_eq!(
-        h.post("/api/v1/auth/login", json!({ "login": "alice", "password": PW })).await.status,
+        h.post("/api/v1/auth/login", json!({ "login": "alice", "password": pw() })).await.status,
         200,
         "password unchanged"
     );
@@ -557,9 +561,9 @@ async fn a_busy_store_answers_503_server_busy_and_changes_nothing_and_the_links_
 #[tokio::test]
 async fn without_confirmation_the_address_changes_at_once_409_email_taken_and_the_former_address_is_told() {
     let (h, id, token) = setup(&[("REQUIRE_EMAIL_VERIFICATION", "0")]).await;
-    let bob = h.create_user_with("bob", Some("bob@example.org"), Some(PW), true).await;
+    let bob = h.create_user_with("bob", Some("bob@example.org"), Some(pw()), true).await;
     let from = sent_count(&h).await;
-    let r = change(&h, &token, json!({ "newEmail": "Bob@Example.org", "password": PW })).await;
+    let r = change(&h, &token, json!({ "newEmail": "Bob@Example.org", "password": pw() })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (409, json!("email_taken")));
     let mails = mails_since(&h, from).await;
     assert_eq!(
@@ -570,7 +574,7 @@ async fn without_confirmation_the_address_changes_at_once_409_email_taken_and_th
     assert!(mails[0].subject.contains("Someone tried to use your e-mail address"));
 
     let from = sent_count(&h).await;
-    let r = change(&h, &token, json!({ "newEmail": "Nora@Example.org", "password": PW })).await;
+    let r = change(&h, &token, json!({ "newEmail": "Nora@Example.org", "password": pw() })).await;
     assert_eq!(
         (r.status, r.json()),
         (200, json!({ "status": "email_changed", "email": "nora@example.org" }))

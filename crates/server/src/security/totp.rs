@@ -126,9 +126,14 @@ pub fn otpauth_uri(issuer: &str, account: &str, secret: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::testing::vector;
 
-    /// RFC 6238 appendix B, SHA-1 column (seed "12345678901234567890", 8 digits).
-    const RFC_SECRET: &[u8] = b"12345678901234567890";
+    /// The seed of RFC 6238 appendix B (SHA-1 column) and RFC 4226 appendix D.
+    fn rfc_secret() -> &'static [u8] {
+        vector("/totp/secret").as_bytes()
+    }
+
+    /// RFC 6238 appendix B, SHA-1 column (8 digits).
     const RFC_VECTORS: &[(i64, &str)] = &[
         (59, "94287082"),
         (1111111109, "07081804"),
@@ -148,8 +153,8 @@ mod tests {
     #[test]
     fn rfc_6238_appendix_b_vectors() {
         for &(t, code) in RFC_VECTORS {
-            assert_eq!(hotp(RFC_SECRET, totp_step(t * 1000) as u64, 8), code, "T={t}");
-            assert_eq!(totp(RFC_SECRET, t * 1000), code[2..], "6 digits at T={t}");
+            assert_eq!(hotp(rfc_secret(), totp_step(t * 1000) as u64, 8), code, "T={t}");
+            assert_eq!(totp(rfc_secret(), t * 1000), code[2..], "6 digits at T={t}");
         }
     }
 
@@ -160,10 +165,10 @@ mod tests {
             "520489",
         ];
         for (i, c) in expect.iter().enumerate() {
-            assert_eq!(hotp(RFC_SECRET, i as u64, 6), *c);
+            assert_eq!(hotp(rfc_secret(), i as u64, 6), *c);
         }
-        assert_eq!(totp(RFC_SECRET, 59_000), "287082");
-        assert_eq!(totp(RFC_SECRET, 1_111_111_109_000), "081804");
+        assert_eq!(totp(rfc_secret(), 59_000), "287082");
+        assert_eq!(totp(rfc_secret(), 1_111_111_109_000), "081804");
     }
 
     #[test]
@@ -214,13 +219,13 @@ mod tests {
 
     #[test]
     fn otpauth_uri_carries_the_url_encoded_issuer() {
-        let uri = otpauth_uri("Scacelith Community Server", "alice", RFC_SECRET);
+        let uri = otpauth_uri("Scacelith Community Server", "alice", rfc_secret());
         assert_eq!(
             uri,
             "otpauth://totp/Scacelith%20Community%20Server:alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ\
              &issuer=Scacelith%20Community%20Server&algorithm=SHA1&digits=6&period=30"
         );
-        let other = otpauth_uri("A&B", "bob", RFC_SECRET);
+        let other = otpauth_uri("A&B", "bob", rfc_secret());
         assert!(other.starts_with("otpauth://totp/A%26B:bob?") && other.contains("issuer=A%26B&"));
         let bytes: Vec<u8> = (1..=20).collect();
         assert_eq!(

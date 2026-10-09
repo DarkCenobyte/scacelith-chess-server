@@ -84,7 +84,7 @@ mod tests {
         let u = uuid_v4();
         assert_eq!(u.len(), 36);
         assert_eq!(&u[14..15], "4");
-        assert!(matches!(&u[19..20], "8" | "9" | "a" | "b"), "{u}");
+        assert!(matches!(&u[19..20], "8" | "9" | "a" | "b"), "the variant (10 in binary)");
         assert_eq!(u.matches('-').count(), 4);
     }
 

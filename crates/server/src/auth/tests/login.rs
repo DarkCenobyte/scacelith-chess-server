@@ -6,11 +6,12 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 
-use super::{Harness, PW, Setup, sha256_hex};
+use super::{Harness, Setup, pw, sha256_hex};
 use crate::auth::public_base_url;
 use crate::config::{Config, TlsMode};
 use crate::security::password::{Argon2Hasher, Argon2Params, PasswordHasher};
 use crate::security::pow::solve_pow;
+use crate::security::testing::random_password;
 use crate::store::{NewSanction, NewSession, NewUser, SanctionKind, Source};
 
 const LOGIN: &str = "/api/v1/auth/login";
@@ -24,7 +25,7 @@ async fn login_by_username_or_email_case_insensitive_gives_a_session_and_the_use
     let h = Harness::new().await;
     let id = h.create_user("Alice").await;
     for login in ["Alice", "alice", "ALICE@EXAMPLE.COM", " alice@example.com "] {
-        let r = h.post(LOGIN, json!({ "login": login, "password": PW, "clientLabel": "Windows 11" })).await;
+        let r = h.post(LOGIN, json!({ "login": login, "password": pw(), "clientLabel": "Windows 11" })).await;
         assert_eq!(r.status, 200, "{login}");
         let body = r.json();
         let token = body["token"].as_str().unwrap();
@@ -53,13 +54,8 @@ async fn unknown_user_wrong_password_and_passwordless_account_get_identical_answ
     let h = Harness::new().await;
     h.create_user("alice").await;
     h.create_user_with("googler", Some("googler@example.com"), None, true).await;
-    for (login, password) in [
-        ("nobody", "whatever pass"),
-        ("alice", "wrong password"),
-        ("googler", "anything at all"),
-        ("nobody@example.com", "x"),
-    ] {
-        let r = attempt(&h, login, password).await;
+    for login in ["nobody", "alice", "googler", "nobody@example.com"] {
+        let r = attempt(&h, login, &random_password()).await;
         assert_eq!(
             (r.status, r.json()),
             (
@@ -85,9 +81,10 @@ async fn timing_unknown_user_and_wrong_password_take_similar_time() {
     })
     .await;
     h.create_user("alice").await;
+    let wrong = random_password();
     let time = async |login: &str| {
         let t0 = Instant::now();
-        assert_eq!(attempt(&h, login, "not the password").await.status, 401);
+        assert_eq!(attempt(&h, login, &wrong).await.status, 401);
         t0.elapsed().as_secs_f64() * 1000.0
     };
     time("warm-up").await;
@@ -123,14 +120,14 @@ async fn email_unverified_and_banned_only_after_the_password_matched() {
         created_at: now,
     };
     h.store.write(move |db| db.sanctions().create(&ban)).await.unwrap();
-    assert_eq!(attempt(&h, "banned1", "wrong password").await.json()["error"], "invalid_credentials");
-    let r = attempt(&h, "banned1", PW).await;
+    assert_eq!(attempt(&h, "banned1", &random_password()).await.json()["error"], "invalid_credentials");
+    let r = attempt(&h, "banned1", pw()).await;
     let body = r.json();
     assert_eq!((r.status, &body["error"], &body["until"]), (403, &json!("banned"), &json!(now + 3_600_000)));
     h.advance(3_600_001);
-    assert_eq!(attempt(&h, "banned1", PW).await.status, 200, "ban over");
-    h.create_user_with("unverified", Some("unverified@example.com"), Some(PW), false).await;
-    let r = attempt(&h, "unverified", PW).await;
+    assert_eq!(attempt(&h, "banned1", pw()).await.status, 200, "ban over");
+    h.create_user_with("unverified", Some("unverified@example.com"), Some(pw()), false).await;
+    let r = attempt(&h, "unverified", pw()).await;
     assert_eq!((r.status, r.json()["error"].clone()), (403, json!("email_unverified")));
 }
 
@@ -138,23 +135,24 @@ async fn email_unverified_and_banned_only_after_the_password_matched() {
 async fn per_account_failure_counter_exponential_delay_identical_for_unknown_accounts() {
     let h = Harness::with_env(&[("AUTH_FAILURES_PER_ACCOUNT", "3")]).await;
     h.create_user("alice").await;
+    let wrong = random_password();
     for login in ["alice", "nobody"] {
         for _ in 0..3 {
-            assert_eq!(attempt(&h, login, "wrong password").await.status, 401);
+            assert_eq!(attempt(&h, login, &wrong).await.status, 401);
         }
     }
-    let a = attempt(&h, "alice", PW).await;
-    let b = attempt(&h, "nobody", "wrong password").await;
+    let a = attempt(&h, "alice", pw()).await;
+    let b = attempt(&h, "nobody", &wrong).await;
     let refused = json!({ "error": "too_many_attempts", "message": "Too many attempts; wait before trying again.", "retryAfter": 2 });
     assert_eq!((a.status, a.json()), (429, refused));
     assert_eq!((b.status, b.json()), (a.status, a.json()), "unknown accounts are throttled the same way");
     assert_eq!(a.header("retry-after"), Some("2"));
     h.advance(2000);
-    assert_eq!(attempt(&h, "alice", "wrong password").await.status, 401);
-    assert_eq!(attempt(&h, "alice", "wrong password").await.json()["retryAfter"], 4, "doubled");
+    assert_eq!(attempt(&h, "alice", &wrong).await.status, 401);
+    assert_eq!(attempt(&h, "alice", &wrong).await.json()["retryAfter"], 4, "doubled");
     h.advance(4000);
-    assert_eq!(attempt(&h, "alice", PW).await.status, 200, "the right password after the delay");
-    assert_eq!(attempt(&h, "alice", "wrong password").await.status, 401, "counter reset by the success");
+    assert_eq!(attempt(&h, "alice", pw()).await.status, 200, "the right password after the delay");
+    assert_eq!(attempt(&h, "alice", &wrong).await.status, 401, "counter reset by the success");
     let events = h.events().await;
     let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
     for kind in ["login_failed", "login_lockout", "login_throttled", "login"] {
@@ -178,19 +176,19 @@ async fn a_credential_stuffing_wave_turns_on_the_login_proof_of_work() {
         assert_eq!(r.status, 401);
     }
     assert!(h.auth.login_pow_active());
-    let r = attempt(&h, "alice", PW).await;
+    let r = attempt(&h, "alice", pw()).await;
     assert_eq!(r.status, 428);
     let pow = r.json()["pow"].clone();
     assert_eq!(pow["bits"], 6);
     let challenge = pow["challenge"].as_str().unwrap();
     let answer = json!({ "challenge": challenge, "nonce": solve_pow(challenge, 6) });
-    let body = json!({ "login": "alice", "password": PW, "pow": answer });
+    let body = json!({ "login": "alice", "password": pw(), "pow": answer });
     assert_eq!(h.post(LOGIN, body.clone()).await.status, 200);
     let r = h.post(LOGIN, body).await;
     assert_eq!((r.status, r.json()["reason"].clone()), (428, json!("replayed")));
     h.advance(5 * 60_000 + 1);
     assert!(!h.auth.login_pow_active(), "the wave is over");
-    assert_eq!(attempt(&h, "alice", PW).await.status, 200);
+    assert_eq!(attempt(&h, "alice", pw()).await.status, 200);
 }
 
 #[tokio::test]
@@ -198,31 +196,32 @@ async fn outdated_hashes_are_upgraded_at_login() {
     let h = Harness::new().await;
     let old =
         Argon2Hasher::new(Argon2Params { memory_kib: 32, passes: 1, lanes: 1, ..Argon2Params::DEFAULT });
+    let legacy = random_password();
     let user = NewUser {
         username: "legacy".into(),
         email: Some("legacy@example.com".into()),
-        password_hash: Some(old.hash("legacy passphrase 1").unwrap()),
+        password_hash: Some(old.hash(&legacy).unwrap()),
         email_verified: true,
         accept_challenges: true,
         created_at: h.now(),
     };
     let id = h.store.users().create(user).await.unwrap();
-    h.login("legacy", "legacy passphrase 1").await;
+    h.login("legacy", &legacy).await;
     let stored = h.user(id).await.password_hash.unwrap();
     assert!(stored.starts_with("$argon2id$v=19$m=64,t=1,p=1$"), "{stored}");
-    h.login("legacy", "legacy passphrase 1").await;
+    h.login("legacy", &legacy).await;
 }
 
 #[tokio::test]
 async fn max_sessions_per_user_revokes_the_oldest_session_and_drops_it_from_the_cache() {
     let h = Harness::with_env(&[("MAX_SESSIONS_PER_USER", "2")]).await;
     h.create_user("alice").await;
-    let a = h.token("alice", PW).await;
+    let a = h.token("alice", pw()).await;
     h.advance(1000);
-    let b = h.token("alice", PW).await;
+    let b = h.token("alice", pw()).await;
     assert_eq!(h.me_status(&a).await, 200, "cached");
     h.advance(1000);
-    let c = h.token("alice", PW).await;
+    let c = h.token("alice", pw()).await;
     assert_eq!(h.me_status(&a).await, 401);
     assert_eq!(h.me_status(&b).await, 200);
     assert_eq!(h.me_status(&c).await, 200);
@@ -235,7 +234,7 @@ async fn max_sessions_per_user_revokes_the_oldest_session_and_drops_it_from_the_
 async fn max_sessions_per_user_broadcasts_the_session_revoked_by_a_login_elsewhere_too() {
     let h = Harness::with_env(&[("MAX_SESSIONS_PER_USER", "2")]).await;
     let id = h.create_user("alice").await;
-    let a = h.token("alice", PW).await;
+    let a = h.token("alice", pw()).await;
     h.advance(1000);
     // A login of the same account elsewhere inserted its session just before this one.
     let now = h.now();
@@ -249,7 +248,7 @@ async fn max_sessions_per_user_broadcasts_the_session_revoked_by_a_login_elsewhe
         ip: None,
     };
     h.store.sessions().create(other).await.unwrap();
-    h.token("alice", PW).await;
+    h.token("alice", pw()).await;
     assert_eq!(h.revoked.calls(), [(id, Some(vec![sha256_hex(&a)]))]);
     assert_eq!(h.me_status(&a).await, 401);
 }

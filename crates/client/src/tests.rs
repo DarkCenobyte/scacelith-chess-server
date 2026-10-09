@@ -621,6 +621,11 @@ fn json_answer(status: &str, body: serde_json::Value) -> String {
     )
 }
 
+/// A password drawn at random (16 hexadecimal digits), so that none is written in the tests.
+fn random_password() -> String {
+    format!("{:016x}", getrandom::u64().expect("the operating system's random source is available"))
+}
+
 #[tokio::test]
 async fn api_client_flows() {
     let session =
@@ -635,20 +640,18 @@ async fn api_client_flows() {
     ])
     .await;
     let api = ApiClient::new(endpoint);
+    let (registered, typed, wrong) = (random_password(), random_password(), random_password());
     assert_eq!(api.info().await.unwrap()["protocol"]["max"], 1);
-    assert_eq!(
-        api.register("alice", "a@example.org", "correct horse battery").await.unwrap()["status"],
-        "ready"
-    );
+    assert_eq!(api.register("alice", "a@example.org", &registered).await.unwrap()["status"], "ready");
     let Login::MfaRequired { mfa_token, expires_in } =
-        api.login("alice", "pw-pw-pw-pw", Some("tests")).await.unwrap()
+        api.login("alice", &typed, Some("tests")).await.unwrap()
     else {
         panic!("second step")
     };
     assert_eq!((mfa_token.as_str(), expires_in), ("mfa_x", 300));
     let s = api.login_mfa(&mfa_token, "123456").await.unwrap();
     assert_eq!((s.token.as_str(), s.user["username"].as_str()), (TOKEN, Some("alice")));
-    let err = api.login("alice", "wrong-password", None).await.unwrap_err();
+    let err = api.login("alice", &wrong, None).await.unwrap_err();
     let ClientError::Api(e) = err else { panic!("{err}") };
     assert_eq!((e.status, e.error.as_str(), e.message.as_str()), (401, "invalid_credentials", "Wrong."));
     api.logout(TOKEN).await.unwrap();
@@ -659,10 +662,13 @@ async fn api_client_flows() {
     assert!(requests[1].starts_with("POST /api/v1/auth/register HTTP/1.1\r\n"));
     assert!(requests[1].contains("Content-Type: application/json\r\n"));
     assert!(
-        requests[1]
-            .ends_with(r#"{"username":"alice","email":"a@example.org","password":"correct horse battery"}"#)
+        requests[1].ends_with(&format!(
+            r#"{{"username":"alice","email":"a@example.org","password":"{registered}"}}"#
+        ))
     );
-    assert!(requests[2].ends_with(r#"{"login":"alice","password":"pw-pw-pw-pw","clientLabel":"tests"}"#));
+    assert!(
+        requests[2].ends_with(&format!(r#"{{"login":"alice","password":"{typed}","clientLabel":"tests"}}"#))
+    );
     assert!(requests[3].ends_with(r#"{"mfaToken":"mfa_x","code":"123456"}"#));
     assert!(requests[5].starts_with("POST /api/v1/auth/logout HTTP/1.1\r\n"));
     assert!(requests[5].contains(&format!("Authorization: Bearer {TOKEN}\r\n")));

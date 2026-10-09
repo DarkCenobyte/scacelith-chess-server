@@ -1111,7 +1111,8 @@ async fn insert_refund(store: &Store, game: GameId, victim: UserId, cheater: Use
         .expect("refund rows");
 }
 
-/// Waits (5 s at most) for the player's next notices.
+/// Waits (5 s at most) for the player's next notices; none when none came by then (the caller's
+/// assertion names the player).
 async fn next_notices(p: &Player) -> Vec<(NoticeCode, f64)> {
     for _ in 0..2500 {
         let n = notices(&p.frames());
@@ -1120,7 +1121,7 @@ async fn next_notices(p: &Player) -> Vec<(NoticeCode, f64)> {
         }
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
-    panic!("no notice for user {}", p.user());
+    Vec::new()
 }
 
 /// Waits (5 s at most) until the user's refunds are marked notified.

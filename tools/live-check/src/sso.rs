@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 use crate::control::{Call, Control, Reply, Routes};
 use crate::google::{Consent, FakeGoogle};
 use crate::support::TempDir;
-use crate::support::server::{base_env, certificate, certificate_pin, free_port};
+use crate::support::server::{base_env, certificate, certificate_sha256, free_port};
 use crate::support::web::call;
 use crate::{Ctx, fresh_totp, run_cpp};
 
@@ -100,7 +100,7 @@ pub(crate) async fn run(ctx: &Ctx) -> i32 {
         (Endpoint::plain(addr), None, "plain HTTP".to_owned())
     } else {
         let tls = TlsConfig::with_root_pem(&pem).expect("the certificate of the server");
-        let pin = certificate_pin(&pem);
+        let pin = certificate_sha256(&pem);
         let mode = format!("TLS, certificate SHA-256 {pin}");
         (Endpoint::tls(addr, "localhost", tls), Some(pin), mode)
     };

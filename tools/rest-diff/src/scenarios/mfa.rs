@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::{BoxFut, PASSWORD, login, new_account};
+use super::{BoxFut, login, new_account, pw};
 use crate::crypto;
 use crate::duo::{Duo, Pair, Side, fresh_ip};
 use crate::http::{Req, Resp};
@@ -66,9 +66,7 @@ fn mfa(body: impl Fn(&Side) -> serde_json::Value) -> impl Fn(&Side) -> Req {
 /// The first sign-in step of `user`; saves its `mfaToken` as `<user>.mfa`.
 async fn first_step(d: &mut Duo, id: &str, ip: IpAddr, user: &str) {
     let p = d
-        .step(id, ip, 200, |_| {
-            Req::post("/api/v1/auth/login").json(json!({"login": user, "password": PASSWORD}))
-        })
+        .step(id, ip, 200, |_| Req::post("/api/v1/auth/login").json(json!({"login": user, "password": pw()})))
         .await;
     d.save(&p, &format!("{user}.mfa"), "mfaToken");
 }
@@ -81,7 +79,7 @@ async fn enable(d: &mut Duo, ip: IpAddr, user: &str) {
             &format!("{user}-setup"),
             ip,
             200,
-            post("/api/v1/account/mfa/totp/setup", user, |_| json!({"password": PASSWORD})),
+            post("/api/v1/account/mfa/totp/setup", user, |_| json!({"password": pw()})),
         )
         .await;
     d.save(&p, &format!("{user}.secret"), "secret");
@@ -129,18 +127,14 @@ async fn errors_before_enable(d: &mut Duo) {
         "disable-not-enabled",
         ip,
         409,
-        post("/api/v1/account/mfa/totp/disable", "sam", |_| json!({"password": PASSWORD, "code": "123456"})),
+        post("/api/v1/account/mfa/totp/disable", "sam", |_| json!({"password": pw(), "code": "123456"})),
     )
     .await;
     d.step(
         "recovery-not-enabled",
         ip,
         409,
-        post(
-            "/api/v1/account/mfa/recovery-codes",
-            "sam",
-            |_| json!({"password": PASSWORD, "code": "123456"}),
-        ),
+        post("/api/v1/account/mfa/recovery-codes", "sam", |_| json!({"password": pw(), "code": "123456"})),
     )
     .await;
     d.step("setup-no-password", ip, 400, post("/api/v1/account/mfa/totp/setup", "sam", |_| json!({}))).await;
@@ -151,13 +145,8 @@ async fn errors_before_enable(d: &mut Duo) {
         post("/api/v1/account/mfa/totp/setup", "sam", |_| json!({"password": "wrong"})),
     )
     .await;
-    d.step(
-        "setup",
-        ip,
-        200,
-        post("/api/v1/account/mfa/totp/setup", "sam", |_| json!({"password": PASSWORD})),
-    )
-    .await;
+    d.step("setup", ip, 200, post("/api/v1/account/mfa/totp/setup", "sam", |_| json!({"password": pw()})))
+        .await;
     d.step("me-pending-setup", ip, 200, |s| Req::get("/api/v1/account/me").bearer(&s.v("sam.token"))).await;
     d.step(
         "enable-five-digits",
@@ -184,14 +173,14 @@ async fn errors_before_enable(d: &mut Duo) {
         "enable-extra",
         ip,
         400,
-        post("/api/v1/account/mfa/totp/enable", "sam", |_| json!({"code": "123456", "password": PASSWORD})),
+        post("/api/v1/account/mfa/totp/enable", "sam", |_| json!({"code": "123456", "password": pw()})),
     )
     .await;
     d.step(
         "reauth-user-limit",
         ip,
         429,
-        post("/api/v1/account/mfa/totp/setup", "sam", |_| json!({"password": PASSWORD})),
+        post("/api/v1/account/mfa/totp/setup", "sam", |_| json!({"password": pw()})),
     )
     .await;
 }
@@ -205,7 +194,7 @@ async fn enrolment_and_sign_in(d: &mut Duo) {
         "setup-first",
         ip,
         200,
-        post("/api/v1/account/mfa/totp/setup", "tim", |_| json!({"password": PASSWORD})),
+        post("/api/v1/account/mfa/totp/setup", "tim", |_| json!({"password": pw()})),
     )
     .await;
     let p = d
@@ -213,7 +202,7 @@ async fn enrolment_and_sign_in(d: &mut Duo) {
             "setup-again",
             ip,
             200,
-            post("/api/v1/account/mfa/totp/setup", "tim", |_| json!({"password": PASSWORD})),
+            post("/api/v1/account/mfa/totp/setup", "tim", |_| json!({"password": pw()})),
         )
         .await;
     d.save(&p, "tim.secret", "secret");
@@ -359,11 +348,7 @@ async fn recovery_codes_at_sign_in(d: &mut Duo) {
         "export-security-events",
         ip,
         200,
-        post(
-            "/api/v1/account/export",
-            "vic",
-            |s| json!({"password": PASSWORD, "recoveryCode": s.v("vic.rc5")}),
-        ),
+        post("/api/v1/account/export", "vic", |s| json!({"password": pw(), "recoveryCode": s.v("vic.rc5")})),
     )
     .await;
 }
@@ -407,7 +392,7 @@ async fn reauthentication(d: &mut Duo) {
         "email-without-code",
         ip,
         403,
-        post(email, "xia", |_| json!({"newEmail": "xia2@example.org", "password": PASSWORD})),
+        post(email, "xia", |_| json!({"newEmail": "xia2@example.org", "password": pw()})),
     )
     .await;
     d.step(
@@ -417,7 +402,7 @@ async fn reauthentication(d: &mut Duo) {
         post(
             email,
             "xia",
-            |s| json!({"newEmail": "xia2@example.org", "password": PASSWORD, "code": wrong_code(s, "xia")}),
+            |s| json!({"newEmail": "xia2@example.org", "password": pw(), "code": wrong_code(s, "xia")}),
         ),
     )
     .await;
@@ -439,7 +424,7 @@ async fn reauthentication(d: &mut Duo) {
         post(
             email,
             "xia",
-            |s| json!({"newEmail": "xia2@example.org", "password": PASSWORD, "recoveryCode": s.v("xia.rc4")}),
+            |s| json!({"newEmail": "xia2@example.org", "password": pw(), "recoveryCode": s.v("xia.rc4")}),
         ),
     )
     .await;
@@ -452,7 +437,7 @@ async fn reauthentication(d: &mut Duo) {
         post(
             "/api/v1/account/password",
             "xia",
-            |_| json!({"currentPassword": PASSWORD, "newPassword": "another long passphrase"}),
+            |_| json!({"currentPassword": pw(), "newPassword": "another long passphrase"}),
         ),
     )
     .await;
@@ -471,24 +456,24 @@ async fn new_recovery_codes(d: &mut Duo) {
         "recovery-codes-with-recovery",
         ip,
         403,
-        post(rc, "yan", |s| json!({"password": PASSWORD, "code": s.v("yan.rc5")})),
+        post(rc, "yan", |s| json!({"password": pw(), "code": s.v("yan.rc5")})),
     )
     .await;
     d.step(
         "recovery-codes-field",
         ip,
         400,
-        post(rc, "yan", |s| json!({"password": PASSWORD, "recoveryCode": s.v("yan.rc5")})),
+        post(rc, "yan", |s| json!({"password": pw(), "recoveryCode": s.v("yan.rc5")})),
     )
     .await;
-    d.step("recovery-codes-no-code", ip, 0, post(rc, "yan", |_| json!({"password": PASSWORD}))).await;
+    d.step("recovery-codes-no-code", ip, 0, post(rc, "yan", |_| json!({"password": pw()}))).await;
     next_code(d, "yan").await;
     let p = d
         .step(
             "recovery-codes",
             ip,
             200,
-            post(rc, "yan", |s| json!({"password": PASSWORD, "code": s.v("yan.code")})),
+            post(rc, "yan", |s| json!({"password": pw(), "code": s.v("yan.code")})),
         )
         .await;
     let old = (d.node.v("yan.rc6"), d.rust.v("yan.rc6"));
@@ -515,7 +500,7 @@ async fn new_recovery_codes(d: &mut Duo) {
         "export-without-code",
         ip,
         403,
-        post("/api/v1/account/export", "yan", |_| json!({"password": PASSWORD})),
+        post("/api/v1/account/export", "yan", |_| json!({"password": pw()})),
     )
     .await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -523,7 +508,7 @@ async fn new_recovery_codes(d: &mut Duo) {
         "export-recovery-code",
         ip,
         200,
-        post("/api/v1/account/export", "yan", |s| json!({"password": PASSWORD, "code": s.v("yan.rc1")})),
+        post("/api/v1/account/export", "yan", |s| json!({"password": pw(), "code": s.v("yan.rc1")})),
     )
     .await;
 }
@@ -535,7 +520,7 @@ async fn disable(d: &mut Duo) {
     let ip = fresh_ip();
     enable(d, ip, "zed").await;
     let off = "/api/v1/account/mfa/totp/disable";
-    d.step("disable-no-code", ip, 403, post(off, "zed", |_| json!({"password": PASSWORD}))).await;
+    d.step("disable-no-code", ip, 403, post(off, "zed", |_| json!({"password": pw()}))).await;
     d.step(
         "disable-wrong-password",
         ip,
@@ -544,18 +529,17 @@ async fn disable(d: &mut Duo) {
     )
     .await;
     next_code(d, "zed").await;
-    d.step("disable", ip, 200, post(off, "zed", |s| json!({"password": PASSWORD, "code": s.v("zed.code")})))
+    d.step("disable", ip, 200, post(off, "zed", |s| json!({"password": pw(), "code": s.v("zed.code")})))
         .await;
     d.mail("disable-mail", "zed@example.org", None).await;
-    d.step("disable-again", ip, 409, post(off, "zed", |_| json!({"password": PASSWORD, "code": "123456"})))
-        .await;
-    login(d, ip, "zed", PASSWORD, "zed.plain").await;
+    d.step("disable-again", ip, 409, post(off, "zed", |_| json!({"password": pw(), "code": "123456"}))).await;
+    login(d, ip, "zed", pw(), "zed.plain").await;
     d.step("me-disabled", ip, 200, |s| Req::get("/api/v1/account/me").bearer(&s.v("zed.plain"))).await;
     d.step(
         "setup-after-disable",
         ip,
         200,
-        post("/api/v1/account/mfa/totp/setup", "zed", |_| json!({"password": PASSWORD})),
+        post("/api/v1/account/mfa/totp/setup", "zed", |_| json!({"password": pw()})),
     )
     .await;
 }
@@ -590,16 +574,11 @@ async fn code_cap(d: &mut Duo) {
         "cap-refused-reauth",
         ip,
         429,
-        post("/api/v1/account/export", "uma", |s| json!({"password": PASSWORD, "code": s.v("uma.code")})),
+        post("/api/v1/account/export", "uma", |s| json!({"password": pw(), "code": s.v("uma.code")})),
     )
     .await;
-    d.step(
-        "cap-without-code",
-        ip,
-        403,
-        post("/api/v1/account/export", "uma", |_| json!({"password": PASSWORD})),
-    )
-    .await;
+    d.step("cap-without-code", ip, 403, post("/api/v1/account/export", "uma", |_| json!({"password": pw()})))
+        .await;
 }
 
 /// A 6-digit code that is not the account's current one (nor its neighbours).

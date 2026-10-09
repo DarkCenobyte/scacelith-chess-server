@@ -8,7 +8,7 @@ pub mod server;
 pub mod web;
 
 pub use players::{
-    Account, Client, PASSWORD, Player, Table, WAIT, account, accounts, challenge_game, close_all, connect,
-    join_all, mv, player, players, queue_game, sign_in,
+    Account, Client, Player, Table, WAIT, account, accounts, challenge_game, close_all, connect, join_all,
+    mv, password, player, players, queue_game, sign_in,
 };
 pub use server::{TempDir, TestServer, eventually, metric_value};

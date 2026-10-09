@@ -112,7 +112,7 @@ pub fn certificate(dir: &TempDir) -> (PathBuf, PathBuf, Vec<u8>) {
 }
 
 /// The SHA-256 of the certificate of a PEM block (its DER), lower-case hexadecimal.
-pub fn certificate_pin(pem: &[u8]) -> String {
+pub fn certificate_sha256(pem: &[u8]) -> String {
     let text = String::from_utf8_lossy(pem);
     let b64: String = text.lines().filter(|l| !l.starts_with("-----")).collect();
     let der = base64::engine::general_purpose::STANDARD.decode(b64.trim()).expect("a PEM certificate");
@@ -418,7 +418,7 @@ impl TestServer {
     /// The SHA-256 of the server's certificate (DER), lower-case hexadecimal: the pin of a
     /// client that trusts this certificate only.
     pub fn pin(&self) -> String {
-        certificate_pin(&self.cert_pem)
+        certificate_sha256(&self.cert_pem)
     }
 
     /// The client TLS settings that trust this server's certificate.

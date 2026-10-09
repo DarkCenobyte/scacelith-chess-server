@@ -10,7 +10,7 @@ use std::sync::Arc;
 use http::Method;
 use serde_json::{Value, json};
 
-use super::{CountingHasher, Harness, PW, Setup, TEST_DEFAULTS};
+use super::{CountingHasher, Harness, Setup, TEST_DEFAULTS, pw};
 use crate::config::{Config, test_config};
 use crate::http::Router;
 use crate::http::pages::{self, PageDeps};
@@ -287,7 +287,7 @@ async fn password_recovery_an_ipv6_48_gets_3_times_the_limits_of_one_64() {
 #[tokio::test]
 async fn resends_per_address_and_reset_submissions_per_address_the_form_included() {
     let h = Harness::with_env(&[("AUTH_MAIL_PER_HOUR", "2"), ("AUTH_RESET_PER_HOUR", "2")]).await;
-    h.create_user_with("alice", Some("alice@example.com"), Some(PW), false).await;
+    h.create_user_with("alice", Some("alice@example.com"), Some(pw()), false).await;
     let resend = |email: &str| {
         h.call_from("203.0.113.5", Method::POST, "/api/v1/auth/verify-email/resend")
             .json(&json!({ "email": email }))
@@ -332,8 +332,8 @@ struct Enrolled {
 
 async fn enroll(h: &Harness, username: &str) -> Enrolled {
     let id = h.create_user(username).await;
-    let token = h.token(username, PW).await;
-    let setup = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": PW })).await;
+    let token = h.token(username, pw()).await;
+    let setup = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": pw() })).await;
     let secret = base32_decode(setup.json()["secret"].as_str().unwrap()).unwrap();
     let en =
         h.post_as(&token, "/api/v1/account/mfa/totp/enable", json!({ "code": totp(&secret, h.now()) })).await;
@@ -353,7 +353,7 @@ async fn second_factors_per_account_every_15_minutes_refused_before_the_code_is_
     let h = Harness::with_env(&[("AUTH_MFA_PER_ACCOUNT", "3")]).await;
     let alice = enroll(&h, "alice").await;
     let mfa_token = async |login: &str| -> String {
-        let r = h.post(LOGIN, json!({ "login": login, "password": PW })).await;
+        let r = h.post(LOGIN, json!({ "login": login, "password": pw() })).await;
         r.json()["mfaToken"].as_str().expect("an MFA step").to_owned()
     };
     let step =
@@ -383,7 +383,7 @@ async fn second_factors_per_account_every_15_minutes_refused_before_the_code_is_
         .post_as(
             &alice.token,
             "/api/v1/account/mfa/totp/disable",
-            json!({ "password": PW, "code": totp(&alice.secret, h.now()) }),
+            json!({ "password": pw(), "code": totp(&alice.secret, h.now()) }),
         )
         .await;
     assert_eq!((r.status, r.json()["error"].clone()), (429, json!("too_many_attempts")));
@@ -407,8 +407,8 @@ async fn re_authentication_per_account_every_10_minutes_whatever_the_address() {
     let h = Harness::with_env(&[("AUTH_REAUTH_PER_USER", "2")]).await;
     h.create_user("alice").await;
     h.create_user("bob").await;
-    let alice = h.token("alice", PW).await;
-    let bob = h.token("bob", PW).await;
+    let alice = h.token("alice", pw()).await;
+    let bob = h.token("bob", pw()).await;
     let change = |token: &str, ip: &str| {
         h.call_from(ip, Method::POST, "/api/v1/account/password")
             .bearer(token)
@@ -426,7 +426,7 @@ async fn re_authentication_per_account_every_10_minutes_whatever_the_address() {
     let del = h
         .call_from("203.0.113.2", Method::POST, "/api/v1/account/delete")
         .bearer(&alice)
-        .json(&json!({ "password": PW }))
+        .json(&json!({ "password": pw() }))
         .send()
         .await;
     assert_eq!(del.status, 429, "every route that asks for the password");
@@ -451,18 +451,21 @@ async fn the_password_hashes_of_one_address_auth_rate_per_ip_in_auth_as_many_aga
     let mut tokens = Vec::new();
     for n in names {
         let r =
-            h.call_from(ip, Method::POST, LOGIN).json(&json!({ "login": n, "password": PW })).send().await;
+            h.call_from(ip, Method::POST, LOGIN).json(&json!({ "login": n, "password": pw() })).send().await;
         assert_eq!(r.status, 200);
         tokens.push(r.json()["token"].as_str().unwrap().to_owned());
     }
-    let r =
-        h.call_from(ip, Method::POST, LOGIN).json(&json!({ "login": "alice", "password": PW })).send().await;
+    let r = h
+        .call_from(ip, Method::POST, LOGIN)
+        .json(&json!({ "login": "alice", "password": pw() }))
+        .send()
+        .await;
     assert_eq!(r.status, 429, "`auth` spent");
     assert_eq!(work() - before, 3);
     let change = |token: &str| {
         h.call_from(ip, Method::POST, "/api/v1/account/password")
             .bearer(token)
-            .json(&json!({ "currentPassword": PW, "newPassword": "ivory rook takes e5" }))
+            .json(&json!({ "currentPassword": pw(), "newPassword": "ivory rook takes e5" }))
             .send()
     };
     for token in &tokens {

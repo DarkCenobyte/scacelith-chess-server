@@ -265,14 +265,17 @@ mod tests {
     use crate::security::password::hasher::{Argon2Hasher, Argon2Params};
     use crate::security::password::limiter::HashLimiterConfig;
     use crate::security::password::limiter::tests::METRICS_LOCK;
+    use crate::security::testing::random_password;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// A test double: every call sleeps (a slow kind of stored hash: `slow:`), `h:<pw>` hashes.
+    /// A test double: every call sleeps (a slow kind of stored hash: `slow:`), `h:<pw>` hashes,
+    /// and the hash of `failing` fails.
     struct Stub {
         calls: Mutex<Vec<&'static str>>,
         running: AtomicUsize,
         peak: AtomicUsize,
         warm_ms: f64,
+        failing: String,
     }
 
     impl Stub {
@@ -282,6 +285,7 @@ mod tests {
                 running: AtomicUsize::new(0),
                 peak: AtomicUsize::new(0),
                 warm_ms,
+                failing: random_password(),
             })
         }
 
@@ -299,7 +303,7 @@ mod tests {
             "stub"
         }
         fn hash(&self, password: &str) -> Result<String, HashFailure> {
-            if password == "fail" {
+            if password == self.failing {
                 return Err(HashFailure("stub failed".into()));
             }
             self.work("hash", 2);
@@ -342,15 +346,17 @@ mod tests {
         let h = Arc::new(capped(stub.clone(), 10));
         assert_eq!(h.algorithm(), "stub");
         let o = HashOpts::default();
+        let (pw, other) = (random_password(), random_password());
+        let stored = format!("h:{pw}");
         let (w, a, b, c, d) = tokio::join!(
             h.warm_up(),
-            h.hash("pw", &o),
-            h.verify("h:pw", "pw", &o),
-            h.verify("h:pw", "no", &o),
-            h.verify_dummy("x", &o)
+            h.hash(&pw, &o),
+            h.verify(&stored, &pw, &o),
+            h.verify(&stored, &other, &o),
+            h.verify_dummy(&other, &o)
         );
         assert_eq!(w, Ok(()));
-        assert_eq!(a.unwrap(), "h:pw");
+        assert_eq!(a.unwrap(), stored);
         assert_eq!(b.unwrap(), Verified { ok: true, needs_rehash: false });
         assert_eq!(c.unwrap(), Verified::default());
         assert_eq!(d, Ok(()));
@@ -360,15 +366,16 @@ mod tests {
         // A refusal comes back as Busy; an error of the hasher itself is not one.
         let full = Arc::new(capped(stub.clone(), 0));
         let f2 = full.clone();
-        let first = tokio::spawn(async move { f2.verify_dummy("a", &HashOpts::default()).await });
+        let first =
+            tokio::spawn(async move { f2.verify_dummy(&random_password(), &HashOpts::default()).await });
         while full.limiter().stats().active == 0 {
             tokio::task::yield_now().await;
         }
-        let refused = full.verify_dummy("b", &HashOpts::default()).await.unwrap_err();
+        let refused = full.verify_dummy(&other, &HashOpts::default()).await.unwrap_err();
         assert_eq!(refused, HashError::Busy(BusyReason::QueueFull));
         assert_eq!(refused.busy(), Some(BusyReason::QueueFull));
         first.await.unwrap().unwrap();
-        let failed = h.hash("fail", &o).await.unwrap_err();
+        let failed = h.hash(&stub.failing, &o).await.unwrap_err();
         assert_eq!(failed, HashError::Failed(HashFailure("stub failed".into())));
         assert_eq!(failed.busy(), None);
     }
@@ -391,7 +398,8 @@ mod tests {
         assert_eq!(h.floor().floor_ms(), 42.0);
         // The first failed check is padded to it.
         let t0 = Instant::now();
-        assert_eq!(h.check_password(None, "x", &HashOpts::default()).await.unwrap(), Verified::default());
+        let pw = random_password();
+        assert_eq!(h.check_password(None, &pw, &HashOpts::default()).await.unwrap(), Verified::default());
         assert!(t0.elapsed() >= Duration::from_millis(38), "{:?}", t0.elapsed());
     }
 
@@ -400,13 +408,15 @@ mod tests {
         let _m = METRICS_LOCK.lock().await;
         let h = Arc::new(capped(Stub::new(0.0), 10));
         let o = HashOpts::default();
+        let (pw, wrong) = (random_password(), random_password());
+        let (slow, fast) = (format!("slow:{pw}"), format!("fast:{pw}"));
         // A slow stored hash sets the floor; the fast dummy failure then takes as long.
         let t0 = Instant::now();
-        assert_eq!(h.check_password(Some("slow:pw"), "nope", &o).await.unwrap(), Verified::default());
+        assert_eq!(h.check_password(Some(&slow), &wrong, &o).await.unwrap(), Verified::default());
         let t1 = t0.elapsed();
         assert!(h.floor().floor_ms() >= 75.0, "floor {}", h.floor().floor_ms());
         let t0 = Instant::now();
-        assert_eq!(h.check_password(None, "anything", &o).await.unwrap(), Verified::default());
+        assert_eq!(h.check_password(None, &wrong, &o).await.unwrap(), Verified::default());
         let t2 = t0.elapsed().as_secs_f64() * 1000.0;
         assert!(
             t2 >= h.floor().floor_ms() - 5.0,
@@ -414,17 +424,18 @@ mod tests {
             h.floor().floor_ms()
         );
         // Empty stored hashes are unknown accounts too.
-        assert_eq!(h.check_password(Some(""), "x", &o).await.unwrap(), Verified::default());
+        assert_eq!(h.check_password(Some(""), &pw, &o).await.unwrap(), Verified::default());
         // A success is not padded.
         let t0 = Instant::now();
         assert_eq!(
-            h.check_password(Some("fast:pw"), "pw", &o).await.unwrap(),
+            h.check_password(Some(&fast), &pw, &o).await.unwrap(),
             Verified { ok: true, needs_rehash: false }
         );
         assert!(t0.elapsed() < Duration::from_millis(60), "success took {:?}", t0.elapsed());
         // The padding holds no slot: the next task runs while the failure still waits.
         let h2 = h.clone();
-        let failing = tokio::spawn(async move { h2.check_password(None, "x", &HashOpts::default()).await });
+        let failing =
+            tokio::spawn(async move { h2.check_password(None, &wrong, &HashOpts::default()).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         let during = h.limiter().run_blocking(&HashOpts::default(), || ()).await;
         assert!(during.is_ok() && !failing.is_finished(), "the slot is free while the failure is padded");
@@ -432,10 +443,10 @@ mod tests {
         // The options reach the limiter.
         let busy = h.limiter().acquire(&HashOpts::default()).await.unwrap();
         let no_wait = HashError::Busy(BusyReason::NoWait);
-        assert_eq!(h.check_password(None, "x", &zero()).await.unwrap_err(), no_wait);
-        assert_eq!(h.hash("x", &zero()).await.unwrap_err(), no_wait);
-        assert_eq!(h.verify("fast:x", "x", &zero()).await.unwrap_err(), no_wait);
-        assert_eq!(h.verify_dummy("x", &zero()).await.unwrap_err(), no_wait);
+        assert_eq!(h.check_password(None, &pw, &zero()).await.unwrap_err(), no_wait);
+        assert_eq!(h.hash(&pw, &zero()).await.unwrap_err(), no_wait);
+        assert_eq!(h.verify(&fast, &pw, &zero()).await.unwrap_err(), no_wait);
+        assert_eq!(h.verify_dummy(&pw, &zero()).await.unwrap_err(), no_wait);
         drop(busy);
     }
 
@@ -455,11 +466,12 @@ mod tests {
         let h = LimitedHasher::new(hasher, limiter, floor, Logger::root().child("auth"));
         h.warm_up().await.unwrap();
         assert!(h.floor().baseline_ms() > 0.0);
-        let stored = h.hash("the right one", &HashOpts::default()).await.unwrap();
+        let pw = random_password();
+        let stored = h.hash(&pw, &HashOpts::default()).await.unwrap();
         let o = HashOpts::default();
-        assert!(h.check_password(Some(&stored), "the right one", &o).await.unwrap().ok);
+        assert!(h.check_password(Some(&stored), &pw, &o).await.unwrap().ok);
         let t0 = Instant::now();
-        assert!(!h.check_password(None, "a wrong one", &o).await.unwrap().ok);
+        assert!(!h.check_password(None, &random_password(), &o).await.unwrap().ok);
         let unknown = t0.elapsed().as_secs_f64() * 1000.0;
         assert!(
             unknown >= h.floor().floor_ms() - 2.0,
@@ -492,15 +504,16 @@ mod tests {
         let _m = METRICS_LOCK.lock().await;
         let h = capped(Stub::new(0.0), 0);
         let busy = h.limiter().acquire(&HashOpts::default()).await.unwrap();
+        let pw = random_password();
         for _ in 0..3 {
             assert_eq!(
-                h.hash("x", &HashOpts::default()).await.unwrap_err(),
+                h.hash(&pw, &HashOpts::default()).await.unwrap_err(),
                 HashError::Busy(BusyReason::QueueFull)
             );
         }
         assert!(h.last_saturation_log.lock().is_some());
         let first = *h.last_saturation_log.lock();
-        assert_eq!(h.hash("x", &HashOpts::default()).await.unwrap_err().busy(), Some(BusyReason::QueueFull));
+        assert_eq!(h.hash(&pw, &HashOpts::default()).await.unwrap_err().busy(), Some(BusyReason::QueueFull));
         assert_eq!(*h.last_saturation_log.lock(), first, "not logged again within the minute");
         drop(busy);
         assert_eq!(

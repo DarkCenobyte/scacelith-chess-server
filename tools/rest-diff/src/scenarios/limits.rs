@@ -6,7 +6,7 @@
 
 use serde_json::json;
 
-use super::{BoxFut, PASSWORD, new_account};
+use super::{BoxFut, new_account, pw};
 use crate::duo::{Duo, Side, fresh_ip};
 use crate::http::Req;
 
@@ -29,7 +29,7 @@ async fn auth_family(d: &mut Duo) {
     })
     .await;
     d.burst("auth-register", fresh_ip(), 15, per_hour(10.0), 10, |_, i| {
-        Req::post("/api/v1/auth/register").json(json!({"username": format!("burst{i}"), "email": format!("burst{i}@example.org"), "password": PASSWORD}))
+        Req::post("/api/v1/auth/register").json(json!({"username": format!("burst{i}"), "email": format!("burst{i}@example.org"), "password": pw()}))
     })
     .await;
     d.burst("auth-mail", fresh_ip(), 15, per_hour(10.0), 10, |_, i| {

@@ -4,7 +4,7 @@
 use http::Method;
 use serde_json::{Value, json};
 
-use super::{Harness, PW, link_in, token_of};
+use super::{Harness, link_in, pw, token_of};
 use crate::security::totp::{base32_decode, totp};
 use crate::store::{NewSanction, NewUser, RatingRecord, SanctionKind, Source, UserStatus};
 
@@ -59,7 +59,7 @@ async fn me_shows_the_account_ratings_and_active_sanctions_never_the_integrity_l
         })
         .await
         .unwrap();
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     let r = h.get_as(&token, "/api/v1/account/me").await;
     assert_eq!(r.status, 200);
     let me = r.json();
@@ -88,7 +88,7 @@ async fn me_shows_the_account_ratings_and_active_sanctions_never_the_integrity_l
 async fn me_keeps_every_field_and_adds_last_login_at_and_pending_email_as_the_login_answer_does() {
     let h = Harness::new().await;
     let id = h.create_user("alice").await;
-    let login = h.login("alice", PW).await;
+    let login = h.login("alice", pw()).await;
     let token = login["token"].as_str().unwrap().to_owned();
     let login_at = h.now();
     assert_eq!(login["user"]["lastLoginAt"], json!(login_at));
@@ -119,7 +119,7 @@ async fn me_keeps_every_field_and_adds_last_login_at_and_pending_email_as_the_lo
     assert!(me["user"]["createdAt"].as_i64().unwrap() > 0);
 
     let r = h
-        .post_as(&token, "/api/v1/account/email", json!({ "newEmail": "Nora@Example.org", "password": PW }))
+        .post_as(&token, "/api/v1/account/email", json!({ "newEmail": "Nora@Example.org", "password": pw() }))
         .await;
     assert_eq!(r.status, 202);
     let me = h.get_as(&token, "/api/v1/account/me").await.json();
@@ -131,7 +131,7 @@ async fn me_keeps_every_field_and_adds_last_login_at_and_pending_email_as_the_lo
 async fn preferences_are_stored_as_the_store_boolean_and_shown_as_all_or_none() {
     let h = Harness::new().await;
     let id = h.create_user("alice").await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     let put = |value: &str| {
         h.call(Method::PUT, "/api/v1/account/preferences")
             .bearer(&token)
@@ -155,9 +155,9 @@ async fn preferences_are_stored_as_the_store_boolean_and_shown_as_all_or_none() 
 async fn deletion_needs_the_password_and_second_factor_anonymises_and_revokes_the_sessions() {
     let h = Harness::new().await;
     let id = h.create_user("alice").await;
-    let token = h.token("alice", PW).await;
-    let other = h.token("alice", PW).await;
-    let setup = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": PW })).await;
+    let token = h.token("alice", pw()).await;
+    let other = h.token("alice", pw()).await;
+    let setup = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": pw() })).await;
     let secret = base32_decode(setup.json()["secret"].as_str().unwrap()).unwrap();
     h.post_as(&token, "/api/v1/account/mfa/totp/enable", json!({ "code": totp(&secret, h.now()) })).await;
     h.advance(30_000);
@@ -166,9 +166,9 @@ async fn deletion_needs_the_password_and_second_factor_anonymises_and_revokes_th
         h.post_as(&token, delete, json!({ "password": "nope nope nope" })).await.json()["error"],
         "invalid_password"
     );
-    let r = h.post_as(&token, delete, json!({ "password": PW })).await;
+    let r = h.post_as(&token, delete, json!({ "password": pw() })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (403, json!("mfa_code_required")));
-    let r = h.post_as(&token, delete, json!({ "password": PW, "code": totp(&secret, h.now()) })).await;
+    let r = h.post_as(&token, delete, json!({ "password": pw(), "code": totp(&secret, h.now()) })).await;
     assert_eq!((r.status, r.json()), (200, json!({ "status": "deleted" })));
     let row = h.user(id).await;
     assert_eq!(row.status, UserStatus::Deleted);
@@ -176,7 +176,7 @@ async fn deletion_needs_the_password_and_second_factor_anonymises_and_revokes_th
     for t in [&token, &other] {
         assert_eq!(h.me_status(t).await, 401);
     }
-    assert_eq!(h.post("/api/v1/auth/login", json!({ "login": "alice", "password": PW })).await.status, 401);
+    assert_eq!(h.post("/api/v1/auth/login", json!({ "login": "alice", "password": pw() })).await.status, 401);
     assert!(h.events().await.iter().any(|e| e.kind == "account_deleted" && e.user_id == Some(id)));
 }
 
@@ -184,19 +184,19 @@ async fn deletion_needs_the_password_and_second_factor_anonymises_and_revokes_th
 async fn the_deletion_erases_the_ip_addresses_of_the_security_events_the_pending_ones_included() {
     let h = Harness::new().await;
     let alice = h.create_user("alice").await;
-    let token = h.token("alice", PW).await;
-    assert_eq!(h.post_as(&token, "/api/v1/account/delete", json!({ "password": PW })).await.status, 200);
+    let token = h.token("alice", pw()).await;
+    assert_eq!(h.post_as(&token, "/api/v1/account/delete", json!({ "password": pw() })).await.status, 200);
 
     // With a recovery code: its recovery_code_used event comes from the deletion's own request.
     let bob = h.create_user("bob").await;
-    let token = h.token("bob", PW).await;
-    let setup = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": PW })).await;
+    let token = h.token("bob", pw()).await;
+    let setup = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": pw() })).await;
     let secret = base32_decode(setup.json()["secret"].as_str().unwrap()).unwrap();
     let enable =
         h.post_as(&token, "/api/v1/account/mfa/totp/enable", json!({ "code": totp(&secret, h.now()) })).await;
     let code = enable.json()["recoveryCodes"][0].clone();
     let r =
-        h.post_as(&token, "/api/v1/account/delete", json!({ "password": PW, "recoveryCode": code })).await;
+        h.post_as(&token, "/api/v1/account/delete", json!({ "password": pw(), "recoveryCode": code })).await;
     assert_eq!(r.status, 200);
 
     let events = h.events().await;
@@ -225,7 +225,7 @@ async fn an_account_without_a_password_is_told_to_set_one_first() {
 async fn an_email_change_logs_in_with_the_new_address_and_refuses_an_address_taken_meanwhile() {
     let h = Harness::new().await;
     let id = h.create_user("alice").await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     let link_to = async |to: &str| {
         let mail = h.sent().await.into_iter().rfind(|m| m.to == to).expect("a mail");
         token_of(&link_in(&mail.text).unwrap()).unwrap()
@@ -234,7 +234,7 @@ async fn an_email_change_logs_in_with_the_new_address_and_refuses_an_address_tak
         |t: String| h.call(Method::POST, "/confirm-email-change").body(FORM, format!("token={t}")).send();
 
     let r = h
-        .post_as(&token, "/api/v1/account/email", json!({ "newEmail": "nora@example.org", "password": PW }))
+        .post_as(&token, "/api/v1/account/email", json!({ "newEmail": "nora@example.org", "password": pw() }))
         .await;
     assert_eq!(r.status, 202);
     let tk = link_to("nora@example.org").await;
@@ -248,13 +248,13 @@ async fn an_email_change_logs_in_with_the_new_address_and_refuses_an_address_tak
     let live = h.store.read(move |db| db.tokens().live_for_user(id, "email_change", now)).await.unwrap();
     assert!(live.is_none());
     assert_eq!(
-        h.post("/api/v1/auth/login", json!({ "login": "nora@example.org", "password": PW })).await.status,
+        h.post("/api/v1/auth/login", json!({ "login": "nora@example.org", "password": pw() })).await.status,
         200
     );
 
     // Taken between the request and the confirmation.
     let r = h
-        .post_as(&token, "/api/v1/account/email", json!({ "newEmail": "zoe@example.org", "password": PW }))
+        .post_as(&token, "/api/v1/account/email", json!({ "newEmail": "zoe@example.org", "password": pw() }))
         .await;
     assert_eq!(r.status, 202);
     let tk = link_to("zoe@example.org").await;

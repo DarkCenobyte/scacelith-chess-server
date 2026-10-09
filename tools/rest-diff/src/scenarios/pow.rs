@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::{BoxFut, PASSWORD};
+use super::{BoxFut, pw};
 use crate::crypto;
 use crate::duo::{Duo, Side, fresh_ip};
 use crate::http::Req;
@@ -34,7 +34,7 @@ fn tampered(s: &Side, var: &str) -> String {
 }
 
 fn register(user: &str, pow: Option<Value>) -> Req {
-    let mut body = json!({"username": user, "email": format!("{user}@example.org"), "password": PASSWORD});
+    let mut body = json!({"username": user, "email": format!("{user}@example.org"), "password": pw()});
     if let Some(p) = pow {
         body["pow"] = p;
     }
@@ -124,7 +124,7 @@ pub fn run(d: &mut Duo) -> BoxFut<'_> {
         // The wave of failed sign-ins.
         let ip = fresh_ip();
         d.step("login-before-wave", ip, 200, |_| {
-            Req::post("/api/v1/auth/login").json(json!({"login": "bea", "password": PASSWORD}))
+            Req::post("/api/v1/auth/login").json(json!({"login": "bea", "password": pw()}))
         })
         .await;
         for i in 1..=3 {
@@ -136,19 +136,19 @@ pub fn run(d: &mut Duo) -> BoxFut<'_> {
         }
         let p = d
             .step("login-wave", ip, 428, |_| {
-                Req::post("/api/v1/auth/login").json(json!({"login": "bea", "password": PASSWORD}))
+                Req::post("/api/v1/auth/login").json(json!({"login": "bea", "password": pw()}))
             })
             .await;
         save_challenge(d, &p, "l1");
         d.step("login-wave-other-address", fresh_ip(), 428, |_| {
-            Req::post("/api/v1/auth/login").json(json!({"login": "bea", "password": PASSWORD}))
+            Req::post("/api/v1/auth/login").json(json!({"login": "bea", "password": pw()}))
         })
         .await;
         let p = d.step("register-challenge-for-login", ip, 428, |_| register("dan", None)).await;
         save_challenge(d, &p, "r2");
         d.step("login-endpoint", ip, 428, |s| {
             Req::post("/api/v1/auth/login")
-                .json(json!({"login": "bea", "password": PASSWORD, "pow": proof(s, "r2")}))
+                .json(json!({"login": "bea", "password": pw(), "pow": proof(s, "r2")}))
         })
         .await;
         d.step("register-endpoint", ip, 428, |s| register("dan", Some(proof(s, "l1")))).await;
@@ -159,18 +159,18 @@ pub fn run(d: &mut Duo) -> BoxFut<'_> {
         .await;
         let p = d
             .step("login-wave-again", ip, 428, |_| {
-                Req::post("/api/v1/auth/login").json(json!({"login": "bea", "password": PASSWORD}))
+                Req::post("/api/v1/auth/login").json(json!({"login": "bea", "password": pw()}))
             })
             .await;
         save_challenge(d, &p, "l2");
         d.step("login-with-pow", ip, 200, |s| {
             Req::post("/api/v1/auth/login")
-                .json(json!({"login": "bea", "password": PASSWORD, "pow": proof(s, "l2")}))
+                .json(json!({"login": "bea", "password": pw(), "pow": proof(s, "l2")}))
         })
         .await;
         d.step("login-replayed", ip, 428, |s| {
             Req::post("/api/v1/auth/login")
-                .json(json!({"login": "bea", "password": PASSWORD, "pow": proof(s, "l2")}))
+                .json(json!({"login": "bea", "password": pw(), "pow": proof(s, "l2")}))
         })
         .await;
         d.step("login-unknown-user-wave", ip, 428, |_| {

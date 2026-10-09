@@ -29,12 +29,12 @@ use tokio::process::Command;
 async fn verified_player(srv: &TestServer, name: &str) -> Player {
     let api = srv.api();
     let email = format!("{name}@example.org");
-    let body = json!({"username": name, "email": email, "password": PASSWORD});
+    let body = json!({"username": name, "email": email, "password": password()});
     let (res, answer) = call(&api, "POST", "/auth/register", None, Some(body)).await;
     assert_eq!((res.status, answer), (202, json!({"status": "verification_sent"})));
     // No account before the link is used: the sign-in fails as for an unknown name, and the
     // database has no row for it.
-    let login = json!({"login": name, "password": PASSWORD});
+    let login = json!({"login": name, "password": password()});
     let (res, answer) = call(&api, "POST", "/auth/login", None, Some(login.clone())).await;
     assert_eq!((res.status, answer["error"].as_str()), (401, Some("invalid_credentials")));
     let rows: i64 = srv
@@ -160,7 +160,7 @@ async fn register_play_history_game_record_pgn_email_change_export_deletion() {
 
     // An e-mail change through its link.
     let seen_old = srv.mails_to(&alice.acc.email).len();
-    let body = json!({"newEmail": "alice.new@example.org", "password": PASSWORD});
+    let body = json!({"newEmail": "alice.new@example.org", "password": password()});
     let (res, answer) = call(a_api, "POST", "/account/email", Some(&a_tok), Some(body)).await;
     assert_eq!((res.status, answer), (202, json!({"status": "verification_sent"})));
     assert_eq!(a_api.me(&a_tok).await.expect("me")["user"]["pendingEmail"], "alice.new@example.org");
@@ -189,7 +189,7 @@ async fn register_play_history_game_record_pgn_email_change_export_deletion() {
 
     // The export.
     let (res, doc) =
-        call(a_api, "POST", "/account/export", Some(&a_tok), Some(json!({"password": PASSWORD}))).await;
+        call(a_api, "POST", "/account/export", Some(&a_tok), Some(json!({"password": password()}))).await;
     assert_eq!(res.status, 200, "{doc}");
     assert_eq!(
         res.header("content-disposition"),
@@ -226,15 +226,15 @@ async fn register_play_history_game_record_pgn_email_change_export_deletion() {
 
     // The deletion; it closes the live connection too.
     let (res, answer) =
-        call(a_api, "POST", "/account/delete", Some(&a_tok), Some(json!({"password": PASSWORD}))).await;
+        call(a_api, "POST", "/account/delete", Some(&a_tok), Some(json!({"password": password()}))).await;
     assert_eq!((res.status, answer), (200, json!({"status": "deleted"})));
     assert_eq!(closed_as_revoked(&mut alice).await, close::UNAUTHORIZED);
     let a_api = &alice.acc.api;
     assert_eq!(call(a_api, "GET", "/account/me", Some(&a_tok), None).await.0.status, 401);
     let export =
-        call(a_api, "POST", "/account/export", Some(&a_tok), Some(json!({"password": PASSWORD}))).await;
+        call(a_api, "POST", "/account/export", Some(&a_tok), Some(json!({"password": password()}))).await;
     assert_eq!(export.0.status, 401);
-    let login = json!({"login": "alice_api", "password": PASSWORD});
+    let login = json!({"login": "alice_api", "password": password()});
     assert_eq!(call(a_api, "POST", "/auth/login", None, Some(login)).await.0.status, 401);
     let deleted = format!("deleted#{}", alice.acc.user_id);
     assert_eq!(
