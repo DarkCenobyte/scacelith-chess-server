@@ -131,8 +131,8 @@ pub trait Rules: Send {
     /// The fifty-move rule can be claimed in the current position.
     fn can_claim_fifty_move(&self) -> bool;
 
-    /// Whether `side` still has mating material (a flag or an abandonment against a side that
-    /// cannot mate is a draw).
+    /// Whether `side` still has mating material (a resignation, a flag or an abandonment against
+    /// a side that cannot mate is a draw).
     fn can_color_mate(&self, side: Side) -> bool;
 
     /// Ends the game with an online result (resignation, abandonment, abort...). Only informative:

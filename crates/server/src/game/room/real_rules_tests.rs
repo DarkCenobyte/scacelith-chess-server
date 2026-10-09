@@ -125,6 +125,23 @@ fn the_player_whose_flag_falls_loses_when_the_opponent_can_mate() {
 }
 
 #[test]
+fn a_resignation_against_a_bare_king_is_a_draw() {
+    // The audit's position: White has a bare king, Black a queen.
+    let fen = "7k/7q/8/8/8/8/8/K7 b - - 0 1";
+    let room_of = || {
+        let mut room = mk_room(180000, 2000);
+        room.rules = Box::new(ChessGame::new(Some(fen)).expect("a valid FEN"));
+        room
+    };
+    let mut room = room_of();
+    let end = end_of(&room.on_resign(Side::Black, 0, T0 + 1000).broadcast).expect("GameEnd");
+    assert_eq!((end.status, end.reason), (GS::Draw, ER::ResignationVsInsufficient));
+    let mut room = room_of();
+    let end = end_of(&room.on_resign(Side::White, 0, T0 + 1000).broadcast).expect("GameEnd");
+    assert_eq!((end.status, end.reason), (GS::BlackWins, ER::Resignation));
+}
+
+#[test]
 fn the_digest_is_the_protocol_position_hash() {
     let room = mk_room(180000, 2000);
     assert_eq!(room.digest(), 0x3706_291C, "the start position of PROTOCOL.md");

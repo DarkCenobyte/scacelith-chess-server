@@ -248,18 +248,22 @@ mod tests {
         let welcome = messages.iter_mut().find(|m| m["name"] == "Welcome").unwrap();
         welcome["fields"].as_array_mut().unwrap().pop();
         let root = scratch_root("force", &serde_json::to_string_pretty(&older).unwrap());
+        let (version, name) = (
+            format!("v{}.{}", schema.protocol, schema.minor),
+            manifest::file_name(schema.protocol, schema.minor),
+        );
         let refused = run(&root, None, Mode::Freeze { force: false }).unwrap_err();
-        assert!(refused.contains("the wire of the frozen v1.0 changed"), "{refused}");
+        assert!(refused.contains(&format!("the wire of the frozen {version} changed")), "{refused}");
         assert!(run(&root, None, Mode::Check).unwrap_err().contains("append-only rule"));
         assert_eq!(
             run(&root, None, Mode::Freeze { force: true }).unwrap(),
-            ["wrote protocol/frozen/v1.0.json"]
+            [format!("wrote {FROZEN_DIR}/{name}")]
         );
-        let written = fs::read_to_string(root.join(FROZEN_DIR).join("v1.0.json")).unwrap();
+        let written = fs::read_to_string(root.join(FROZEN_DIR).join(&name)).unwrap();
         assert_eq!(written, manifest::render(&schema));
         assert_eq!(
             run(&root, None, Mode::Freeze { force: false }).unwrap(),
-            ["protocol/frozen/v1.0.json up to date"]
+            [format!("{FROZEN_DIR}/{name} up to date")]
         );
         let _ = fs::remove_dir_all(&root);
     }

@@ -19,10 +19,10 @@ HTTPS account API is described in `docs/API.md` of the server repository.
 | | |
 |---|---|
 | Protocol version (`proto`) | 1 |
-| Minor version (`minor`) | 0 |
+| Minor version (`minor`) | 1 |
 | Capability bits (`caps`) | none defined |
 | WebSocket subprotocol | `scacelith.rt1` |
-| Schema fingerprint | `0x05d4f428` (informational) |
+| Schema fingerprint | `0x6e6c4989` (informational) |
 | `MaxClientMessage` | 512 |
 | `MaxServerMessage` | 65536 |
 | `MaxPlies` | 1200 |
@@ -148,13 +148,21 @@ published ranges; the experimental ranges are never published, and a published p
 * **`proto`** is the major version: 1 for the whole life of this protocol. A change that breaks
   compatibility would be a new protocol with a new subprotocol token, not a new `proto` value on
   this one.
-* **`minor`** numbers the additions to version 1; this document describes minor 0. The client
+* **`minor`** numbers the additions to version 1; this document describes minor 1. The client
   sends the highest minor it speaks in `Hello.minor`; the server answers with the negotiated minor
   `Welcome.minor = min(Hello.minor, server minor)`. Both sides then use only what the negotiated
-  minor defines: a client sends the fields and messages of that minor and no more.
+  minor defines: a client sends the fields and messages of that minor and no more, and the server
+  never sends it a value of a later minor (see the minors below).
 * **`caps`** is a set of capability bits (u64) for optional features. The client sends the bits
-  it supports in `Hello.caps`; `Welcome.caps` is the bitwise AND with the server's. Minor 0 defines
-  no bit: a client sends 0 and ignores bits it does not know.
+  it supports in `Hello.caps`; `Welcome.caps` is the bitwise AND with the server's. No minor
+  defines a bit yet: a client sends 0 and ignores bits it does not know.
+* **Minors.** Minor 0 is the first release (`protocol/frozen/v1.0.json`). Minor 1 adds the
+  `EndReason` `ResignationVsInsufficient` (14): a resignation against an opponent who cannot
+  checkmate is a draw (FIDE 5.1.2, see [Games](#games)). A session of minor 0 receives
+  `Resignation` with the `Draw` status in its place, in `GameEnd` and `GameSnapshot`: an older
+  client shows a drawn game ended by a resignation. The game records of the HTTPS API, which no
+  minor governs, carry 14 (an older client shows a generic end there, as for any unknown value of
+  an open enum).
 * **Frozen anchors.** Whatever the minor, these never change, so that any client and any server
   can always understand each other's first words:
   1. the Hello prefix: `0x01 | seq u32 | proto u16 | minor u16 | caps u64` (17 bytes);
@@ -321,8 +329,15 @@ published ranges; the experimental ranges are never published, and a published p
   without capture or pawn move, else `NothingToClaim`. Checkmate, stalemate, insufficient
   material, fivefold repetition and the 75-move rule end the game by themselves.
 * **Resign, abort.** `Resign` at any time while the game runs (leaving a running game from the
-  menu resigns it). `Abort` only before one's own first move (`AbortNotAllowed` otherwise); an
-  aborted game is unrated.
+  menu resigns it): the opponent wins (`Resignation`), unless the opponent cannot mate, and then
+  the game is drawn (`ResignationVsInsufficient`; FIDE 5.1.2). `Abort` only before one's own first
+  move (`AbortNotAllowed` otherwise); an aborted game is unrated.
+* **Cannot mate.** A resignation, a flag fall or an abandonment against a side that cannot
+  checkmate by any series of legal moves is a draw. The server judges it by the material, as
+  python-chess (`has_insufficient_material`) and lichess do: a side with a pawn, a rook or a queen
+  can mate; a bare king cannot; a king and a single knight cannot when the opponent has nothing
+  but its king and queens; bishops alone (no knight) cannot when every bishop on the board stands
+  on squares of one colour and no pawn or knight is left. A position only hard to win can mate.
 * **End.** `GameEnd{status, reason, whiteMs, blackMs, serverTime}` goes to both players. For a
   rated game, `RatingUpdate` follows once the result is committed. A game ends after
   `MaxPlies` (1200) plies at the latest (`ServerAborted`).
@@ -1079,7 +1094,7 @@ Result of a game. The same numbers are the `status` of the game records of the H
 
 #### EndReason
 
-Why a game ended. 0..13 are the game's chess::GameEndReason values (14..19 are kept for new ones), 20 and above happen online only. The same numbers are the `reason` of the game records of the HTTPS API. Open: a later minor may add values. A client keeps an unknown value and show a generic end of game: `status` gives the result
+Why a game ended. 0..14 are the game's chess::GameEndReason values (15..19 are kept for new ones), 20 and above happen online only. The same numbers are the `reason` of the game records of the HTTPS API. Open: a later minor may add values. A client keeps an unknown value and show a generic end of game: `status` gives the result
 
 | Value | Name | Meaning |
 |---|---|---|
@@ -1097,6 +1112,7 @@ Why a game ended. 0..13 are the game's chess::GameEndReason values (14..19 are k
 | 11 | `FiftyMoveClaim` |  |
 | 12 | `Agreement` |  |
 | 13 | `IllegalMovesVsInsufficient` | offline games only |
+| 14 | `ResignationVsInsufficient` | minor 1: resigned, but the opponent cannot mate: draw (a session of minor 0 gets Resignation, with the Draw status, in its place) |
 | 20 | `Abandonment` | disconnected longer than the reconnection grace: loss |
 | 21 | `AbandonmentVsInsufficient` | abandoned, but the opponent cannot mate: draw |
 | 22 | `Aborted` | aborted by a player before their first move (unrated) |

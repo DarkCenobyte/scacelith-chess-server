@@ -708,8 +708,10 @@ Rust and C++ codecs: change it, run `protogen`, and commit the generated files w
 The game and the server share a contract, kept on both sides: the realtime protocol (the schema,
 the frozen manifests, [docs/PROTOCOL.md](docs/PROTOCOL.md) and the golden vectors, of which the
 game keeps a copy in its `protocol/` folder), the rating vectors (`test/fixtures/elo-vectors.json`,
-the game's `tests/data/elo-vectors.json`) and the server's PGN files (`test/fixtures/server-pgn/`,
-the game's `tests/data/server-pgn/`). `protogen -- --client ../scacelith-chess` writes the game's
+the game's `tests/data/elo-vectors.json`), the positions of who can still mate
+(`test/fixtures/mating-material.json`, the game's `tests/data/mating-material.json`: the material
+that decides whether a resignation, a flag fall or a forfeit is a loss or a draw) and the server's
+PGN files (`test/fixtures/server-pgn/`, the game's `tests/data/server-pgn/`). `protogen -- --client ../scacelith-chess` writes the game's
 C++ codec and its copy of the protocol in a checkout of the game, and
 `tools/interop/check-game.sh ../scacelith-chess` checks the whole contract against one. The
 configuration keys live in `crates/server/src/config/keys.rs`: after a change, run
