@@ -243,9 +243,9 @@ With `--client DIR` (after `--` when run through cargo), `DIR` being a checkout 
 `protogen --check` writes nothing and fails when a derived file is stale (with `--client`, also
 one of the game's); a test of the `scacelith-protocol` crate runs the same check, on the game too
 when `SCACELITH_CLIENT_DIR` names a checkout of it. The CI's interop job runs it against the
-game's `master`. Every released minor is frozen as
-`protocol/frozen/v1.<minor>.json` (`protogen --freeze`), and `protogen` refuses a schema that
-breaks the append-only rules of PROTOCOL.md "Versions and evolution" against those manifests.
+game's commit pinned in `tools/interop/game-revision` (the weekly run: the game's `master`). Every
+released minor is frozen as `protocol/frozen/v1.<minor>.json` (`protogen --freeze`), and
+`protogen` refuses a schema that breaks the append-only rules of PROTOCOL.md "Versions and evolution" against those manifests.
 
 On the server side, client messages decode strictly (`ClientMsg::decode`): a connection task
 reads the Hello prefix first (`HelloPrefix::read`), then decodes the Hello of any minor

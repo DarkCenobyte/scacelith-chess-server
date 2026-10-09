@@ -720,9 +720,13 @@ otherwise.
 GitHub Actions runs all of these on every push to master and every pull request
 (`.github/workflows/ci.yml`), with the real-engine tests (Ubuntu's Stockfish), the static release
 build, a dependency review of pull requests, the contract with the game and its live tests (against
-the game's master; a manual run of the workflow takes another branch of the game as `game-revision`, for
-a change made on both sides) and a lint of the workflows (actionlint, zizmor); a weekly run catches
-new advisories and changes on the game's side. CodeQL (`.github/workflows/codeql.yml`) scans the Rust code and the workflows. Dependabot
+the game's commit pinned in `tools/interop/game-revision`, so that a run of a server commit always
+tests the same pair; a manual run of the workflow takes another branch of the game as
+`game-revision`, for a change made on both sides) and a lint of the workflows (actionlint, zizmor); a
+weekly run catches new advisories and, against the game's master, changes on the game's side. Move
+the pin forward with every change of the contract; the game pins this server the same way (its
+`tools/interop/server-revision`) and runs the same contract and live tests in its own CI. CodeQL
+(`.github/workflows/codeql.yml`) scans the Rust code and the workflows. Dependabot
 (`.github/dependabot.yml`) proposes the updates of the crates, the Rust toolchain and the actions,
 each a week after its release.
 

@@ -3,7 +3,8 @@
 # dependency review), the static release build, the contract with the game and its live tests,
 # and the workflows' own lint; the commands of the README's "Development" section. The release
 # workflow runs it again on the tagged commit (workflow_call); a weekly run catches new advisories
-# and changes on the game's side.
+# and changes on the game's side (the contract against the game's master instead of the pinned
+# revision of tools/interop/game-revision).
 name: CI
 
 on:
@@ -15,9 +16,9 @@ on:
   workflow_dispatch:
     inputs:
       game-revision:
-        description: Branch, tag or commit of the game to check the contract against
+        description: Branch, tag or commit of the game to check the contract against (empty = the pinned one)
         type: string
-        default: master
+        default: ""
   workflow_call:
 
 permissions: {}
@@ -192,14 +193,38 @@ jobs:
           path: server
           persist-credentials: false
 
-      # The game's master, or the branch a manual run names (a change made on both sides: run
-      # this workflow on the server's branch with the game's branch as game-revision).
+      # The game's commit pinned in tools/interop/game-revision (the pair known to work together,
+      # so a run of the same server commit always checks the same pair); the game's master on the
+      # weekly run, to see changes on its side early; or what a manual run names (a change made on
+      # both sides: run this workflow on the server's branch with the game's branch).
+      - name: Choose the game's revision
+        id: game
+        env:
+          EVENT: ${{ github.event_name }}
+          REQUESTED: ${{ inputs.game-revision }}
+        run: |
+          pinned=$(grep -Ev '^[[:space:]]*(#|$)' server/tools/interop/game-revision | head -n 1 | tr -d '[:space:]')
+          if [[ ! "$pinned" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::tools/interop/game-revision does not hold a full commit hash"
+            exit 1
+          fi
+          if [[ -n "$REQUESTED" ]]; then ref=$REQUESTED
+          elif [[ "$EVENT" == schedule ]]; then ref=master
+          else ref=$pinned
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Game revision: $ref (pinned: $pinned)" >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: DarkCenobyte/scacelith-chess
-          ref: ${{ inputs.game-revision || 'master' }}
+          ref: ${{ steps.game.outputs.ref }}
           path: game
           persist-credentials: false
+
+      - name: Name the pair under test
+        run: |
+          echo "Server $(git -C server rev-parse HEAD), game $(git -C game rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Install the game's build dependencies
         run: |
