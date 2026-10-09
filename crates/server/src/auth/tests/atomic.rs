@@ -3,18 +3,24 @@
 //! two password changes at once end as one after the other, and a password stored while an
 //! account change was re-authenticated wins over that change.
 
+use std::sync::LazyLock;
+
 use serde_json::{Value, json};
 
-use super::{Harness, NEW_PW, PW};
+use super::{Harness, new_pw, pw};
 use crate::auth::SESSION_CACHE_TTL_MS;
 use crate::ids::UserId;
+use crate::security::testing::random_password;
 use crate::security::totp::{base32_decode, totp};
 use crate::store::{StoreError, UserStatus};
 
 const RESET: &str = "/api/v1/auth/password/reset";
 const CHANGE: &str = "/api/v1/account/password";
-/// Another valid password.
-const THIRD_PW: &str = "yet another passphrase";
+/// A third valid password, drawn at random once per test run.
+fn third_pw() -> &'static str {
+    static THIRD_PW: LazyLock<String> = LazyLock::new(random_password);
+    &THIRD_PW
+}
 
 /// Every write step of a password reset, each made to fail in turn: the trigger's name and event.
 const RESET_STEPS: [(&str, &str); 4] = [
@@ -35,7 +41,7 @@ async fn reset_link(h: &Harness) -> String {
 /// A pending change of alice's address to new@example.com.
 async fn request_email_change(h: &Harness, token: &str) {
     let r = h
-        .post_as(token, "/api/v1/account/email", json!({ "newEmail": "new@example.com", "password": PW }))
+        .post_as(token, "/api/v1/account/email", json!({ "newEmail": "new@example.com", "password": pw() }))
         .await;
     assert_eq!(r.status, 202, "{}", r.text());
 }
@@ -60,13 +66,13 @@ async fn told_of_new_password(h: &Harness) -> bool {
 async fn a_reset_that_fails_at_any_step_changes_nothing_and_its_link_still_works() {
     let h = Harness::new().await;
     let id = h.create_user("alice").await;
-    let old = h.token("alice", PW).await;
+    let old = h.token("alice", pw()).await;
     request_email_change(&h, &old).await;
     let token = reset_link(&h).await;
     let hash = h.user(id).await.password_hash;
     for (name, event) in RESET_STEPS {
         h.break_writes(name, event).await;
-        let r = h.post(RESET, json!({ "token": token, "newPassword": NEW_PW })).await;
+        let r = h.post(RESET, json!({ "token": token, "newPassword": new_pw() })).await;
         assert_eq!(r.status, 500, "{name}: {}", r.text());
         h.mend(name).await;
         assert_eq!(h.user(id).await.password_hash, hash, "{name}: the password stays");
@@ -80,15 +86,15 @@ async fn a_reset_that_fails_at_any_step_changes_nothing_and_its_link_still_works
     assert!(!h.event_kinds().await.contains(&"password_reset".to_owned()));
 
     // The same link, once the store works.
-    let r = h.post(RESET, json!({ "token": token, "newPassword": NEW_PW })).await;
+    let r = h.post(RESET, json!({ "token": token, "newPassword": new_pw() })).await;
     assert_eq!((r.status, r.json()), (200, json!({ "status": "password_reset" })));
     assert_eq!(h.revoked.calls(), [(id, None)], "the connection is closed once, after the commit");
     assert_eq!(h.unrevoked_sessions(id).await, 0);
     assert_eq!(h.me_status(&old).await, 401);
-    assert_eq!(login_status(&h, PW).await, 401);
-    assert_eq!(login_status(&h, NEW_PW).await, 200);
+    assert_eq!(login_status(&h, pw()).await, 401);
+    assert_eq!(login_status(&h, new_pw()).await, 200);
     assert!(told_of_new_password(&h).await);
-    let r = h.post(RESET, json!({ "token": token, "newPassword": THIRD_PW })).await;
+    let r = h.post(RESET, json!({ "token": token, "newPassword": third_pw() })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (400, json!("invalid_token")));
 }
 
@@ -96,11 +102,11 @@ async fn a_reset_that_fails_at_any_step_changes_nothing_and_its_link_still_works
 async fn a_password_change_that_fails_at_any_step_changes_nothing() {
     let h = Harness::new().await;
     let id = h.create_user("alice").await;
-    let (current, other) = (h.token("alice", PW).await, h.token("alice", PW).await);
+    let (current, other) = (h.token("alice", pw()).await, h.token("alice", pw()).await);
     request_email_change(&h, &current).await;
     let link = reset_link(&h).await;
     let hash = h.user(id).await.password_hash;
-    let body = json!({ "currentPassword": PW, "newPassword": NEW_PW });
+    let body = json!({ "currentPassword": pw(), "newPassword": new_pw() });
     for (name, event) in &RESET_STEPS[1..] {
         h.break_writes(name, event).await;
         let r = h.post_as(&current, CHANGE, body.clone()).await;
@@ -123,23 +129,23 @@ async fn a_password_change_that_fails_at_any_step_changes_nothing() {
     assert_eq!(pending_email(&h, &current).await, (200, Value::Null), "this session stays, the change goes");
     assert_eq!(h.me_status(&other).await, 401);
     assert!(!h.auth.peek_reset_token(&link).await.unwrap());
-    assert_eq!(login_status(&h, NEW_PW).await, 200);
+    assert_eq!(login_status(&h, new_pw()).await, 200);
 }
 
 #[tokio::test]
 async fn one_reset_link_sent_twice_at_once_works_once() {
     let h = Harness::new().await;
     let id = h.create_user("alice").await;
-    let old = h.token("alice", PW).await;
+    let old = h.token("alice", pw()).await;
     let token = reset_link(&h).await;
     let (a, b) = tokio::join!(
-        h.post(RESET, json!({ "token": token, "newPassword": NEW_PW })),
-        h.post(RESET, json!({ "token": token, "newPassword": THIRD_PW })),
+        h.post(RESET, json!({ "token": token, "newPassword": new_pw() })),
+        h.post(RESET, json!({ "token": token, "newPassword": third_pw() })),
     );
     let mut statuses = [a.status, b.status];
     statuses.sort_unstable();
     assert_eq!(statuses, [200, 400], "{} / {}", a.text(), b.text());
-    let (kept, lost) = if a.status == 200 { (NEW_PW, THIRD_PW) } else { (THIRD_PW, NEW_PW) };
+    let (kept, lost) = if a.status == 200 { (new_pw(), third_pw()) } else { (third_pw(), new_pw()) };
     assert_eq!(h.revoked.calls(), [(id, None)]);
     assert_eq!(h.me_status(&old).await, 401);
     assert_eq!(login_status(&h, lost).await, 401);
@@ -150,13 +156,14 @@ async fn one_reset_link_sent_twice_at_once_works_once() {
 async fn two_password_changes_at_once_end_as_one_after_the_other() {
     let h = Harness::new().await;
     let id = h.create_user("alice").await;
-    let (a, b) = (h.token("alice", PW).await, h.token("alice", PW).await);
-    let body = |new: &str| json!({ "currentPassword": PW, "newPassword": new });
-    let (ra, rb) = tokio::join!(h.post_as(&a, CHANGE, body(NEW_PW)), h.post_as(&b, CHANGE, body(THIRD_PW)));
+    let (a, b) = (h.token("alice", pw()).await, h.token("alice", pw()).await);
+    let body = |new: &str| json!({ "currentPassword": pw(), "newPassword": new });
+    let (ra, rb) =
+        tokio::join!(h.post_as(&a, CHANGE, body(new_pw())), h.post_as(&b, CHANGE, body(third_pw())));
     let ((winner, kept), (loser, lost), refused) = if ra.status == 200 {
-        ((&a, NEW_PW), (&b, THIRD_PW), &rb)
+        ((&a, new_pw()), (&b, third_pw()), &rb)
     } else {
-        ((&b, THIRD_PW), (&a, NEW_PW), &ra)
+        ((&b, third_pw()), (&a, new_pw()), &ra)
     };
     // The second, written over a password that is no longer the stored one, is refused (or its
     // session was revoked before it was checked).
@@ -179,8 +186,8 @@ async fn two_password_changes_at_once_end_as_one_after_the_other() {
 async fn with_mfa() -> (Harness, UserId, String, Vec<u8>) {
     let h = Harness::new().await;
     let id = h.create_user("alice").await;
-    let token = h.token("alice", PW).await;
-    let r = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": PW })).await;
+    let token = h.token("alice", pw()).await;
+    let r = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": pw() })).await;
     let secret = base32_decode(r.json()["secret"].as_str().unwrap()).unwrap();
     let r =
         h.post_as(&token, "/api/v1/account/mfa/totp/enable", json!({ "code": totp(&secret, h.now()) })).await;
@@ -189,10 +196,10 @@ async fn with_mfa() -> (Harness, UserId, String, Vec<u8>) {
     (h, id, token, secret)
 }
 
-/// Stores the hash of [`NEW_PW`] for alice in the transaction that uses her next authenticator
+/// Stores the hash of [`new_pw`] for alice in the transaction that uses her next authenticator
 /// code: a reset that lands after the password of a request was checked, before its change.
 async fn reset_with_the_next_code(h: &Harness, id: UserId) {
-    let hash = h.hasher.hash(NEW_PW).unwrap();
+    let hash = h.hasher.hash(new_pw()).unwrap();
     let event = format!(
         "UPDATE OF mfa_last_step ON users WHEN NEW.id = {id} BEGIN UPDATE users SET password_hash = '{hash}' \
          WHERE id = {id}; END"
@@ -221,7 +228,11 @@ async fn a_reset_that_lands_during_a_reauthenticated_change_wins_over_it() {
     let (h, id, token, secret) = with_mfa().await;
     reset_with_the_next_code(&h, id).await;
     let r = h
-        .post_as(&token, "/api/v1/account/delete", json!({ "password": PW, "code": totp(&secret, h.now()) }))
+        .post_as(
+            &token,
+            "/api/v1/account/delete",
+            json!({ "password": pw(), "code": totp(&secret, h.now()) }),
+        )
         .await;
     assert_eq!((r.status, r.json()["error"].clone()), (403, json!("invalid_password")), "{}", r.text());
     let u = h.user(id).await;
@@ -235,7 +246,7 @@ async fn a_reset_that_lands_during_a_reauthenticated_change_wins_over_it() {
         .post_as(
             &token,
             "/api/v1/account/mfa/totp/disable",
-            json!({ "password": PW, "code": totp(&secret, h.now()) }),
+            json!({ "password": pw(), "code": totp(&secret, h.now()) }),
         )
         .await;
     assert_eq!((r.status, r.json()["error"].clone()), (403, json!("invalid_password")), "{}", r.text());
@@ -250,7 +261,7 @@ async fn a_reset_that_lands_during_a_reauthenticated_change_wins_over_it() {
         .post_as(
             &token,
             "/api/v1/account/mfa/recovery-codes",
-            json!({ "password": PW, "code": totp(&secret, h.now()) }),
+            json!({ "password": pw(), "code": totp(&secret, h.now()) }),
         )
         .await;
     assert_eq!((r.status, r.json()["error"].clone()), (403, json!("invalid_password")), "{}", r.text());
