@@ -15,7 +15,8 @@
 //! 4. link: `{linkTicket, password}`: the account's password (5 tries per ticket, the login's
 //!    failure counter and proof of work). The link is stored then, or, with two-step verification
 //!    on, once the MFA step accepts a code; the account's address gets a notice.
-//! 5. complete (new accounts): `{ssoTicket, username}` creates the account, links it and logs in.
+//! 5. complete (new accounts): `{ssoTicket, username}` creates the account and links it (with the
+//!    use of the ticket, in one transaction), then logs in.
 //!
 //! Invariant: a Google identity is attached to an existing account only after the person proved
 //! the Google address (ID token, `email_verified`) and the account (its current password, plus its
@@ -25,7 +26,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use serde_json::{Map, Value, json};
 
-use super::accounts::username_held;
+use super::accounts::{store_busy, username_held};
 use super::error::{AuthError, AuthResult};
 use super::identity::{check_username, normalize_email, normalize_opt_email, suggest_username};
 use super::login::{PasswordCheck, ProvenPassword, password_hash_digest};
@@ -481,57 +482,59 @@ impl Inner {
         let d = data_of(&row);
         let (sub, email) =
             (str_field(&d, "sub").unwrap_or("").to_owned(), str_field(&d, "email").unwrap_or("").to_owned());
-        // A username held by a pending signup of another address is taken as well.
-        let (username, held_email, now) = (p.username.clone(), email.clone(), self.now());
-        let taken = self
+        let (username, now) = (p.username.clone(), self.now());
+        // One transaction: the ticket is used up, the account created and the Google identity
+        // linked to it together, or nothing happens (no account without its sign-in). A taken
+        // username keeps the ticket for another one; the refusals after its use commit that use.
+        let created = self
             .store
-            .read(move |db| {
-                Ok::<_, StoreError>(
-                    db.users().by_username(&username)?.is_some()
-                        || username_held(db, &username, &held_email, now)?,
-                )
+            .write(move |db| {
+                // A username held by a pending signup of another address is taken as well.
+                if db.users().by_username(&username)?.is_some() || username_held(db, &username, &email, now)? {
+                    return Ok(Err(AuthError::new(409, "username_taken", "This username is already taken.")));
+                }
+                if db.tokens().consume(SSO_TICKET, &h, now)?.is_none() {
+                    return Ok(Err(expired()));
+                }
+                if db.sso().find(PROVIDER, &sub)?.is_some() {
+                    return Ok(Err(AuthError::new(
+                        409,
+                        "sso_already_linked",
+                        "This Google account is already linked; sign in with Google again.",
+                    )));
+                }
+                let new_user = NewUser {
+                    username,
+                    email: Some(email.clone()),
+                    password_hash: None,
+                    email_verified: true,
+                    accept_challenges: true,
+                    created_at: now,
+                };
+                let id = match db.users().create(&new_user) {
+                    Ok(id) => id,
+                    Err(e) if e.kind() == ErrorKind::UsernameTaken => {
+                        return Ok(Err(AuthError::new(
+                            409,
+                            "username_taken",
+                            "This username was just taken; sign in with Google again and choose another one.",
+                        )));
+                    }
+                    Err(e) if e.kind() == ErrorKind::EmailTaken => {
+                        return Ok(Err(AuthError::new(
+                            409,
+                            "email_taken",
+                            "An account with this e-mail address was just created; sign in with Google again to use it.",
+                        )));
+                    }
+                    Err(e) => return Err(e),
+                };
+                db.sso().link(id, PROVIDER, &sub, Some(&email), now)?;
+                Ok::<_, StoreError>(Ok(id))
             })
-            .await?;
-        if taken {
-            return Err(AuthError::new(409, "username_taken", "This username is already taken."));
-        }
-        if self.store.tokens().consume(SSO_TICKET.into(), h, self.now()).await?.is_none() {
-            return Err(expired());
-        }
-        if self.store.sso().find(PROVIDER.into(), sub.clone()).await?.is_some() {
-            return Err(AuthError::new(
-                409,
-                "sso_already_linked",
-                "This Google account is already linked; sign in with Google again.",
-            ));
-        }
-        let new_user = NewUser {
-            username: p.username.clone(),
-            email: Some(email.clone()),
-            password_hash: None,
-            email_verified: true,
-            accept_challenges: true,
-            created_at: self.now(),
-        };
-        let id = match self.store.users().create(new_user).await {
-            Ok(id) => id,
-            Err(e) if e.kind() == ErrorKind::UsernameTaken => {
-                return Err(AuthError::new(
-                    409,
-                    "username_taken",
-                    "This username was just taken; sign in with Google again and choose another one.",
-                ));
-            }
-            Err(e) if e.kind() == ErrorKind::EmailTaken => {
-                return Err(AuthError::new(
-                    409,
-                    "email_taken",
-                    "An account with this e-mail address was just created; sign in with Google again to use it.",
-                ));
-            }
-            Err(e) => return Err(e.into()),
-        };
-        self.store.sso().link(id, PROVIDER.into(), sub, Some(email), self.now()).await?;
+            .await
+            .map_err(store_busy)?;
+        let id = created?;
         self.events.record("sso_account_created", Some(id), ip, Some(json!({ "provider": PROVIDER })));
         let Some(user) = self.store.users().by_id(id).await? else {
             return Err(AuthError::internal("the account just created is gone"));

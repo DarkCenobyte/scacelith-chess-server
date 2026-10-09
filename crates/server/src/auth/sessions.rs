@@ -10,7 +10,9 @@
 //! Revocations are told to the realtime layer through [`SessionEvents`]: the listed sessions'
 //! connections are closed, or, without a list ("every session of the user"), the user's
 //! connection. A refresh (an account change that the cache holds: the address confirmed or
-//! changed) only drops the cached entries of the user; it closes nothing.
+//! changed) only drops the cached entries of the user; it closes nothing. A change of credentials
+//! revokes in its own transaction ([`Sessions::revoked_all`]): the cache and the connections hear
+//! of it only once it committed, and a change that failed revoked nothing.
 
 use std::sync::Arc;
 
@@ -342,9 +344,17 @@ impl Sessions {
     /// `except` the user's connection is closed too.
     pub(crate) async fn revoke_all(&self, user_id: UserId, except: Option<i64>) -> AuthResult<usize> {
         let hashes = self.store.sessions().revoke_all_for_user(user_id, except, self.now()).await?;
+        Ok(self.revoked_all(user_id, except, hashes))
+    }
+
+    /// Tells what a write job that revoked every session of `user_id` but `except` (with
+    /// [`store::Sessions::revoke_all_for_user`], in the transaction of the change that called for
+    /// it) revoked, once it committed: the cached sessions are dropped and, without `except`, the
+    /// user's connection is closed. Returns the number revoked.
+    pub(crate) fn revoked_all(&self, user_id: UserId, except: Option<i64>, hashes: Vec<String>) -> usize {
         let n = hashes.len();
         self.broadcast(user_id, except.map(|_| hashes));
-        Ok(n)
+        n
     }
 
     /// Closes the user's connection and drops the cached sessions after the store already

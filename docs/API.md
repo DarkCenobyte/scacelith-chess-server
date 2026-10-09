@@ -267,7 +267,9 @@ Authorization: Bearer sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8
   - an administrator (`scacelith-server admin user revoke-sessions`).
 
   A revocation from the API takes effect at once, and the WebSocket opened with a revoked session
-  is closed (`Notice{SessionRevoked}`, then close 4003). The server caches session lookups for
+  is closed (`Notice{SessionRevoked}`, then close 4003). A password change or reset and the
+  deletion of the account revoke in the same transaction as the change itself: when one of them
+  fails, no session was revoked and nothing else changed either. The server caches session lookups for
   30 s, so a revocation by the admin command, a separate process, takes effect within 30 s.
 - **Scope.** A token belongs to one server and opens its WebSocket too (`Hello.token`,
   [PROTOCOL.md](PROTOCOL.md)). Never send it to another server.
@@ -434,7 +436,7 @@ Errors of the re-authentication:
 
 | Status | `error` | When |
 |---|---|---|
-| 403 | `invalid_password` | Wrong password. |
+| 403 | `invalid_password` | Wrong password, or the password was reset or changed while the request ran (nothing was changed). |
 | 403 | `mfa_code_required` | Two-step verification is on and neither `code` nor `recoveryCode` was sent. |
 | 403 | `invalid_code` | Wrong or already used code. |
 | 400 | `password_not_set` | A Google-only account has no password yet ("Forgot password" sets one). |
@@ -741,7 +743,8 @@ with the page: each attempt hashes a password).
 | `token` | string, 1-128 | The `token` parameter of the link. |
 | `newPassword` | string, 1-1024 | Password rules as at registration. |
 
-Answer: 200 `{ "status": "password_reset" }`. The password reset has these effects:
+Answer: 200 `{ "status": "password_reset" }`. The password reset has these effects, in one
+transaction (all of them, or none):
 
 - every session is revoked, and a pending e-mail change is cancelled;
 - the other reset links of the account stop working;
@@ -751,8 +754,8 @@ Answer: 200 `{ "status": "password_reset" }`. The password reset has these effec
 
 Errors: 400 `invalid_token` (link invalid, used or expired, or mailed to an address the account
 no longer has), 400 `weak_password`, the hash queue errors, and 503 `server_busy` with
-`retryAfter: 1` when the database stayed locked (nothing changed). After a hash queue error or a
-503, the link stays valid.
+`retryAfter: 1` when the database stayed locked (nothing changed). After a hash queue error, a 503
+or a 500, nothing changed: the old password and the sessions stay, and the link stays valid.
 
 ### Google sign-in
 
@@ -1051,14 +1054,16 @@ Changes the password. **Auth** session. **Limits** `reauth`, `reauth_user`. Body
 `{ "currentPassword": string 1-1024, "newPassword": string 1-1024 }`. The current password is
 needed, but no second factor, even with two-step verification on.
 
-Answer: 200 `{ "status": "password_changed" }`. The change has these effects:
+Answer: 200 `{ "status": "password_changed" }`. The change has these effects, in one transaction
+(all of them, or none):
 
 - every other session is revoked, and this one stays signed in;
 - a pending e-mail change is cancelled, and the account's password reset links stop working;
 - the owner gets a mail.
 
-Errors: the re-authentication errors (section 1.7) and 400 `weak_password` (checked after the
-current password).
+Errors: the re-authentication errors (section 1.7), 400 `weak_password` (checked after the
+current password), and 503 `server_busy` with `retryAfter: 1` when the database stayed locked
+(nothing changed).
 
 ```sh
 curl -sS "$API/account/password" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
@@ -1759,7 +1764,9 @@ curl -sS "$API/leaderboard?category=3%2B2&limit=10"
 
 - The list holds the top 100 rated records with at least `minGames` (`PROVISIONAL_GAMES`) counted
   games. It leaves out deleted accounts and confirmed cheaters.
-- The server computes it again at most every 10 seconds; `updatedAt` says when.
+- The server computes it again at most every 10 seconds; `updatedAt` says when. One computation
+  of a category runs at a time: meanwhile the other requests get the previous list, or wait for
+  the computation when there is none yet.
 
 Errors: 400 `invalid_category`, 400 `invalid_limit`, 503 `busy`.
 
