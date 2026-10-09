@@ -7,7 +7,7 @@ use std::net::IpAddr;
 
 use serde_json::json;
 
-use super::{BoxFut, PASSWORD, new_account};
+use super::{BoxFut, new_account, pw};
 use crate::duo::{Duo, Side, fresh_ip};
 use crate::http::Req;
 use crate::realtime::{End, GameScript};
@@ -563,27 +563,12 @@ async fn export_and_deletion(d: &mut Duo) {
     let ip = fresh_ip();
     d.step("me-ratings", ip, 200, get_as("gwen", |_| "/api/v1/account/me".into())).await;
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    d.step(
-        "export-gwen",
-        ip,
-        200,
-        post_as("/api/v1/account/export", "gwen", |_| json!({"password": PASSWORD})),
-    )
-    .await;
-    d.step(
-        "export-hugo",
-        ip,
-        200,
-        post_as("/api/v1/account/export", "hugo", |_| json!({"password": PASSWORD})),
-    )
-    .await;
-    d.step(
-        "delete-iris",
-        ip,
-        200,
-        post_as("/api/v1/account/delete", "iris", |_| json!({"password": PASSWORD})),
-    )
-    .await;
+    d.step("export-gwen", ip, 200, post_as("/api/v1/account/export", "gwen", |_| json!({"password": pw()})))
+        .await;
+    d.step("export-hugo", ip, 200, post_as("/api/v1/account/export", "hugo", |_| json!({"password": pw()})))
+        .await;
+    d.step("delete-iris", ip, 200, post_as("/api/v1/account/delete", "iris", |_| json!({"password": pw()})))
+        .await;
     deleted_views(d, ip).await;
 }
 

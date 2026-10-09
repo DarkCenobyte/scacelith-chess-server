@@ -49,12 +49,14 @@ fn rating_of(srv: &TestServer, user_id: u32) -> i64 {
         .expect("a rating")
 }
 
-/// Waits until the 3+2 rating of a player is `rating` (a refund is written by the server's
-/// database writer, a moment after the decision).
-async fn rating_becomes(srv: &TestServer, user_id: u32, rating: i64) {
-    let what = format!("the rating {rating} of user {user_id}");
-    eventually(Duration::from_secs(5), &what, || async { (rating_of(srv, user_id) == rating).then_some(()) })
-        .await;
+/// Waits until the 3+2 rating of `p` is `rating` (a refund is written by the server's database
+/// writer, a moment after the decision).
+async fn rating_becomes(srv: &TestServer, p: &Player, rating: i64) {
+    let what = format!("the rating {rating} of {}", p.name());
+    eventually(Duration::from_secs(5), &what, || async {
+        (rating_of(srv, p.acc.user_id) == rating).then_some(())
+    })
+    .await;
 }
 
 /// A rated 3+2 game that `winner` (White) wins by resignation after two moves; the points the
@@ -115,9 +117,9 @@ async fn a_banned_cheaters_victims_get_their_points_back_and_are_told_out_of_a_g
 
     // Connected and idle: told at once, with the points given back.
     assert_eq!(restored(&mut idle, m_idle, Duration::from_secs(5)).await, lost_idle);
-    rating_becomes(&srv, idle.acc.user_id, 1500).await;
+    rating_becomes(&srv, &idle, 1500).await;
     // Playing: the refund is applied, the notice waits for the end of the game.
-    rating_becomes(&srv, busy.acc.user_id, 1500).await;
+    rating_becomes(&srv, &busy, 1500).await;
     assert!(!restored_within(&mut busy, m_busy, Duration::from_secs(1)).await, "no notice during a game");
     let m_end = busy.client.mark();
     busy.client.resign(g);
@@ -125,7 +127,7 @@ async fn a_banned_cheaters_victims_get_their_points_back_and_are_told_out_of_a_g
     assert_eq!((end.status, end.reason), (GameStatus::BlackWins, EndReason::Resignation));
     assert_eq!(restored(&mut busy, m_end, Duration::from_secs(5)).await, lost_busy);
     // Offline: told right after Welcome at the next connection.
-    rating_becomes(&srv, away.acc.user_id, 1500).await;
+    rating_becomes(&srv, &away, 1500).await;
     away.reconnect(&srv).await;
     assert_eq!(restored(&mut away, 0, Duration::from_secs(5)).await, lost_away);
 
@@ -185,7 +187,7 @@ async fn a_cheater_confirmed_with_the_cli_while_playing_is_refunded_when_recorde
     let lost = i64::from(ru.black.before) - i64::from(ru.black.after);
     assert!((9..=10).contains(&lost), "K 20, equal ratings: {lost}");
     assert_eq!(restored(&mut vic, m, Duration::from_secs(10)).await, lost);
-    rating_becomes(&srv, vic.acc.user_id, 1500).await;
+    rating_becomes(&srv, &vic, 1500).await;
     let rows: Vec<(i64, u32, i64, String, Option<i64>)> = {
         let db = srv.db();
         let mut q = db

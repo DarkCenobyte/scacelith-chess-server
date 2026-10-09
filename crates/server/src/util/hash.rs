@@ -38,6 +38,7 @@ pub fn ct_eq_hashed(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::testing::vector;
 
     #[test]
     fn known_vectors() {
@@ -46,8 +47,9 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         // RFC 4231 test case 2.
+        let (key, data) = (vector("/hmacSha256/key"), vector("/hmacSha256/data"));
         assert_eq!(
-            hex::encode(hmac_sha256(b"Jefe", b"what do ya want for nothing?")),
+            hex::encode(hmac_sha256(key.as_bytes(), data.as_bytes())),
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
         );
     }

@@ -89,10 +89,10 @@ impl Ctx {
         self.opts.target
     }
 
-    /// A random generator: seeded when `--seed` was given (`salt` varies it per task).
-    pub fn rng(&self, salt: u64) -> Rng {
+    /// A random generator: seeded when `--seed` was given (`stream` varies it per task).
+    pub fn rng(&self, stream: u64) -> Rng {
         match self.opts.seed {
-            Some(seed) => Rng::new(seed ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+            Some(seed) => Rng::new(seed ^ stream.wrapping_mul(0x9E37_79B9_7F4A_7C15)),
             None => Rng::from_entropy(),
         }
     }

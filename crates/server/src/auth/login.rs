@@ -334,10 +334,10 @@ impl Inner {
     /// `POST /auth/login/mfa`.
     pub(crate) async fn login_mfa(&self, p: &MfaLoginParams) -> AuthResult<Value> {
         let ip = p.ip.as_deref();
-        if !is_prefixed_token(&p.mfa_token, MFA_PREFIX) {
+        if !is_prefixed_token(&p.token, MFA_PREFIX) {
             return Err(invalid_mfa_token());
         }
-        let h = sha256_hex(&p.mfa_token);
+        let h = sha256_hex(&p.token);
         let row = self.store.tokens().get(MFA_LOGIN.into(), h.clone()).await?;
         let Some(row) = row.filter(|r| is_live(Some(r), self.now())) else {
             return Err(invalid_mfa_token());

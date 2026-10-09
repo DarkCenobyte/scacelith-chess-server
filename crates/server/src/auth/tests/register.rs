@@ -1,6 +1,8 @@
 //! Registration: pending signups, the confirmation link and its pages, username and password
 //! rules, existing addresses, resends, proof of work and limits (auth.register.test.js).
 
+use std::sync::LazyLock;
+
 use http::Method;
 use serde_json::{Value, json};
 
@@ -8,13 +10,19 @@ use super::{CountingHasher, Harness, Setup, link_in, token_of};
 use crate::http::testing::TestResponse;
 use crate::mail::OutgoingMail;
 use crate::security::pow::{POW_TTL_MS, check_work, solve_pow};
+use crate::security::testing::random_password;
 use crate::store::{NewUser, RetentionPolicy};
 
 const REG: &str = "/api/v1/auth/register";
-const GOOD_PW: &str = "ivory rook takes e5";
+
+/// The password of the registrations: drawn at random once per test run.
+fn good_pw() -> &'static str {
+    static GOOD_PW: LazyLock<String> = LazyLock::new(random_password);
+    &GOOD_PW
+}
 
 fn good(over: Value) -> Value {
-    let mut body = json!({ "username": "Alice_1", "email": "Alice@Example.com", "password": GOOD_PW });
+    let mut body = json!({ "username": "Alice_1", "email": "Alice@Example.com", "password": good_pw() });
     if let (Some(b), Some(o)) = (body.as_object_mut(), over.as_object()) {
         b.extend(o.clone());
     }
@@ -93,9 +101,9 @@ async fn register_answers_202_and_mails_a_link_and_the_account_exists_only_once_
     assert!(sent[0].subject.contains("Confirm your e-mail address"));
 
     // Before confirmation there is no account: the right password is answered as an unknown one.
-    for password in [GOOD_PW, "wrong password!"] {
+    for (password, which) in [(good_pw(), "the right password"), ("wrong password!", "a wrong password")] {
         let l = h.post("/api/v1/auth/login", json!({ "login": "alice_1", "password": password })).await;
-        assert_eq!((l.status, l.json()["error"].clone()), (401, json!("invalid_credentials")), "{password}");
+        assert_eq!((l.status, l.json()["error"].clone()), (401, json!("invalid_credentials")), "{which}");
     }
 
     let token = verify_from_mail(&h, &sent[0]).await;
@@ -107,7 +115,7 @@ async fn register_answers_202_and_mails_a_link_and_the_account_exists_only_once_
     assert!(signup_by_name(&h, "alice_1").await.is_none(), "the pending signup is gone");
     assert_eq!(confirm_post(&h, &token).await.status, 400, "single use");
     assert_eq!(confirm_page(&h, &token).await.status, 400);
-    let ok = h.login("ALICE@example.com", GOOD_PW).await;
+    let ok = h.login("ALICE@example.com", good_pw()).await;
     assert!(ok["token"].as_str().unwrap().starts_with("sct_"));
     assert_eq!(ok["user"]["username"], "Alice_1");
     let registered: Vec<_> =
@@ -155,18 +163,15 @@ async fn username_rules() {
         ("SCACELITH", "invalid_username"),
         ("BOB", "username_taken"),
     ];
-    for (i, (username, code)) in cases.into_iter().enumerate() {
-        let r = h
-            .post(REG, good(json!({ "username": username, "email": format!("probe{i}@example.com") })))
-            .await;
-        assert_eq!(r.json()["error"], code, "{username}");
-        assert_eq!(r.status, if code == "username_taken" { 409 } else { 400 }, "{username}");
+    for (i, (name, code)) in cases.into_iter().enumerate() {
+        let r =
+            h.post(REG, good(json!({ "username": name, "email": format!("probe{i}@example.com") }))).await;
+        assert_eq!(r.json()["error"], code, "{name}");
+        assert_eq!(r.status, if code == "username_taken" { 409 } else { 400 }, "{name}");
     }
-    for username in ["abc", "9lives", "a_b-c", &"x".repeat(20)] {
-        let r = h
-            .post(REG, good(json!({ "username": username, "email": format!("{username}@example.com") })))
-            .await;
-        assert_eq!(r.status, 202, "{username}");
+    for name in ["abc", "9lives", "a_b-c", &"x".repeat(20)] {
+        let r = h.post(REG, good(json!({ "username": name, "email": format!("{name}@example.com") }))).await;
+        assert_eq!(r.status, 202, "{name}");
     }
 }
 
@@ -191,7 +196,7 @@ async fn email_and_password_checks() {
         assert_eq!(
             (r.status, &body["error"], &body["reason"]),
             (400, &json!("weak_password"), &json!(reason)),
-            "{password}"
+            "{reason}"
         );
     }
 }
@@ -204,7 +209,7 @@ async fn an_existing_email_gets_the_same_answer_work_and_traces_as_a_new_one() {
         let counter = CountingHasher::new();
         let h = Harness::build(Setup { hasher: Some(counter.clone()), ..Setup::default() }).await;
         if with_account {
-            h.create_user_with("owner", Some("target@example.com"), Some(super::PW), true).await;
+            h.create_user_with("owner", Some("target@example.com"), Some(super::pw()), true).await;
         }
         servers.push((h, counter));
     }
@@ -228,7 +233,7 @@ async fn an_existing_email_gets_the_same_answer_work_and_traces_as_a_new_one() {
     let mut probes = Vec::new();
     for (h, _) in &servers {
         let again = h.post(REG, good(json!({ "username": "prober", "email": "other@example.com" }))).await;
-        let login = h.post("/api/v1/auth/login", json!({ "login": "Prober", "password": GOOD_PW })).await;
+        let login = h.post("/api/v1/auth/login", json!({ "login": "Prober", "password": good_pw() })).await;
         probes.push((
             again.status,
             again.json()["error"].clone(),
@@ -243,7 +248,7 @@ async fn an_existing_email_gets_the_same_answer_work_and_traces_as_a_new_one() {
 #[tokio::test]
 async fn an_existing_email_gets_the_same_answer_and_its_owner_a_notice() {
     let h = Harness::new().await;
-    h.create_user_with("owner", Some("taken@example.com"), Some(super::PW), true).await;
+    h.create_user_with("owner", Some("taken@example.com"), Some(super::pw()), true).await;
     let r = h.post(REG, good(json!({ "username": "newcomer", "email": "TAKEN@example.com" }))).await;
     let fresh = h.post(REG, good(json!({ "username": "another", "email": "free@example.com" }))).await;
     assert_eq!((r.status, r.json()), (fresh.status, fresh.json()));
@@ -319,7 +324,8 @@ async fn a_second_signup_with_the_same_address_replaces_the_pending_one() {
     assert_eq!(r.status, 202);
     // Later: replaced again, with a new link.
     h.advance(5 * 60_000);
-    let r = h.post(REG, good(json!({ "username": "Alice_3", "password": "another ivory rook" }))).await;
+    let other_pw = random_password();
+    let r = h.post(REG, good(json!({ "username": "Alice_3", "password": other_pw }))).await;
     assert_eq!(r.status, 202);
     let mails: Vec<_> = h.sent().await.into_iter().filter(|m| m.to == "alice@example.com").collect();
     assert_eq!(mails.len(), 2);
@@ -327,7 +333,7 @@ async fn a_second_signup_with_the_same_address_replaces_the_pending_one() {
     assert_eq!(confirm_post(&h, &mail_token(&mails[1])).await.status, 200);
     assert_eq!(user_by_email(&h, "alice@example.com").await.unwrap().username, "Alice_3");
     assert!(user_by_name(&h, "Alice_2").await.is_none());
-    h.login("alice_3", "another ivory rook").await;
+    h.login("alice_3", &other_pw).await;
 }
 
 #[tokio::test]
@@ -387,7 +393,7 @@ async fn resend_holds_the_username_24_h_more_whether_or_not_the_address_has_an_a
     for with_account in [false, true] {
         let h = Harness::new().await;
         if with_account {
-            h.create_user_with("owner", Some("target@example.com"), Some(super::PW), true).await;
+            h.create_user_with("owner", Some("target@example.com"), Some(super::pw()), true).await;
         }
         servers.push(h);
     }
@@ -417,8 +423,8 @@ async fn the_link_of_a_pending_signup_whose_username_or_address_another_account_
     h.post(REG, good(json!({ "username": "Bob_2", "email": "bob@example.com" }))).await;
     let tokens: Vec<String> = h.sent().await.iter().map(mail_token).collect();
     // Accounts made another way (a Google sign-in, for one) with that address, and that username.
-    h.create_user_with("Alice_9", Some("alice@example.com"), Some(super::PW), true).await;
-    h.create_user_with("bob_2", Some("robert@example.com"), Some(super::PW), true).await;
+    h.create_user_with("Alice_9", Some("alice@example.com"), Some(super::pw()), true).await;
+    h.create_user_with("bob_2", Some("robert@example.com"), Some(super::pw()), true).await;
     for token in &tokens {
         let r = confirm_post(&h, token).await;
         assert_eq!(r.status, 409);
@@ -432,8 +438,8 @@ async fn the_link_of_a_pending_signup_whose_username_or_address_another_account_
 #[tokio::test]
 async fn accounts_created_unconfirmed_before_pending_signups_keep_their_links_and_answers() {
     let h = Harness::new().await;
-    let old = h.create_user_with("oldtimer", Some("old@example.com"), Some(super::PW), false).await;
-    let l = h.post("/api/v1/auth/login", json!({ "login": "oldtimer", "password": super::PW })).await;
+    let old = h.create_user_with("oldtimer", Some("old@example.com"), Some(super::pw()), false).await;
+    let l = h.post("/api/v1/auth/login", json!({ "login": "oldtimer", "password": super::pw() })).await;
     assert_eq!((l.status, l.json()["error"].clone()), (403, json!("email_unverified")));
     // A signup with its address is the "existing address" case: a held username, no link, a notice.
     assert_eq!(h.post(REG, good(json!({ "email": "old@example.com" }))).await.status, 202);
@@ -451,7 +457,7 @@ async fn accounts_created_unconfirmed_before_pending_signups_keep_their_links_an
     verify_from_mail(&h, link).await;
     assert!(h.user(old).await.email_verified);
     assert!(user_by_name(&h, "Alice_1").await.is_none(), "the held username made no account");
-    assert_eq!(h.login("oldtimer", super::PW).await["user"]["id"], json!(old));
+    assert_eq!(h.login("oldtimer", super::pw()).await["user"]["id"], json!(old));
 }
 
 #[tokio::test]
@@ -467,7 +473,7 @@ async fn without_email_confirmation_the_account_is_ready_at_once() {
     let r = h.post(REG, good(json!({}))).await;
     assert_eq!((r.status, r.json()), (201, json!({ "status": "ready" })));
     assert!(h.sent().await.is_empty());
-    h.login("Alice_1", GOOD_PW).await;
+    h.login("Alice_1", good_pw()).await;
     let dup = h.post(REG, good(json!({ "username": "other" }))).await;
     assert_eq!((dup.status, dup.json()["error"].clone()), (409, json!("email_taken")));
 }

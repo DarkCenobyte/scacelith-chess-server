@@ -265,7 +265,7 @@ impl Inner {
         {
             return Err(failed("bad_iss", None));
         }
-        let nonce = str_field(&d, "nonce").unwrap_or("");
+        let nonce = str_field(&d, "nonce");
         let claims = match oidc.exchange_code(&p.code, verifier, redirect_uri).await {
             Ok(id_token) => oidc.verify_id_token(&id_token, nonce).await,
             Err(e) => Err(e),

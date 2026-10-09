@@ -4,6 +4,7 @@
 //! the rules for each move's `posHash` ([`Table`]).
 
 use std::pin::Pin;
+use std::sync::LazyLock;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -13,12 +14,22 @@ use scacelith_protocol::{
     ChallengeAccept, ChallengeCreate, ClientMsg, ColorPref, DrawAnswer, DrawOffer, GameSnapshot, Move,
     MoveMade, QueueJoin, Resign, ServerMsg, Welcome, uci_to_move,
 };
+use scacelith_server::security::encoding::random_bytes;
 
 use super::server::TestServer;
 use super::web::{call, link_path, page, query_param, text};
 
-/// The password of every test account.
-pub const PASSWORD: &str = "correct horse battery staple 9";
+/// The password of every test account: drawn at random once per test process (four groups of
+/// six decimal digits, which pass the password policy and hold no user name or address).
+pub fn password() -> &'static str {
+    static PASSWORD: LazyLock<String> = LazyLock::new(|| {
+        let r = random_bytes::<16>();
+        let group =
+            |i: usize| u32::from_le_bytes([r[4 * i], r[4 * i + 1], r[4 * i + 2], r[4 * i + 3]]) % 1_000_000;
+        format!("{:06} {:06} {:06} {:06}", group(0), group(1), group(2), group(3))
+    });
+    &PASSWORD
+}
 /// The usual wait for a message.
 pub const WAIT: Duration = Duration::from_secs(10);
 
@@ -142,8 +153,7 @@ impl Client {
         match self.try_wait_for(since, limit, pick).await {
             Some(found) => found,
             None => panic!(
-                "{} did not receive {what} within {limit:?} (closed: {:?}); received since the mark: {:?}",
-                self.welcome().username,
+                "the client did not receive {what} within {limit:?} (closed: {:?}); received since the mark: {:?}",
                 self.closed,
                 &self.history[since.min(self.history.len())..]
             ),
@@ -153,7 +163,7 @@ impl Client {
     /// Waits until the connection has ended (keeping what arrives meanwhile) and returns how.
     pub async fn closed(&mut self, limit: Duration) -> CloseInfo {
         let ended = tokio::time::timeout(limit, async { while self.pull().await {} }).await;
-        assert!(ended.is_ok(), "{}: the connection did not close within {limit:?}", self.welcome().username);
+        assert!(ended.is_ok(), "the connection did not close within {limit:?}");
         self.closed.clone().expect("closed")
     }
 
@@ -247,10 +257,10 @@ pub struct Account {
     pub email: String,
 }
 
-/// Signs `name` in (password [`PASSWORD`]) and returns its session.
+/// Signs `name` in (password [`password`]) and returns its session.
 pub async fn sign_in(srv: &TestServer, name: &str, label: Option<&str>) -> Account {
     let api = srv.api();
-    let login = api.login(name, PASSWORD, label).await.unwrap_or_else(|e| panic!("login {name}: {e}"));
+    let login = api.login(name, password(), label).await.unwrap_or_else(|e| panic!("login {name}: {e}"));
     let Login::Session(session) = login else { panic!("login {name}: a second factor is asked") };
     let user_id = session.user["id"].as_u64().expect("the account id") as u32;
     let email = session.user["email"].as_str().unwrap_or_default().to_string();
@@ -261,7 +271,7 @@ pub async fn sign_in(srv: &TestServer, name: &str, label: Option<&str>) -> Accou
 pub async fn account(srv: &TestServer, name: &str) -> Account {
     let api = srv.api();
     let answer = api
-        .register(name, &format!("{name}@example.org"), PASSWORD)
+        .register(name, &format!("{name}@example.org"), password())
         .await
         .unwrap_or_else(|e| panic!("register {name}: {e}"));
     assert!(
@@ -277,7 +287,7 @@ pub async fn account(srv: &TestServer, name: &str) -> Account {
 pub async fn verified_account(srv: &TestServer, name: &str, label: Option<&str>) -> Account {
     let api = srv.api();
     let email = format!("{name}@example.org");
-    let body = serde_json::json!({"username": name, "email": email, "password": PASSWORD});
+    let body = serde_json::json!({"username": name, "email": email, "password": password()});
     let (res, answer) = call(&api, "POST", "/auth/register", None, Some(body)).await;
     assert_eq!(
         (res.status, &answer),

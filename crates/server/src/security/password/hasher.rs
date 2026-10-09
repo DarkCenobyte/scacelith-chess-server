@@ -25,7 +25,7 @@ use parking_lot::Mutex;
 use zeroize::Zeroizing;
 
 use super::policy::normalize_password;
-use crate::security::encoding::{b64_std, node_b64_decode, random_bytes};
+use crate::security::encoding::{b64_std, node_b64_decode, random_bytes, random_vec};
 use crate::security::keys::safe_eq;
 
 /// The result of a verification.
@@ -224,8 +224,7 @@ impl Argon2Hasher {
 
     fn hash_bytes(&self, password: &[u8]) -> Result<String, HashFailure> {
         let p = self.params;
-        let mut salt = vec![0u8; p.salt_len];
-        crate::security::encoding::fill_random(&mut salt);
+        let salt = random_vec(p.salt_len);
         let mut tag = Zeroizing::new(vec![0u8; p.tag_len]);
         argon2id(password, &salt, p.memory_kib, p.passes, p.lanes, &mut tag)?;
         Ok(format_hash(p.memory_kib, p.passes, p.lanes, &salt, &tag))
@@ -242,9 +241,14 @@ impl Argon2Hasher {
             return Ok(d.clone());
         }
         // Computed outside the lock: two first callers may both compute one; the first stored
-        // wins, which costs the same as a verification each.
+        // wins, which costs the same as a verification each. The hash of a random password with
+        // today's parameters, kept parsed (what `verify` reads from a stored hash).
         let pw = b64_std(&random_bytes::<18>());
-        let parsed = parse_hash(&self.hash_bytes(pw.as_bytes())?).expect("the hasher's own format parses");
+        let p = self.params;
+        let salt = random_vec(p.salt_len);
+        let mut tag = vec![0u8; p.tag_len];
+        argon2id(pw.as_bytes(), &salt, p.memory_kib, p.passes, p.lanes, &mut tag)?;
+        let parsed = ParsedHash { memory_kib: p.memory_kib, passes: p.passes, lanes: p.lanes, salt, tag };
         Ok(self.dummy.lock().get_or_insert_with(|| Arc::new(parsed)).clone())
     }
 
@@ -298,6 +302,7 @@ impl PasswordHasher for Argon2Hasher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::testing::{random_password, vector};
 
     /// Cheap parameters for the unit tests (1 MiB, 1 pass, 1 lane).
     pub(crate) const FAST: Argon2Params =
@@ -306,10 +311,11 @@ mod tests {
     #[test]
     fn reference_vector_of_the_argon2_reference_implementation() {
         // phc-winner-argon2 test vector: argon2id v=19, t=2, m=65536, p=1, "password"/"somesalt".
+        let (password, salt) = (vector("/argon2id/password"), vector("/argon2id/salt"));
         let mut out = [0u8; 32];
-        argon2id(b"password", b"somesalt", 65536, 2, 1, &mut out).unwrap();
+        argon2id(password.as_bytes(), salt.as_bytes(), 65536, 2, 1, &mut out).unwrap();
         assert_eq!(
-            format_hash(65536, 2, 1, b"somesalt", &out),
+            format_hash(65536, 2, 1, salt.as_bytes(), &out),
             "$argon2id$v=19$m=65536,t=2,p=1$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc"
         );
         // And the verification of that string with the reference parameters.
@@ -320,67 +326,64 @@ mod tests {
             ..Argon2Params::DEFAULT
         });
         let stored = "$argon2id$v=19$m=65536,t=2,p=1$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc";
-        assert_eq!(h.verify(stored, "password").unwrap(), Verified { ok: true, needs_rehash: false });
-        assert!(!h.verify(stored, "Password").unwrap().ok);
+        assert_eq!(h.verify(stored, password).unwrap(), Verified { ok: true, needs_rehash: false });
+        assert!(!h.verify(stored, vector("/argon2id/otherCase")).unwrap().ok);
     }
 
     #[test]
     fn the_default_format_round_trips() {
         let h = Argon2Hasher::default();
-        let s = h.hash("a sufficiently long passphrase").unwrap();
+        let pw = random_password();
+        let s = h.hash(&pw).unwrap();
         let p = parse_hash(&s).unwrap();
         assert!(s.starts_with("$argon2id$v=19$m=65536,t=3,p=4$"), "{s}");
         assert_eq!((p.salt.len(), p.tag.len()), (16, 32));
         assert_eq!(s.split('$').nth(4).unwrap().len(), 22);
         assert_eq!(s.split('$').nth(5).unwrap().len(), 43);
-        assert_eq!(
-            h.verify(&s, "a sufficiently long passphrase").unwrap(),
-            Verified { ok: true, needs_rehash: false }
-        );
+        assert_eq!(h.verify(&s, &pw).unwrap(), Verified { ok: true, needs_rehash: false });
     }
 
     #[test]
     fn hash_and_verify_wrong_passwords_and_garbage() {
         let h = Argon2Hasher::new(FAST);
-        let s = h.hash("correct horse battery").unwrap();
+        let pw = random_password();
+        let s = h.hash(&pw).unwrap();
         assert!(s.starts_with("$argon2id$v=19$m=1024,t=1,p=1$"));
-        assert_eq!(
-            h.verify(&s, "correct horse battery").unwrap(),
-            Verified { ok: true, needs_rehash: false }
-        );
-        assert!(!h.verify(&s, "correct horse batterY").unwrap().ok);
-        assert_eq!(h.verify("not a hash", "x").unwrap(), Verified::default());
-        assert_eq!(h.verify("", "x").unwrap(), Verified::default());
-        assert_eq!(h.verify("!disabled", "x").unwrap(), Verified::default());
-        assert_ne!(h.hash("same").unwrap(), h.hash("same").unwrap(), "random salt");
-        h.verify_dummy("x").unwrap();
+        assert_eq!(h.verify(&s, &pw).unwrap(), Verified { ok: true, needs_rehash: false });
+        // The same password but its last digit.
+        let last = pw.as_bytes()[pw.len() - 1] - b'0';
+        let near = format!("{}{}", &pw[..pw.len() - 1], (last + 1) % 10);
+        assert!(!h.verify(&s, &near).unwrap().ok);
+        assert_eq!(h.verify("not a hash", &pw).unwrap(), Verified::default());
+        assert_eq!(h.verify("", &pw).unwrap(), Verified::default());
+        assert_eq!(h.verify("!disabled", &pw).unwrap(), Verified::default());
+        assert_ne!(h.hash(&pw).unwrap(), h.hash(&pw).unwrap(), "random salt");
+        h.verify_dummy(&pw).unwrap();
     }
 
     #[test]
     fn passwords_are_compared_after_nfc_normalisation() {
         let h = Argon2Hasher::new(FAST);
-        let s = h.hash("caf\u{e9} au lait noir").unwrap();
-        assert!(h.verify(&s, "cafe\u{301} au lait noir").unwrap().ok);
+        let s = h.hash(vector("/nfc/composed")).unwrap();
+        assert!(h.verify(&s, vector("/nfc/decomposed")).unwrap().ok);
     }
 
     #[test]
     fn weaker_parameters_are_reported_after_a_successful_check_only() {
-        let old = Argon2Hasher::new(FAST).hash("passphrase one two").unwrap();
+        let pw = random_password();
+        let old = Argon2Hasher::new(FAST).hash(&pw).unwrap();
         let stronger = Argon2Hasher::new(Argon2Params { memory_kib: 2048, ..FAST });
-        assert_eq!(
-            stronger.verify(&old, "passphrase one two").unwrap(),
-            Verified { ok: true, needs_rehash: true }
-        );
-        assert_eq!(stronger.verify(&old, "wrong").unwrap(), Verified::default());
+        assert_eq!(stronger.verify(&old, &pw).unwrap(), Verified { ok: true, needs_rehash: true });
+        assert_eq!(stronger.verify(&old, &random_password()).unwrap(), Verified::default());
         let more_passes = Argon2Hasher::new(Argon2Params { passes: 2, ..FAST });
-        assert!(more_passes.verify(&old, "passphrase one two").unwrap().needs_rehash);
+        assert!(more_passes.verify(&old, &pw).unwrap().needs_rehash);
         let other_lanes = Argon2Hasher::new(Argon2Params { lanes: 2, ..FAST });
-        assert!(other_lanes.verify(&old, "passphrase one two").unwrap().needs_rehash);
+        assert!(other_lanes.verify(&old, &pw).unwrap().needs_rehash);
         let longer_tag = Argon2Hasher::new(Argon2Params { tag_len: 64, ..FAST });
-        assert!(longer_tag.verify(&old, "passphrase one two").unwrap().needs_rehash);
+        assert!(longer_tag.verify(&old, &pw).unwrap().needs_rehash);
         // A stronger stored hash than today's parameters is not downgraded.
         let weaker = Argon2Hasher::new(Argon2Params { memory_kib: 512, ..FAST });
-        assert!(!weaker.verify(&old, "passphrase one two").unwrap().needs_rehash);
+        assert!(!weaker.verify(&old, &pw).unwrap().needs_rehash);
     }
 
     #[test]
@@ -419,13 +422,14 @@ mod tests {
         let h = Argon2Hasher::new(FAST);
         let salt = b64_std(&[1u8; 16]);
         let tag = b64_std(&[2u8; 32]);
+        let pw = random_password();
         // m < 8 p
-        assert!(h.verify(&format!("$argon2id$v=19$m=16,t=1,p=4${salt}${tag}"), "x").is_err());
+        assert!(h.verify(&format!("$argon2id$v=19$m=16,t=1,p=4${salt}${tag}"), &pw).is_err());
         // t = 0
-        assert!(h.verify(&format!("$argon2id$v=19$m=1024,t=0,p=1${salt}${tag}"), "x").is_err());
+        assert!(h.verify(&format!("$argon2id$v=19$m=1024,t=0,p=1${salt}${tag}"), &pw).is_err());
         // memory above the cap
-        assert!(h.verify(&format!("$argon2id$v=19$m=99999999,t=1,p=1${salt}${tag}"), "x").is_err());
-        let e = h.verify(&format!("$argon2id$v=19$m=1024,t=1,p=0${salt}${tag}"), "x").unwrap_err();
+        assert!(h.verify(&format!("$argon2id$v=19$m=99999999,t=1,p=1${salt}${tag}"), &pw).is_err());
+        let e = h.verify(&format!("$argon2id$v=19$m=1024,t=1,p=0${salt}${tag}"), &pw).unwrap_err();
         assert!(e.to_string().starts_with("password hashing failed: argon2"), "{e}");
     }
 
@@ -445,7 +449,8 @@ mod tests {
     fn unknown_accounts_cost_the_same_work() {
         let h = Argon2Hasher::new(Argon2Params { memory_kib: 8192, ..FAST });
         h.warm_up().unwrap();
-        let stored = h.hash("whatever it is").unwrap();
+        let stored = h.hash(&random_password()).unwrap();
+        let wrong = random_password();
         let time = |f: &dyn Fn()| {
             let t = Instant::now();
             f();
@@ -454,8 +459,8 @@ mod tests {
         let mut real = Vec::new();
         let mut dummy = Vec::new();
         for _ in 0..5 {
-            real.push(time(&|| assert!(!h.verify(&stored, "wrong password here").unwrap().ok)));
-            dummy.push(time(&|| h.verify_dummy("wrong password here").unwrap()));
+            real.push(time(&|| assert!(!h.verify(&stored, &wrong).unwrap().ok)));
+            dummy.push(time(&|| h.verify_dummy(&wrong).unwrap()));
         }
         let med = |v: &mut Vec<f64>| {
             v.sort_by(f64::total_cmp);

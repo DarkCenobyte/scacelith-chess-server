@@ -127,6 +127,12 @@ pub fn check_password_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::testing::vector;
+
+    /// A password of the policy tests, by name (`test/fixtures/security-vectors.json`).
+    fn pw(name: &str) -> &'static str {
+        vector(&format!("/passwords/{name}"))
+    }
 
     fn reason(pw: &str) -> Option<&'static str> {
         check_password_policy(pw, 10, "Magnus_C", "grandpatzer@example.com").err().map(|v| v.reason.as_str())
@@ -134,37 +140,37 @@ mod tests {
 
     #[test]
     fn policy_length_bytes_username_email_common() {
-        assert_eq!(reason("short"), Some("too_short"));
+        assert_eq!(reason(pw("short")), Some("too_short"));
         assert_eq!(reason(&"é".repeat(9)), Some("too_short"));
         assert_eq!(reason(&"x".repeat(PASSWORD_MAX_BYTES + 1)), Some("too_long"));
         assert_eq!(reason(&"é".repeat(129)), Some("too_long"), "258 bytes");
-        assert_eq!(reason("my magnus_c secret!"), Some("contains_username"));
-        assert_eq!(reason("GRANDPATZER forever"), Some("contains_email"));
-        assert_eq!(reason("qwertyuiop"), Some("too_common"));
-        assert_eq!(reason("PASSWORD1234"), Some("too_common"));
-        assert_eq!(reason("1q2w3e4r5t"), Some("too_common"));
-        assert_eq!(reason("ivory rook takes e5"), None);
+        assert_eq!(reason(pw("containsUsername")), Some("contains_username"));
+        assert_eq!(reason(pw("containsEmailUpperCase")), Some("contains_email"));
+        assert_eq!(reason(pw("commonKeyboard")), Some("too_common"));
+        assert_eq!(reason(pw("commonUpperCase")), Some("too_common"));
+        assert_eq!(reason(pw("commonPattern")), Some("too_common"));
+        assert_eq!(reason(pw("acceptable")), None);
         assert_eq!(check_password_policy(&"x".repeat(PASSWORD_MAX_BYTES), 10, "", ""), Ok(()));
     }
 
     #[test]
     fn policy_messages() {
-        let v = check_password_policy("short", 10, "", "").unwrap_err();
+        let v = check_password_policy(pw("short"), 10, "", "").unwrap_err();
         assert_eq!(v.message, "The password must have at least 10 characters.");
         assert_eq!(
             check_password_policy(&"x".repeat(300), 10, "", "").unwrap_err().message,
             "The password must not exceed 256 bytes."
         );
         assert_eq!(
-            check_password_policy("my magnus_c secret!", 10, "Magnus_C", "").unwrap_err().to_string(),
+            check_password_policy(pw("containsUsername"), 10, "Magnus_C", "").unwrap_err().to_string(),
             "The password must not contain the username."
         );
         assert_eq!(
-            check_password_policy("grandpatzer forever", 10, "", "grandpatzer@x.org").unwrap_err().message,
+            check_password_policy(pw("containsEmail"), 10, "", "grandpatzer@x.org").unwrap_err().message,
             "The password must not contain the e-mail address."
         );
         assert_eq!(
-            check_password_policy("password1234", 10, "", "").unwrap_err().message,
+            check_password_policy(pw("common"), 10, "", "").unwrap_err().message,
             "This password is too common; choose another one."
         );
     }
@@ -172,9 +178,9 @@ mod tests {
     #[test]
     fn short_names_and_nfc() {
         // A user name or local part of fewer than 3 characters is not looked for.
-        assert_eq!(check_password_policy("ab ivory rook takes", 10, "ab", "ab@example.org"), Ok(()));
+        assert_eq!(check_password_policy(pw("containsShortName"), 10, "ab", "ab@example.org"), Ok(()));
         // The length counts characters after NFC: "e" + combining acute is one character.
-        assert_eq!(normalize_password("cafe\u{301}"), "café");
+        assert_eq!(normalize_password(pw("decomposedShort")), "café");
         assert_eq!(check_password_policy(&"e\u{301}".repeat(10), 10, "", "").map_err(|v| v.reason), Ok(()));
         assert_eq!(
             check_password_policy(&"e\u{301}".repeat(9), 10, "", "").map_err(|v| v.reason),
@@ -188,8 +194,10 @@ mod tests {
         assert!(set.len() >= 1000, "size {}", set.len());
         assert!(set.iter().all(|p| *p == p.to_lowercase()));
         assert!(
-            is_common_password("123456") && is_common_password("Password") && is_common_password("iloveyou")
+            is_common_password(pw("listedDigits"))
+                && is_common_password(pw("listedCapitalised"))
+                && is_common_password(pw("listedWords"))
         );
-        assert!(!is_common_password("a very unusual passphrase 42"));
+        assert!(!is_common_password(pw("unlisted")));
     }
 }

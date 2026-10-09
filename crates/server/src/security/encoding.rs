@@ -5,20 +5,31 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 
+/// The panic message of a failed draw: the operating system cannot provide random bytes (it
+/// never fails on a supported Linux; the server must not go on without randomness).
+const RANDOM_FAILED: &str = "the operating system's random generator failed";
+
 /// Fills a buffer with bytes of the operating system's random generator.
 ///
 /// # Panics
 /// When the operating system cannot provide random bytes (it never fails on a supported Linux;
 /// the server must not go on without randomness).
 pub fn fill_random(buf: &mut [u8]) {
-    getrandom::fill(buf).expect("the operating system's random generator failed");
+    getrandom::fill(buf).expect(RANDOM_FAILED);
 }
 
 /// `N` bytes of the operating system's random generator (see [`fill_random`]).
 pub fn random_bytes<const N: usize>() -> [u8; N] {
     let mut b = [0u8; N];
-    fill_random(&mut b);
+    getrandom::fill(&mut b).expect(RANDOM_FAILED);
     b
+}
+
+/// `len` bytes of the operating system's random generator (see [`fill_random`]).
+pub fn random_vec(len: usize) -> Vec<u8> {
+    let mut v = vec![0u8; len];
+    getrandom::fill(&mut v).expect(RANDOM_FAILED);
+    v
 }
 
 /// Standard base64 without padding (`Buffer.toString('base64')` with the `=` stripped).

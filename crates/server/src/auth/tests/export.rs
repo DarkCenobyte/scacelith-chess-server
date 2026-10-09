@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use rusqlite::types::Value as SqlValue;
 use serde_json::{Value, json};
 
-use super::{DAY_MS, Harness, PW, link_in, sha256_hex, token_of};
+use super::{DAY_MS, Harness, link_in, pw, sha256_hex, token_of};
 use crate::http::testing::TestResponse;
 use crate::ids::{GameId, UserId};
 use crate::security::encoding::b64_url;
@@ -50,7 +50,7 @@ fn game(h: &Harness, id: GameId, white: (UserId, &str), black: (UserId, &str), r
 
 /// Turns two-step verification on: the secret (base32) and the recovery codes.
 async fn enable_mfa(h: &Harness, token: &str) -> (String, Vec<String>) {
-    let st = h.post_as(token, "/api/v1/account/mfa/totp/setup", json!({ "password": PW })).await;
+    let st = h.post_as(token, "/api/v1/account/mfa/totp/setup", json!({ "password": pw() })).await;
     let encoded = st.json()["secret"].as_str().unwrap().to_owned();
     let code = totp(&base32_decode(&encoded).unwrap(), h.now());
     let en = h.post_as(token, "/api/v1/account/mfa/totp/enable", json!({ "code": code })).await;
@@ -89,10 +89,11 @@ async fn the_document_format_account_sections_content_disposition_and_account_ex
     let h = Harness::with_env(&[("SERVER_NAME", "Club"), ("SERVER_PUBLIC_HOST", "chess.example.org")]).await;
     let u = h.create_user("alice").await;
     let bob = h.create_user("bob").await;
-    let token = h.login_with("alice", PW, json!({ "clientLabel": "Scacelith 1.4 (Windows)" })).await["token"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let token =
+        h.login_with("alice", pw(), json!({ "clientLabel": "Scacelith 1.4 (Windows)" })).await["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
     let (a, b) = ((u, "alice"), (bob, "bob"));
     let games = vec![
         game(&h, 11, a, b, status::WHITE_WINS),
@@ -136,7 +137,7 @@ async fn the_document_format_account_sections_content_disposition_and_account_ex
         .unwrap();
     h.auth.events().flush().await;
 
-    let r = export(&h, &token, json!({ "password": PW })).await;
+    let r = export(&h, &token, json!({ "password": pw() })).await;
     assert_eq!(r.status, 200, "{}", r.text());
     assert!(r.header("content-type").unwrap().starts_with("application/json"));
     assert_eq!(
@@ -218,26 +219,26 @@ async fn the_document_format_account_sections_content_disposition_and_account_ex
 async fn re_authentication_like_deletion_and_401_without_a_session() {
     let h = Harness::new().await;
     h.create_user("alice").await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     let r = export(&h, &token, json!({ "password": "nope nope nope" })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (403, json!("invalid_password")));
     let r = export(&h, &token, json!({})).await;
     assert_eq!((r.status, r.json()["error"].clone()), (400, json!("invalid_request")));
-    assert_eq!(h.post(EXPORT, json!({ "password": PW })).await.status, 401);
+    assert_eq!(h.post(EXPORT, json!({ "password": pw() })).await.status, 401);
 
     let (secret, codes) = enable_mfa(&h, &token).await;
     h.advance(30_000);
-    let r = export(&h, &token, json!({ "password": PW })).await;
+    let r = export(&h, &token, json!({ "password": pw() })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (403, json!("mfa_code_required")));
-    let r = export(&h, &token, json!({ "password": PW, "code": "000000" })).await;
+    let r = export(&h, &token, json!({ "password": pw(), "code": "000000" })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (403, json!("invalid_code")));
     // Four of the five attempts of the hour (account_export, a sliding hour) are used by now:
     // two hours later they no longer count.
     h.advance(2 * 3_600_000);
-    let r = export(&h, &token, json!({ "password": PW, "code": code_of(&h, &secret) })).await;
+    let r = export(&h, &token, json!({ "password": pw(), "code": code_of(&h, &secret) })).await;
     assert_eq!(r.status, 200, "{}", r.text());
     assert_eq!(r.json()["account"]["mfaEnabled"], true);
-    let r = export(&h, &token, json!({ "password": PW, "recoveryCode": codes[3] })).await;
+    let r = export(&h, &token, json!({ "password": pw(), "recoveryCode": codes[3] })).await;
     assert_eq!(r.status, 200, "{}", r.text());
 }
 
@@ -246,24 +247,24 @@ async fn rate_5_exports_per_hour_and_player_in_a_sliding_hour() {
     let h = Harness::new().await;
     h.create_user("alice").await;
     h.create_user("bob").await;
-    let a = h.token("alice", PW).await;
-    let b = h.token("bob", PW).await;
+    let a = h.token("alice", pw()).await;
+    let b = h.token("bob", pw()).await;
     for i in 0..5 {
-        assert_eq!(export(&h, &a, json!({ "password": PW })).await.status, 200, "export {i}");
+        assert_eq!(export(&h, &a, json!({ "password": pw() })).await.status, 200, "export {i}");
     }
     h.advance(60_000);
-    let r = export(&h, &a, json!({ "password": PW })).await;
+    let r = export(&h, &a, json!({ "password": pw() })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (429, json!("rate_limited")));
     assert!(r.header("retry-after").unwrap().parse::<u64>().unwrap() > 0);
-    assert_eq!(export(&h, &b, json!({ "password": PW })).await.status, 200, "per player");
+    assert_eq!(export(&h, &b, json!({ "password": pw() })).await.status, 200, "per player");
     h.advance(13 * 60_000);
     assert_eq!(
-        export(&h, &a, json!({ "password": PW })).await.status,
+        export(&h, &a, json!({ "password": pw() })).await.status,
         429,
         "a sliding hour, not a bucket refilled every 12 minutes"
     );
     h.advance(60 * 60_000);
-    assert_eq!(export(&h, &a, json!({ "password": PW })).await.status, 200, "again in the next hour");
+    assert_eq!(export(&h, &a, json!({ "password": pw() })).await.status, 200, "again in the next hour");
 }
 
 #[tokio::test]
@@ -271,7 +272,7 @@ async fn a_long_history_is_exported_whole_newest_first() {
     let h = Harness::new().await;
     let u = h.create_user("alice").await;
     let bob = h.create_user("bob").await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     const N: u64 = 1203;
     let records: Vec<GameRecord> = (1..=N)
         .map(|i| {
@@ -288,7 +289,7 @@ async fn a_long_history_is_exported_whole_newest_first() {
         })
         .collect();
     h.store.finish_batch(records).await.unwrap();
-    let r = export(&h, &token, json!({ "password": PW })).await;
+    let r = export(&h, &token, json!({ "password": pw() })).await;
     assert_eq!(r.status, 200, "{}", r.text());
     let d = r.json();
     let ids: Vec<u64> =
@@ -304,7 +305,7 @@ async fn a_long_history_is_exported_whole_newest_first() {
 #[tokio::test]
 async fn ip_addresses_only_those_of_the_account_holder_not_of_someone_who_typed_the_address_or_name() {
     let h = Harness::with_env(&[("AUTH_FAILURES_PER_ACCOUNT", "3")]).await;
-    let u = h.create_user_with("alice", Some("alice@example.com"), Some(PW), true).await;
+    let u = h.create_user_with("alice", Some("alice@example.com"), Some(pw()), true).await;
     const BOB: &str = "198.51.100.77";
     const ALICE: &str = "203.0.113.7";
     let post_from = |ip: &'static str, path: &'static str, body: Value| {
@@ -326,17 +327,17 @@ async fn ip_addresses_only_those_of_the_account_holder_not_of_someone_who_typed_
         assert_eq!(r.status, 401);
     }
     h.advance(3_600_000);
-    let sign_in = post_from(ALICE, "/api/v1/auth/login", json!({ "login": "alice", "password": PW })).await;
+    let sign_in = post_from(ALICE, "/api/v1/auth/login", json!({ "login": "alice", "password": pw() })).await;
     assert_eq!(sign_in.status, 200, "{}", sign_in.text());
     let token = sign_in.json()["token"].as_str().unwrap().to_owned();
     let as_alice = |path: &'static str, body: Value| {
         h.call_from(ALICE, http::Method::POST, path).bearer(&token).json(&body).send()
     };
-    let st = as_alice("/api/v1/account/mfa/totp/setup", json!({ "password": PW })).await;
+    let st = as_alice("/api/v1/account/mfa/totp/setup", json!({ "password": pw() })).await;
     let secret = st.json()["secret"].as_str().unwrap().to_owned();
     let en = as_alice("/api/v1/account/mfa/totp/enable", json!({ "code": code_of(&h, &secret) })).await;
     assert_eq!(en.status, 200);
-    let r = post_from(BOB, "/api/v1/auth/login", json!({ "login": "alice", "password": PW })).await;
+    let r = post_from(BOB, "/api/v1/auth/login", json!({ "login": "alice", "password": pw() })).await;
     let mfa_token = r.json()["mfaToken"].as_str().expect("an MFA step").to_owned();
     let r =
         post_from(BOB, "/api/v1/auth/login/mfa", json!({ "mfaToken": mfa_token, "code": "000000" })).await;
@@ -360,7 +361,7 @@ async fn ip_addresses_only_those_of_the_account_holder_not_of_someone_who_typed_
         ]
     );
 
-    let r = as_alice(EXPORT, json!({ "password": PW, "code": code_of(&h, &secret) })).await;
+    let r = as_alice(EXPORT, json!({ "password": pw(), "code": code_of(&h, &secret) })).await;
     assert_eq!(r.status, 200, "{}", r.text());
     assert!(!r.text().contains(BOB), "no IP address of another person");
     let d = r.json();
@@ -412,14 +413,17 @@ impl Forbidden {
 async fn an_export_never_holds_a_secret_the_anti_cheats_data_reports_against_the_player_or_a_moderators_identity()
  {
     let h = Harness::new().await;
-    let uid = h.create_user_with("Alice", Some("alice@example.org"), Some(PW), true).await;
-    let cheater = h.create_user_with("Mallory", Some("mallory@example.org"), Some(PW), true).await;
-    let rita = h.create_user_with("Rita_Reporter", Some("rita@example.org"), Some(PW), true).await;
-    let victim = h.create_user_with("Victor", Some("victor@example.org"), Some(PW), true).await;
+    let uid = h.create_user_with("Alice", Some("alice@example.org"), Some(pw()), true).await;
+    let cheater = h.create_user_with("Mallory", Some("mallory@example.org"), Some(pw()), true).await;
+    let rita = h.create_user_with("Rita_Reporter", Some("rita@example.org"), Some(pw()), true).await;
+    let victim = h.create_user_with("Victor", Some("victor@example.org"), Some(pw()), true).await;
 
     // Sessions: three logins, one of them signed out.
     let login = async |label: &str| {
-        h.login_with("Alice", PW, json!({ "clientLabel": label })).await["token"].as_str().unwrap().to_owned()
+        h.login_with("Alice", pw(), json!({ "clientLabel": label })).await["token"]
+            .as_str()
+            .unwrap()
+            .to_owned()
     };
     let token = login("desk").await;
     let laptop = login("laptop").await;
@@ -436,7 +440,7 @@ async fn an_export_never_holds_a_secret_the_anti_cheats_data_reports_against_the
     let reset_mail = mails.iter().find(|m| m.subject.contains("Reset")).expect("the reset mail");
     let reset_token = token_of(&link_in(&reset_mail.text).unwrap()).unwrap();
     let change =
-        json!({ "newEmail": "alice.new@example.org", "password": PW, "recoveryCode": recovery_codes[0] });
+        json!({ "newEmail": "alice.new@example.org", "password": pw(), "recoveryCode": recovery_codes[0] });
     let r = h.post_as(&token, "/api/v1/account/email", change).await;
     assert_eq!(r.status, 202, "{}", r.text());
     let mails = h.sent().await;
@@ -572,7 +576,7 @@ async fn an_export_never_holds_a_secret_the_anti_cheats_data_reports_against_the
     h.auth.events().flush().await;
 
     // The export.
-    let r = export(&h, &laptop, json!({ "password": PW, "code": code_of(&h, &secret) })).await;
+    let r = export(&h, &laptop, json!({ "password": pw(), "code": code_of(&h, &secret) })).await;
     assert_eq!(r.status, 200, "{}", r.text());
     let text = r.text().to_owned();
     let d = r.json();
@@ -667,7 +671,7 @@ async fn an_export_never_holds_a_secret_the_anti_cheats_data_reports_against_the
     for c in &recovery_codes {
         forbidden.add("recovery code", c.as_str());
     }
-    forbidden.add("password", PW);
+    forbidden.add("password", pw());
     // ...the anti-cheat's data and the reports against Alice...
     let integrity = h
         .store
@@ -754,10 +758,10 @@ async fn an_export_never_holds_a_secret_the_anti_cheats_data_reports_against_the
 #[tokio::test]
 async fn rating_refunds_and_the_outcomes_of_reports_never_tell_which_opponent_was_sanctioned() {
     let h = Harness::new().await;
-    let uid = h.create_user_with("Alice", Some("alice@example.org"), Some(PW), true).await;
-    let mallory = h.create_user_with("Mallory", Some("mallory@example.org"), Some(PW), true).await;
-    let victor = h.create_user_with("Victor", Some("victor@example.org"), Some(PW), true).await;
-    let token = h.token("Alice", PW).await;
+    let uid = h.create_user_with("Alice", Some("alice@example.org"), Some(pw()), true).await;
+    let mallory = h.create_user_with("Mallory", Some("mallory@example.org"), Some(pw()), true).await;
+    let victor = h.create_user_with("Victor", Some("victor@example.org"), Some(pw()), true).await;
+    let token = h.token("Alice", pw()).await;
     let (a, m, v) = ((uid, "Alice"), (mallory, "Mallory"), (victor, "Victor"));
     let lost_to_m = game(&h, 7_100_000_000_001, m, a, status::WHITE_WINS);
     let lost_to_v = game(&h, 7_100_000_000_002, v, a, status::WHITE_WINS);
@@ -825,7 +829,7 @@ async fn rating_refunds_and_the_outcomes_of_reports_never_tell_which_opponent_wa
     assert_eq!(points, 20);
     h.auth.events().flush().await;
 
-    let r = export(&h, &token, json!({ "password": PW })).await;
+    let r = export(&h, &token, json!({ "password": pw() })).await;
     assert_eq!(r.status, 200, "{}", r.text());
     let mut d = r.json();
     assert_eq!(d["games"]["total"], 3);
