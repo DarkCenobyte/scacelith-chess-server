@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: واجهة HTTPS API لخادم Scacelith
-  version: "0.9.0"
+  version: "0.9.1"
   summary: 'واجهة HTTPS API المشتركة بين كل خوادم Scacelith: الخادم الرسمي والخوادم المجتمعية.'
   description: |-
     يستجيب لواجهة HTTPS API هذه كلُّ خادم Scacelith، سواء الخادم الرسمي `caissa.scacelith.com` أو أي خادم مجتمعي. وتستخدمها اللعبة في كل ما يقع خارج المباراة نفسها: إنشاء الحساب وتسجيل الدخول (بما في ذلك المصادقة الثنائية وGoogle)، وصفحة الحساب، وسجل المباريات، وتنزيل ملفات PGN وصور GIF المتحركة للمباريات، والأجهزة المسجَّل الدخول منها، وتنزيل البيانات، وحذف الحساب، والبلاغات.
@@ -25,9 +25,14 @@ info:
     - **الحجم والوقت.** يقتصر الجسم على `HTTP_BODY_LIMIT` بايت (16,384 افتراضيًا؛ ولـ `POST /gif` حدّه الخاص البالغ 135,168 بايت): 413 `payload_too_large`. ويجب أن يصل خلال 10 ثوانٍ: 408 `request_timeout`. وبعد أيٍّ من الخطأين يغلق الخادم الاتصال.
     - **مخططات صارمة.** يُرفض الحقل الذي لا تعرفه نقطة النهاية، والحقل غير الموسوم بأنه اختياري مطلوب، وتُفحص الأنواع والأطوال. وأيّ إخفاق من هذه يكون الرد عليه 400 `invalid_request`، مع `field` الذي يسمّي الحقل (بصيغة نقطية للحقل المتداخل، مثل `pow.nonce`). ولا يجوز أن تحتوي السلاسل النصية على محارف تحكّم. وتُحسب الأطوال بوحدات ترميز UTF-16، لذا يُحسب المحرف الواقع خارج المستوى متعدد اللغات الأساسي (كالرموز التعبيرية) مرتين. والجسم الذي ليس JSON يكون الرد عليه 400 `invalid_json`. أما `POST /gif` و`POST /reports` فتفحصان جسميهما بنفسيهما (راجع كل نقطة نهاية).
     - **سلاسل الاستعلام.** يُعتدّ بأول ظهور للمعامل، وتُتجاهل المعاملات غير المعروفة، ويُفكّ `+` إلى مسافة: فنقاط النهاية التي تتلقى فئة نظام وقت تقبل `3%2B2` و`3+2` كليهما.
-    - **الطرق.** `HEAD` هو `GET` من دون الجسم. ويكون الرد على `OPTIONS` لمسار موجود 204 مع ترويسة `Allow`. وأي طريقة أخرى لا يدعمها المسار يكون الرد عليها 405 `method_not_allowed` مع `Allow`.
+    - **الطرق.** `HEAD` هو `GET` من دون الجسم. ويكون الرد على `OPTIONS` لمسار موجود 204 مع ترويسة `Allow` (ومع ترويسات الطلب التمهيدي لـ CORS، انظر أدناه). وأي طريقة أخرى لا يدعمها المسار يكون الرد عليها 405 `method_not_allowed` مع `Allow`.
     - **هدف الطلب.** لا يجوز أن يتجاوز 4096 محرفًا (414 `uri_too_long`). والطلب الذي يتعذّر تحليله أصلًا، أو الذي يكون رأسه كبيرًا جدًا أو يصل ببطء شديد، يتلقى ردًا فارغًا بالحالة 400 أو 431 أو 408 ويُغلق الاتصال.
-    - **بلا CORS.** تخدم الواجهة اللعبةَ لا صفحات الويب. لا تُرسَل أي ترويسة `Access-Control-*` أبدًا، فلا تستطيع صفحة ويب قراءة الرد؛ ولأن الواجهة لا تقبل إلا أجسام JSON، فإن أي كتابة عابرة للمواقع تحتاج إلى طلب تمهيدي، وهذا الطلب التمهيدي يفشل.
+    - **CORS: قائمة سماح، معطَّلة افتراضيًا.** تخدم الواجهة اللعبةَ، وهي لا ترسل `Origin`. وحين تكون `CORS_ORIGINS` فارغة (وهي القيمة الافتراضية) لا تُرسَل أي ترويسة `Access-Control-*` أبدًا، فلا تستطيع أي صفحة ويب قراءة أي رد. وتسرد `CORS_ORIGINS` أصول الويب التي يُسمح لصفحاتها باستدعاء الواجهة من متصفح، كلٌّ منها تمامًا كما ترسله المتصفحات في `Origin`: `https://host` أو `https://host:port`، بأحرف صغيرة، بلا مسار ولا شرطة مائلة في آخره ولا المنفذ الافتراضي؛ و`http://` فقط لـ `localhost` و`127.0.0.1` و`[::1]` (التطوير المحلي)؛ ولا محارف بدل. ويضبط الخادم الرسمي `CORS_ORIGINS=https://scacelith.com,https://www.scacelith.com` لموقعه على الويب. وعندئذ:
+      - كل رد على مسار تحت `/api/v1` ما عدا نقاط نهاية فحص السلامة، ناجحًا كان أو خطأً (بما في ذلك 429 طبقة الحدّ حسب العنوان)، يحمل `Vary: Origin`. وحين يطابق `Origin` الطلب بايتًا ببايت أحد الأصول المدرجة، يحمل الرد أيضًا `Access-Control-Allow-Origin: <that origin>`، ويحمل كذلك `Access-Control-Expose-Headers: Retry-After, Content-Disposition` إلا في الرد على طلب تمهيدي، كي تقرأ الصفحة رموز الأخطاء و`Retry-After` وأسماء ملفات تنزيلات PGN وGIF.
+      - الطلب التمهيدي (`OPTIONS` مع `Access-Control-Request-Method`) من أصل مدرج على مسار موجود يكون الرد عليه 204، بلا جسم، مع `Allow` و`Access-Control-Allow-Origin` و`Access-Control-Allow-Methods` (طرق `Allow`) و`Access-Control-Allow-Headers: Authorization, Content-Type` و`Access-Control-Max-Age: 600` و`Vary: Origin`. ولا يحتاج إلى رمز مميَّز، ولا يُحتسب من رصيد أي حساب ولا من أي حدّ لنقطة نهاية؛ لكنه، مثل أي طلب، يأخذ رمزًا من طبقة الحدّ حسب العنوان. ويعيد المتصفح استخدام الطلب التمهيدي مدة 10 دقائق، لكن لعنوان URL ذاته فقط، بما في ذلك سلسلة الاستعلام. أما الطلب الذي لا يحمل `Authorization` ولا جسم JSON، مثل `GET /info` أو `GET /leaderboard`، فلا يحتاج إلى طلب تمهيدي.
+      - وأي رد آخر على طلب تمهيدي هو طلب تمهيدي فاشل، حتى مع ترويسات CORS: 404 لمسار غير موجود، أو 429 طبقة الحدّ حسب العنوان. وعندئذ لا يرسل المتصفح الطلب، وترى الصفحة خطأ شبكة، من دون الرد ومن دون `Retry-After` الخاص به.
+      - لا تُرسَل `Access-Control-Allow-Credentials` أبدًا، ولا `Access-Control-Allow-Origin: *`: فالصفحة ترسل الرمز المميَّز لجلستها في `Authorization: Bearer`، كما تفعل اللعبة، والواجهة لا تضبط أي ملف تعريف ارتباط. ولا تحمل صفحات HTML ولا نقاط نهاية فحص السلامة ولا الردود الفارغة على الطلبات التي تتعذر قراءتها أي ترويسة CORS. ولا يستخدم WebSocket آلية CORS: إذ تسرد `WS_ALLOWED_ORIGINS` الصفحات التي يُسمح لها بفتحه.
+      - صفحة الأصل غير المدرج لا تقرأ شيئًا، ولا تُرسَل كتاباتها العابرة للمواقع أبدًا: فأجسام JSON و`Authorization` تتطلب طلبًا تمهيديًا، لا يحمل الرد عليه `Access-Control-Allow-Origin` لذلك الأصل. وتبقى `Cross-Origin-Resource-Policy: same-origin` على كل رد: فهي لا تنطبق إلا على طلبات `no-cors` (موقع آخر يضمّن ردًا)، ولا تنطبق أبدًا على طلبات `cors` لصفحة مدرجة.
 
     ## الردود والأخطاء
 
@@ -60,7 +65,7 @@ info:
     | 429 | `rate_limited` | حدّ معدّل (انظر أدناه): `retryAfter` مع ترويسة `Retry-After`. |
     | 500 | `internal_error` | إخفاق غير متوقع. يسجّله الخادم. |
     | 503 | `timeout` | لم يردّ الخادم خلال 30 ثانية (60 ثانية للتصدير، و45 ثانية لصور GIF مع الإعدادات الافتراضية). |
-    | 503 | `server_busy` | وجد بحثٌ عن جلسة أو تعديلٌ على حساب قاعدةَ البيانات مقفلة (`retryAfter` 1)، أو أن طابور تجزئة كلمات المرور ممتلئ (انظر أدناه). |
+    | 503 | `server_busy` | وجد بحثٌ عن جلسة أو تعديلٌ على حساب قاعدةَ البيانات مقفلة (`retryAfter` 1)، أو أن طابور تجزئة كلمات المرور ممتلئ (انظر أدناه). وكذلك، لطلب `POST` أو `PUT` أو `PATCH` أو `DELETE`، لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي: لم يُنفَّذ الطلب، ولم تأخذ حدود معدله شيئًا (`retryAfter` من 2 إلى 5). |
 
     تردّ نقاط نهاية القراءة (سجل المباريات، والمباريات، واللاعبون، ولوحة المتصدرين) ونقطة نهاية التصدير بالخطأ 503 `busy` مع `retryAfter: 1` عندما تظل قاعدة البيانات مقفلة.
 
@@ -85,7 +90,7 @@ info:
     - **الجلسة المطلوبة.** غياب الترويسة يكون الرد عليه 401 `unauthorized` مع `WWW-Authenticate: Bearer realm="scacelith"`. والرمز المميَّز غير الصالح يكون الرد عليه 401 `invalid_token` مع `WWW-Authenticate: Bearer realm="scacelith", error="invalid_token"`. وعلى العميل أن ينسى الرمز المميَّز الذي يتلقى `invalid_token` وأن يسجّل الدخول من جديد.
     - **الجلسة الاختيارية.** الجلسة اختيارية في `GET /games/{id}` و`GET /games/{id}/pgn` و`GET /players/{username}` و`GET /players/{username}/games`. فمن دون الترويسة تردّ هذه النقاط بالعرض العام؛ وإذا أُرسلت الترويسة، فيجب أن يكون رمزها المميَّز صالحًا.
     - **مدة الصلاحية.** تنتهي الجلسة عند أسبق الأجلين: `SESSION_MAX_DAYS` (90) يومًا بعد تسجيل الدخول (وهذا هو `expiresAt`)، و`SESSION_IDLE_DAYS` (30) يومًا من دون استخدام. وكل استخدام يؤخّر حدّ الخمول؛ ويكتب الخادم القيمة الجديدة مرة كل 5 دقائق على الأكثر. ويحتفظ الحساب بـ `MAX_SESSIONS_PER_USER` (10) جلسات على الأكثر: فتسجيل دخول جديد يُبطل أقدم الجلسات الزائدة على هذا العدد.
-    - **الإبطال.** يُبطل تسجيلُ الخروج (`POST /auth/logout` و`POST /auth/logout-all` و`DELETE /auth/sessions/{id}`) الجلسات؛ وكذلك يفعل تغيير كلمة المرور (الجلسات الأخرى)، وإعادة تعيين كلمة المرور وحذف الحساب (كل الجلسات)، والمسؤول. ويسري الإبطال عبر الواجهة فورًا، ويُغلق WebSocket الذي فُتح بجلسة مُبطَلة. ويخزّن الخادم نتائج البحث عن الجلسات مؤقتًا مدة 30 ثانية، لذا فإن الإبطال بأمر الإدارة، وهو عملية منفصلة، يسري خلال 30 ثانية.
+    - **الإبطال.** يُبطل تسجيلُ الخروج (`POST /auth/logout` و`POST /auth/logout-all` و`DELETE /auth/sessions/{id}`) الجلسات؛ وكذلك يفعل تغيير كلمة المرور (الجلسات الأخرى)، وإعادة تعيين كلمة المرور وحذف الحساب (كل الجلسات)، والمسؤول. ويسري الإبطال عبر الواجهة فورًا، ويُغلق WebSocket الذي فُتح بجلسة مُبطَلة. ويجري الإبطال عند تغيير كلمة المرور أو إعادة تعيينها وعند حذف الحساب في المعاملة نفسها التي يجري فيها التغيير ذاته: فإذا فشلت إحداها، لم تُبطَل أي جلسة ولم يتغير أي شيء آخر كذلك. ويخزّن الخادم نتائج البحث عن الجلسات مؤقتًا مدة 30 ثانية، لذا فإن الإبطال بأمر الإدارة، وهو عملية منفصلة، يسري خلال 30 ثانية.
     - **النطاق.** ينتمي الرمز المميَّز إلى خادم واحد، ويفتح WebSocket الخاص به أيضًا. لا ترسله أبدًا إلى خادم آخر.
 
     ## حدود المعدّل وأشكال التقييد الأخرى
@@ -123,7 +128,7 @@ info:
 
     ليس لـ `GET /info` و`GET /leaderboard` حدّ خاص بهما: لا تنطبق عليهما إلا طبقة الحدّ حسب العنوان. ونقطة النهاية ذات الحدود المتعددة تفحصها بالترتيب الوارد في وصفها.
 
-    يعالج الخادم الطلب بهذا الترتيب: طبقة الحدّ حسب العنوان، ثم نقاط نهاية فحص السلامة؛ مطابقة نقطة النهاية؛ المصادقة؛ رصيد الحساب، إذا كان الطلب يحمل جلسة؛ حدود نقطة النهاية؛ الجسم؛ نقطة النهاية نفسها (لا تأخذ نقاط نهاية GIF حدود الرسم إلا حين تكون لديها صورة GIF عليها رسمها). وبذلك فإن الطلب المرفوض بسبب رمزه المميَّز لا يستهلك شيئًا من رموز نقطة النهاية، أما الطلب ذو الجسم غير الصالح فيستهلكها.
+    يعالج الخادم الطلب بهذا الترتيب: طبقة الحدّ حسب العنوان، ثم نقاط نهاية فحص السلامة؛ مطابقة نقطة النهاية؛ فحص الكتابات المنتظرة في قاعدة البيانات لطلبات `POST` و`PUT` و`PATCH` و`DELETE` (503 `server_busy`)؛ المصادقة؛ رصيد الحساب، إذا كان الطلب يحمل جلسة؛ حدود نقطة النهاية؛ الجسم؛ نقطة النهاية نفسها (لا تأخذ نقاط نهاية GIF حدود الرسم إلا حين تكون لديها صورة GIF عليها رسمها). وبذلك فإن الطلب المرفوض بسبب رمزه المميَّز لا يستهلك شيئًا من رموز نقطة النهاية، أما الطلب ذو الجسم غير الصالح فيستهلكها.
 
     أشكال تقييد أخرى، تردّ بها نقاط النهاية نفسها:
 
@@ -156,7 +161,7 @@ info:
 
     | الحالة | `error` | متى |
     |---|---|---|
-    | 403 | `invalid_password` | كلمة مرور خاطئة. |
+    | 403 | `invalid_password` | كلمة مرور خاطئة، أو أن كلمة المرور أُعيد تعيينها أو غُيِّرت أثناء تنفيذ الطلب (لم يتغير شيء). |
     | 403 | `mfa_code_required` | المصادقة الثنائية مفعّلة ولم يُرسَل `code` ولا `recoveryCode`. |
     | 403 | `invalid_code` | رمز خاطئ أو مستخدَم من قبل. |
     | 400 | `password_not_set` | حساب يعتمد على Google وحده ليست له كلمة مرور بعد («نسيت كلمة المرور» يعيّن له واحدة). |
@@ -256,7 +261,7 @@ tags:
     description: |-
       سجلات المباريات بنقلاتها وساعاتها، وملفات PGN الخاصة بها.
 
-      **رموز المباريات.** `status`: 1 `WhiteWins`، 2 `BlackWins`، 3 `Draw`، 4 `Aborted` (لا تُخزَّن إلا المباريات المنتهية). `result`: `1-0` أو `0-1` أو `1/2-1/2` أو `*` (ملغاة). `reason`، مع اسمه (`termination`) والكلمات التي يُختم بها نص النقلات في ملف PGN؛ والرمزان 7 و21 تعادلان (اللاعب الذي نفد وقته أو ترك المباراة كان يواجه خصمًا لا يستطيع الإماتة)، ولا ينهي الخادم أي مباراة بالرمزين 4 و13 (فهما من القائمة المشتركة للأسباب):
+      **رموز المباريات.** `status`: 1 `WhiteWins`، 2 `BlackWins`، 3 `Draw`، 4 `Aborted` (لا تُخزَّن إلا المباريات المنتهية). `result`: `1-0` أو `0-1` أو `1/2-1/2` أو `*` (ملغاة). `reason`، مع اسمه (`termination`) والكلمات التي يُختم بها نص النقلات في ملف PGN؛ والرموز 7 و14 و21 تعادلات (اللاعب الذي نفد وقته أو استسلم أو ترك المباراة كان يواجه خصمًا لا يستطيع الإماتة: FIDE 6.9 و5.1.2؛ ويعطي `DESIGN.md` 6.3 القاعدة)، ولا ينهي الخادم أي مباراة بالرمزين 4 و13 (فهما من القائمة المشتركة للأسباب):
 
       | الرمز | `termination` | الكلمات في ملف PGN |
       |---|---|---|
@@ -273,6 +278,7 @@ tags:
       | 11 | `FiftyMoveClaim` | 50-move rule (claimed) (قاعدة الـ 50 نقلة بمطالبة) |
       | 12 | `Agreement` | Draw by agreement (تعادل بالاتفاق) |
       | 13 | `IllegalMovesVsInsufficient` | Second illegal move, but the opponent cannot checkmate (نقلة غير قانونية ثانية، لكن الخصم لا يستطيع الإماتة) |
+      | 14 | `ResignationVsInsufficient` | Resignation, but the opponent cannot checkmate (استسلام، لكن الخصم لا يستطيع الإماتة) |
       | 20 | `Abandonment` | Abandoned (disconnected for too long) (مغادرة المباراة بانقطاع الاتصال مدة طويلة جدًا) |
       | 21 | `AbandonmentVsInsufficient` | Abandoned, but the opponent cannot checkmate (مغادرة المباراة، لكن الخصم لا يستطيع الإماتة) |
       | 22 | `Aborted` | Game aborted (أُلغيت المباراة) |
@@ -280,6 +286,8 @@ tags:
       | 24 | `Forfeit` | Forfeit (fair play violation) (خسارة بقرار لانتهاك قواعد اللعب النظيف) |
       | 25 | `ServerAborted` | Aborted by the server (ألغاها الخادم) |
       | 26 | `BothDisconnected` | Aborted: both players disconnected (أُلغيت: انقطع اتصال اللاعبَين كليهما) |
+
+      الرمز 14 جديد في الإصدار الفرعي 1 من البروتوكول: وعلى العميل المكتوب قبله أن يعرض الرمز غير المعروف كنهاية عادية للمباراة مع `result` الخاص بها.
   - name: gifs
     x-displayName: صور GIF المتحركة
     description: |-
@@ -467,7 +475,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy` (طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /auth/login:
     post:
       operationId: logIn
@@ -550,7 +558,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy` (طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /auth/login/mfa:
     post:
       operationId: logInWithSecondFactor
@@ -621,7 +629,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` مع `retryAfter: 1`: بقيت قاعدة البيانات مقفلة (بعد خطوة ربط حساب Google، لم يُربط شيء: ابدأ من جديد من اللعبة). `timeout`.'
+          description: '`server_busy` مع `retryAfter: 1`: بقيت قاعدة البيانات مقفلة (بعد خطوة ربط حساب Google، لم يُربط شيء: ابدأ من جديد من اللعبة). `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /auth/logout:
     post:
       operationId: logOut
@@ -666,7 +674,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /auth/logout-all:
     post:
       operationId: logOutEverywhere
@@ -711,7 +719,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /auth/verify-email/resend:
     post:
       operationId: resendVerificationEmail
@@ -762,7 +770,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` مع `retryAfter: 1`: بقيت قاعدة البيانات مقفلة أثناء البحث عن الحساب (تجديد طلب التسجيل المنتظر يتم بقدر الإمكان ولا يُفشل الطلب أبدًا). `timeout`.'
+          description: '`server_busy` مع `retryAfter: 1`: بقيت قاعدة البيانات مقفلة أثناء البحث عن الحساب (تجديد طلب التسجيل المنتظر يتم بقدر الإمكان ولا يُفشل الطلب أبدًا). `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /auth/password/forgot:
     post:
       operationId: requestPasswordReset
@@ -813,7 +821,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` مع `retryAfter: 1`: بقيت قاعدة البيانات مقفلة. `timeout`.'
+          description: '`server_busy` مع `retryAfter: 1`: بقيت قاعدة البيانات مقفلة. `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /auth/password/reset:
     post:
       operationId: resetPassword
@@ -823,7 +831,7 @@ paths:
       description: |-
         يعيّن كلمة مرور جديدة بالرمز المميَّز لرابط إعادة التعيين (والصفحة `/reset-password` تفعل الشيء نفسه). وتخضع كلمة المرور الجديدة لقواعد التسجيل.
 
-        تُبطل إعادة التعيين كل الجلسات وتلغي أي تغيير معلّق للبريد الإلكتروني؛ وتتوقف روابط إعادة التعيين الأخرى للحساب عن العمل؛ ويُعدّ العنوان مؤكَّدًا (فقد أثبته الرابط)؛ ويتلقى صاحب الحساب رسالة. ولا تُمَسّ المصادقة الثنائية. وبعد خطأ في طابور تجزئة كلمات المرور أو 503، يبقى الرابط صالحًا.
+        لإعادة التعيين هذه الآثار، في معاملة واحدة (كلها أو لا شيء منها): تُبطل كل الجلسات وتلغي أي تغيير معلّق للبريد الإلكتروني؛ وتتوقف روابط إعادة التعيين الأخرى للحساب عن العمل؛ ويُعدّ العنوان مؤكَّدًا (فقد أثبته الرابط)؛ ويتلقى صاحب الحساب رسالة. ولا تُمَسّ المصادقة الثنائية. وبعد خطأ في طابور تجزئة كلمات المرور أو 503 أو 500، لا يكون قد تغيّر شيء: تبقى كلمة المرور القديمة والجلسات، ويبقى الرابط صالحًا.
 
         **الحدود:** `auth`، ثم `auth_reset` (10 في الساعة لكل عميل، و30 لكل IPv6 /48، مشترك مع الصفحة: فكل محاولة تجزّئ كلمة مرور).
       security: []
@@ -871,7 +879,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`: طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة (`retryAfter: 1`، ولم يتغير شيء). `timeout`.'
+          description: '`server_busy`: طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة (`retryAfter: 1`، ولم يتغير شيء). `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /auth/sso/google/start:
     post:
       operationId: startGoogleSignIn
@@ -929,7 +937,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /auth/sso/google/finish:
     post:
       operationId: finishGoogleSignIn
@@ -1039,7 +1047,7 @@ paths:
           $ref: '#/components/responses/BadGateway'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /auth/sso/google/link:
     post:
       operationId: linkGoogleAccount
@@ -1107,7 +1115,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`: طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة (`retryAfter: 1`، ولم يُربط شيء). `timeout`.'
+          description: '`server_busy`: طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة (`retryAfter: 1`، ولم يُربط شيء). `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /auth/sso/complete:
     post:
       operationId: completeGoogleSignUp
@@ -1169,7 +1177,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /auth/sessions:
     get:
       operationId: listSessions
@@ -1272,7 +1280,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /account/me:
     get:
       operationId: getAccount
@@ -1389,7 +1397,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /account/password:
     post:
       operationId: changePassword
@@ -1399,7 +1407,7 @@ paths:
       description: |-
         يغيّر كلمة المرور. وتلزم كلمة المرور الحالية، لكن لا يلزم عامل ثانٍ، حتى إن كانت المصادقة الثنائية مفعّلة. وتخضع كلمة المرور الجديدة لقواعد التسجيل (وتُفحص بعد كلمة المرور الحالية).
 
-        يُبطل التغيير كل الجلسات الأخرى (وتبقى هذه الجلسة مسجَّلة الدخول)، ويلغي أي تغيير معلّق للبريد الإلكتروني، ويوقف عمل روابط إعادة تعيين كلمة المرور الخاصة بالحساب، ويرسل رسالة إلى صاحب الحساب.
+        للتغيير هذه الآثار، في معاملة واحدة (كلها أو لا شيء منها): يُبطل كل الجلسات الأخرى (وتبقى هذه الجلسة مسجَّلة الدخول)، ويلغي أي تغيير معلّق للبريد الإلكتروني، ويوقف عمل روابط إعادة تعيين كلمة المرور الخاصة بالحساب، ويرسل رسالة إلى صاحب الحساب.
 
         **إعادة المصادقة:** كلمة المرور فقط. **الحدود:** `reauth`، ثم `reauth_user`.
       security:
@@ -1453,7 +1461,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy`: طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة (`retryAfter: 1`، ولم يتغير شيء). `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /account/mfa/totp/setup:
     post:
       operationId: startTotpSetup
@@ -1516,7 +1524,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy` (طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /account/mfa/totp/enable:
     post:
       operationId: enableTotp
@@ -1594,7 +1602,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /account/mfa/totp/disable:
     post:
       operationId: disableTotp
@@ -1659,7 +1667,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy` (طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /account/mfa/recovery-codes:
     post:
       operationId: regenerateRecoveryCodes
@@ -1734,7 +1742,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy` (طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /account/email:
     post:
       operationId: changeEmail
@@ -1823,7 +1831,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`: طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة (`retryAfter: 1`: لم يتغير شيء، ويمكن إرسال الطلب نفسه مرة أخرى). `timeout`.'
+          description: '`server_busy`: طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة (`retryAfter: 1`: لم يتغير شيء، ويمكن إرسال الطلب نفسه مرة أخرى). `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /account/export:
     post:
       operationId: exportAccountData
@@ -1977,7 +1985,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (بقيت قاعدة البيانات مقفلة، مع ترويسة `Retry-After: 1`)، `server_busy` (طابور تجزئة كلمات المرور)، `timeout` (60 ثانية).'
+          description: '`busy` (بقيت قاعدة البيانات مقفلة، مع ترويسة `Retry-After: 1`)، `server_busy` (طابور تجزئة كلمات المرور)، `timeout` (60 ثانية). وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /account/delete:
     post:
       operationId: deleteAccount
@@ -2044,7 +2052,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy` (طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /account/games:
     get:
       operationId: listAccountGames
@@ -2465,7 +2473,7 @@ paths:
           description: '`render_failed`: تعذّر إنشاء صورة GIF (ويسجّل الخادم السبب). `internal_error`.'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` مع `retryAfter` (من 3 إلى 10 ثوانٍ) و`Retry-After`: طابور الرسم ممتلئ، أو انتظرت صورة GIF طويلًا جدًا خيطًا متاحًا؛ وتُعاد كل رموز الحدود التي أخذها الطلب. `timeout`.'
+          description: '`server_busy` مع `retryAfter` (من 3 إلى 10 ثوانٍ) و`Retry-After`: طابور الرسم ممتلئ، أو انتظرت صورة GIF طويلًا جدًا خيطًا متاحًا؛ وتُعاد كل رموز الحدود التي أخذها الطلب. `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /players/{username}:
     get:
       operationId: getPlayer
@@ -2607,7 +2615,7 @@ paths:
         - leaderboard
       summary: الحصول على أفضل اللاعبين في فئة
       description: |-
-        أفضل 100 سجل تصنيف في فئة رسمية، من بين السجلات التي تضم `minGames` (`PROVISIONAL_GAMES`) مباراة محتسبة على الأقل، مع استبعاد الحسابات المحذوفة والغشاشين المؤكَّد غشهم. ويعيد الخادم حساب كل لوحة مرة كل 10 ثوانٍ على الأكثر؛ ويبيّن `updatedAt` متى.
+        أفضل 100 سجل تصنيف في فئة رسمية، من بين السجلات التي تضم `minGames` (`PROVISIONAL_GAMES`) مباراة محتسبة على الأقل، مع استبعاد الحسابات المحذوفة والغشاشين المؤكَّد غشهم. ويعيد الخادم حساب كل لوحة مرة كل 10 ثوانٍ على الأكثر؛ ويبيّن `updatedAt` متى. ولا يجري إلا حساب واحد لكل فئة في الوقت نفسه: وفي أثنائه تتلقى الطلبات الأخرى القائمة السابقة، أو تنتظر الحساب حين لا توجد قائمة بعد.
 
         **الحدود:** طبقة الحدّ حسب العنوان فقط.
       security: []
@@ -2732,7 +2740,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (وجد البحث عن الجلسة قاعدة البيانات مقفلة)، `timeout`.'
+          description: '`server_busy` (وجد البحث عن الجلسة قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5: لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، ولم يُنفَّذ الطلب.'
   /verify-email:
     servers:
       - url: https://caissa.scacelith.com
@@ -2822,7 +2830,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'بقيت قاعدة البيانات مقفلة (`Retry-After: 1`): لم يتغير شيء والرابط ما زال يعمل. وكذلك عند انتهاء مهلة معالج الطلب.'
+          description: 'بقيت قاعدة البيانات مقفلة (`Retry-After: 1`) أو لديها كتابات منتظرة أكثر مما ينبغي (`Retry-After` من 2 إلى 5): لم يتغير شيء والرابط ما زال يعمل. وكذلك عند انتهاء مهلة معالج الطلب.'
   /reset-password:
     servers:
       - url: https://caissa.scacelith.com
@@ -2870,7 +2878,7 @@ paths:
         - pages
       summary: تعيين كلمة مرور جديدة من نموذج إعادة التعيين
       description: |-
-        نموذج صفحة إعادة التعيين؛ يفعل ما يفعله `POST /auth/password/reset`: يُسجَّل خروج كل الأجهزة، ويُلغى أي تغيير معلّق للبريد الإلكتروني، وتتوقف روابط إعادة التعيين الأخرى عن العمل، ويُعدّ العنوان مؤكَّدًا، ويتلقى صاحب الحساب رسالة.
+        نموذج صفحة إعادة التعيين؛ يفعل ما يفعله `POST /auth/password/reset`، في معاملة واحدة: يُسجَّل خروج كل الأجهزة، ويُلغى أي تغيير معلّق للبريد الإلكتروني، وتتوقف روابط إعادة التعيين الأخرى عن العمل، ويُعدّ العنوان مؤكَّدًا، ويتلقى صاحب الحساب رسالة.
 
         يُفحص الرابط أولًا، ثم تطابق كلمتي المرور، ثم قواعد كلمة المرور. وعندما يكون الخادم مشغولًا، يعود النموذج مع `Retry-After` ويبقى الرابط صالحًا.
 
@@ -2915,7 +2923,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: النموذج من جديد مع `Retry-After` عندما يكون الخادم مشغولًا (طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة)؛ ويبقى الرابط صالحًا. وكذلك عند انتهاء مهلة معالج الطلب.
+          description: 'النموذج من جديد مع `Retry-After` عندما يكون الخادم مشغولًا (طابور تجزئة كلمات المرور، أو بقيت قاعدة البيانات مقفلة)؛ ويبقى الرابط صالحًا. وحين يكون لدى قاعدة البيانات كتابات منتظرة أكثر مما ينبغي، تظهر بدلًا من ذلك صفحة "Server error" (خطأ في الخادم) مع `Retry-After` (من 2 إلى 5): لم يُنفَّذ شيء ويبقى الرابط صالحًا. وكذلك عند انتهاء مهلة معالج الطلب.'
   /confirm-email-change:
     servers:
       - url: https://caissa.scacelith.com
@@ -3005,7 +3013,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'بقيت قاعدة البيانات مقفلة (`Retry-After: 1`): لم يتغير شيء والرابط ما زال يعمل. وكذلك عند انتهاء مهلة معالج الطلب.'
+          description: 'بقيت قاعدة البيانات مقفلة (`Retry-After: 1`) أو لديها كتابات منتظرة أكثر مما ينبغي (`Retry-After` من 2 إلى 5): لم يتغير شيء والرابط ما زال يعمل. وكذلك عند انتهاء مهلة معالج الطلب.'
   /healthz:
     servers:
       - url: https://caissa.scacelith.com
@@ -3846,7 +3854,7 @@ components:
         protocol:
           min: 1
           max: 1
-          schema: 97842216
+          schema: 1852590473
           subprotocol: scacelith.rt1
         wsPort: 443
         wsPath: /ws
@@ -4709,6 +4717,7 @@ components:
         - FiftyMoveClaim
         - Agreement
         - IllegalMovesVsInsufficient
+        - ResignationVsInsufficient
         - Abandonment
         - AbandonmentVsInsufficient
         - Aborted

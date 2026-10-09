@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: Scacelith 伺服器 HTTPS API
-  version: "0.9.0"
+  version: "0.9.1"
   summary: 每一台 Scacelith 伺服器（官方伺服器與社群伺服器）共用的 HTTPS API。
   description: |-
     每一台 Scacelith 伺服器，包括官方的 `caissa.scacelith.com` 與任何社群伺服器，都提供這個 HTTPS API。對局本身以外的一切功能，遊戲都透過它進行：註冊與登入（含雙重驗證與 Google 登入）、帳號頁面、對局紀錄、PGN 下載與對局的 GIF 動畫、已登入的裝置、資料下載、刪除帳號，以及檢舉。
@@ -25,9 +25,14 @@ info:
     - **大小與時間**：本文上限為 `HTTP_BODY_LIMIT` 位元組（預設為 16,384；`POST /gif` 另有 135,168 位元組的上限），超過時回應 413 `payload_too_large`。本文必須在 10 秒內送達，否則回應 408 `request_timeout`。發生這兩種錯誤後，伺服器都會關閉連線。
     - **嚴格的結構描述**：端點不認得的欄位會被拒絕，未標示為選用的欄位皆為必填，型別與長度也都會檢查。任何一項不符都會回應 400 `invalid_request`，並以 `field` 指出該欄位（巢狀欄位以點號連接，例如 `pow.nonce`）。字串不得包含控制字元。長度以 UTF-16 程式碼單位計算，因此基本多語言平面以外的字元（例如表情符號）算作兩個。不是 JSON 的本文會回應 400 `invalid_json`。`POST /gif` 與 `POST /reports` 會自行檢查本文（請見各端點的說明）。
     - **查詢字串**：同一個參數只採用第一次出現的值，未知的參數會被忽略，`+` 會解碼為空格：因此接受時限類別的端點，`3%2B2` 與 `3+2` 兩種寫法都接受。
-    - **方法**：`HEAD` 即不含本文的 `GET`。對既有路徑使用 `OPTIONS` 會回應 204，並附上 `Allow` 標頭。該路徑不支援的其他任何方法都會回應 405 `method_not_allowed`，並附上 `Allow`。
+    - **方法**：`HEAD` 即不含本文的 `GET`。對既有路徑使用 `OPTIONS` 會回應 204，並附上 `Allow` 標頭（以及 CORS 預檢要求的標頭，請見下文）。該路徑不支援的其他任何方法都會回應 405 `method_not_allowed`，並附上 `Allow`。
     - **要求目標**：長度不得超過 4096 個字元（414 `uri_too_long`）。完全無法剖析的要求，或是標頭過大、送達過慢的要求，會得到內容為空的 400、431 或 408 回應，並且連線會被關閉。
-    - **不支援 CORS**：本 API 服務的是遊戲，而不是網頁。伺服器從不傳送任何 `Access-Control-*` 標頭，因此網頁無法讀取回應；又因為只接受 JSON 本文，跨網站的寫入必須先經過預檢要求，而預檢一定會失敗。
+    - **CORS（允許清單，預設關閉）**：本 API 服務的是遊戲，而遊戲不會傳送 `Origin`。`CORS_ORIGINS` 為空（預設值）時，伺服器從不傳送任何 `Access-Control-*` 標頭，因此任何網頁都無法讀取回應。`CORS_ORIGINS` 列出哪些 Web 來源的網頁可以從瀏覽器呼叫本 API，每一項都必須與瀏覽器在 `Origin` 中傳送的形式完全相同：`https://host` 或 `https://host:port`，小寫，不含路徑、結尾斜線或預設連接埠；`http://` 只用於 `localhost`、`127.0.0.1` 與 `[::1]`（本機開發）；不支援萬用字元。官方伺服器為其網站設定了 `CORS_ORIGINS=https://scacelith.com,https://www.scacelith.com`。此時：
+      - 對 `/api/v1` 之下除健康檢查端點以外的路徑，每個回應（無論成功或錯誤，包括每位址層的 429）都帶有 `Vary: Origin`。當要求的 `Origin` 與清單中的某個來源逐位元組相同時，回應還會帶有 `Access-Control-Allow-Origin: <that origin>`，以及（預檢要求的回應除外）`Access-Control-Expose-Headers: Retry-After, Content-Disposition`，讓頁面能讀取錯誤代碼、`Retry-After` 以及 PGN 與 GIF 下載的檔名。
+      - 來自清單中來源、針對既有路徑的預檢要求（帶有 `Access-Control-Request-Method` 的 `OPTIONS`）會回應 204，不含本文，並附上 `Allow`、`Access-Control-Allow-Origin`、`Access-Control-Allow-Methods`（即 `Allow` 中的方法）、`Access-Control-Allow-Headers: Authorization, Content-Type`、`Access-Control-Max-Age: 600` 與 `Vary: Origin`。它不需要權杖，也不計入任何帳號額度或端點的限制；與任何要求一樣，它會耗用每位址層的一個權杖。瀏覽器會在 10 分鐘內重複使用預檢結果，但僅限完全相同的 URL（包括查詢字串）。不帶 `Authorization` 也不帶 JSON 本文的要求，例如 `GET /info` 或 `GET /leaderboard`，不需要預檢要求。
+      - 對預檢要求的任何其他回應都是失敗的預檢，即使帶有 CORS 標頭也一樣：例如不存在路徑的 404，或每位址層的 429。此時瀏覽器不會送出該要求，頁面只會看到網路錯誤，既看不到回應，也看不到其 `Retry-After`。
+      - 伺服器從不傳送 `Access-Control-Allow-Credentials`，也從不傳送 `Access-Control-Allow-Origin: *`：頁面和遊戲一樣，在 `Authorization: Bearer` 中傳送其工作階段權杖，而 API 不會設定任何 Cookie。HTML 頁面、健康檢查端點，以及對無法解析之要求的空回應，都不帶任何 CORS 標頭。WebSocket 不使用 CORS：`WS_ALLOWED_ORIGINS` 列出可以開啟它的頁面。
+      - 未列出來源的頁面讀取不到任何內容，其跨網站寫入也永遠不會送出：JSON 本文與 `Authorization` 需要預檢要求，而預檢的回應不帶針對該來源的 `Access-Control-Allow-Origin`。`Cross-Origin-Resource-Policy: same-origin` 仍保留在每個回應上：它只適用於 `no-cors` 要求（其他網站嵌入某個回應），從不適用於已列出頁面的 `cors` 要求。
 
     ## 回應與錯誤
 
@@ -60,7 +65,7 @@ info:
     | 429 | `rate_limited` | 觸及速率限制（請見下文）：附有 `retryAfter` 與 `Retry-After` 標頭。 |
     | 500 | `internal_error` | 非預期的失敗。伺服器會將其記錄下來。 |
     | 503 | `timeout` | 伺服器未在 30 秒內回應（使用預設設定時，匯出為 60 秒，GIF 為 45 秒）。 |
-    | 503 | `server_busy` | 查詢工作階段或變更帳號時發現資料庫遭到鎖定（`retryAfter` 為 1），或密碼雜湊佇列已滿（請見下文）。 |
+    | 503 | `server_busy` | 查詢工作階段或變更帳號時發現資料庫遭到鎖定（`retryAfter` 為 1），或密碼雜湊佇列已滿（請見下文）。此外，對於 `POST`、`PUT`、`PATCH` 或 `DELETE`，資料庫等候中的寫入過多：要求並未執行，也未耗用其速率限制（`retryAfter` 為 2 至 5）。 |
 
     讀取端點（對局紀錄、對局、棋手、排行榜）與匯出在資料庫持續鎖定時，會回應 503 `busy` 並附上 `retryAfter: 1`。
 
@@ -85,7 +90,7 @@ info:
     - **必要的工作階段**：缺少標頭時回應 401 `unauthorized`，並附上 `WWW-Authenticate: Bearer realm="scacelith"`。權杖無效時回應 401 `invalid_token`，並附上 `WWW-Authenticate: Bearer realm="scacelith", error="invalid_token"`。用戶端收到 `invalid_token` 時，應捨棄該權杖並重新登入。
     - **選用的工作階段**：在 `GET /games/{id}`、`GET /games/{id}/pgn`、`GET /players/{username}` 與 `GET /players/{username}/games` 上，工作階段為選用。沒有標頭時，這些端點回應公開的內容；若有傳送標頭，其中的權杖就必須有效。
     - **有效期限**：工作階段在以下兩者中較早到來的時間點結束：登入後 `SESSION_MAX_DAYS`（90）天（即 `expiresAt`），或連續 `SESSION_IDLE_DAYS`（30）天未使用。每次使用都會延後閒置期限；伺服器最多每 5 分鐘寫入一次新值。一個帳號最多保留 `MAX_SESSIONS_PER_USER`（10）個工作階段：超過此數量時，新的登入會撤銷最舊的工作階段。
-    - **撤銷**：登出（`POST /auth/logout`、`POST /auth/logout-all`、`DELETE /auth/sessions/{id}`）會撤銷工作階段；變更密碼（撤銷其他工作階段）、重設密碼與刪除帳號（撤銷所有工作階段），以及管理員，也會撤銷工作階段。透過 API 撤銷會立即生效，以已撤銷工作階段開啟的 WebSocket 也會被關閉。伺服器會將工作階段的查詢結果快取 30 秒，因此透過管理命令（一個獨立的處理程序）進行的撤銷，會在 30 秒內生效。
+    - **撤銷**：登出（`POST /auth/logout`、`POST /auth/logout-all`、`DELETE /auth/sessions/{id}`）會撤銷工作階段；變更密碼（撤銷其他工作階段）、重設密碼與刪除帳號（撤銷所有工作階段），以及管理員，也會撤銷工作階段。透過 API 撤銷會立即生效，以已撤銷工作階段開啟的 WebSocket 也會被關閉。變更或重設密碼以及刪除帳號時，撤銷與變更本身在同一筆交易中進行：其中任何一項失敗時，沒有任何工作階段被撤銷，其他內容也都沒有變更。伺服器會將工作階段的查詢結果快取 30 秒，因此透過管理命令（一個獨立的處理程序）進行的撤銷，會在 30 秒內生效。
     - **範圍**：權杖只屬於一台伺服器，也可用來開啟該伺服器的 WebSocket。切勿將它傳送給其他伺服器。
 
     ## 速率限制與其他節流機制
@@ -123,7 +128,7 @@ info:
 
     `GET /info` 與 `GET /leaderboard` 沒有自己的限制，只受每位址層約束。具有多項限制的端點，會依其說明中列出的順序逐一檢查。
 
-    伺服器依下列順序處理要求：每位址層，接著是健康檢查端點；比對端點；驗證；帳號額度（要求帶有工作階段時）；端點的限制；本文；端點本身（GIF 端點只在確實需要製作 GIF 時，才會計入其製作限制）。因此，因權杖問題而被拒絕的要求，不會耗用端點的任何權杖；而本文無效的要求則會耗用。
+    伺服器依下列順序處理要求：每位址層，接著是健康檢查端點；比對端點；對於 `POST`、`PUT`、`PATCH` 或 `DELETE`，檢查資料庫等候中的寫入（503 `server_busy`）；驗證；帳號額度（要求帶有工作階段時）；端點的限制；本文；端點本身（GIF 端點只在確實需要製作 GIF 時，才會計入其製作限制）。因此，因權杖問題而被拒絕的要求，不會耗用端點的任何權杖；而本文無效的要求則會耗用。
 
     其他節流機制，由端點自行回應：
 
@@ -156,7 +161,7 @@ info:
 
     | 狀態 | `error` | 時機 |
     |---|---|---|
-    | 403 | `invalid_password` | 密碼錯誤。 |
+    | 403 | `invalid_password` | 密碼錯誤，或在要求執行期間密碼遭到重設或變更（未做任何變更）。 |
     | 403 | `mfa_code_required` | 已啟用雙重驗證，但 `code` 與 `recoveryCode` 都沒有傳送。 |
     | 403 | `invalid_code` | 驗證碼錯誤或已使用過。 |
     | 400 | `password_not_set` | 僅使用 Google 登入的帳號尚未設定密碼（可透過「忘記密碼」設定）。 |
@@ -256,7 +261,7 @@ tags:
     description: |-
       棋譜（含著法與棋鐘時間）及其 PGN 檔案。
 
-      **對局代碼**：`status`：1 `WhiteWins`、2 `BlackWins`、3 `Draw`、4 `Aborted`（只會儲存已結束的對局）。`result`：`1-0`、`0-1`、`1/2-1/2` 或 `*`（已中止）。`reason` 附有其名稱（`termination`），以及 PGN 檔案著法文字結尾處的文字（PGN 中為英文，下表括號內為中譯）；代碼 7 與 21 為和棋（超時或棄局的一方，其對手無法將死），而伺服器從不以代碼 4 與 13 結束對局（這兩個代碼屬於共用的結束原因清單）：
+      **對局代碼**：`status`：1 `WhiteWins`、2 `BlackWins`、3 `Draw`、4 `Aborted`（只會儲存已結束的對局）。`result`：`1-0`、`0-1`、`1/2-1/2` 或 `*`（已中止）。`reason` 附有其名稱（`termination`），以及 PGN 檔案著法文字結尾處的文字（PGN 中為英文，下表括號內為中譯）；代碼 7、14 與 21 為和棋（超時、認輸或棄局的一方，其對手無法將死：FIDE 6.9 與 5.1.2；規則見 `DESIGN.md` 6.3），而伺服器從不以代碼 4 與 13 結束對局（這兩個代碼屬於共用的結束原因清單）：
 
       | 代碼 | `termination` | PGN 中的文字 |
       |---|---|---|
@@ -273,6 +278,7 @@ tags:
       | 11 | `FiftyMoveClaim` | 50-move rule (claimed)（五十回合規則，提出要求） |
       | 12 | `Agreement` | Draw by agreement（協議和棋） |
       | 13 | `IllegalMovesVsInsufficient` | Second illegal move, but the opponent cannot checkmate（第二次違例著法，但對方無法將死） |
+      | 14 | `ResignationVsInsufficient` | Resignation, but the opponent cannot checkmate（認輸，但對方無法將死） |
       | 20 | `Abandonment` | Abandoned (disconnected for too long)（棄局：斷線過久） |
       | 21 | `AbandonmentVsInsufficient` | Abandoned, but the opponent cannot checkmate（棄局，但對方無法將死） |
       | 22 | `Aborted` | Game aborted（對局中止） |
@@ -280,6 +286,8 @@ tags:
       | 24 | `Forfeit` | Forfeit (fair play violation)（棄權判負：違反公平對弈） |
       | 25 | `ServerAborted` | Aborted by the server（被伺服器中止） |
       | 26 | `BothDisconnected` | Aborted: both players disconnected（中止：雙方皆已斷線） |
+
+      代碼 14 是通訊協定次版本 1 新增的：在此之前撰寫的用戶端，應將未知代碼顯示為一般的對局結束，並顯示其 `result`。
   - name: gifs
     x-displayName: GIF 動畫
     description: |-
@@ -467,7 +475,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。'
+          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /auth/login:
     post:
       operationId: logIn
@@ -550,7 +558,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。'
+          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /auth/login/mfa:
     post:
       operationId: logInWithSecondFactor
@@ -621,7 +629,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` 附 `retryAfter: 1`：資料庫持續鎖定（若發生在 Google 連結步驟之後，則未建立任何連結：請從遊戲中重新開始）。`timeout`。'
+          description: '`server_busy` 附 `retryAfter: 1`：資料庫持續鎖定（若發生在 Google 連結步驟之後，則未建立任何連結：請從遊戲中重新開始）。`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /auth/logout:
     post:
       operationId: logOut
@@ -666,7 +674,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /auth/logout-all:
     post:
       operationId: logOutEverywhere
@@ -711,7 +719,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /auth/verify-email/resend:
     post:
       operationId: resendVerificationEmail
@@ -762,7 +770,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` 附 `retryAfter: 1`：查詢帳號時資料庫持續鎖定（等候中註冊的延期只會盡力而為，絕不會導致要求失敗）。`timeout`。'
+          description: '`server_busy` 附 `retryAfter: 1`：查詢帳號時資料庫持續鎖定（等候中註冊的延期只會盡力而為，絕不會導致要求失敗）。`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /auth/password/forgot:
     post:
       operationId: requestPasswordReset
@@ -813,7 +821,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` 附 `retryAfter: 1`：資料庫持續鎖定。`timeout`。'
+          description: '`server_busy` 附 `retryAfter: 1`：資料庫持續鎖定。`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /auth/password/reset:
     post:
       operationId: resetPassword
@@ -823,7 +831,7 @@ paths:
       description: |-
         以重設連結的權杖設定新密碼（`/reset-password` 頁面的作用相同）。新密碼須遵守註冊時的規則。
 
-        重設會撤銷所有工作階段，並取消待處理的電子郵件地址變更；該帳號的其他重設連結隨即失效；地址視為已確認（連結已證明這一點）；帳號擁有者會收到一封郵件。雙重驗證不受影響。發生密碼雜湊佇列錯誤或 503 之後，連結依然有效。
+        重設會在一筆交易中產生下列效果（全部生效，或全部不生效）：撤銷所有工作階段，並取消待處理的電子郵件地址變更；該帳號的其他重設連結隨即失效；地址視為已確認（連結已證明這一點）；帳號擁有者會收到一封郵件。雙重驗證不受影響。發生密碼雜湊佇列錯誤、503 或 500 之後，不會有任何變更：舊密碼與工作階段都保留，連結依然有效。
 
         **限制**：`auth`，接著是 `auth_reset`（每個用戶端每小時 10 次，每個 IPv6 /48 為 30 次，與該頁面共用：每次嘗試都會雜湊一次密碼）。
       security: []
@@ -871,7 +879,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`：密碼雜湊佇列，或資料庫持續鎖定（`retryAfter: 1`，未做任何變更）。`timeout`。'
+          description: '`server_busy`：密碼雜湊佇列，或資料庫持續鎖定（`retryAfter: 1`，未做任何變更）。`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /auth/sso/google/start:
     post:
       operationId: startGoogleSignIn
@@ -929,7 +937,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /auth/sso/google/finish:
     post:
       operationId: finishGoogleSignIn
@@ -1039,7 +1047,7 @@ paths:
           $ref: '#/components/responses/BadGateway'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /auth/sso/google/link:
     post:
       operationId: linkGoogleAccount
@@ -1107,7 +1115,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`：密碼雜湊佇列，或資料庫持續鎖定（`retryAfter: 1`，未建立任何連結）。`timeout`。'
+          description: '`server_busy`：密碼雜湊佇列，或資料庫持續鎖定（`retryAfter: 1`，未建立任何連結）。`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /auth/sso/complete:
     post:
       operationId: completeGoogleSignUp
@@ -1169,7 +1177,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /auth/sessions:
     get:
       operationId: listSessions
@@ -1272,7 +1280,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /account/me:
     get:
       operationId: getAccount
@@ -1389,7 +1397,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /account/password:
     post:
       operationId: changePassword
@@ -1399,7 +1407,7 @@ paths:
       description: |-
         變更密碼。需要提供目前的密碼，但即使已啟用雙重驗證，也不需要第二驗證因素。新密碼須遵守註冊規則（在檢查目前的密碼之後才檢查）。
 
-        變更會撤銷所有其他工作階段（目前這一個仍保持登入）、取消待處理的電子郵件地址變更、使該帳號的密碼重設連結失效，並寄一封郵件給帳號擁有者。
+        變更會在一筆交易中產生下列效果（全部生效，或全部不生效）：撤銷所有其他工作階段（目前這一個仍保持登入）、取消待處理的電子郵件地址變更、使該帳號的密碼重設連結失效，並寄一封郵件給帳號擁有者。
 
         **重新驗證**：只需密碼。**限制**：`reauth`，接著是 `reauth_user`。
       security:
@@ -1453,7 +1461,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。'
+          description: '`server_busy`：密碼雜湊佇列，或資料庫持續鎖定（`retryAfter: 1`，未做任何變更）。`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /account/mfa/totp/setup:
     post:
       operationId: startTotpSetup
@@ -1516,7 +1524,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。'
+          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /account/mfa/totp/enable:
     post:
       operationId: enableTotp
@@ -1594,7 +1602,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（資料庫持續鎖定）、`timeout`。'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /account/mfa/totp/disable:
     post:
       operationId: disableTotp
@@ -1659,7 +1667,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。'
+          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /account/mfa/recovery-codes:
     post:
       operationId: regenerateRecoveryCodes
@@ -1734,7 +1742,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。'
+          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /account/email:
     post:
       operationId: changeEmail
@@ -1823,7 +1831,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`：密碼雜湊佇列，或資料庫持續鎖定（`retryAfter: 1`：未做任何變更，可以再次傳送相同的要求）。`timeout`。'
+          description: '`server_busy`：密碼雜湊佇列，或資料庫持續鎖定（`retryAfter: 1`：未做任何變更，可以再次傳送相同的要求）。`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /account/export:
     post:
       operationId: exportAccountData
@@ -1977,7 +1985,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy`（資料庫持續鎖定，附 `Retry-After: 1` 標頭）、`server_busy`（密碼雜湊佇列）、`timeout`（60 秒）。'
+          description: '`busy`（資料庫持續鎖定，附 `Retry-After: 1` 標頭）、`server_busy`（密碼雜湊佇列）、`timeout`（60 秒）。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /account/delete:
     post:
       operationId: deleteAccount
@@ -2044,7 +2052,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。'
+          description: '`server_busy`（密碼雜湊佇列，或資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /account/games:
     get:
       operationId: listAccountGames
@@ -2465,7 +2473,7 @@ paths:
           description: '`render_failed`：無法製作 GIF（伺服器會記錄原因）。`internal_error`。'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` 附 `retryAfter`（3 至 10 秒）與 `Retry-After`：算繪佇列已滿，或 GIF 等候空閒執行緒過久；該要求取用的所有限制權杖都會被退還。`timeout`。'
+          description: '`server_busy` 附 `retryAfter`（3 至 10 秒）與 `Retry-After`：算繪佇列已滿，或 GIF 等候空閒執行緒過久；該要求取用的所有限制權杖都會被退還。`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /players/{username}:
     get:
       operationId: getPlayer
@@ -2607,7 +2615,7 @@ paths:
         - leaderboard
       summary: 取得某個類別的頂尖棋手
       description: |-
-        某個官方類別中，計入的對局數至少達 `minGames`（`PROVISIONAL_GAMES`）的前 100 筆等級分紀錄，已刪除的帳號與經確認的作弊者除外。伺服器最多每 10 秒重新計算一次各個排行榜；`updatedAt` 標示計算的時間。
+        某個官方類別中，計入的對局數至少達 `minGames`（`PROVISIONAL_GAMES`）的前 100 筆等級分紀錄，已刪除的帳號與經確認的作弊者除外。伺服器最多每 10 秒重新計算一次各個排行榜；`updatedAt` 標示計算的時間。每個類別同一時間只會進行一次計算：計算期間，其他要求會取得上一份清單；若還沒有清單，則等候計算完成。
 
         **限制**：只有每位址層。
       security: []
@@ -2732,7 +2740,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（查詢工作階段時發現資料庫遭到鎖定）、`timeout`。'
+          description: '`server_busy`（查詢工作階段時發現資料庫遭到鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：資料庫等候中的寫入過多，要求並未執行。'
   /verify-email:
     servers:
       - url: https://caissa.scacelith.com
@@ -2822,7 +2830,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: '資料庫持續鎖定（`Retry-After: 1`）：未做任何變更，連結仍然有效。處理常式逾時也會回應此狀態。'
+          description: '資料庫持續鎖定（`Retry-After: 1`）或等候中的寫入過多（`Retry-After` 為 2 至 5）：未做任何變更，連結仍然有效。處理常式逾時也會回應此狀態。'
   /reset-password:
     servers:
       - url: https://caissa.scacelith.com
@@ -2870,7 +2878,7 @@ paths:
         - pages
       summary: 透過重設表單設定新密碼
       description: |-
-        重設頁面的表單；作用與 `POST /auth/password/reset` 相同：所有裝置都會登出，待處理的電子郵件地址變更會被取消，其他重設連結隨即失效，地址視為已確認，帳號擁有者會收到一封郵件。
+        重設頁面的表單；作用與 `POST /auth/password/reset` 相同，並在一筆交易中完成：所有裝置都會登出，待處理的電子郵件地址變更會被取消，其他重設連結隨即失效，地址視為已確認，帳號擁有者會收到一封郵件。
 
         先檢查連結，再檢查兩次輸入的密碼是否相同，最後檢查密碼規則。伺服器忙碌時，會重新顯示表單並附上 `Retry-After`，連結依然有效。
 
@@ -2915,7 +2923,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 伺服器忙碌時（密碼雜湊佇列，或資料庫持續鎖定），重新顯示表單並附上 `Retry-After`；連結依然有效。處理常式逾時也會回應此狀態。
+          description: '伺服器忙碌時（密碼雜湊佇列，或資料庫持續鎖定），重新顯示表單並附上 `Retry-After`；連結依然有效。資料庫等候中的寫入過多時，則改為回應附上 `Retry-After`（2 至 5）的「Server error」（伺服器錯誤）頁面：未執行任何動作，連結依然有效。處理常式逾時也會回應此狀態。'
   /confirm-email-change:
     servers:
       - url: https://caissa.scacelith.com
@@ -3005,7 +3013,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: '資料庫持續鎖定（`Retry-After: 1`）：未做任何變更，連結仍然有效。處理常式逾時也會回應此狀態。'
+          description: '資料庫持續鎖定（`Retry-After: 1`）或等候中的寫入過多（`Retry-After` 為 2 至 5）：未做任何變更，連結仍然有效。處理常式逾時也會回應此狀態。'
   /healthz:
     servers:
       - url: https://caissa.scacelith.com
@@ -3846,7 +3854,7 @@ components:
         protocol:
           min: 1
           max: 1
-          schema: 97842216
+          schema: 1852590473
           subprotocol: scacelith.rt1
         wsPort: 443
         wsPath: /ws
@@ -4709,6 +4717,7 @@ components:
         - FiftyMoveClaim
         - Agreement
         - IllegalMovesVsInsufficient
+        - ResignationVsInsufficient
         - Abandonment
         - AbandonmentVsInsufficient
         - Aborted
