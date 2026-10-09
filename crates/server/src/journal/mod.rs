@@ -80,6 +80,7 @@ mod crc;
 pub mod format;
 mod io;
 mod metrics;
+pub mod owner;
 mod state;
 mod worker;
 
@@ -103,6 +104,7 @@ use crate::clock::{self, SharedClock};
 use crate::config::Config;
 use crate::ids::{GameId, ID53_LIMIT};
 use crate::log::Logger;
+use crate::metrics::Gauge;
 use state::{Shared, State};
 use worker::Worker;
 
@@ -284,6 +286,8 @@ pub struct Journal {
     recovered: IndexMap<GameId, Vec<Record>>,
     recovery: RecoveryInfo,
     exited: watch::Receiver<bool>,
+    /// `scacelith_journal_pending_bytes` of the shard.
+    pending_gauge: Gauge,
 }
 
 impl std::fmt::Debug for Journal {
@@ -297,6 +301,7 @@ impl Journal {
     /// recover are then available from [`Journal::recover`]. The scan runs on the shard's I/O
     /// thread.
     pub async fn open(options: JournalOptions) -> Result<Journal, JournalError> {
+        metrics::register();
         let dir = options.dir.join(format!("shard-{}", options.shard));
         let state = State::new(options.compact_segments.max(1), options.compact_per_flush.max(1));
         let shared = Arc::new(Shared {
@@ -320,6 +325,7 @@ impl Journal {
             recovered: opened.recovered,
             recovery: opened.recovery,
             exited: exited_rx,
+            pending_gauge: metrics::PENDING_BYTES.with(&[&options.shard.to_string()]),
         })
     }
 
@@ -403,6 +409,15 @@ impl Journal {
     pub fn has_unwritten(&self) -> bool {
         let st = self.shared.state.lock();
         !st.buf.is_empty() || st.writing
+    }
+
+    /// Bytes appended and not handed to the I/O thread yet: they grow while a batch's write takes
+    /// long (a slow or stuck disk). Also sets `scacelith_journal_pending_bytes` of the shard (the
+    /// host calls it at every beat).
+    pub fn publish_pending(&self) -> usize {
+        let bytes = self.shared.state.lock().buf.len();
+        self.pending_gauge.set(bytes as f64);
+        bytes
     }
 
     /// Batches whose write (or fsync) failed so far.

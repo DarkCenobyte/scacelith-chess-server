@@ -625,3 +625,162 @@ async fn shutdown_with_a_failing_journal_commits_the_finished_games_without_it_a
         drop(cap);
     }
 }
+
+/// The audit's scenario (A04): a game in progress on a real journal, the journal's writes fail,
+/// the game ends and is committed without the journal; the journal on disk still shows it
+/// running. A restart from that journal brings it back as a running game unless the journal is
+/// reconciled with the database first: then nothing comes back, the journal forgets it, and the
+/// database keeps its one commit (no second rating change).
+#[tokio::test]
+async fn a_game_committed_without_the_journal_does_not_come_back_running_after_a_restart() {
+    let mut r = CommitRig::new(None).await;
+    let a = r.new_game(1);
+    let b = r.new_game(3);
+    r.play(a, 6);
+    r.play(b, 4);
+    r.flush().await;
+    r.faults.fail_all(true);
+    r.resign(a);
+    for _ in 0..JOURNAL_GATE_TRIES {
+        r.retry().await;
+    }
+    assert_eq!(r.committed(), [a], "committed without the journal");
+    assert_eq!(r.h.shard.counters().unjournaled, 1);
+    let rated = r.h.store.batches()[0][0].rated;
+    assert!(rated, "a rated game: its commit changed both ratings");
+    // A crash now: the journal on disk has `a` running (its ended record was never written).
+    let (copy, old) = (r.scratch.path().join("degraded"), r.scratch.path().join("degraded-old"));
+    copy_dir(r.h.dir.as_deref().expect("a journal directory"), &copy);
+    copy_dir(&copy, &old);
+    assert_eq!(r.running(&copy).await, [a, b]);
+    let restart = r.h.t() + 60_000;
+    let store: Arc<dyn GameStore> = r.h.store.clone();
+    let opts = |dir: &Path| Opts {
+        shard: 0,
+        journal: JournalAt::Dir(dir.to_owned()),
+        store: Some(store.clone()),
+        t: restart,
+        ..Opts::default()
+    };
+
+    // Without the database's word (the former start), `a` would run again.
+    let mut blind = Rig::with(opts(&old)).await;
+    assert_eq!(blind.shard.recover(), 2);
+    assert!(!blind.room(a).is_over(), "the former start brings the finished game back running");
+    blind.crash().await;
+
+    // The start reconciles: only `b` comes back.
+    let mut s = Rig::with(opts(&copy)).await;
+    assert_eq!(s.shard.recover_reconciled().await.expect("the lookup"), 1);
+    assert!(s.shard.room(a).is_none(), "no game a on the host");
+    assert_eq!(s.shard.active(), 1);
+    assert_eq!(s.shard.active_game_of(1), None, "its players are free");
+    assert_eq!(s.shard.active_game_of(2), None);
+    assert_eq!(s.events.recovered(), [(b, 3, 4)]);
+    assert!(s.journal_committed(a), "the journal forgets it");
+    assert_eq!(s.shard.counters().recovery_in_database, 1);
+    // Hours later, timers and commits included: the database has its one commit of `a`.
+    for _ in 0..10 {
+        s.advance(600_000);
+        let t = s.t();
+        s.run_timers(t);
+        s.poll(t).await;
+    }
+    assert_eq!(s.shard.active(), 0, "b ended by abandonment");
+    assert_eq!(r.h.store.committed_ids(), [a, b], "a committed once, b once");
+    assert!(s.events.ended().iter().all(|e| e.game != a), "no second end of a");
+    // A third start takes neither back.
+    let (dir, _temp) = s.crash().await;
+    let mut again = Rig::with(opts(&dir)).await;
+    assert_eq!(again.shard.recover_reconciled().await.expect("the lookup"), 0);
+    again.crash().await;
+    r.close().await;
+}
+
+/// A journal kept with an older copy of the database (the backup policy of docs/DEPLOY.md
+/// section 10), with the real store: a game the database already holds stays as it is there
+/// (no game comes back, no second rating change), and a game of a player the database does not
+/// know is dropped instead of being retried for ever.
+#[tokio::test]
+async fn a_journal_and_a_database_of_different_instants_are_reconciled_at_start() {
+    let dir = TempDir::new("reconcile");
+    let (store, users) = real_store(&["alice", "bob", "carol", "dave"]).await;
+    let [alice, bob, carol, dave] = users[..] else { panic!("four accounts") };
+    let rules: RulesFactory = Arc::new(|| Box::new(ChessGame::default()));
+    let game_store: Arc<dyn GameStore> = Arc::new(store.clone());
+    let opts = |dir: &Path, t: i64| Opts {
+        shard: 0,
+        journal: JournalAt::Dir(dir.to_owned()),
+        rules: Some(rules.clone()),
+        store: Some(game_store.clone()),
+        t,
+        ..Opts::default()
+    };
+    let mut s = Rig::with(opts(dir.path(), T0)).await;
+    let g1 = s.create(NewGame { white: shown(alice, "alice"), black: shown(bob, "bob"), ..new_game(0, 0) });
+    let g2 = s.create(NewGame { white: shown(carol, "carol"), black: shown(dave, "dave"), ..new_game(0, 0) });
+    play_uci(&mut s, g1, &["e2e4", "e7e5"], [None, None]);
+    play_uci(&mut s, g2, &["d2d4", "d7d5"], [None, None]);
+    s.journal().flush().await.expect("journal written");
+    // A copy of the journal while both games run (the journal of an earlier instant).
+    let early = dir.path().join("early");
+    copy_dir(&dir.path().join("shard-0"), &early.join("shard-0"));
+    // g1 ends and is committed: both ratings change once.
+    play_uci(&mut s, g1, &["f1c4", "b8c6", "d1h5", "g8f6", "h5f7"], [None, None]);
+    assert!(s.room(g1).is_over());
+    s.advance(100);
+    let t = s.t();
+    assert_eq!(s.poll(t).await, Some(true));
+    let rating = |user| {
+        let store = store.clone();
+        async move { store.ratings().get(user, "3+2".into()).await.expect("read") }
+    };
+    let (alice_rating, bob_rating) = (rating(alice).await, rating(bob).await);
+    assert_eq!((alice_rating.games, bob_rating.games), (1, 1));
+    s.crash().await;
+
+    // The early journal against this database: g1 is finished here, g2 goes on.
+    let mut s = Rig::with(opts(&early, T0 + 60_000)).await;
+    assert_eq!(s.shard.recover_reconciled().await.expect("the lookup"), 1);
+    assert!(s.shard.room(g1).is_none());
+    assert_eq!(s.events.recovered(), [(g2, carol, dave)]);
+    assert_eq!(s.shard.counters().recovery_in_database, 1);
+    s.advance(100);
+    let t = s.t();
+    assert_eq!(s.poll(t).await, None, "nothing to commit");
+    assert_eq!(rating(alice).await, alice_rating, "no second rating change");
+    assert_eq!(rating(bob).await, bob_rating);
+    let row = store.games().by_id(g1).await.expect("read").expect("g1 stored");
+    assert_eq!(row.summary.status, GS::WhiteWins.to_u8(), "the database's result stands");
+    let (early, _) = s.crash().await;
+
+    // A database that does not know dave (a copy older than his account): g2 can never be
+    // committed, so it is dropped rather than retried for ever.
+    let forgetful = Arc::new(crate::game::testing::FakeStore::new());
+    forgetful.forget_players(&[dave]);
+    let mut s = Rig::with(Opts { store: Some(forgetful.clone()), ..opts(&early, T0 + 120_000) }).await;
+    assert_eq!(s.shard.recover_reconciled().await.expect("the lookup"), 0);
+    assert!(s.shard.room(g2).is_none());
+    assert!(s.events.recovered().is_empty());
+    assert_eq!(s.shard.counters().recovery_unknown_player, 1);
+    assert!(s.journal_committed(g2));
+    s.crash().await;
+    store.close().await;
+}
+
+/// The counters of the alert rules of docs/SIZING.md show from the start, at 0 when nothing
+/// happened yet, so that `increase()` sees their first event.
+#[tokio::test]
+async fn the_counters_of_the_journal_alerts_are_exported_from_the_start() {
+    let r = CommitRig::new(None).await;
+    let text = crate::metrics::registry().render();
+    for series in [
+        "scacelith_journal_errors_total ",
+        "scacelith_game_commit_unjournaled_total ",
+        "scacelith_game_recovery_dropped_total{reason=\"in_database\"} ",
+        "scacelith_game_recovery_dropped_total{reason=\"unknown_player\"} ",
+    ] {
+        assert!(text.lines().any(|l| l.starts_with(series)), "{series} exported");
+    }
+    r.close().await;
+}

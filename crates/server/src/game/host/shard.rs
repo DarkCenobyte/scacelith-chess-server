@@ -24,8 +24,9 @@ use serde_json::json;
 use tokio::sync::oneshot;
 use tokio::task::{Id as TaskId, JoinError, JoinSet};
 
-use super::commit::{CommitError, Done, GameStore, TaskKind};
-use super::metrics::{Counters, GestureDrop, Meter};
+use super::commit::{CommitError, Done, GameStore, Stored, TaskKind};
+use super::inbox::Backlog;
+use super::metrics::{self, Counters, GestureDrop, Meter, RecoveryDrop};
 use crate::clock::SharedClock;
 use crate::config::Config;
 use crate::events::{Anomaly, AnomalySink, HostEvents, NewGame, RematchRequest};
@@ -37,7 +38,9 @@ use crate::game::timers::TimerSet;
 use crate::ids::{ConnId, GameId, GameIdAllocator, UserId};
 use crate::journal::Journal;
 use crate::log::{self, Logger};
+use crate::metrics::Gauge;
 use crate::realtime::Endpoint;
+use crate::store::StoreError;
 use crate::{log_error, log_info, log_warn};
 
 /// Period of the actor's beat (timers, stall detection, commits, compaction).
@@ -115,6 +118,8 @@ pub(super) struct Shared {
     last_stall_end: AtomicI64,
     stall_min_ms: i64,
     stall_credit_max_ms: i64,
+    /// What waits for the actor.
+    pub(super) backlog: Backlog,
 }
 
 impl Shared {
@@ -127,6 +132,7 @@ impl Shared {
             last_stall_end: AtomicI64::new(i64::MIN),
             stall_min_ms: settings.stall_min_ms,
             stall_credit_max_ms: settings.stall_credit_max_ms,
+            backlog: Backlog::default(),
         }
     }
 
@@ -180,6 +186,50 @@ pub(super) struct Entry {
     pub(super) committed: bool,
     /// A failed journal write may have lost its `ended` record: journaled again before its commit.
     pub(super) rejournal: bool,
+}
+
+/// A game rebuilt from the journal, not published yet.
+struct Rebuilt {
+    game: GameId,
+    room: GameRoom,
+    /// Why the strict replay failed (the room is then what the lenient one rebuilt).
+    broken: Option<String>,
+}
+
+/// The games of a shard's journal, rebuilt but not published yet ([`Shard::rebuild`]).
+#[derive(Default)]
+pub struct Recovery {
+    games: Vec<Rebuilt>,
+}
+
+impl Recovery {
+    /// Whether no game was rebuilt.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.games.is_empty()
+    }
+
+    /// The games, in journal order.
+    #[must_use]
+    pub fn games(&self) -> Vec<GameId> {
+        self.games.iter().map(|r| r.game).collect()
+    }
+
+    /// Their players, each once.
+    #[must_use]
+    pub fn players(&self) -> Vec<UserId> {
+        let mut players: Vec<UserId> =
+            self.games.iter().flat_map(|r| Side::BOTH.map(|s| r.room.player(s).user_id)).collect();
+        players.sort_unstable();
+        players.dedup();
+        players
+    }
+}
+
+impl std::fmt::Debug for Recovery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Recovery").field("games", &self.games()).finish()
+    }
 }
 
 /// The sender of a request: where its reply goes and when it arrived.
@@ -269,6 +319,8 @@ pub struct Shard {
     active: usize,
     pub(super) meter: Meter,
     shared: Arc<Shared>,
+    /// `scacelith_game_inbox_messages` of the shard.
+    inbox_gauge: Gauge,
     /// Time of the latest beat (`None`: no stall detection yet, or shut down).
     beat: Option<i64>,
     /// Start of the stall the latest beat detected, until its timers ran.
@@ -336,6 +388,7 @@ impl Shard {
             timers: TimerSet::new(),
             active: 0,
             meter: Meter::new(),
+            inbox_gauge: metrics::inbox_gauge(deps.shard),
             beat: None,
             stall_from: None,
             last_stall_end: i64::MIN,
@@ -419,10 +472,21 @@ impl Shard {
         self.timers.len()
     }
 
-    /// What the host counted.
+    /// What the host counted (the gestures dropped before its inbox aside: [`HostStats`]
+    /// includes them).
+    ///
+    /// [`HostStats`]: super::HostStats
     #[must_use]
     pub fn counters(&self) -> &Counters {
         &self.meter.counts
+    }
+
+    /// Publishes what waits for the host (every beat): the journal bytes not handed to its I/O
+    /// thread (read for placement) and the gauges.
+    pub(super) fn publish_backlog(&self) {
+        let pending = self.journal.as_ref().map_or(0, Journal::publish_pending);
+        self.shared.backlog.set_journal_pending(pending);
+        self.inbox_gauge.set(self.shared.backlog.messages() as f64);
     }
 
     /// Publishes the load numbers to the handles.
@@ -806,15 +870,34 @@ impl Shard {
 
     // ---- recovery -----------------------------------------------------------------------------
 
-    /// Replays the journal (start-up, before anything else): running games are restored with
-    /// the recovery grace and their clock held, ended ones are queued for their commit, games
-    /// that cannot be fully replayed end `ServerAborted`, games that cannot be rebuilt at all are
-    /// dropped. Returns the number of games taken back.
+    /// Replays the journal (start-up, before anything else) without asking the database: see
+    /// [`Shard::recover_reconciled`], which the hosts use. Returns the number of games taken back.
     pub fn recover(&mut self) -> usize {
-        let Some(journal) = self.journal.as_mut() else { return 0 };
+        let recovery = self.rebuild();
+        self.publish(recovery, &Stored::default())
+    }
+
+    /// Replays the journal (start-up, before anything else), reconciled with the database: the
+    /// games are rebuilt ([`Shard::rebuild`]), the store says which of them it already holds and
+    /// which of their players it does not know ([`GameStore::lookup`]), then the others are
+    /// published ([`Shard::publish`]). Returns the number of games taken back.
+    ///
+    /// # Errors
+    ///
+    /// The store's lookup failed (nothing was published).
+    pub async fn recover_reconciled(&mut self) -> Result<usize, StoreError> {
+        let recovery = self.rebuild();
+        let stored = self.lookup(&recovery).await?;
+        Ok(self.publish(recovery, &stored))
+    }
+
+    /// Rebuilds the games of the journal without publishing them: no timer, no event, nothing
+    /// sent or journaled, but their ids are never given again, and a game that cannot be rebuilt
+    /// at all is dropped (its `committed` record appended so that its segments go).
+    pub fn rebuild(&mut self) -> Recovery {
+        let Some(journal) = self.journal.as_mut() else { return Recovery::default() };
         let games = journal.take_recovered();
-        let t = self.now();
-        let mut count = 0;
+        let mut rebuilt = Vec::with_capacity(games.len());
         for (game, records) in games {
             // Never given again, even with the clock behind.
             self.ids.seed(game);
@@ -843,6 +926,49 @@ impl Shard {
                 self.journal_committed(game);
                 continue;
             };
+            rebuilt.push(Rebuilt { game, room, broken });
+        }
+        if let Some(journal) = self.journal.as_mut() {
+            journal.release_recovered();
+        }
+        Recovery { games: rebuilt }
+    }
+
+    /// What the database holds of the games of `recovery` (nothing to ask without a game).
+    pub(super) fn lookup(
+        &self,
+        recovery: &Recovery,
+    ) -> impl Future<Output = Result<Stored, StoreError>> + Send + 'static + use<> {
+        let lookup = (!recovery.is_empty()).then(|| self.store.lookup(recovery.games(), recovery.players()));
+        async move {
+            match lookup {
+                Some(lookup) => lookup.await,
+                None => Ok(Stored::default()),
+            }
+        }
+    }
+
+    /// Publishes the rebuilt games: running games are restored with the recovery grace and their
+    /// clock held, ended ones are queued for their commit, games that could not be fully replayed
+    /// end `ServerAborted`. The database has the last word: a game it already holds is finished
+    /// whatever the journal says (committed while the journal could not be written, or a journal
+    /// older than the database), and a game of a player it does not know can never be committed
+    /// (a database older than the journal); both are dropped from the journal (their `committed`
+    /// record appended), with no event, no commit and no rating change. Returns the number of
+    /// games taken back.
+    pub fn publish(&mut self, recovery: Recovery, stored: &Stored) -> usize {
+        let t = self.now();
+        let mut count = 0;
+        for Rebuilt { game, room, broken } in recovery.games {
+            if stored.games.contains(&game) {
+                self.drop_stored(game, &room);
+                continue;
+            }
+            let players = Side::BOTH.map(|s| room.player(s).user_id);
+            if let Some(&user) = players.iter().find(|u| stored.missing_players.contains(u)) {
+                self.drop_orphan(game, &room, user);
+                continue;
+            }
             count += 1;
             let over = room.is_over();
             let entry = self.rooms.entry(game).or_insert(Entry {
@@ -889,17 +1015,47 @@ impl Shard {
             self.meter.counts.recovered += 1;
             self.events.game_recovered(game, white, black);
         }
-        if let Some(journal) = self.journal.as_mut() {
-            journal.release_recovered();
-        }
         let c = &self.meter.counts;
         log_info!(self.log, "games recovered from the journal", {
             "shard": self.shard,
             "restored": c.recovered,
             "requeued": c.requeued,
             "aborted": c.aborted,
+            "inDatabase": c.recovery_in_database,
+            "unknownPlayer": c.recovery_unknown_player,
         });
         count
+    }
+
+    /// A journal game the database already holds: its result stands, the journal forgets it.
+    fn drop_stored(&mut self, game: GameId, room: &GameRoom) {
+        if room.is_over() {
+            // The trace of a stop between a commit and its `committed` record.
+            log_info!(self.log, "journal: finished game already in the database, dropped from the journal", {
+                "gameId": game,
+            });
+        } else {
+            log_warn!(self.log, "journal: game running in the journal but already in the database (committed without the journal, or a journal older than the database): the database's result stands", {
+                "gameId": game,
+                "ply": room.ply(),
+            });
+        }
+        self.meter.recovery_dropped(RecoveryDrop::InDatabase);
+        self.journal_committed(game);
+    }
+
+    /// A journal game of a player the database does not know: it can never be committed.
+    fn drop_orphan(&mut self, game: GameId, room: &GameRoom, user: UserId) {
+        log_error!(self.log, "journal: game of a player the database does not know (a database older than the journal), dropped", {
+            "gameId": game,
+            "userId": user,
+            "white": room.player(Side::White).user_id,
+            "black": room.player(Side::Black).user_id,
+            "ply": room.ply(),
+            "over": room.is_over(),
+        });
+        self.meter.recovery_dropped(RecoveryDrop::UnknownPlayer);
+        self.journal_committed(game);
     }
 
     // ---- internals ----------------------------------------------------------------------------

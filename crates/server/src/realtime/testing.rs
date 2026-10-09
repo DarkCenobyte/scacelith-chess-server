@@ -49,6 +49,7 @@ pub(crate) struct FakeHosts {
     /// Endpoints attached, for the tests that write as a host.
     endpoints: Mutex<HashMap<(GameId, UserId), Endpoint>>,
     stalled: AtomicBool,
+    saturated: AtomicBool,
 }
 
 impl FakeHosts {
@@ -60,6 +61,7 @@ impl FakeHosts {
             mode: Mutex::new(CreateMode::Ok),
             endpoints: Mutex::new(HashMap::new()),
             stalled: AtomicBool::new(false),
+            saturated: AtomicBool::new(false),
         })
     }
 
@@ -69,6 +71,11 @@ impl FakeHosts {
 
     pub(crate) fn set_stalled(&self, stalled: bool) {
         self.stalled.store(stalled, Ordering::SeqCst);
+    }
+
+    /// What [`GameHosts::saturated`] answers.
+    pub(crate) fn set_saturated(&self, saturated: bool) {
+        self.saturated.store(saturated, Ordering::SeqCst);
     }
 
     pub(crate) fn calls(&self) -> Vec<HostCall> {
@@ -172,6 +179,10 @@ impl GameHosts for FakeHosts {
 
     fn stall_during(&self, _since_mono_ms: f64) -> bool {
         self.stalled.load(Ordering::SeqCst)
+    }
+
+    fn saturated(&self) -> bool {
+        self.saturated.load(Ordering::SeqCst)
     }
 
     fn ping(&self) -> BoxFuture<bool> {

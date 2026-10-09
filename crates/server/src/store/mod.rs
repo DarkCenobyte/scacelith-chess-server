@@ -102,6 +102,7 @@ pub use sessions::{NewSession, SessionAuth, SessionInfo, Sessions};
 pub use tokens::{NewSignup, NewToken, Signup, Signups, Sso, SsoIdentity, SsoLink, Token, Tokens};
 pub use users::{Anonymized, Mfa, NewUser, User, UserStatus, UserUpdate, Users};
 pub use values::{NO_CURSOR, clean_email, js_trim, normalize_email};
+pub use writer::WRITE_BACKLOG_BUSY;
 
 use crate::clock::SharedClock;
 use crate::config::Config;
@@ -248,6 +249,18 @@ impl Store {
 
     pub(crate) fn writer(&self) -> Option<&Writer> {
         self.inner.writer.as_ref()
+    }
+
+    /// Write jobs waiting for the writer thread (0 for a read-only store).
+    pub fn write_backlog(&self) -> usize {
+        self.writer().map_or(0, Writer::backlog)
+    }
+
+    /// Whether [`WRITE_BACKLOG_BUSY`] write jobs or more wait: new work that would write is then
+    /// refused (HTTP requests with 503 `server_busy`, new games with `RateLimited`) until the
+    /// writer catches up. Game commits and the other jobs of the server are never refused.
+    pub fn writes_backlogged(&self) -> bool {
+        self.write_backlog() >= WRITE_BACKLOG_BUSY
     }
 
     /// Runs `f` in a read transaction on a reader connection (on a blocking thread): every query

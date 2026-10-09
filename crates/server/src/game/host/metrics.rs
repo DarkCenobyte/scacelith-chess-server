@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 use scacelith_protocol::{EndReason, ErrorCode};
 
-use crate::metrics::{self, Counter, CounterVec, Gauge, Histogram};
+use crate::metrics::{self, Counter, CounterVec, Gauge, GaugeVec, Histogram};
 
 /// Why a gesture was not relayed (label of `scacelith_gestures_dropped_total`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -22,16 +22,19 @@ pub enum GestureDrop {
     Malformed,
     /// The opponent's connection already holds a backlog.
     Backlog,
+    /// The host's inbox already holds `GESTURE_INBOX_MAX` gestures (dropped before reaching it).
+    Overload,
 }
 
 impl GestureDrop {
     /// Every reason, in label order.
-    pub const ALL: [GestureDrop; 5] = [
+    pub const ALL: [GestureDrop; 6] = [
         GestureDrop::NoGame,
         GestureDrop::NotPlayer,
         GestureDrop::NoOpponent,
         GestureDrop::Backlog,
         GestureDrop::Malformed,
+        GestureDrop::Overload,
     ];
 
     /// The metric label.
@@ -43,6 +46,28 @@ impl GestureDrop {
             GestureDrop::NoOpponent => "no_opponent",
             GestureDrop::Malformed => "malformed",
             GestureDrop::Backlog => "backlog",
+            GestureDrop::Overload => "overload",
+        }
+    }
+}
+
+/// Why a game of the journal was dropped at start (label of
+/// `scacelith_game_recovery_dropped_total`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryDrop {
+    /// The database already holds it: finished, whatever the journal says.
+    InDatabase,
+    /// A player the database does not know: it can never be committed.
+    UnknownPlayer,
+}
+
+impl RecoveryDrop {
+    /// The metric label.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecoveryDrop::InDatabase => "in_database",
+            RecoveryDrop::UnknownPlayer => "unknown_player",
         }
     }
 }
@@ -66,6 +91,10 @@ pub struct Counters {
     pub requeued: u64,
     /// Games the journal could only partly replay (ended `ServerAborted`).
     pub aborted: u64,
+    /// Games of the journal the database already held at start (dropped from the journal).
+    pub recovery_in_database: u64,
+    /// Games of the journal with a player the database did not know at start (dropped).
+    pub recovery_unknown_player: u64,
     /// Compaction snapshots appended.
     pub snapshots: u64,
     /// Stalls of the actor detected by its beat.
@@ -101,11 +130,14 @@ struct Global {
     commit_ms: Histogram,
     commit_errors: Counter,
     unjournaled: Counter,
+    recovery_dropped: [Counter; 2],
+    draining: Gauge,
     stall_ms: Histogram,
     stall_credit: Counter,
     timer_late: Histogram,
     gestures: Counter,
-    gesture_drops: [Counter; 5],
+    gesture_drops: [Counter; 6],
+    inbox: GaugeVec,
 }
 
 static GLOBAL: LazyLock<Global> = LazyLock::new(|| {
@@ -146,6 +178,18 @@ static GLOBAL: LazyLock<Global> = LazyLock::new(|| {
             "scacelith_game_commit_unjournaled_total",
             "Finished games committed to the database without waiting for the journal, whose writes kept failing",
         ),
+        recovery_dropped: {
+            let dropped = metrics::counter_vec(
+                "scacelith_game_recovery_dropped_total",
+                "Games of the journal dropped at start: already in the database (finished, whatever the journal said) or with a player the database does not know",
+                &["reason"],
+            );
+            [RecoveryDrop::InDatabase, RecoveryDrop::UnknownPlayer].map(|r| dropped.with(&[r.as_str()]))
+        },
+        draining: metrics::gauge(
+            "scacelith_game_shards_draining",
+            "Game shards outside SHARD_BASE to SHARD_BASE + WORKERS - 1 served for the games their journal held at start",
+        ),
         stall_ms: metrics::histogram(
             "scacelith_game_stall_ms",
             "Stalls of the game host actors detected by their timers (ms, longer than GAME_STALL_MIN_MS)",
@@ -162,8 +206,30 @@ static GLOBAL: LazyLock<Global> = LazyLock::new(|| {
         ),
         gestures: metrics::counter("scacelith_gestures_relayed_total", "Gestures relayed to the opponent"),
         gesture_drops: GestureDrop::ALL.map(|d| drops.with(&[d.as_str()])),
+        inbox: metrics::gauge_vec(
+            "scacelith_game_inbox_messages",
+            "Messages waiting in the inbox of a game host (set by its beat)",
+            &["shard"],
+        ),
     }
 });
+
+/// Sets the number of draining shards (at start).
+pub(super) fn draining_shards(n: usize) {
+    GLOBAL.draining.set(n as f64);
+}
+
+/// A gesture dropped before the inbox of its host (counted by the host's `Backlog`, which the
+/// host's [`Counters`] include).
+pub(super) fn gesture_overload() {
+    let i = GestureDrop::ALL.iter().position(|&d| d == GestureDrop::Overload).unwrap_or(0);
+    GLOBAL.gesture_drops[i].inc();
+}
+
+/// The gauge of the messages waiting in the inbox of a shard's host.
+pub(super) fn inbox_gauge(shard: u32) -> Gauge {
+    GLOBAL.inbox.with(&[&shard.to_string()])
+}
 
 /// The meters of one host: every event goes to the process-wide metrics and to the host's
 /// [`Counters`].
@@ -220,6 +286,19 @@ impl Meter {
         if unjournaled {
             GLOBAL.unjournaled.add(games as u64);
             self.counts.unjournaled += games as u64;
+        }
+    }
+
+    pub(super) fn recovery_dropped(&mut self, why: RecoveryDrop) {
+        match why {
+            RecoveryDrop::InDatabase => {
+                GLOBAL.recovery_dropped[0].inc();
+                self.counts.recovery_in_database += 1;
+            }
+            RecoveryDrop::UnknownPlayer => {
+                GLOBAL.recovery_dropped[1].inc();
+                self.counts.recovery_unknown_player += 1;
+            }
         }
     }
 

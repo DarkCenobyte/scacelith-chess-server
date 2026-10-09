@@ -1,5 +1,7 @@
 //! Accounts (`users`) and MFA recovery codes.
 
+use std::collections::HashSet;
+
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Row, params, params_from_iter};
 
@@ -132,6 +134,18 @@ impl Users<'_> {
             )
             .map_err(StoreError::user_clash)?;
         user_id(id)
+    }
+
+    /// The ids of `ids` without an account (rows are never deleted, only anonymized: such an id
+    /// comes from a journal newer than this database).
+    pub fn missing_among(&self, ids: &[UserId]) -> Result<HashSet<UserId>> {
+        let mut out = HashSet::new();
+        for &id in ids {
+            if self.db.one("SELECT 1 FROM users WHERE id = ?1", [id], |_| Ok(()))?.is_none() {
+                out.insert(id);
+            }
+        }
+        Ok(out)
     }
 
     /// The account with this id.

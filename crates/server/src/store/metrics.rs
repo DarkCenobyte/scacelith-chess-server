@@ -2,7 +2,7 @@
 
 use std::sync::LazyLock;
 
-use crate::metrics::{self, Counter, CounterVec, Histogram};
+use crate::metrics::{self, Counter, CounterVec, Gauge, Histogram};
 
 /// Waiting `signal` analysis jobs per player: a flagged player's further games are not queued
 /// while this many of their games wait (the scoring reads their 30 latest analysed games, so these
@@ -15,6 +15,11 @@ pub(crate) static BUSY: LazyLock<Counter> = LazyLock::new(|| {
         "scacelith_store_busy_total",
         "Store operations that gave up waiting for the database lock",
     )
+});
+
+/// Write jobs waiting for the writer thread (the one it runs aside).
+pub(super) static WRITE_QUEUE: LazyLock<Gauge> = LazyLock::new(|| {
+    metrics::gauge("scacelith_db_write_queue", "Database write jobs waiting for the writer thread")
 });
 
 static COMMIT_BATCH_MS: LazyLock<Histogram> = LazyLock::new(|| {

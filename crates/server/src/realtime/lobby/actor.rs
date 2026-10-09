@@ -349,12 +349,13 @@ impl LobbyActor {
                     Some(msg) => self.handle(msg).await,
                 },
             }
-            self.update_gauges();
+            self.update_gauges(rx.len());
         }
     }
 
-    fn update_gauges(&self) {
+    fn update_gauges(&self, inbox: usize) {
         let m = metrics::lobby();
+        m.inbox.set(inbox as f64);
         m.online.set(self.presence.len() as f64);
         m.searching.set(self.queued.len() as f64);
         m.challenges_open.set(self.ch.len() as f64);
@@ -619,6 +620,16 @@ impl LobbyActor {
         }
     }
 
+    /// Whether the server takes no new game for now ([`GameHosts::saturated`]): a request that
+    /// would create one is refused with `RateLimited`, and nothing of it is kept.
+    fn saturated(&self) -> bool {
+        let saturated = self.hosts.saturated();
+        if saturated {
+            metrics::lobby().refused_busy.inc();
+        }
+        saturated
+    }
+
     // ---- matchmaking ----------------------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
@@ -652,6 +663,9 @@ impl LobbyActor {
                 self.send_user(user, Some(frames::notice(NoticeCode::MatchmakingCooldown, until as f64)));
                 return Err(ErrorCode::MatchmakingCooldown);
             }
+        }
+        if self.saturated() {
+            return Err(ErrorCode::RateLimited);
         }
         if self.queued.contains_key(&user) || self.mm.has(user) {
             self.mm.leave(user);
@@ -824,6 +838,9 @@ impl LobbyActor {
                 }
             }
         }
+        if self.saturated() {
+            return Err(ErrorCode::RateLimited);
+        }
         let c = self
             .ch
             .create(
@@ -871,6 +888,10 @@ impl LobbyActor {
         if creator_busy {
             return Self::answer(&link, seq, Err(ErrorCode::AlreadyInGame));
         }
+        // The challenge stays open: the target may accept it again in a moment.
+        if self.saturated() {
+            return Self::answer(&link, seq, Err(ErrorCode::RateLimited));
+        }
         match self.ch.accept(id, Self::challenge_player(&link, 0, false), now) {
             Ok(started) => self.start_challenge_game(started, link, seq),
             Err(e) => Self::answer(&link, seq, Err(match_error(e))),
@@ -895,6 +916,10 @@ impl LobbyActor {
             && self.mm.repeat_limited(creator, by, now)
         {
             return Self::answer(&link, seq, Err(ErrorCode::RatedRepeatLimit));
+        }
+        // The code stays valid, and this try is not a failure.
+        if self.saturated() {
+            return Self::answer(&link, seq, Err(ErrorCode::RateLimited));
         }
         match self.ch.join_code(code, Self::challenge_player(&link, 0, false), now) {
             Ok(started) => self.start_challenge_game(started, link, seq),
@@ -1030,6 +1055,9 @@ impl LobbyActor {
             }
             CreateResult::Failed(code) => {
                 metrics::lobby().create_failed.inc();
+                if code == ErrorCode::RateLimited {
+                    metrics::lobby().refused_busy.inc();
+                }
                 self.finish_creation(creation, Err(code), &[]);
             }
             CreateResult::Created(game) => {
@@ -1074,8 +1102,10 @@ impl LobbyActor {
                 Self::answer(&link, seq, result.map(|_| ()));
             }
             After::Rematch(reply) => {
-                let _ = reply.send(result.map_err(|code| {
-                    if code == ErrorCode::AlreadyInGame { ErrorCode::RematchUnavailable } else { code }
+                // A saturated server refuses it like a busy player (PROTOCOL.md: RematchUnavailable).
+                let _ = reply.send(result.map_err(|code| match code {
+                    ErrorCode::AlreadyInGame | ErrorCode::RateLimited => ErrorCode::RematchUnavailable,
+                    code => code,
                 }));
             }
         }

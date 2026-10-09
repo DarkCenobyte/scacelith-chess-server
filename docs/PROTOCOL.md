@@ -445,6 +445,11 @@ published ranges; the experimental ranges are never published, and a published p
   bytes queued) is closed with 4303 and no `Error`; it reconnects and resynchronises.
 * **Lobby limits** have their own errors: `ChallengeLimit`, `RateLimited` for wrong private codes,
   `MatchmakingCooldown` (with `Notice{MatchmakingCooldown, arg = end}`), `RatedRepeatLimit`.
+* **A server that falls behind** takes no new game for a while: `QueueJoin`, `ChallengeCreate`,
+  `ChallengeAccept` and `ChallengeJoinCode` then get `Error{RateLimited}` (non-fatal) and nothing
+  changes (a challenge or a code stays open), and a rematch both players asked for gets
+  `Error{RematchUnavailable}`. Try again a few seconds later; games in progress are not affected.
+  The gestures of a player whose game host is that far behind may be dropped, as for a slow link.
 
 ## Errors and close codes
 

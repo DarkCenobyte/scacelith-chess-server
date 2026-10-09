@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use super::{Ep, Opts, Rig, T0, ended_at, move_msg, rematch, result, resync, snapshot};
 use crate::config::test_config;
 use crate::events::IncidentKind;
-use crate::game::host::{Msg, beat};
+use crate::game::host::{Inbox, Msg, beat};
 use crate::ids::GameId;
 
 /// A game where White's clock runs (both first moves played), with its connections and its flag
@@ -257,9 +257,11 @@ async fn a_beat_handles_the_requests_already_queued_before_its_timers() {
     assert!(!h.beat(deadline - 5));
     // White's move is read 3 ms before its flag deadline and still waits in the inbox when the
     // next beat comes due, 2 ms after the deadline (a busy actor: both are ready at once).
-    let (tx, mut inbox) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut inbox = Inbox { rx, shared: h.shard.shared() };
     let msg = ClientMsg::Move(move_msg(h.room(id), 5));
     let read_at = (deadline - 3) as f64;
+    inbox.shared.backlog.posting();
     tx.send(Msg::Client { user: 1, msg, ep: ew.endpoint(), recv_at: read_at }).expect("inbox open");
     h.set(deadline + 2);
     assert!(beat(&mut h.shard, &mut inbox).await.is_continue());
@@ -271,7 +273,8 @@ async fn a_beat_handles_the_requests_already_queued_before_its_timers() {
     // Without a request, the same beat flags.
     let (mut h, id, _, _, deadline) = running(Opts::default()).await;
     assert!(!h.beat(deadline - 5));
-    let (_tx, mut inbox) = mpsc::unbounded_channel();
+    let (_tx, rx) = mpsc::unbounded_channel();
+    let mut inbox = Inbox { rx, shared: h.shard.shared() };
     h.set(deadline + 2);
     assert!(beat(&mut h.shard, &mut inbox).await.is_continue());
     assert_eq!((result(h.room(id)).1, ended_at(h.room(id))), (ER::Timeout, deadline + 2));

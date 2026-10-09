@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use scacelith_protocol::{EndReason, ErrorCode, GameStatus, move_flag};
 use tokio::sync::oneshot;
 
-use super::host::{CommitFuture, GameStore};
+use super::host::{CommitFuture, GameStore, LookupFuture, Stored};
 use crate::events::{Anomaly, AnomalySink, GameEnded, HostEvents, IncidentKind, RematchRequest};
 use crate::ids::{ConnId, GameId, UserId};
 use crate::store::{CommitEntry, CommitRatings, ErrorKind, GameRecord, RatingChange, StoreError};
@@ -342,11 +342,15 @@ struct FakeStoreState {
     failures: u32,
     bad: HashSet<GameId>,
     hook: Option<CommitHook>,
+    /// Players [`GameStore::lookup`] reports unknown.
+    missing: HashSet<UserId>,
 }
 
 /// A [`GameStore`] double: records the batches it commits, fails the next calls on demand
 /// (`busy`), refuses a batch holding a bad game (`invalid_record` with the game id), and rates
-/// every rated game +8 for White and -8 for Black from the ratings of the record.
+/// every rated game +8 for White and -8 for Black from the ratings of the record. Its lookup
+/// knows the games it committed and reports the players set by [`FakeStore::forget_players`]
+/// unknown.
 #[derive(Default)]
 pub struct FakeStore {
     state: Mutex<FakeStoreState>,
@@ -401,6 +405,11 @@ impl FakeStore {
     pub fn committed_ids(&self) -> Vec<GameId> {
         self.state().batches.iter().flatten().map(|r| r.id).collect()
     }
+
+    /// The lookup reports these players unknown (a database older than the journal).
+    pub fn forget_players(&self, players: &[UserId]) {
+        self.state().missing.extend(players.iter().copied());
+    }
 }
 
 impl GameStore for FakeStore {
@@ -436,5 +445,15 @@ impl GameStore for FakeStore {
             Ok(entries)
         };
         Box::pin(async move { result })
+    }
+
+    fn lookup(&self, games: Vec<GameId>, players: Vec<UserId>) -> LookupFuture {
+        let st = self.state();
+        let committed: HashSet<GameId> = st.batches.iter().flatten().map(|r| r.id).collect();
+        let stored = Stored {
+            games: games.into_iter().filter(|g| committed.contains(g)).collect(),
+            missing_players: players.into_iter().filter(|p| st.missing.contains(p)).collect(),
+        };
+        Box::pin(async move { Ok(stored) })
     }
 }
