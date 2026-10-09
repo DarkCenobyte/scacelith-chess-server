@@ -297,6 +297,7 @@ impl Journal {
     /// recover are then available from [`Journal::recover`]. The scan runs on the shard's I/O
     /// thread.
     pub async fn open(options: JournalOptions) -> Result<Journal, JournalError> {
+        metrics::register();
         let dir = options.dir.join(format!("shard-{}", options.shard));
         let state = State::new(options.compact_segments.max(1), options.compact_per_flush.max(1));
         let shared = Arc::new(Shared {

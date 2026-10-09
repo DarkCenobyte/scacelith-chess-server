@@ -47,6 +47,27 @@ impl GestureDrop {
     }
 }
 
+/// Why a game of the journal was dropped at start (label of
+/// `scacelith_game_recovery_dropped_total`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryDrop {
+    /// The database already holds it: finished, whatever the journal says.
+    InDatabase,
+    /// A player the database does not know: it can never be committed.
+    UnknownPlayer,
+}
+
+impl RecoveryDrop {
+    /// The metric label.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecoveryDrop::InDatabase => "in_database",
+            RecoveryDrop::UnknownPlayer => "unknown_player",
+        }
+    }
+}
+
 /// What one host counted since it started (the process-wide metrics sum every host).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Counters {
@@ -66,6 +87,10 @@ pub struct Counters {
     pub requeued: u64,
     /// Games the journal could only partly replay (ended `ServerAborted`).
     pub aborted: u64,
+    /// Games of the journal the database already held at start (dropped from the journal).
+    pub recovery_in_database: u64,
+    /// Games of the journal with a player the database did not know at start (dropped).
+    pub recovery_unknown_player: u64,
     /// Compaction snapshots appended.
     pub snapshots: u64,
     /// Stalls of the actor detected by its beat.
@@ -101,6 +126,7 @@ struct Global {
     commit_ms: Histogram,
     commit_errors: Counter,
     unjournaled: Counter,
+    recovery_dropped: [Counter; 2],
     stall_ms: Histogram,
     stall_credit: Counter,
     timer_late: Histogram,
@@ -146,6 +172,14 @@ static GLOBAL: LazyLock<Global> = LazyLock::new(|| {
             "scacelith_game_commit_unjournaled_total",
             "Finished games committed to the database without waiting for the journal, whose writes kept failing",
         ),
+        recovery_dropped: {
+            let dropped = metrics::counter_vec(
+                "scacelith_game_recovery_dropped_total",
+                "Games of the journal dropped at start: already in the database (finished, whatever the journal said) or with a player the database does not know",
+                &["reason"],
+            );
+            [RecoveryDrop::InDatabase, RecoveryDrop::UnknownPlayer].map(|r| dropped.with(&[r.as_str()]))
+        },
         stall_ms: metrics::histogram(
             "scacelith_game_stall_ms",
             "Stalls of the game host actors detected by their timers (ms, longer than GAME_STALL_MIN_MS)",
@@ -220,6 +254,19 @@ impl Meter {
         if unjournaled {
             GLOBAL.unjournaled.add(games as u64);
             self.counts.unjournaled += games as u64;
+        }
+    }
+
+    pub(super) fn recovery_dropped(&mut self, why: RecoveryDrop) {
+        match why {
+            RecoveryDrop::InDatabase => {
+                GLOBAL.recovery_dropped[0].inc();
+                self.counts.recovery_in_database += 1;
+            }
+            RecoveryDrop::UnknownPlayer => {
+                GLOBAL.recovery_dropped[1].inc();
+                self.counts.recovery_unknown_player += 1;
+            }
         }
     }
 

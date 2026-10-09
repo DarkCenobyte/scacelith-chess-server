@@ -228,7 +228,7 @@ The server uses the SQLite bundled with rusqlite (SQLite 3.53.2). The database i
 
 Games in progress live in memory and in a journal per shard ([DESIGN.md](DESIGN.md) section 5.6): a batch is written `JOURNAL_FLUSH_MS` (50 ms) after its first record, with one `write` and an `fdatasync` (`JOURNAL_FSYNC`), so a crash loses at most the last 50 ms of moves. Finished games are committed in batches, at most `DB_COMMIT_MS` (50 ms) after the first of them ended, one batch in flight per shard, with the rating changes in the same transaction; before a batch is committed, the shard waits until its journal has written and fsynced the records of those games, so the database never holds a finished game whose end the journal could still lose. Journal compaction keeps each shard's journal at about (`JOURNAL_COMPACT_SEGMENTS` + 1) × 16 MiB, 80 MiB with the default 4, however long the games last; plan 100 MB per shard.
 
-When the journal cannot be written (a full disk, a failing volume), after 3 failed journal flushes in a row finished games are committed without it, rating changes included, and `scacelith_game_commit_unjournaled_total` counts them. Alert on any increase of it and of `scacelith_journal_errors_total`, and fix the disk before restarting: a finished game whose end the journal lost would come back as a game in progress after a restart, and the database keeps its first result.
+When the journal cannot be written (a full disk, a failing volume), after 3 failed journal flushes in a row finished games are committed without it, rating changes included, and `scacelith_game_commit_unjournaled_total` counts them. Alert on any increase of it and of `scacelith_journal_errors_total` ([Alert rules](#alert-rules)), and fix the disk: until the journal writes again, a crash loses the moves of the games in progress since its last good write. A finished game whose end the journal lost still shows as running in the journal; the next start asks the database first, finds the game there and drops it from the journal (`scacelith_game_recovery_dropped_total{reason="in_database"}`), so it does not come back and its rating change is not applied twice.
 
 What the database holds, and for how long: [DESIGN.md](DESIGN.md) section 7. Everything sits on one machine; nothing is implemented to spread one server over several.
 
@@ -487,11 +487,37 @@ It keeps one entry per source address seen in the last minute (at most 65,536), 
 | `scacelith_ws_hello_total{result="server_full"}`, `scacelith_ws_handshakes_rejected_total{reason="server_full"}` | newcomers refused at login by `MAX_CONNECTIONS`, the sign of a full server; upgrades refused (HTTP 503) once its reserve is in use too, after which the TLS gate sheds (`scacelith_tls_refused_total{reason="server_full"}`) |
 | `scacelith_password_hash_rejected_total{reason}`, `scacelith_password_hash_queued`, `scacelith_password_hash_wait_ms` | `queue_full` or `timeout` outside an attack: not enough CPU for the logins; `source_limit`: clients held to `PASSWORD_HASH_WAITERS_PER_SOURCE` waiting hashes while the queue was at least half full |
 | `scacelith_journal_disk_bytes` (per shard) | more than about (`JOURNAL_COMPACT_SEGMENTS` + 1) × 16 MiB |
-| `scacelith_journal_errors_total`, `scacelith_game_commit_unjournaled_total` | any increase: the journal cannot be written, and finished games are committed without it; fix the disk before a restart |
+| `scacelith_journal_errors_total`, `scacelith_game_commit_unjournaled_total` | any increase: the journal cannot be written, and finished games are committed without it; fix the disk |
+| `scacelith_game_recovery_dropped_total{reason}` | at a start, games of the journal the database already held (`in_database`: the trace of a stop right after a commit, or of commits made without the journal) or whose player it did not know (`unknown_player`: a database older than the journal, docs/DEPLOY.md section 10) |
 | `scacelith_retention_runs_total{result}`, `scacelith_retention_run_seconds` | a `failed` result, or runs growing longer |
 | `scacelith_anticheat_analysis_engines`, `scacelith_anticheat_analysis_engines_shared` | fewer engines than `ANALYSIS_WORKERS` (an engine that does not start), fewer sharing engines than engines (each of those takes 110 MB more; the log says why) |
 | `scacelith_anticheat_analysis_queue_ordinary`, `scacelith_anticheat_analysis_queue_priority`, `scacelith_anticheat_analysis_skipped_total{reason}` | the ordinary queue held at `ANALYSIS_QUEUE_MAX`, a growing priority queue |
 | `scacelith_gif_renders_total{result}`, `scacelith_gif_render_duration_ms`, `scacelith_gif_queue`, `scacelith_gif_cache_total{result}`, `scacelith_http_rate_limited_total{limit=~"gif.*"}` | `busy` renders (503 `server_busy`) or a rising render time: the CPU is full and the GIFs wait for the games, as intended; a low cache hit rate is normal (each game is asked for once or twice) |
+
+### Alert rules
+
+Prometheus rules for the conditions above that need someone at once. Every counter is exported from the start of the process (at 0), so `increase` sees its first event, and a restart resets it without a false alert.
+
+```yaml
+# /etc/prometheus/rules/scacelith.yml
+groups:
+  - name: scacelith
+    rules:
+      - alert: ScacelithJournalWritesFail
+        # The journal cannot be written: after 3 failed flushes in a row, finished games are
+        # committed without it, and a crash loses the moves since its last good write.
+        expr: increase(scacelith_journal_errors_total[10m]) > 0 or increase(scacelith_game_commit_unjournaled_total[10m]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "Scacelith journal writes fail on {{ $labels.instance }}: free the disk or fix JOURNAL_DIR's volume"
+      - alert: ScacelithRecoveryDroppedGames
+        # A start dropped journal games of players the database does not know (a database
+        # older than the journal).
+        expr: increase(scacelith_game_recovery_dropped_total{reason="unknown_player"}[1h]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Scacelith dropped games of unknown players at its start: was an older database restored?"
+```
 
 ## Risks, largest first
 

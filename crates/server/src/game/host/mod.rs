@@ -2,8 +2,9 @@
 //! shard owns the rooms of its games, their timers, the shard's journal and the commit of
 //! finished games.
 //!
-//! [`Hosts::start`] opens each shard's journal, replays it ([`Shard::recover`], on a blocking
-//! thread, before the shard serves anything) and spawns the actor. The actor processes its inbox
+//! [`Hosts::start`] opens each shard's journal, replays it on a blocking thread before the shard
+//! serves anything, reconciled with the database ([`Shard::recover_reconciled`]: a game the
+//! database already holds does not come back), and spawns the actor. The actor processes its inbox
 //! one message at a time (a connection's frames and its detach stay ordered: they travel through
 //! the same inbox), and a 10 ms beat (`MissedTickBehavior::Delay`) runs the timers, detects
 //! stalls, starts commits and compacts the journal. A beat first handles the messages already in
@@ -47,9 +48,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
-pub use self::commit::{CommitFuture, GameStore, JOURNAL_GATE_TRIES, MAX_BACKOFF_MS};
-pub use self::metrics::{Counters, GestureDrop};
-pub use self::shard::{RulesFactory, SLOT_MS, Shard, ShardDeps, ShardSettings};
+pub use self::commit::{CommitFuture, GameStore, JOURNAL_GATE_TRIES, LookupFuture, MAX_BACKOFF_MS, Stored};
+pub use self::metrics::{Counters, GestureDrop, RecoveryDrop};
+pub use self::shard::{Recovery, RulesFactory, SLOT_MS, Shard, ShardDeps, ShardSettings};
 
 use self::shard::{Shared, panic_message};
 use crate::clock::SharedClock;
@@ -368,9 +369,18 @@ impl Hosts {
             logger: logger.clone(),
             last_game_id,
         });
-        // The replay is CPU work: off the runtime threads.
+        // The replay is CPU work: off the runtime threads. Nothing is published before the
+        // database has said which of the games it already holds.
+        let rebuilt = tokio::task::spawn_blocking(move || {
+            let recovery = core.rebuild();
+            (core, recovery)
+        })
+        .await;
+        let (mut core, recovery) =
+            rebuilt.map_err(|e| HostError::Recovery { shard, message: e.to_string() })?;
+        let stored = core.lookup(&recovery).await.map_err(HostError::Store)?;
         let recovered = tokio::task::spawn_blocking(move || {
-            let n = core.recover();
+            let n = core.publish(recovery, &stored);
             core.publish_load();
             (core, n)
         })

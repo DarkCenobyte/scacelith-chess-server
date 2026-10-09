@@ -44,3 +44,14 @@ pub(super) static SEGMENTS: LazyLock<GaugeVec> = LazyLock::new(|| {
 pub(super) static DISK_BYTES: LazyLock<GaugeVec> = LazyLock::new(|| {
     metrics::gauge_vec("scacelith_journal_disk_bytes", "Size of the journal segments on disk", &["shard"])
 });
+
+/// Registers the counters and histograms at once, so that they show at 0 before their first event
+/// (an alert on `increase(scacelith_journal_errors_total[...])` then sees the first failure).
+pub(super) fn register() {
+    LazyLock::force(&FLUSH_MS);
+    LazyLock::force(&BYTES);
+    LazyLock::force(&RECORDS);
+    LazyLock::force(&ERRORS);
+    LazyLock::force(&SEGMENTS_DELETED);
+    LazyLock::force(&SNAPSHOTS);
+}

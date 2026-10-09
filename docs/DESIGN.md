@@ -196,10 +196,10 @@ the third failed flush in a row (`JOURNAL_GATE_TRIES`, about 0.3 s after the fir
 journal. Its snapshots and `committed` records are still appended in case the journal comes back.
 The host logs one error per episode and counts these games in
 `scacelith_game_commit_unjournaled_total`; the first flush that writes without a failure ends the
-episode. The database is then the only durable copy of these results. One risk remains, the one the
-wait avoids: after a crash before the journal has written the game's snapshot or `committed`
-record, a game whose `ended` record was lost comes back running; whatever result it ends with, the
-database keeps the first one.
+episode. The database is then the only durable copy of these results. After a crash before the
+journal has written the game's snapshot or `committed` record, the journal still shows such a game
+running; the next start asks the database first (Recovery, 5.3), finds the game there and drops it
+from the journal, so it neither comes back nor changes a rating twice.
 
 **Reconnection.** A lost connection keeps the game running (the player's clock too, except for the
 clock hold of a game restored after a restart: 6.4). The opponent gets
@@ -329,11 +329,18 @@ holds before anything of it reaches the client; then it ends the game as a forfe
 of the request and sends the sender a fatal `Error{CheatDetected}` (close 4302). Queuing the
 forfeit, the `Error` or the close before that call would let a client that reconnects at once in.
 
-**Recovery.** At start each shard rebuilds its games from the journal: a running game is restored
-with the restart rules of 6.4 and announced to the lobby (`HostEvents::game_recovered`), a game
-that ended but was not committed is queued for its commit, a game whose records cannot all be
-replayed is rebuilt as far as they allow and ended `ServerAborted`, and one that cannot be rebuilt
-at all is dropped (its `committed` record is appended so that its segments go).
+**Recovery.** At start each shard rebuilds its games from the journal, then reconciles them with
+the database before it publishes anything (`GameStore::lookup`, one read): the database has the
+last word. A game the database already holds is finished whatever the journal says (committed
+while the journal could not be written, or a journal older than the database), and a game with a
+player the database does not know can never be committed (a database older than the journal):
+both are dropped, their `committed` record appended, with no event, commit or rating change
+(`scacelith_game_recovery_dropped_total{reason}`). Then a running game is restored with the restart
+rules of 6.4 and announced to the lobby (`HostEvents::game_recovered`), a game that ended but was
+not committed is queued for its commit, a game whose records cannot all be replayed is rebuilt as
+far as they allow and ended `ServerAborted`, and one that cannot be rebuilt at all is dropped (its
+`committed` record is appended so that its segments go). docs/DEPLOY.md section 10 states the
+policy for a journal and a database of different instants.
 
 ### 5.4 Matching (`matching`, `realtime::lobby`)
 

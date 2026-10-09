@@ -589,9 +589,11 @@ derived from `SERVER_SECRET`: after a restart each player makes one full handsha
 - When the journal cannot be written (a full disk, a failing volume),
   `scacelith_journal_errors_total` grows and the server logs `journal write failed`. Finished games
   still reach the database, rating changes included, after three failed journal flushes in a row:
-  `scacelith_game_commit_unjournaled_total` counts them, with one error logged per episode. Free
-  the space or fix the volume before a restart: a finished game whose end the journal lost would
-  come back as a game in progress (the database keeps its first result).
+  `scacelith_game_commit_unjournaled_total` counts them, with one error logged per episode (alert
+  on both: [docs/SIZING.md](docs/SIZING.md#alert-rules)). Free the space or fix the volume. A
+  finished game whose end the journal lost still shows as running in the journal; the next start
+  finds it in the database and drops it from the journal, so it does not come back and its rating
+  change is not applied twice.
 
 ## Moderation and anti-cheat
 

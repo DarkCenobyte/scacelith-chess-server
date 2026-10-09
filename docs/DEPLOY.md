@@ -414,19 +414,30 @@ sudo install -m 0600 -o scacelith -g scacelith scacelith-20261003T043000Z.db /va
 sudo systemctl start scacelith-server
 ```
 
-The journal must not be replayed against an older copy. It holds the games that were in progress
-when the server stopped, and the server replays each of them at the start without looking at the
-database, then commits it to the database when it ends. A game whose player registered after the
-copy was made can never be committed (the copy has no such account): its commit fails and is
-retried for ever, at least every 10 seconds and with an error in the log each time; the other
-finished games of its shard can wait up to 10 seconds for their own commit; its other player
-stays "in a game" for matchmaking and challenges until the next restart; and the journal keeps
-it, so every later start replays it again. The journal cannot bring back the games that ended between the copy and the
-stop either: once they are in the database, the journal forgets them. So the games in progress at
-the stop are lost with a restore, and their players find no game when they reconnect. Keep the
-journal only with a copy made after the server stopped (it then matches the journal exactly), for
-example when moving the server to another machine: stop it, take the copy, and move the copy and
-`journal/` together.
+**A journal and a database of different instants.** The journal belongs to the instant of the
+stop: it holds the games that were in progress then. A copy of the database belongs to the instant
+it was taken. The procedure above therefore moves the journal aside with the database: the games
+in progress at the stop are lost with a restore (they would be committed on top of the copy's
+older ratings, and the games that ended between the copy and the stop are in neither), and their
+players find no game when they reconnect. Keep the journal only with a copy made after the server
+stopped (it then matches the journal exactly), for example when moving the server to another
+machine: stop it, take the copy, and move the copy and `journal/` together.
+
+If a journal and a database of different instants meet all the same (the journal left in place by
+mistake, or a journal copy older than the database), the start reconciles them before it takes any
+game back, and the database has the last word:
+
+- A game the database already holds is finished, whatever the journal says (a journal older than
+  the database, or a game committed while the journal could not be written: SIZING.md, "Database
+  and disk"). The journal forgets it: no game comes back and no rating changes twice. The log has
+  an info line for a game the journal shows finished (also the trace of a stop right after a
+  commit), a warning for one it shows running.
+- A game with a player the database does not know (a database older than that player's account)
+  can never be committed: it is dropped from the journal, with an error in the log naming the game
+  and its players, instead of being retried for ever.
+- Every other game is taken back and later committed to this database.
+
+`scacelith_game_recovery_dropped_total{reason="in_database"|"unknown_player"}` counts these games.
 
 ## 11. Several instances
 

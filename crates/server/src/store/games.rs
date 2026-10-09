@@ -1,6 +1,8 @@
 //! Finished games: the records the host commits, and the history queries of the account, profile
 //! and anti-cheat (the commit itself is in `commit.rs`).
 
+use std::collections::HashSet;
+
 use rusqlite::{Row, params};
 
 use super::db::Db;
@@ -255,6 +257,18 @@ impl Games<'_> {
     pub fn last_id(&self) -> Result<GameId> {
         let id: Option<i64> = self.db.one("SELECT max(id) FROM games", [], |r| r.get(0))?.flatten();
         Ok(id.unwrap_or(0) as GameId)
+    }
+
+    /// The games of `ids` that are stored (one primary key lookup each: the reconciliation of a
+    /// journal at start).
+    pub fn stored_among(&self, ids: &[GameId]) -> Result<HashSet<GameId>> {
+        let mut out = HashSet::new();
+        for &id in ids {
+            if self.db.one("SELECT 1 FROM games WHERE id = ?1", [sql_id(id)], |_| Ok(()))?.is_some() {
+                out.insert(id);
+            }
+        }
+        Ok(out)
     }
 
     /// A player's games, newest first, before the game id `before` (exclusive; `None`: from the
