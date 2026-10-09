@@ -57,11 +57,12 @@ use crate::clock::SharedClock;
 use crate::config::Config;
 use crate::events::{AnomalySink, HostEvents, NewGame};
 use crate::ids::{self, ConnId, GameId, MAX_SHARDS, UserId};
+use crate::journal::owner::{self, ClaimError, ShardClaim};
 use crate::journal::{Journal, JournalError, JournalOptions};
 use crate::log::Logger;
 use crate::realtime::Endpoint;
 use crate::store::{Store, StoreError};
-use crate::{log_error, log_info};
+use crate::{log_error, log_info, log_warn};
 
 /// What the host actors need.
 #[derive(Clone)]
@@ -84,10 +85,16 @@ impl std::fmt::Debug for HostDeps {
 pub enum HostError {
     /// The shard range is empty or goes beyond the 64 shards a game id can address.
     BadShards(Range<u32>),
-    /// The database's largest game id could not be read.
+    /// The database could not be read (largest game id, server id, the games of a journal).
     Store(StoreError),
+    /// `JOURNAL_DIR` could not be listed.
+    JournalDir(std::io::Error),
     /// A shard's journal could not be opened.
     Journal { shard: u32, error: JournalError },
+    /// Another process serves a shard of this instance's range (two servers share `JOURNAL_DIR`).
+    ShardInUse(u32),
+    /// A shard of this instance's range holds games of another database.
+    ForeignJournal { shard: u32, owner: String, server_id: String, games: usize },
     /// A shard's recovery failed (a bug).
     Recovery { shard: u32, message: String },
 }
@@ -96,8 +103,20 @@ impl std::fmt::Display for HostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             HostError::BadShards(r) => write!(f, "bad game shards {}..{} (at most 64)", r.start, r.end),
-            HostError::Store(e) => write!(f, "game ids not readable: {e}"),
+            HostError::Store(e) => write!(f, "database not readable: {e}"),
+            HostError::JournalDir(e) => write!(f, "JOURNAL_DIR not readable: {e}"),
             HostError::Journal { shard, error } => write!(f, "journal of shard {shard}: {error}"),
+            HostError::ShardInUse(shard) => write!(
+                f,
+                "the journal of shard {shard} is in use by another process: every server needs its own JOURNAL_DIR \
+                 (docs/DEPLOY.md section 11)"
+            ),
+            HostError::ForeignJournal { shard, owner, server_id, games } => write!(
+                f,
+                "the journal of shard {shard} holds {games} games of another database (server id {owner}; this \
+                 database is {server_id}): point JOURNAL_DIR at this database's journal, or move \
+                 JOURNAL_DIR/shard-{shard} aside (docs/DEPLOY.md section 11)"
+            ),
             HostError::Recovery { shard, message } => {
                 write!(f, "recovery of shard {shard} failed: {message}")
             }
@@ -170,6 +189,8 @@ enum Msg {
 #[derive(Clone)]
 pub struct HostHandle {
     shard: u32,
+    /// Outside the instance's shard range: it serves the games of its journal, never a new one.
+    draining: bool,
     tx: mpsc::UnboundedSender<Msg>,
     shared: Arc<Shared>,
     clock: SharedClock,
@@ -177,7 +198,11 @@ pub struct HostHandle {
 
 impl std::fmt::Debug for HostHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HostHandle").field("shard", &self.shard).field("load", &self.load()).finish()
+        f.debug_struct("HostHandle")
+            .field("shard", &self.shard)
+            .field("draining", &self.draining)
+            .field("load", &self.load())
+            .finish()
     }
 }
 
@@ -186,6 +211,13 @@ impl HostHandle {
     #[must_use]
     pub fn shard(&self) -> u32 {
         self.shard
+    }
+
+    /// Whether the shard is outside the instance's range (`SHARD_BASE` to `SHARD_BASE + WORKERS -
+    /// 1`) and only serves the games its journal held at start.
+    #[must_use]
+    pub fn draining(&self) -> bool {
+        self.draining
     }
 
     fn post(&self, msg: Msg) {
@@ -271,11 +303,16 @@ impl HostHandle {
     }
 }
 
-/// The host actors of the process, one per shard.
+/// The host actors of the process, one per shard: those of the instance's range, and those of the
+/// shards outside it whose journal held games at start (draining: they serve these games until
+/// they end and get no new game).
 pub struct Hosts {
-    /// One per shard, in shard order (`first_shard..`).
+    /// Every host, in shard order.
     handles: Vec<HostHandle>,
-    first_shard: u32,
+    /// The index in `handles` of each shard's host.
+    by_shard: [Option<u8>; MAX_SHARDS as usize],
+    /// The shard directories claimed, released once the hosts shut down.
+    claims: Mutex<Vec<ShardClaim>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -285,13 +322,27 @@ impl std::fmt::Debug for Hosts {
     }
 }
 
+/// What starting one shard gave.
+enum Started {
+    /// A host, with its actor and the claim on its directory.
+    Host(HostHandle, JoinHandle<()>, ShardClaim),
+    /// Nothing to serve: a directory outside the range without games, or not this instance's.
+    Skipped,
+}
+
 impl Hosts {
-    /// Opens the journal of each shard of `shards`, recovers its games and starts its actor.
-    /// Returns once every shard has recovered (the players can be told their games back).
+    /// Starts the hosts of the shards of `shards` (`SHARD_BASE` to `SHARD_BASE + WORKERS - 1`)
+    /// and of every other shard whose journal under `JOURNAL_DIR` holds games of this database
+    /// (draining hosts, see [`HostHandle::draining`]): each one's directory is claimed (locked
+    /// and marked with the database's server id: [`ShardClaim`]), its journal opened, its games
+    /// recovered and reconciled with the database, and its actor started. Returns once every
+    /// shard has recovered (the players can be told their games back).
     ///
     /// # Errors
     ///
-    /// A bad shard range, an unreadable database, a journal that cannot be opened.
+    /// A bad shard range, an unreadable database or `JOURNAL_DIR`, a journal that cannot be
+    /// opened, a shard of the range that another process serves or whose journal holds the games
+    /// of another database.
     pub async fn start(deps: HostDeps, shards: Range<u32>) -> Result<Hosts, HostError> {
         let rules: RulesFactory = Arc::new(|| Box::new(ChessGame::default()));
         let store: Arc<dyn GameStore> = Arc::new(deps.store.clone());
@@ -305,7 +356,8 @@ impl Hosts {
         Hosts::start_with(&deps, shards, store, rules, journal).await
     }
 
-    /// [`Hosts::start`] with given rules, store and journal options (tests).
+    /// [`Hosts::start`] with given rules, store and journal options (tests). The journal options
+    /// of every shard name the same directory.
     pub(crate) async fn start_with(
         deps: &HostDeps,
         shards: Range<u32>,
@@ -317,13 +369,24 @@ impl Hosts {
             return Err(HostError::BadShards(shards));
         }
         let last_game_id = deps.store.games().last_id().await.map_err(HostError::Store)?;
+        let server_id = deps.store.server_id().await.map_err(HostError::Store)?;
+        let root = journal_options(shards.start).dir;
+        let mut all: Vec<u32> = shards.clone().collect();
+        all.extend(owner::shard_dirs(&root).map_err(HostError::JournalDir)?);
+        all.sort_unstable();
+        all.dedup();
         let logger = Logger::root().child("game");
-        let mut hosts =
-            Hosts { handles: Vec::new(), first_shard: shards.start, tasks: Mutex::new(Vec::new()) };
-        for shard in shards {
+        let mut hosts = Hosts {
+            handles: Vec::new(),
+            by_shard: [None; MAX_SHARDS as usize],
+            claims: Mutex::new(Vec::new()),
+            tasks: Mutex::new(Vec::new()),
+        };
+        for shard in all {
+            let at = ShardAt { shard, draining: !shards.contains(&shard), server_id: server_id.as_deref() };
             let started = Hosts::start_shard(
                 deps,
-                shard,
+                at,
                 store.clone(),
                 rules.clone(),
                 &journal_options,
@@ -332,31 +395,84 @@ impl Hosts {
             )
             .await;
             match started {
-                Ok((handle, task)) => {
+                Ok(Started::Host(handle, task, claim)) => {
+                    hosts.by_shard[shard as usize] = u8::try_from(hosts.handles.len()).ok();
                     hosts.handles.push(handle);
                     hosts.tasks.get_mut().push(task);
+                    hosts.claims.get_mut().push(claim);
                 }
+                Ok(Started::Skipped) => {}
                 Err(e) => {
                     hosts.shutdown().await;
                     return Err(e);
                 }
             }
         }
+        metrics::draining_shards(hosts.handles.iter().filter(|h| h.draining).count());
         Ok(hosts)
     }
 
     async fn start_shard(
         deps: &HostDeps,
-        shard: u32,
+        at: ShardAt<'_>,
         store: Arc<dyn GameStore>,
         rules: RulesFactory,
         journal_options: &impl Fn(u32) -> JournalOptions,
         logger: &Logger,
         last_game_id: GameId,
-    ) -> Result<(HostHandle, JoinHandle<()>), HostError> {
-        let journal = Journal::open(journal_options(shard))
-            .await
-            .map_err(|error| HostError::Journal { shard, error })?;
+    ) -> Result<Started, HostError> {
+        let ShardAt { shard, draining, server_id } = at;
+        let options = journal_options(shard);
+        let skip = |why: &str| {
+            log_warn!(logger, "game shard outside this instance's range left alone", {
+                "shard": shard, "why": why,
+            });
+            Ok(Started::Skipped)
+        };
+        if draining && !owner::has_segments(&options.dir, shard).unwrap_or(true) {
+            // Nothing to recover: the directory is left as it is.
+            return Ok(Started::Skipped);
+        }
+        let mut claim = match ShardClaim::take(&options.dir, shard) {
+            Ok(claim) => claim,
+            Err(ClaimError::InUse) if draining => return skip("in use by another process"),
+            Err(ClaimError::InUse) => return Err(HostError::ShardInUse(shard)),
+            Err(ClaimError::Io(e)) if draining => return skip(&e.to_string()),
+            Err(ClaimError::Io(e)) => {
+                let error = JournalError::Io { kind: e.kind(), message: format!("owner file: {e}") };
+                return Err(HostError::Journal { shard, error });
+            }
+        };
+        if !claim.locked() {
+            log_warn!(logger, "journal directory not locked: the file system has no flock", { "shard": shard });
+        }
+        let foreign = match (claim.owner(), server_id) {
+            (Some(owner), Some(id)) if owner != id => Some(owner.to_owned()),
+            _ => None,
+        };
+        if draining && foreign.is_some() {
+            return skip("journal of another database");
+        }
+        let journal = Journal::open(options).await.map_err(|error| HostError::Journal { shard, error })?;
+        let games = journal.recover().len();
+        if let Some(owner) = foreign
+            && games > 0
+        {
+            let _ = journal.close().await;
+            let server_id = server_id.unwrap_or_default().to_owned();
+            return Err(HostError::ForeignJournal { shard, owner, server_id, games });
+        }
+        if draining && games == 0 {
+            // A directory a former range left behind, its games all committed.
+            let _ = journal.close().await;
+            return Ok(Started::Skipped);
+        }
+        if let Some(id) = server_id {
+            claim.set_owner(id).map_err(|e| HostError::Journal {
+                shard,
+                error: JournalError::Io { kind: e.kind(), message: format!("owner file: {e}") },
+            })?;
+        }
         let mut core = Shard::new(ShardDeps {
             shard,
             settings: ShardSettings::from_config(&deps.config),
@@ -386,30 +502,38 @@ impl Hosts {
         })
         .await;
         let (core, n) = recovered.map_err(|e| HostError::Recovery { shard, message: e.to_string() })?;
-        log_info!(logger, "game host started", { "shard": shard, "recovered": n });
+        if draining {
+            log_warn!(logger, "game shard outside this instance's range: it serves the games of its journal until they end, and takes no new game", {
+                "shard": shard, "recovered": n, "games": core.games(),
+            });
+        } else {
+            log_info!(logger, "game host started", { "shard": shard, "recovered": n });
+        }
         let (tx, inbox) = mpsc::unbounded_channel();
-        let handle = HostHandle { shard, tx, shared: core.shared(), clock: deps.clock.clone() };
+        let handle = HostHandle { shard, draining, tx, shared: core.shared(), clock: deps.clock.clone() };
         let task = tokio::spawn(run(core, inbox));
-        Ok((handle, task))
+        Ok(Started::Host(handle, task, claim))
     }
 
     /// The host of a game (by the shard bits of its id).
     #[must_use]
     pub fn get(&self, game: GameId) -> Option<&HostHandle> {
-        let i = ids::shard_of(game).checked_sub(self.first_shard)?;
-        self.handles.get(i as usize)
+        let i = self.by_shard.get(ids::shard_of(game) as usize).copied().flatten()?;
+        self.handles.get(usize::from(i))
     }
 
-    /// Where to create a game: the `preferred` shard when it is one of ours, else the host with
-    /// the fewest games (the lowest shard on a tie).
+    /// Where to create a game: the `preferred` shard when it is one of the instance's range,
+    /// else the host of the range with the fewest games (the lowest shard on a tie). A draining
+    /// host is never chosen.
     #[must_use]
     pub fn pick(&self, preferred: Option<u32>) -> &HostHandle {
-        if let Some(h) = preferred.and_then(|s| self.handles.iter().find(|h| h.shard == s)) {
+        let mut range = self.handles.iter().filter(|h| !h.draining);
+        if let Some(h) = preferred.and_then(|s| self.handles.iter().find(|h| h.shard == s && !h.draining)) {
             return h;
         }
-        // `start` never builds an empty set of hosts.
-        let mut best = &self.handles[0];
-        for h in &self.handles[1..] {
+        // `start` always starts the hosts of a non-empty range.
+        let mut best = range.next().expect("a host of the range");
+        for h in range {
             if h.load().games < best.load().games {
                 best = h;
             }
@@ -417,7 +541,7 @@ impl Hosts {
         best
     }
 
-    /// Every host, in shard order.
+    /// Every host, in shard order (draining ones included).
     #[must_use]
     pub fn handles(&self) -> &[HostHandle] {
         &self.handles
@@ -430,7 +554,8 @@ impl Hosts {
         self.handles.iter().any(|h| h.stall_during(since_mono_ms))
     }
 
-    /// Shuts every host down: final commits (a few attempts), journals flushed and closed.
+    /// Shuts every host down: final commits (a few attempts), journals flushed and closed, then
+    /// the shard directories released.
     pub async fn shutdown(&self) {
         let answers: Vec<_> = self
             .handles
@@ -448,7 +573,18 @@ impl Hosts {
         for task in tasks {
             let _ = task.await;
         }
+        self.claims.lock().clear();
     }
+}
+
+/// A shard to start, and how.
+#[derive(Clone, Copy)]
+struct ShardAt<'a> {
+    shard: u32,
+    /// Outside the instance's range.
+    draining: bool,
+    /// The database's server id (`None`: unknown, the owner files are neither checked nor written).
+    server_id: Option<&'a str>,
 }
 
 /// Handles one message (the shutdown request is returned to the caller, which awaits it).

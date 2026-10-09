@@ -636,6 +636,7 @@ impl Instance {
         log_info!(log, "started", {
             "serverId": server_id,
             "shards": hosts.handles().len(),
+            "drainingShards": hosts.handles().iter().filter(|h| h.draining()).count(),
             "recovered": recovered,
             "threads": config.workers,
             "nofile": nofile,

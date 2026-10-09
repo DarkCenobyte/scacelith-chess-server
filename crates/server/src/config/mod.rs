@@ -13,7 +13,8 @@
 //!   `GOOGLE_REDIRECT_URI`) no longer exist: still set, they get a warning, never an error
 //!   ([`OBSOLETE`]);
 //! * `WORKERS` is the number of game shards and of runtime threads (`auto` = one per core, at
-//!   most 16), still within `SHARD_BASE + WORKERS <= 64`;
+//!   most 16), still within `SHARD_BASE + WORKERS <= 64`; a change between two starts keeps the
+//!   games in progress (`game::host::Hosts::start`);
 //! * the settings the former server applied per worker process are whole-server values whose
 //!   defaults scale with `WORKERS`: `MAX_PENDING_HANDSHAKES` (128 x), `IP_MAX_INFLIGHT` (32 x),
 //!   `PASSWORD_HASH_CONCURRENCY` (1 x), `PASSWORD_HASH_QUEUE_MAX` (32 x),

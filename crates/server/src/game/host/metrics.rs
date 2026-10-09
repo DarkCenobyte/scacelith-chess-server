@@ -127,6 +127,7 @@ struct Global {
     commit_errors: Counter,
     unjournaled: Counter,
     recovery_dropped: [Counter; 2],
+    draining: Gauge,
     stall_ms: Histogram,
     stall_credit: Counter,
     timer_late: Histogram,
@@ -180,6 +181,10 @@ static GLOBAL: LazyLock<Global> = LazyLock::new(|| {
             );
             [RecoveryDrop::InDatabase, RecoveryDrop::UnknownPlayer].map(|r| dropped.with(&[r.as_str()]))
         },
+        draining: metrics::gauge(
+            "scacelith_game_shards_draining",
+            "Game shards outside SHARD_BASE to SHARD_BASE + WORKERS - 1 served for the games their journal held at start",
+        ),
         stall_ms: metrics::histogram(
             "scacelith_game_stall_ms",
             "Stalls of the game host actors detected by their timers (ms, longer than GAME_STALL_MIN_MS)",
@@ -198,6 +203,11 @@ static GLOBAL: LazyLock<Global> = LazyLock::new(|| {
         gesture_drops: GestureDrop::ALL.map(|d| drops.with(&[d.as_str()])),
     }
 });
+
+/// Sets the number of draining shards (at start).
+pub(super) fn draining_shards(n: usize) {
+    GLOBAL.draining.set(n as f64);
+}
 
 /// The meters of one host: every event goes to the process-wide metrics and to the host's
 /// [`Counters`].

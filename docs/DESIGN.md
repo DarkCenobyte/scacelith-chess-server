@@ -41,9 +41,11 @@ analysis pool (Stockfish child processes, nice 19) · GIF render threads (nice 1
   runs on tokio's blocking pool (store reads, password hashes, the journal replay) or on dedicated
   threads.
 * **Game shards.** `WORKERS` host actors, numbered `SHARD_BASE` to `SHARD_BASE + WORKERS - 1`
-  (64 shard numbers at most, checked at start). A game id packs `(ms since 2026-01-01) << 12 |
-  shard << 6 | seq` and stays below 2^53; its shard bits name the host, so a message reaches its
-  game without a lookup table (`ids`). Section 5.3.
+  (64 shard numbers at most, checked at start), each with its journal in `JOURNAL_DIR/shard-<n>`.
+  A game id packs `(ms since 2026-01-01) << 12 | shard << 6 | seq` and stays below 2^53; its shard
+  bits name the host, so a message reaches its game without a lookup table (`ids`), whatever the
+  range of the instance. A shard outside the range whose journal still holds games (the range
+  changed) gets a draining host at start, which serves them until they end. Section 5.3.
 * **Lobby.** One actor owns what must be unique in the server: presence (one live connection per
   account), the matchmaker queues, challenges and private codes, conduct cooldowns, game creation
   and placement, rematches, the ban cache and the rating refund notices. Sections 5.4 and 5.8.
@@ -329,6 +331,19 @@ holds before anything of it reaches the client; then it ends the game as a forfe
 of the request and sends the sender a fatal `Error{CheatDetected}` (close 4302). Queuing the
 forfeit, the `Error` or the close before that call would let a client that reconnects at once in.
 
+**Shard directories.** `Hosts::start` starts the shards of the range and every other
+`JOURNAL_DIR/shard-<n>` directory that holds journal segments. It first claims each directory
+(`journal::owner`): an exclusive `flock` on its `owner` file, held while the process runs, and the
+server id of the database (`server_meta`) written in it. A shard of the range that another process
+holds, or whose journal holds the games of another database (another server id) refuses the start
+(`HostError::ShardInUse`, `HostError::ForeignJournal`); a directory written by 0.9.1 or older has no
+server id and is taken, then marked. A shard outside the range is left alone in these cases, and
+when its journal holds no game; otherwise it gets a draining host (`HostHandle::draining`,
+`scacelith_game_shards_draining`): it recovers and serves its games like any host, takes no new
+game (`Hosts::pick` skips it, rematches included), and lasts until the process stops; the next
+start finds its journal empty and leaves it out. Changing `WORKERS` or `SHARD_BASE` therefore never
+abandons a game in progress (DEPLOY.md section 11).
+
 **Recovery.** At start each shard rebuilds its games from the journal, then reconciles them with
 the database before it publishes anything (`GameStore::lookup`, one read): the database has the
 last word. A game the database already holds is finished whatever the journal says (committed
@@ -418,7 +433,9 @@ in-memory buffer; the shard's I/O thread writes a batch `JOURNAL_FLUSH_MS` after
 or at once on `flush()`, with one `write` (+ `fdatasync` when `JOURNAL_FSYNC` is on), one batch in
 flight. Segments rotate at 16 MiB; the first batch after a start opens a new segment. The API:
 `open`, `append`, `committed`, `flush`, `has_unwritten`, `failed_writes`,
-`compaction_candidates`, `recover`, `stats`, `close`. A journal directory belongs to one process.
+`compaction_candidates`, `recover`, `stats`, `close`. A journal directory belongs to one process,
+which holds the lock of its `owner` file (5.3); the journal itself only reads and writes the
+`segment-<seq>.log` files.
 
 **Deletion.** A segment is deleted when no game needs it any more: every game it mentions is ended
 *and* committed, or has a newer snapshot. A segment holding a game's `committed` record outlives
@@ -1157,9 +1174,11 @@ checkpoint (it is truncated to 64 MiB and removed when the server stops). A back
 
 One process serves one machine: `WORKERS` shards share one runtime, and every limit of the
 configuration is a whole-server limit. Several instances are independent servers, each with its
-own accounts, database, journal and ports (DEPLOY.md, section 11). `SHARD_BASE` gives an instance
-its own range of shard numbers, so that the game ids of instances given distinct ranges never
-collide. Nothing more is implemented for several machines: presence, queues and limits live in one
+own accounts, database, journal and ports (DEPLOY.md, section 11); the lock and the server id of
+each shard directory (5.3) refuse a start that would share a journal. `SHARD_BASE` gives an
+instance its own range of shard numbers, so that the game ids of instances given distinct ranges
+never collide. The range of an instance can change between two starts: the games left in the
+journals of shards it no longer covers are served by draining hosts until they end (5.3). Nothing more is implemented for several machines: presence, queues and limits live in one
 process, the store is a local SQLite file, and no channel connects the hosts of different
 instances. Capacity on one machine: SIZING.md.
 

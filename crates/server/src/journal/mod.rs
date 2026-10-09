@@ -80,6 +80,7 @@ mod crc;
 pub mod format;
 mod io;
 mod metrics;
+pub mod owner;
 mod state;
 mod worker;
 

@@ -9,6 +9,7 @@ mod durability;
 mod failures;
 mod handle;
 mod long_games;
+mod owner;
 mod support;
 
 /// The store tests' log capture (one capture at a time in the whole test binary).
