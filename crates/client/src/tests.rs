@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use scacelith_protocol::{
-    Ack, ClientMsg, Color, EndReason, ErrorCode, GameEnd, GameSnapshot, GameStatus, Message, MoveMade,
+    Ack, ClientMsg, Color, EndReason, ErrorCode, GameEnd, GameSnapshot, GameStatus, MINOR, Message, MoveMade,
     PlayerInfo, QueueLeave, Resign, ServerMsg, ServerPing, Welcome, decode_hello,
 };
 use serde_json::json;
@@ -113,7 +113,7 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> FakeServer<S> {
     /// Reads the Hello and answers a Welcome for `username`.
     async fn welcome(&mut self, username: &str) {
         let ClientMsg::Hello(hello) = self.msg().await else { panic!("Hello first") };
-        assert_eq!((hello.seq, hello.proto, hello.minor, hello.caps), (1, 1, 0, 0));
+        assert_eq!((hello.seq, hello.proto, hello.minor, hello.caps), (1, 1, MINOR, 0));
         assert_eq!(hello.token, TOKEN);
         self.send(welcome_msg(username)).await;
     }

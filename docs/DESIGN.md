@@ -755,8 +755,18 @@ happen with a modified client.
 * `DrawClaim`: accepted when the current position occurred 3 times or the halfmove clock is at
   least 100; otherwise `NothingToClaim`. Automatic endings: mate, stalemate, insufficient material,
   fivefold repetition, 75 moves (as in the game). A game reaching 1200 plies ends `ServerAborted`.
-* `Resign` at any time while the game runs. `Abort` only before the sender's own first move
-  (conduct incident `abort`).
+* `Resign` at any time while the game runs: a loss, or a draw (`ResignationVsInsufficient`, FIDE
+  5.1.2) when the opponent cannot mate. `Abort` only before the sender's own first move (conduct
+  incident `abort`).
+* "Cannot mate" (`Position::can_color_mate`, the same rule as the game's `canColorMate` and as
+  python-chess and lichess): a side with a pawn, a rook or a queen can mate; a side with a knight
+  cannot only when it has that single knight and the opponent has nothing but queens; a side with
+  bishops alone cannot only when every bishop of the board stands on one square colour and there
+  is no pawn and no knight; a bare king cannot. A position that is merely hard to win is not
+  "cannot mate". It turns resignation, flag fall (`TimeoutVsInsufficient`) and abandonment
+  (`AbandonmentVsInsufficient`) into draws (in the offline game, the second illegal move too);
+  `test/fixtures/mating-material.json` holds the positions both sides' tests check, with a mating
+  line for each "can mate" that is not obvious. The anti-cheat `Forfeit` stays a loss.
 * `Rematch` within 60 s after the end: when both accept, the host asks the lobby
   (`HostEvents::rematch`), which creates a new game with the colours swapped, the same time control,
   rated flag and `autoPress`, after checking bans, presence, another game and, for a rated game,

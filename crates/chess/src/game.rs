@@ -10,7 +10,8 @@ use crate::types::{Color, EndReason, GameStatus, MoveFlags, move_uci};
 
 /// A game: positions, moves, automatic endings (checkmate, stalemate, dead position, fivefold
 /// repetition, 75-move rule), claims (threefold, fifty moves), resignation, agreement, flag fall
-/// and any online ending ([`ChessGame::end`]).
+/// and any online ending ([`ChessGame::end`]). A resignation or a flag fall against an opponent
+/// who cannot checkmate is a draw.
 ///
 /// The finishing calls return `true` only when they ended the game (`false` when it was already
 /// over, or when there was nothing to claim).
@@ -244,9 +245,14 @@ impl ChessGame {
         false
     }
 
-    /// `loser` resigns.
+    /// `loser` resigns: a loss, or a draw when the opponent cannot checkmate
+    /// ([`Position::can_color_mate`], FIDE 5.1.2).
     pub fn resign(&mut self, loser: Color) -> bool {
-        self.finish(Self::win_for(loser.opposite()), EndReason::Resignation)
+        let winner = loser.opposite();
+        if !self.position.can_color_mate(winner) {
+            return self.finish(GameStatus::Draw, EndReason::ResignationVsInsufficient);
+        }
+        self.finish(Self::win_for(winner), EndReason::Resignation)
     }
 
     /// Draw by agreement.

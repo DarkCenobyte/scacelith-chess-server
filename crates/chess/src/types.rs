@@ -364,7 +364,7 @@ impl TryFrom<u8> for GameStatus {
     }
 }
 
-/// Why a game ended (the protocol's `EndReason`): 0..13 are `chess::GameEndReason`, 20 and above
+/// Why a game ended (the protocol's `EndReason`): 0..14 are `chess::GameEndReason`, 20 and above
 /// are online-only endings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -397,6 +397,8 @@ pub enum EndReason {
     Agreement = 12,
     /// Second illegal move, but the opponent cannot mate: draw (13).
     IllegalMovesVsInsufficient = 13,
+    /// Resignation, but the opponent cannot mate: draw (14, protocol minor 1).
+    ResignationVsInsufficient = 14,
     /// Disconnected for too long (20).
     Abandonment = 20,
     /// Abandoned, but the opponent cannot mate: draw (21).
@@ -415,7 +417,7 @@ pub enum EndReason {
 
 impl EndReason {
     /// Every reason, in numeric order.
-    pub const ALL: [EndReason; 21] = [
+    pub const ALL: [EndReason; 22] = [
         EndReason::None,
         EndReason::Checkmate,
         EndReason::Resignation,
@@ -430,6 +432,7 @@ impl EndReason {
         EndReason::FiftyMoveClaim,
         EndReason::Agreement,
         EndReason::IllegalMovesVsInsufficient,
+        EndReason::ResignationVsInsufficient,
         EndReason::Abandonment,
         EndReason::AbandonmentVsInsufficient,
         EndReason::Aborted,
@@ -457,6 +460,7 @@ impl EndReason {
             11 => EndReason::FiftyMoveClaim,
             12 => EndReason::Agreement,
             13 => EndReason::IllegalMovesVsInsufficient,
+            14 => EndReason::ResignationVsInsufficient,
             20 => EndReason::Abandonment,
             21 => EndReason::AbandonmentVsInsufficient,
             22 => EndReason::Aborted,
@@ -475,7 +479,7 @@ impl EndReason {
     }
 
     /// English description, the PGN comment of the ending (the game's `assets/i18n/en.lang`
-    /// `reason.*` texts for 1..13); "" for [`EndReason::None`].
+    /// `reason.*` texts for 1..14); "" for [`EndReason::None`].
     #[must_use]
     pub const fn text(self) -> &'static str {
         match self {
@@ -493,6 +497,7 @@ impl EndReason {
             EndReason::FiftyMoveClaim => "50-move rule (claimed)",
             EndReason::Agreement => "Draw by agreement",
             EndReason::IllegalMovesVsInsufficient => "Second illegal move, but the opponent cannot checkmate",
+            EndReason::ResignationVsInsufficient => "Resignation, but the opponent cannot checkmate",
             EndReason::Abandonment => "Abandoned (disconnected for too long)",
             EndReason::AbandonmentVsInsufficient => "Abandoned, but the opponent cannot checkmate",
             EndReason::Aborted => "Game aborted",
@@ -576,7 +581,7 @@ mod tests {
         }
         assert_eq!(GameStatus::try_from(5), Err(5));
         let reasons: Vec<u8> = EndReason::ALL.iter().map(|r| r.as_u8()).collect();
-        assert_eq!(reasons, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 20, 21, 22, 23, 24, 25, 26]);
+        assert_eq!(reasons, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 20, 21, 22, 23, 24, 25, 26]);
         for v in 0..=255u8 {
             match EndReason::from_u8(v) {
                 Some(r) => assert_eq!(r.as_u8(), v),
@@ -626,6 +631,11 @@ mod tests {
         assert_eq!(EndReason::Checkmate.text(), "Checkmate");
         assert_eq!(EndReason::Timeout.text(), "Loss on time");
         assert_eq!(EndReason::BothDisconnected.text(), "Aborted: both players disconnected");
+        assert_eq!(
+            EndReason::ResignationVsInsufficient.text(),
+            "Resignation, but the opponent cannot checkmate"
+        );
+        assert_eq!(EndReason::ResignationVsInsufficient.termination(GameStatus::Draw), "normal");
     }
 
     #[test]

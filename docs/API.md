@@ -515,7 +515,7 @@ curl -sS "$API/info"
   "name": "Scacelith",
   "serverId": "07dd26af-672a-43af-a8af-34011c7e977b",
   "motd": "",
-  "protocol": { "min": 1, "max": 1, "schema": 97842216, "subprotocol": "scacelith.rt1" },
+  "protocol": { "min": 1, "max": 1, "schema": 1852590473, "subprotocol": "scacelith.rt1" },
   "wsPort": 443,
   "wsPath": "/ws",
   "registration": "open",
@@ -536,7 +536,7 @@ curl -sS "$API/info"
   restarts. It is `null` when the database cannot give it.
 - `protocol`: the WebSocket protocol versions that the server speaks (`min` to `max`), the
   schema fingerprint `schema` (the first 4 bytes, big-endian, of the SHA-256 of the canonical
-  schema, as an unsigned integer: `0x05d4f428`; informational, never compared) and the
+  schema, as an unsigned integer: `0x6e6c4989`; informational, never compared) and the
   subprotocol (PROTOCOL.md).
 - `wsPort`: the WebSocket port that players use: `PUBLIC_WS_PORT`, else `WS_PORT`, else
   `API_PORT`. Behind a proxy that publishes 443, set `PUBLIC_WS_PORT` as well as
@@ -1655,10 +1655,12 @@ after a 429 or a 503.
 
 `status`: 1 `WhiteWins`, 2 `BlackWins`, 3 `Draw`, 4 `Aborted`. Only finished games are stored.
 
-`reason`, with its name (`termination`) and the words that end the PGN file's move text. Codes 7
-and 21 are draws: the player who ran out of time or abandoned faced an opponent who could not
-checkmate. The server never ends a game with codes 4 and 13; they are part of the shared list of
-reasons.
+`reason`, with its name (`termination`) and the words that end the PGN file's move text. Codes 7,
+14 and 21 are draws: the player who ran out of time, resigned or abandoned faced an opponent who
+could not checkmate (FIDE 6.9 and 5.1.2; DESIGN.md 6.3 gives the rule). The server never ends a
+game with codes 4 and 13; they are part of the shared list of reasons. Code 14 is new in protocol
+minor 1: a client written before it should show an unknown code as a plain end of game with its
+`result`.
 
 | Code | `termination` | Words in the PGN |
 |---|---|---|
@@ -1675,6 +1677,7 @@ reasons.
 | 11 | `FiftyMoveClaim` | 50-move rule (claimed) |
 | 12 | `Agreement` | Draw by agreement |
 | 13 | `IllegalMovesVsInsufficient` | Second illegal move, but the opponent cannot checkmate |
+| 14 | `ResignationVsInsufficient` | Resignation, but the opponent cannot checkmate |
 | 20 | `Abandonment` | Abandoned (disconnected for too long) |
 | 21 | `AbandonmentVsInsufficient` | Abandoned, but the opponent cannot checkmate |
 | 22 | `Aborted` | Game aborted |

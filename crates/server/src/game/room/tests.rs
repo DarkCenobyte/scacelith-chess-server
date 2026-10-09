@@ -541,6 +541,26 @@ fn resignation_and_a_resignation_after_the_flag_deadline_loses_to_the_flag() {
 }
 
 #[test]
+fn resignation_against_a_side_that_cannot_mate_is_a_draw() {
+    // FIDE 5.1.2: Black cannot mate, White resigns.
+    let mut room =
+        Mk { script: Script { can_mate: [true, false], ..Script::default() }, ..Mk::default() }.opened();
+    let o = room.on_resign(W, 0, T0 + 5000);
+    assert!(o.ended);
+    let end = game_end(&o.broadcast[0]);
+    assert_eq!((end.status, end.reason), (GS::Draw, ER::ResignationVsInsufficient));
+    let record = room.record().expect("over");
+    assert_eq!((record.status, record.reason), (GS::Draw.to_u8(), 14));
+    assert!(record.rated, "a draw like any other");
+    assert_eq!(room.snapshot(B, T0 + 6000).reason, ER::ResignationVsInsufficient);
+    // The side that can mate resigning still loses.
+    let mut room =
+        Mk { script: Script { can_mate: [true, false], ..Script::default() }, ..Mk::default() }.opened();
+    room.on_resign(B, 0, T0 + 5000);
+    assert_eq!(result(&room), (GS::WhiteWins, ER::Resignation));
+}
+
+#[test]
 fn draw_offer_alone_declined_by_answer_accepted_by_answer() {
     let mut room = opened();
     let o = room.on_draw_offer(W, 0, T0 + 3000);

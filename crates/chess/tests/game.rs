@@ -221,6 +221,50 @@ fn flag_fall_loss_on_time_or_draw_when_the_opponent_cannot_mate() {
     let mut g = ChessGame::new(Some("4k3/8/8/8/5n2/8/8/2B1K3 w - - 0 1")).unwrap();
     g.flag_fall(Color::Black); // lone bishop v knight: helpmate exists
     assert_eq!(g.status(), GameStatus::WhiteWins);
+    let mut g = ChessGame::new(Some("7k/8/8/8/8/8/8/KN5q b - - 0 1")).unwrap();
+    g.flag_fall(Color::Black); // K+N v K+Q: no knight mate without a blocker other than a queen
+    assert_eq!(g.status(), GameStatus::Draw);
+    assert_eq!(g.reason(), EndReason::TimeoutVsInsufficient);
+    let mut g = ChessGame::new(Some("7k/8/8/8/8/8/8/KN5r b - - 0 1")).unwrap();
+    g.flag_fall(Color::Black); // K+N v K+R: the rook can block
+    assert_eq!(g.status(), GameStatus::WhiteWins);
+    let mut g = ChessGame::new(Some("7k/8/8/8/8/8/8/KB5r b - - 0 1")).unwrap();
+    g.flag_fall(Color::Black); // K+B v K+R: a lone bishop never mates past a rook
+    assert_eq!(g.status(), GameStatus::Draw);
+}
+
+#[test]
+fn resignation_is_a_draw_when_the_opponent_cannot_mate() {
+    // FIDE 5.1.2: the resignation of Black, whose opponent has a bare king.
+    let mut g = ChessGame::new(Some("7k/7q/8/8/8/8/8/K7 b - - 0 1")).unwrap();
+    assert!(g.resign(Color::Black));
+    assert_eq!(g.status(), GameStatus::Draw);
+    assert_eq!(g.reason(), EndReason::ResignationVsInsufficient);
+    assert_eq!(g.result_string(), "1/2-1/2");
+    assert!(!g.resign(Color::White)); // over
+    // The side with the queen resigns: a loss.
+    let mut g = ChessGame::new(Some("7k/7q/8/8/8/8/8/K7 b - - 0 1")).unwrap();
+    assert!(g.resign(Color::White));
+    assert_eq!((g.status(), g.reason()), (GameStatus::BlackWins, EndReason::Resignation));
+    // K+N v K+Q: the knight cannot mate, the queen can.
+    let mut g = ChessGame::new(Some("7k/8/8/8/8/8/8/KN5q b - - 0 1")).unwrap();
+    g.resign(Color::Black);
+    assert_eq!((g.status(), g.reason()), (GameStatus::Draw, EndReason::ResignationVsInsufficient));
+    let mut g = ChessGame::new(Some("7k/8/8/8/8/8/8/KN5q b - - 0 1")).unwrap();
+    g.resign(Color::White);
+    assert_eq!((g.status(), g.reason()), (GameStatus::BlackWins, EndReason::Resignation));
+    // K+N v K+P: a helpmate exists, the resignation loses.
+    let mut g = ChessGame::new(Some("4k3/7p/8/8/8/8/8/4KN2 b - - 0 1")).unwrap();
+    g.resign(Color::Black);
+    assert_eq!((g.status(), g.reason()), (GameStatus::WhiteWins, EndReason::Resignation));
+    let pgn = {
+        let mut g = ChessGame::new(Some("7k/7q/8/8/8/8/8/K7 b - - 0 1")).unwrap();
+        g.resign(Color::Black);
+        g.pgn(&PgnTags::default())
+    };
+    assert!(pgn.contains("[Result \"1/2-1/2\"]"), "{pgn}");
+    assert!(pgn.contains("[Termination \"normal\"]"), "{pgn}");
+    assert!(pgn.contains("{Resignation, but the opponent cannot checkmate} 1/2-1/2"), "{pgn}");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 {
   "about": "Scacelith realtime protocol, version 1: the single source of the wire format. protogen (crates/protocol, `cargo run -p scacelith-protocol --features gen --bin protogen`) validates this file and writes the Rust codec (crates/protocol/src/gen.rs), the game's C++ codec (src/net/protocol_gen.h/.cpp), the tables of docs/PROTOCOL.md and the golden vectors (test/fixtures/protocol-vectors.json). Keys named `doc` or ending in `Doc` are prose: they are left out of the fingerprint and of the frozen manifests (protocol/frozen/). Field types: u8 u16 u32 u64 i32 f64 id53 bool str8 enum:<Enum> struct:<Struct> list16:<scalar or struct:Struct>; `min`/`max` bound integers, string byte lengths (str8) and item counts (list16).",
   "protocol": 1,
-  "minor": 0,
+  "minor": 1,
   "subprotocol": "scacelith.rt1",
   "constants": [
     { "name": "MaxClientMessage", "value": 512, "doc": "Largest client message, in bytes (type byte included). The server refuses a larger WebSocket message from its frame header, before reading it (close 1009)." },
@@ -53,7 +53,7 @@
     },
     {
       "name": "EndReason", "open": true,
-      "doc": "Why a game ended. 0..13 are the game's chess::GameEndReason values (14..19 are kept for new ones), 20 and above happen online only. The same numbers are the `reason` of the game records of the HTTPS API.",
+      "doc": "Why a game ended. 0..14 are the game's chess::GameEndReason values (15..19 are kept for new ones), 20 and above happen online only. The same numbers are the `reason` of the game records of the HTTPS API.",
       "unknownDoc": "show a generic end of game: `status` gives the result",
       "values": [
         { "name": "None", "value": 0, "doc": "the game is not over" },
@@ -70,6 +70,7 @@
         { "name": "FiftyMoveClaim", "value": 11 },
         { "name": "Agreement", "value": 12 },
         { "name": "IllegalMovesVsInsufficient", "value": 13, "doc": "offline games only" },
+        { "name": "ResignationVsInsufficient", "value": 14, "doc": "minor 1: resigned, but the opponent cannot mate: draw (a session of minor 0 gets Resignation, with the Draw status, in its place)" },
         { "name": "Abandonment", "value": 20, "doc": "disconnected longer than the reconnection grace: loss" },
         { "name": "AbandonmentVsInsufficient", "value": 21, "doc": "abandoned, but the opponent cannot mate: draw" },
         { "name": "Aborted", "value": 22, "doc": "aborted by a player before their first move (unrated)" },
