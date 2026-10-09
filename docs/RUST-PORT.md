@@ -80,7 +80,7 @@ scacelith-chess-server/
   Cargo.toml              workspace (shared dependency versions, lints, profiles)
   rust-toolchain.toml     Rust 1.99.0 (+ x86_64-unknown-linux-musl for the static release build)
   protocol/scacelith-v1.json   realtime protocol schema (source of all generated codecs)
-  protocol/frozen/        manifests of the released protocol minors (v1.0.json)
+  protocol/frozen/        manifests of the released protocol minors (v1.0.json, v1.1.json)
   crates/protocol         scacelith-protocol: generated codec, constants, the `protogen` generator
   crates/chess            scacelith-chess: rules, SAN/UCI/FEN, digest, PGN (no dependencies)
   crates/gif              scacelith-gif: GIF renderer and encoder
