@@ -156,11 +156,12 @@ published ranges; the experimental ranges are never published, and a published p
 * **`caps`** is a set of capability bits (u64) for optional features. The client sends the bits
   it supports in `Hello.caps`; `Welcome.caps` is the bitwise AND with the server's. No minor
   defines a bit yet: a client sends 0 and ignores bits it does not know.
-* **Minors.** Minor 0 is the first release (`protocol/frozen/v1.0.json`). Minor 1 adds the
-  `EndReason` `ResignationVsInsufficient` (14): a resignation against an opponent who cannot
-  checkmate is a draw (FIDE 5.1.2, see [Games](#games)). A session of minor 0 receives
-  `Resignation` with the `Draw` status in its place, in `GameEnd` and `GameSnapshot`: an older
-  client shows a drawn game ended by a resignation. The game records of the HTTPS API, which no
+* **Minors.** Minor 0 is the first release (`protocol/frozen/v1.0.json`). Minor 1
+  (`protocol/frozen/v1.1.json`) adds the `EndReason` `ResignationVsInsufficient` (14): a
+  resignation against an opponent who cannot checkmate is a draw (FIDE 5.1.2, see
+  [Games](#games)). A session of minor 0 receives `Resignation` with the `Draw` status in its
+  place, in `GameEnd` and `GameSnapshot`: an older client shows a drawn game ended by a
+  resignation. The game records of the HTTPS API, which no
   minor governs, carry 14 (an older client shows a generic end there, as for any unknown value of
   an open enum).
 * **Frozen anchors.** Whatever the minor, these never change, so that any client and any server
