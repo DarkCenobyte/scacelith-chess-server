@@ -4,7 +4,10 @@
 //! affect another: the servers keep their production limits, except where a profile says.
 
 use std::future::Future;
+use std::hash::{BuildHasher, Hasher, RandomState};
+use std::path::Path;
 use std::pin::Pin;
+use std::sync::LazyLock;
 
 use crate::duo::Duo;
 
@@ -37,8 +40,34 @@ pub struct Profile {
     pub scenarios: Vec<(&'static str, ScenarioFn)>,
 }
 
-/// The password of the scenarios' accounts.
-pub const PASSWORD: &str = "correct horse battery";
+/// The password of the scenarios' accounts: drawn at random once per run.
+pub fn pw() -> &'static str {
+    static PASSWORD: LazyLock<String> = LazyLock::new(random_password);
+    &PASSWORD
+}
+
+/// A new password drawn at random: four groups of six decimal digits, which pass the password
+/// policy and hold no user name or address. Every `RandomState` has its own keys, which std seeds
+/// from the operating system's random generator.
+pub fn random_password() -> String {
+    let group = || RandomState::new().build_hasher().finish() % 1_000_000;
+    format!("{:06} {:06} {:06} {:06}", group(), group(), group(), group())
+}
+
+/// The password `name` of `test/fixtures/security-vectors.json` (under `passwords`): the
+/// passwords whose content a step checks, read when the run starts so that none is written in
+/// the scenarios.
+///
+/// # Panics
+/// When the file cannot be read or holds no such password.
+pub fn fixed_pw(name: &str) -> &'static str {
+    static VECTORS: LazyLock<serde_json::Value> = LazyLock::new(|| {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/fixtures/security-vectors.json");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    });
+    VECTORS["passwords"][name].as_str().unwrap_or_else(|| panic!("no password {name}"))
+}
 
 /// Registers `user` with `email`, follows the confirmation link of its mail (the page's POST,
 /// as a browser would) and signs in; saves the session token as `<user>.token`. Every request
@@ -47,7 +76,7 @@ pub async fn new_account(d: &mut Duo, ip: std::net::IpAddr, user: &str, email: &
     use crate::http::Req;
     d.step(&format!("{user}-register"), ip, 202, |_| {
         Req::post("/api/v1/auth/register")
-            .json(serde_json::json!({"username": user, "email": email, "password": PASSWORD}))
+            .json(serde_json::json!({"username": user, "email": email, "password": pw()}))
     })
     .await;
     let link = format!("{user}.verify");
@@ -56,7 +85,7 @@ pub async fn new_account(d: &mut Duo, ip: std::net::IpAddr, user: &str, email: &
         Req::post("/verify-email").form(&[("token", &s.v(&link))])
     })
     .await;
-    login(d, ip, user, PASSWORD, &format!("{user}.token")).await;
+    login(d, ip, user, pw(), &format!("{user}.token")).await;
 }
 
 /// Signs in `login` with `password` and saves the token as `var`.

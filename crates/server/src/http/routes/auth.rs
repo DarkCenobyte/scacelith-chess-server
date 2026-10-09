@@ -267,7 +267,7 @@ async fn login(d: Arc<AuthRouteDeps>, ctx: Ctx) -> Result<Answer, ApiError> {
 async fn login_mfa(d: Arc<AuthRouteDeps>, ctx: Ctx) -> Result<Answer, ApiError> {
     let b = &ctx.body;
     let params = MfaLoginParams {
-        mfa_token: text(b, "mfaToken"),
+        token: text(b, "mfaToken"),
         code: opt_text(b, "code"),
         recovery_code: opt_text(b, "recoveryCode"),
         ip: Some(ip_of(&ctx)),

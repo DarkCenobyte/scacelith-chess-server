@@ -110,8 +110,8 @@ async fn profile_public_data_only_ratings_in_config_order_counts_validation_and_
     assert_eq!(body["games"], json!({ "total": 4, "rated": 3, "wins": 2, "draws": 1, "losses": 0 }));
     let top: Vec<&str> = body.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(top, ["username", "createdAt", "ratings", "games"]);
-    for secret in ["email", "example.org", "password", "hash", "integrity", "sanction"] {
-        assert!(!res.text().contains(secret), "no {secret} in the profile");
+    for hidden in ["email", "example.org", "password", "hash", "integrity", "sanction"] {
+        assert!(!res.text().contains(hidden), "no {hidden} in the profile");
     }
 
     let get = |name: &str| s.t.get(&format!("/api/v1/players/{name}")).send();

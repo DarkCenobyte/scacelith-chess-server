@@ -304,6 +304,7 @@ impl Position {
     }
 
     /// Dead position: K v K, K+B v K, K+N v K, or only bishops, all on squares of one colour.
+    /// Exactly the positions where neither colour [can mate](Position::can_color_mate).
     #[must_use]
     pub fn has_insufficient_material(&self) -> bool {
         let c = &self.counts;
@@ -321,6 +322,51 @@ impl Position {
         if knights != 0 {
             return false;
         }
+        self.bishops_on_one_colour()
+    }
+
+    /// `chess::Position::canColorMate`: whether `color` could still checkmate by some series of
+    /// legal moves (FIDE 5.1.2 and 6.9: a resignation or a flag fall against a side that cannot
+    /// is a draw), judged by the material alone, as python-chess (`has_insufficient_material`)
+    /// and lichess judge it. A pawn, a rook or a queen can always mate. `color` cannot mate with:
+    ///
+    /// * a bare king;
+    /// * a king and one knight when the opponent has nothing but its king and queens: a knight
+    ///   mates only with a piece of the mated side blocking a flight square next to the knight,
+    ///   and a queen there could always take it;
+    /// * bishops alone (no knight) when every bishop on the board, the opponent's included,
+    ///   stands on squares of one colour and no pawn or knight is left: the mated king's flight
+    ///   squares of the other colour need blockers of its own side, and a rook or a queen there
+    ///   could always take or block the checking bishop.
+    ///
+    /// Never false while a mate is possible (a position that is only hard to win can mate); false
+    /// for both colours exactly when the position is dead ([`Position::has_insufficient_material`]).
+    #[must_use]
+    pub fn can_color_mate(&self, color: Color) -> bool {
+        let c = &self.counts;
+        let mine = (color as usize) << 3;
+        let theirs = mine ^ 8;
+        let n = |side: usize, kind: u8| u32::from(c[side | usize::from(kind)]);
+        if n(mine, PAWN) + n(mine, ROOK) + n(mine, QUEEN) != 0 {
+            return true;
+        }
+        let (knights, bishops) = (n(mine, KNIGHT), n(mine, BISHOP));
+        if knights != 0 {
+            // A lone knight needs a blocker of the opponent that is not a queen.
+            return knights + bishops > 1
+                || n(theirs, PAWN) + n(theirs, KNIGHT) + n(theirs, BISHOP) + n(theirs, ROOK) != 0;
+        }
+        if bishops == 0 {
+            return false;
+        }
+        // Bishops alone: an opposing pawn, knight or bishop of the other square colour can block a
+        // flight square without being able to take or block the checking bishop.
+        n(theirs, PAWN) + n(theirs, KNIGHT) != 0 || !self.bishops_on_one_colour()
+    }
+
+    /// Every bishop on the board (of both colours) stands on squares of one colour (true without
+    /// bishops).
+    fn bishops_on_one_colour(&self) -> bool {
         let (mut light, mut dark) = (false, false);
         for sq in 0..64u8 {
             if self.board[s88(sq)] & 7 == BISHOP {
@@ -332,27 +378,6 @@ impl Position {
             }
         }
         !(light && dark)
-    }
-
-    /// `chess::Position::canColorMate` (FIDE 6.9 approximation): false when `color` has a bare
-    /// king, when it has a single minor piece and the opponent a bare king, or when the position
-    /// is dead; true otherwise (a helpmate is assumed possible).
-    #[must_use]
-    pub fn can_color_mate(&self, color: Color) -> bool {
-        if self.has_insufficient_material() {
-            return false;
-        }
-        let mine = (color as usize) << 3;
-        let theirs = mine ^ 8;
-        let c = &self.counts;
-        let n: u32 = (1..=5).map(|t| u32::from(c[mine | t])).sum();
-        let t: u32 = (1..=5).map(|k| u32::from(c[theirs | k])).sum();
-        if n == 0 {
-            return false;
-        }
-        !(n == 1
-            && u32::from(c[mine | KNIGHT as usize]) + u32::from(c[mine | BISHOP as usize]) == 1
-            && t == 0)
     }
 
     /// The protocol `posHash`: FNV-1a 32 of the first four FEN fields

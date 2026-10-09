@@ -65,11 +65,11 @@ impl fmt::Debug for Key {
 
 /// HKDF-SHA256 of `secret` for one purpose: empty salt, `info` = the UTF-8 label, 32 bytes.
 pub fn derive_key(secret: &[u8], info: &str) -> Key {
-    let mut okm = [0u8; KEY_LEN];
-    Hkdf::<Sha256>::new(None, secret)
-        .expand(info.as_bytes(), &mut okm)
-        .expect("32 bytes is a valid HKDF-SHA256 output length");
-    Key(okm)
+    // HKDF-Expand writes the 32 output bytes over the buffer of the pseudorandom key that
+    // HKDF-Extract returned (32 bytes as well).
+    let (mut okm, hkdf) = Hkdf::<Sha256>::extract(None, secret);
+    hkdf.expand(info.as_bytes(), &mut okm).expect("32 bytes is a valid HKDF-SHA256 output length");
+    Key(okm.into())
 }
 
 /// `SERVER_SECRET` is too short to derive keys from.
@@ -108,11 +108,7 @@ impl AuthKeys {
             return Err(KeyError);
         }
         let mfa = match mfa_encryption_key {
-            Some(mek) if mek.len() == KEY_LEN => {
-                let mut k = [0u8; KEY_LEN];
-                k.copy_from_slice(mek);
-                Key(k)
-            }
+            Some(mek) if mek.len() == KEY_LEN => Key(mek.try_into().expect("the length was checked")),
             Some(mek) if !mek.is_empty() => derive_key(mek, LABEL_MFA),
             _ => derive_key(server_secret, LABEL_MFA),
         };
@@ -173,6 +169,7 @@ pub fn random_token_of(prefix: &str, bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::testing::vector;
 
     fn secret48() -> Vec<u8> {
         vec![7u8; 48]
@@ -262,8 +259,9 @@ mod tests {
     #[test]
     fn hmac_vector() {
         // RFC 4231 test case 2.
+        let (key, data) = (vector("/hmacSha256/key"), vector("/hmacSha256/data"));
         assert_eq!(
-            hex::encode(hmac_sha256(b"Jefe", b"what do ya want for nothing?")),
+            hex::encode(hmac_sha256(key.as_bytes(), data.as_bytes())),
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
         );
     }

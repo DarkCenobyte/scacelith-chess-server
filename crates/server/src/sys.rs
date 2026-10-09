@@ -2,7 +2,10 @@
 //! to use `unsafe`; every block states why it is sound.
 #![allow(unsafe_code)]
 
+use std::ffi::CString;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 /// Lowers the scheduling priority of the calling thread to `nice` (0..19). Used by the GIF
 /// render threads and the analysis threads so they never compete with games.
@@ -99,6 +102,24 @@ pub fn monotonic_usec() -> u64 {
     ts.tv_sec as u64 * 1_000_000 + ts.tv_nsec as u64 / 1000
 }
 
+/// Bytes free for an unprivileged process on the file system of `path` (`statvfs`: available
+/// blocks times the fragment size).
+pub fn disk_free_bytes(path: &Path) -> io::Result<u64> {
+    let c = CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    // SAFETY: an all-zero statvfs is a valid value of this plain C struct.
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is a NUL-terminated path that outlives the call, and `st` is a valid, writable
+    // statvfs.
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Narrower than u64 on 32-bit targets.
+    #[allow(clippy::useless_conversion)]
+    let (blocks, size) = (u64::from(st.f_bavail), u64::from(st.f_frsize));
+    Ok(blocks.saturating_mul(size))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +136,7 @@ mod tests {
         assert!(clock_ticks_per_second() > 0);
         let a = monotonic_usec();
         assert!(a > 0 && monotonic_usec() >= a);
+        assert!(disk_free_bytes(Path::new(".")).unwrap() > 0);
+        assert!(disk_free_bytes(Path::new("/no/such/directory")).is_err());
     }
 }

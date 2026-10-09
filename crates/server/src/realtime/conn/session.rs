@@ -574,9 +574,9 @@ pub(crate) async fn run(
     mut drain: DrainWatch,
     welcomed: Welcomed,
 ) {
-    let Welcomed { link, out, mut cmds, claim, active_game, pending } = welcomed;
+    let Welcomed { link, out, mut cmds, claim, active_game, pending, minor } = welcomed;
     let _player = Gauge::up(&metrics::conn().players);
-    let mut writer_task = tokio::spawn(super::writer::run(writer, out.clone()));
+    let mut writer_task = tokio::spawn(super::writer::run(writer, out.clone(), minor));
     let mut s = Session::new(ctx.clone(), link, info.clone());
     if active_game != 0 {
         s.attach(active_game);

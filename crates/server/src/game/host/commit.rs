@@ -15,8 +15,11 @@
 //! batch is committed without waiting for it (one error logged per episode,
 //! `scacelith_game_commit_unjournaled_total`), its snapshots and `committed` records still
 //! appended, and each such commit starts one flush (the probe) that ends the episode when it
-//! writes without a failure. The database is then the only durable copy of those results
-//! (`finish_batch` ignores a game it already has, so a replay cannot apply it twice).
+//! writes without a failure. The database is then the only durable copy of those results: the
+//! journal may still show such a game running (its `ended` record lost), so a start reconciles
+//! the journal with the database before it publishes anything ([`Shard::recover_reconciled`]: a
+//! game the database holds is finished, whatever the journal says), and `finish_batch` ignores a
+//! game it already has, so a replay cannot apply it twice.
 //!
 //! When `finish_batch` fails because of one record (the error carries its game id), the batch is
 //! committed one game at a time so that only that game stays pending (and in the journal). After
@@ -39,7 +42,7 @@ use super::shard::{Shard, guarded, send};
 use crate::events::GameEnded;
 use crate::game::room::{GameRecord, NEVER};
 use crate::game::rules::Side;
-use crate::ids::GameId;
+use crate::ids::{GameId, UserId};
 use crate::journal::JournalError;
 use crate::log;
 use crate::store::{CommitEntry, RatingChange, Store, StoreError};
@@ -53,16 +56,42 @@ pub const MAX_BACKOFF_MS: i64 = 10_000;
 /// The future of a commit.
 pub type CommitFuture = Pin<Box<dyn Future<Output = Result<Vec<CommitEntry>, StoreError>> + Send>>;
 
+/// The future of [`GameStore::lookup`].
+pub type LookupFuture = Pin<Box<dyn Future<Output = Result<Stored, StoreError>> + Send>>;
+
+/// What the database already holds of the games a journal brings back at start
+/// ([`Shard::recover_reconciled`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Stored {
+    /// The games the database already has: finished, whatever the journal says.
+    pub games: HashSet<GameId>,
+    /// The players the database does not know: a game of theirs can never be committed.
+    pub missing_players: HashSet<UserId>,
+}
+
 /// Where a host commits finished games: the [`Store`], or a test double.
 pub trait GameStore: Send + Sync + 'static {
     /// Commits the games in one transaction (see [`Store::finish_batch`]); the work is queued
     /// when this is called, not when the future is first polled.
     fn finish_batch(&self, records: Vec<GameRecord>) -> CommitFuture;
+
+    /// Which of `games` the database already holds, and which of `players` it does not know
+    /// (one read, at start, before the games of a journal are published).
+    fn lookup(&self, games: Vec<GameId>, players: Vec<UserId>) -> LookupFuture;
 }
 
 impl GameStore for Store {
     fn finish_batch(&self, records: Vec<GameRecord>) -> CommitFuture {
         Box::pin(Store::finish_batch(self, records))
+    }
+
+    fn lookup(&self, games: Vec<GameId>, players: Vec<UserId>) -> LookupFuture {
+        let read = self.read(move |db| {
+            let games = db.games().stored_among(&games)?;
+            let missing_players = db.users().missing_among(&players)?;
+            Ok::<_, StoreError>(Stored { games, missing_players })
+        });
+        Box::pin(read)
     }
 }
 

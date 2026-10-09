@@ -2,7 +2,8 @@
 # Checks the contract between this server and a checkout of the game (DarkCenobyte/scacelith-chess),
 # everything but the live tests (tools/live-check):
 #   1. protogen --check --client: the game's C++ codec and its copy of the protocol (protocol/)
-#   2. the rating vectors and the server's PGN files, of which the game keeps a copy
+#   2. the rating vectors, the mating-material positions and the server's PGN files, of which the
+#      game keeps a copy
 #   3. the chess cross-check vectors, regenerated from the game's own rules
 #   4. the server tests that read the game's sources (SCACELITH_CLIENT_DIR)
 # Usage: tools/interop/check-game.sh GAME_CHECKOUT   (from anywhere; CXX overrides g++)
@@ -22,6 +23,7 @@ cargo run --quiet --locked -p scacelith-protocol --features gen --bin protogen -
 
 echo "== shared fixtures"
 cmp test/fixtures/elo-vectors.json "$game/tests/data/elo-vectors.json" || status=1
+cmp test/fixtures/mating-material.json "$game/tests/data/mating-material.json" || status=1
 diff -r test/fixtures/server-pgn "$game/tests/data/server-pgn" || status=1
 
 echo "== chess cross-check vectors from the game's rules"

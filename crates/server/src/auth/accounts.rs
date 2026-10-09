@@ -23,15 +23,19 @@
 //! one transaction with the end of the former address's links; the unique index decides a race.
 //! Without confirmation: the change happens at once (200) or 409 `email_taken`.
 //!
-//! A password change or reset cancels a pending e-mail change and the other reset links; account
-//! changes are written only while the password the request proved is still the stored one
-//! (compare and set): a reset that landed meanwhile wins.
+//! A password change or reset cancels a pending e-mail change and the other reset links and
+//! revokes the sessions (but the request's, for a change) in the transaction of the new password:
+//! a failure changes nothing, and the session cache and the connections hear of the revocation
+//! only once it committed. The re-authenticated changes of the address, the password, two-step
+//! verification (off, new recovery codes) and the deletion are written only while the password
+//! the request proved is still the stored one (compare and set): a reset that landed meanwhile
+//! wins.
 
 use serde_json::{Map, Value, json};
 
 use super::error::{AuthError, AuthResult};
 use super::identity::{check_username, is_valid_email, mask_email, normalize_email, normalize_opt_email};
-use super::mfa::SecondFactor;
+use super::mfa::{SecondFactor, mfa_turn_off};
 use super::tokens::{
     EMAIL_CHANGE, EMAIL_CHANGE_TTL_MS, EMAIL_VERIFY, EMAIL_VERIFY_TTL_MS, PASSWORD_RESET,
     PASSWORD_RESET_TTL_MS, data_of, is_link_token, is_live, str_field,
@@ -578,13 +582,15 @@ impl Inner {
         let password_hash = self.hasher.hash(new_password, &self.hasher.budget(ip).next()).await?;
         let (hash, now, id) = (sha256_hex(token), self.now(), user.id);
         // One transaction: no change of address lands between the check of the link's address and
-        // the new password, and the pending e-mail change and the other reset links go with it.
-        let done = self
+        // the new password, and the pending e-mail change, the other reset links and every session
+        // go with it. A failure changes nothing: the old password and sessions stay, and so does
+        // the link.
+        let revoked = self
             .store
             .write(move |db| {
-                let Some(used) = db.tokens().consume(PASSWORD_RESET, &hash, now)? else { return Ok(false) };
+                let Some(used) = db.tokens().consume(PASSWORD_RESET, &hash, now)? else { return Ok(None) };
                 if !sent_to_current_address(db, &used)? {
-                    return Ok(false);
+                    return Ok(None);
                 }
                 db.users().update(
                     id,
@@ -596,14 +602,13 @@ impl Inner {
                 )?;
                 db.tokens().delete_for_user(id, EMAIL_CHANGE)?;
                 db.tokens().delete_for_user(id, PASSWORD_RESET)?;
-                Ok::<_, StoreError>(true)
+                Ok::<_, StoreError>(Some(db.sessions().revoke_all_for_user(id, None, now)?))
             })
             .await
             .map_err(store_busy)?;
-        if !done {
-            return Err(invalid_reset_token());
-        }
-        self.sessions.revoke_all(user.id, None).await?;
+        let Some(revoked) = revoked else { return Err(invalid_reset_token()) };
+        // Committed: now the cache and the connections hear of it.
+        self.sessions.revoked_all(user.id, None, revoked);
         self.events.record("password_reset", Some(user.id), ip, None);
         self.mail(
             Template::PasswordChanged { username: &user.username, when_ms: self.now(), by_reset: true },
@@ -684,28 +689,22 @@ impl Inner {
             .await?;
         self.password_policy(new_password, &user.username, user.email.as_deref().unwrap_or(""))?;
         let next = self.hasher.hash(new_password, &budget.next()).await?;
-        let checked = user.password_hash.as_deref().unwrap_or("");
+        let (id, keep, now) = (user.id, session.session_id, self.now());
         // Written only over the hash the current password matched: a reset or another change
-        // that landed meanwhile wins (a login's rehash of the same password is no change).
-        if !self.set_password_hash_if(user.id, checked, &next).await? {
-            let fresh = self.still_current(user.id, checked, current_password, &budget).await?;
-            let written = match fresh.as_ref().and_then(|f| f.password_hash.as_deref()) {
-                Some(h) => self.set_password_hash_if(user.id, h, &next).await?,
-                None => false,
-            };
-            if !written {
-                return Err(invalid_password());
-            }
-        }
-        self.sessions.revoke_all(user.id, Some(session.session_id)).await?;
-        let id = user.id;
-        self.store
-            .write(move |db| {
+        // that landed meanwhile wins (a login's rehash of the same password is no change). One
+        // transaction with the end of the other sessions, of the pending e-mail change and of the
+        // reset links: a failure changes nothing.
+        let revoked = self
+            .with_password(&user, current_password, &budget, move |db| {
+                let update = UserUpdate { password_hash: Some(Some(next.clone())), ..UserUpdate::default() };
+                db.users().update(id, &update)?;
                 db.tokens().delete_for_user(id, EMAIL_CHANGE)?;
                 db.tokens().delete_for_user(id, PASSWORD_RESET)?;
-                Ok::<_, StoreError>(())
+                db.sessions().revoke_all_for_user(id, Some(keep), now)
             })
             .await?;
+        // Committed: now the cache and the connections hear of it.
+        self.sessions.revoked_all(id, Some(keep), revoked);
         self.events.record("password_changed", Some(user.id), ip, None);
         self.mail(
             Template::PasswordChanged { username: &user.username, when_ms: self.now(), by_reset: false },
@@ -829,7 +828,8 @@ impl Inner {
         let budget = self.hasher.budget(ip);
         let user =
             self.reauth(session.user_id, &creds.password, factor, FactorRule::Any, ip, &budget).await?;
-        self.mfa_turn_off(&user).await?;
+        let (id, now) = (user.id, self.now());
+        self.with_password(&user, &creds.password, &budget, move |db| mfa_turn_off(db, id, now)).await?;
         self.events.record("mfa_disabled", Some(user.id), ip, None);
         self.mail(
             Template::MfaDisabled { username: &user.username, when_ms: self.now() },
@@ -853,15 +853,20 @@ impl Inner {
         let budget = self.hasher.budget(ip);
         let factor = SecondFactor { code, recovery_code: None };
         let user = self.reauth(session.user_id, password, factor, FactorRule::Totp, ip, &budget).await?;
-        let codes = self.mfa_new_recovery_codes(&user).await?;
+        let (codes, hashes) = self.mfa_new_recovery_codes(user.id);
+        let (id, now) = (user.id, self.now());
+        self.with_password(&user, password, &budget, move |db| {
+            db.mfa().replace_recovery_codes(id, &hashes, now)
+        })
+        .await?;
         self.events.record("recovery_codes_regenerated", Some(user.id), ip, None);
         Ok(json!({ "recoveryCodes": codes }))
     }
 
-    /// `POST /account/delete`: anonymises the account and revokes every session. The security
-    /// events still waiting in the batch (this request's `recovery_code_used`, the last second's
-    /// logins) are written first, so that the anonymisation erases their addresses too; the
-    /// deletion's own event has none.
+    /// `POST /account/delete`: anonymises the account and revokes every session (one
+    /// transaction). The security events still waiting in the batch (this request's
+    /// `recovery_code_used`, the last second's logins) are written first, so that the
+    /// anonymisation erases their addresses too; the deletion's own event has none.
     pub(crate) async fn delete_account(
         &self,
         session: &SessionInfo,
@@ -872,11 +877,11 @@ impl Inner {
         let user = self
             .reauth(session.user_id, &creds.password, creds.factor(), FactorRule::Any, ip, &budget)
             .await?;
-        // The flush's write is queued before the anonymisation (the store runs writes in order).
-        let flushed = self.events.flush();
-        let anonymized = self.store.users().anonymize(user.id, self.now());
-        flushed.await;
-        anonymized.await?;
+        // The pending events are written before the anonymisation.
+        self.events.flush().await;
+        let (id, now) = (user.id, self.now());
+        self.with_password(&user, &creds.password, &budget, move |db| db.users().anonymize(id, now)).await?;
+        // Committed: now the cache and the connections hear of it.
         self.sessions.revoked_elsewhere(user.id);
         self.events.record("account_deleted", Some(user.id), None, None);
         Ok(json!({ "status": "deleted" }))
@@ -898,43 +903,48 @@ impl Inner {
     /// Runs `write` in one transaction only while the stored password is still the one the
     /// request proved (compare and set): a reset or change that landed since the check wins and
     /// the request is refused as with a wrong password; a sign-in's rehash of the same password
-    /// is checked once against the new hash and is no change.
-    async fn with_password<F>(
+    /// is checked once against the new hash and is no change. Returns what `write` returned.
+    async fn with_password<R, F>(
         &self,
         user: &User,
         password: &str,
         budget: &HashBudget,
         write: F,
-    ) -> AuthResult<()>
+    ) -> AuthResult<R>
     where
-        F: Fn(&Db<'_>) -> Result<(), StoreError> + Clone + Send + 'static,
+        R: Send + 'static,
+        F: Fn(&Db<'_>) -> Result<R, StoreError> + Clone + Send + 'static,
     {
-        if self.write_if_password(user.id, user.password_hash.clone(), write.clone()).await? {
-            return Ok(());
+        if let Some(done) = self.write_if_password(user.id, user.password_hash.clone(), write.clone()).await?
+        {
+            return Ok(done);
         }
         let checked = user.password_hash.as_deref().unwrap_or("");
         let Some(again) = self.still_current(user.id, checked, password, budget).await? else {
             return Err(invalid_password());
         };
-        if self.write_if_password(user.id, again.password_hash, write).await? {
-            Ok(())
-        } else {
-            Err(invalid_password())
-        }
+        self.write_if_password(user.id, again.password_hash, write).await?.ok_or_else(invalid_password)
     }
 
-    async fn write_if_password<F>(&self, user_id: UserId, hash: Option<String>, write: F) -> AuthResult<bool>
+    /// Runs `write` in one transaction while the account is active and its stored password hash
+    /// is `hash`: what `write` returned, `None` (nothing written) otherwise.
+    async fn write_if_password<R, F>(
+        &self,
+        user_id: UserId,
+        hash: Option<String>,
+        write: F,
+    ) -> AuthResult<Option<R>>
     where
-        F: Fn(&Db<'_>) -> Result<(), StoreError> + Send + 'static,
+        R: Send + 'static,
+        F: FnOnce(&Db<'_>) -> Result<R, StoreError> + Send + 'static,
     {
         self.store
             .write(move |db| {
-                let Some(u) = db.users().by_id(user_id)? else { return Ok(false) };
+                let Some(u) = db.users().by_id(user_id)? else { return Ok(None) };
                 if !is_active(&u) || u.password_hash != hash {
-                    return Ok(false);
+                    return Ok(None);
                 }
-                write(db)?;
-                Ok(true)
+                write(db).map(Some)
             })
             .await
             .map_err(store_busy)

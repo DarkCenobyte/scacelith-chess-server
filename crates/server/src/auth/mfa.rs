@@ -4,7 +4,9 @@
 //! with its `otpauth://` URI; the enable (a valid code of the pending secret) activates it and
 //! returns 10 recovery codes (shown once, stored as peppered HMACs); the disable needs the password
 //! and a code or a recovery code; the recovery codes can be regenerated with the password and a
-//! code. A code is accepted once: the matched time step is stored atomically.
+//! code. A code is accepted once: the matched time step is stored atomically. The disable and the
+//! new recovery codes are written only while the password the request proved is still the stored
+//! one (a password reset that landed meanwhile wins).
 //!
 //! Every second factor checked (at sign-in and in account changes) first takes one token of the
 //! account's whole-server limit, `AUTH_MFA_PER_ACCOUNT` per 15 minutes (key `mfa:u<id>`): beyond
@@ -14,13 +16,14 @@ use serde_json::{Value, json};
 
 use super::Inner;
 use super::error::{AuthError, AuthResult};
+use crate::ids::UserId;
 use crate::security::encoding::{js_is_space, js_trim};
 use crate::security::recovery::{RECOVERY_CODE_COUNT, generate_recovery_codes, hash_typed_recovery_code};
 use crate::security::secret_box::{mfa_aad, mfa_pending_aad};
 use crate::security::totp::{
     TOTP_DIGITS, TOTP_PERIOD_S, base32_encode, generate_totp_secret, is_totp_code, otpauth_uri, verify_totp,
 };
-use crate::store::{StoreError, User, UserStatus, UserUpdate};
+use crate::store::{Db, StoreError, User, UserStatus, UserUpdate};
 
 /// Window of the per-account second-factor limit (`AUTH_MFA_PER_ACCOUNT`).
 pub const MFA_LIMIT_WINDOW_MS: i64 = 15 * 60_000;
@@ -221,31 +224,28 @@ impl Inner {
         }
     }
 
-    /// Turns two-step verification off (the caller checked the password and the second factor).
-    pub(crate) async fn mfa_turn_off(&self, user: &User) -> AuthResult<()> {
-        let (id, now) = (user.id, self.now());
-        self.store
-            .write(move |db| {
-                db.users().update(
-                    id,
-                    &UserUpdate {
-                        mfa_enabled: Some(false),
-                        mfa_secret_enc: Some(None),
-                        pending_mfa_secret_enc: Some(None),
-                        ..UserUpdate::default()
-                    },
-                )?;
-                db.mfa().replace_recovery_codes(id, &[], now)
-            })
-            .await?;
-        Ok(())
-    }
-
-    /// New recovery codes for `user` (the old ones stop working).
-    pub(crate) async fn mfa_new_recovery_codes(&self, user: &User) -> AuthResult<Vec<String>> {
+    /// New recovery codes for `user_id`, to show, and their hashes, which the caller's write job
+    /// stores in place of the old ones ([`Mfa::replace_recovery_codes`]).
+    ///
+    /// [`Mfa::replace_recovery_codes`]: crate::store::Mfa::replace_recovery_codes
+    pub(crate) fn mfa_new_recovery_codes(&self, user_id: UserId) -> (Vec<String>, Vec<String>) {
         let codes = generate_recovery_codes(RECOVERY_CODE_COUNT);
-        let hashes = self.recovery_hashes(user.id, &codes);
-        self.store.mfa().replace_recovery_codes(user.id, hashes, self.now()).await?;
-        Ok(codes)
+        let hashes = self.recovery_hashes(user_id, &codes);
+        (codes, hashes)
     }
+}
+
+/// Turns two-step verification of `id` off in the caller's write job (the caller checked the
+/// password and the second factor): the secrets and the recovery codes go.
+pub(crate) fn mfa_turn_off(db: &Db<'_>, id: UserId, now: i64) -> Result<(), StoreError> {
+    db.users().update(
+        id,
+        &UserUpdate {
+            mfa_enabled: Some(false),
+            mfa_secret_enc: Some(None),
+            pending_mfa_secret_enc: Some(None),
+            ..UserUpdate::default()
+        },
+    )?;
+    db.mfa().replace_recovery_codes(id, &[], now)
 }

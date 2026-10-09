@@ -35,6 +35,8 @@ pub(crate) struct Welcomed {
     pub active_game: GameId,
     /// Messages received between the Hello and the `Welcome`.
     pub pending: Vec<Bytes>,
+    /// The negotiated minor (`Welcome.minor`): the writer gives an older minor the values it knows.
+    pub minor: u16,
 }
 
 /// A refused Hello: the fatal `Error` (after its `Notice`, if any) and the `scacelith_ws_hello_total`
@@ -154,9 +156,10 @@ pub(crate) async fn run(
         writer.close(code, &reason);
         return None;
     }
+    let minor = negotiated_minor(hello.minor);
     let welcome = Welcome {
         proto: PROTOCOL_VERSION,
-        minor: negotiated_minor(hello.minor),
+        minor,
         caps: hello.caps & CAPS,
         server_time: ctx.clock.mono_ms(),
         user_id: link.user_id(),
@@ -186,11 +189,10 @@ pub(crate) async fn run(
     let m = metrics::conn();
     m.hello.with(&["ok"]).inc();
     m.hello_ms.observe(ctx.clock.mono_ms() - opened);
-    Some(Welcomed { link, out, cmds, claim, active_game, pending })
+    Some(Welcomed { link, out, cmds, claim, active_game, pending, minor })
 }
 
 /// The minor version of the session: the lower of the client's and the server's.
-#[allow(clippy::unnecessary_min_or_max, reason = "the server's MINOR is 0 for now; later minors negotiate")]
 fn negotiated_minor(client: u16) -> u16 {
     client.min(MINOR)
 }

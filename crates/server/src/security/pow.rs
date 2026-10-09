@@ -331,8 +331,10 @@ mod tests {
         let forged_part = b64_url(forged.to_string().as_bytes());
         let forged = format!("{forged_part}.{sig}");
         assert_eq!(pow.verify(ip, "register", 8, &forged, &nonce), Err(PowRefusal::Signature));
-        assert_eq!(pow.verify(ip, "register", 8, &c.challenge, "12x"), Err(PowRefusal::Malformed));
-        assert_eq!(pow.verify(ip, "register", 8, &c.challenge, ""), Err(PowRefusal::Malformed));
+        // A nonce with a letter, an empty one.
+        let (letter, empty) = (format!("{nonce}x"), &nonce[..0]);
+        assert_eq!(pow.verify(ip, "register", 8, &c.challenge, &letter), Err(PowRefusal::Malformed));
+        assert_eq!(pow.verify(ip, "register", 8, &c.challenge, empty), Err(PowRefusal::Malformed));
         assert_eq!(pow.verify(ip, "register", 8, &c.challenge, &"1".repeat(21)), Err(PowRefusal::Malformed));
         assert_eq!(pow.verify(ip, "register", 8, "short", &nonce), Err(PowRefusal::Malformed));
         let bad = (0u64..).map(|n| n.to_string()).find(|n| !check_work(&c.challenge, n, 8)).unwrap();

@@ -46,8 +46,16 @@ pub trait GameHosts: Send + Sync + 'static {
     fn decline_rematch(&self, game: GameId, user: UserId);
 
     /// Creates a game on the host of shard `preferred` when given and available, else on the
-    /// least loaded one; resolves to the new game id.
+    /// least loaded one; resolves to the new game id, or to `RateLimited` when the server is
+    /// saturated ([`GameHosts::saturated`]).
     fn create(&self, preferred: Option<u32>, game: NewGame) -> BoxFuture<Result<GameId, ErrorCode>>;
+
+    /// Whether the server takes no new game for now: its game hosts or its database have too much
+    /// work waiting (`game::Hosts::saturated`). The lobby then refuses the requests that would
+    /// create one with `RateLimited`.
+    fn saturated(&self) -> bool {
+        false
+    }
 
     /// Cancels a game nobody will join (created after its creator gave up waiting).
     fn cancel(&self, game: GameId);
@@ -162,8 +170,17 @@ impl GameHosts for Hosts {
     }
 
     fn create(&self, preferred: Option<u32>, game: NewGame) -> BoxFuture<Result<GameId, ErrorCode>> {
-        let host = self.pick(preferred).clone();
-        Box::pin(async move { host.create(game).await })
+        let host = self.place(preferred).cloned();
+        Box::pin(async move {
+            match host {
+                Some(host) => host.create(game).await,
+                None => Err(ErrorCode::RateLimited),
+            }
+        })
+    }
+
+    fn saturated(&self) -> bool {
+        Hosts::saturated(self)
     }
 
     fn cancel(&self, game: GameId) {

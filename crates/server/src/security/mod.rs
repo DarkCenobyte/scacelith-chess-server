@@ -21,4 +21,6 @@ pub mod pow;
 pub mod ratelimit;
 pub mod recovery;
 pub mod secret_box;
+#[cfg(test)]
+pub(crate) mod testing;
 pub mod totp;

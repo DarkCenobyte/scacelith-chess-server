@@ -38,7 +38,8 @@
 //! message types, appends fields to server messages (a client message never gains fields: the
 //! server must keep decoding older clients), adds values to open enums and defines capability
 //! bits ([`CAPS`]); the server reads the Hello of any minor ([`decode_hello`],
-//! [`HelloPrefix`]). [`FINGERPRINT`] identifies the schema in logs and is never compared.
+//! [`HelloPrefix`]) and gives a session of an older minor the values that minor knows
+//! ([`frame_for_minor`]). [`FINGERPRINT`] identifies the schema in logs and is never compared.
 
 mod moves;
 pub mod wire;
@@ -180,6 +181,45 @@ pub fn decode_hello(buf: &[u8]) -> Result<Hello, DecodeError> {
         r.finish()?;
     }
     Ok(hello)
+}
+
+/// The frame a session of an older `minor` receives in place of `frame`, a server message of this
+/// minor ([`MINOR`]) that carries a value `minor` does not define; `None` when the frame suits
+/// that session as it is (and when it does not decode).
+///
+/// Minor 1 added [`EndReason::ResignationVsInsufficient`]: a session of minor 0 receives
+/// [`EndReason::Resignation`] in its place, in `GameEnd` and `GameSnapshot`, whose `status`
+/// (`Draw`) still gives the result.
+///
+/// ```
+/// use scacelith_protocol::{EndReason, GameEnd, GameStatus, Message, frame_for_minor};
+///
+/// let end = GameEnd { game: 7, status: GameStatus::Draw, reason: EndReason::ResignationVsInsufficient, ..GameEnd::default() };
+/// let frame = end.to_vec().unwrap();
+/// let older = GameEnd::decode(&frame_for_minor(&frame, 0).unwrap()).unwrap();
+/// assert_eq!((older.status, older.reason), (GameStatus::Draw, EndReason::Resignation));
+/// assert_eq!(frame_for_minor(&frame, 1), None);
+/// ```
+pub fn frame_for_minor(frame: &[u8], minor: u16) -> Option<Bytes> {
+    if minor >= 1 {
+        return None;
+    }
+    let older = |reason: EndReason| {
+        (reason == EndReason::ResignationVsInsufficient).then_some(EndReason::Resignation)
+    };
+    match peek_type(frame)? {
+        MsgType::GameEnd => {
+            let mut m = GameEnd::decode(frame).ok()?;
+            m.reason = older(m.reason)?;
+            m.to_bytes().ok()
+        }
+        MsgType::GameSnapshot => {
+            let mut m = GameSnapshot::decode(frame).ok()?;
+            m.reason = older(m.reason)?;
+            m.to_bytes().ok()
+        }
+        _ => None,
+    }
 }
 
 /// Type of a frame, from its first byte (`None` when empty or unknown).

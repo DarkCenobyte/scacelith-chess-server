@@ -944,6 +944,34 @@ async fn keeps_the_eight_most_recent_games_attached() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_session_of_minor_0_gets_the_end_reasons_of_minor_0() {
+    let rig = Rig::new(&[]).await;
+    let game = rig.game_in_progress().await;
+    let end = proto::GameEnd {
+        game,
+        gseq: 4,
+        status: proto::GameStatus::Draw,
+        reason: proto::EndReason::ResignationVsInsufficient,
+        white_ms: 1000,
+        black_ms: 2000,
+        server_time: 1.0,
+    };
+    let cases = [(0, proto::EndReason::Resignation), (1, proto::EndReason::ResignationVsInsufficient)];
+    for (attached, (minor, reason)) in cases.into_iter().enumerate() {
+        // The second connection replaces the first.
+        let mut c = rig.connect();
+        c.seq = 1;
+        c.send(Hello { minor, ..hello(1, ALICE) }).await;
+        assert_eq!(c.welcome().await.minor, minor);
+        rig.host_calls(attached + 1, |h| matches!(h, HostCall::Attach { .. })).await;
+        let ep = rig.hosts.endpoint(game, 1).expect("attached");
+        assert!(ep.send(end.to_bytes().expect("a valid GameEnd")));
+        let ServerMsg::GameEnd(got) = c.until("GameEnd").await else { unreachable!() };
+        assert_eq!(got, proto::GameEnd { reason, ..end.clone() }, "minor {minor}");
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn closes_a_slow_consumer_4303_without_an_error() {
     let rig = Rig::new(&[("WS_SEND_BUFFER_LIMIT", "4096")]).await;
     let game = rig.game_in_progress().await;

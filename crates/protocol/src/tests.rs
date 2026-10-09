@@ -309,6 +309,47 @@ fn hello_of_any_minor() {
 }
 
 #[test]
+fn older_minors_get_the_values_they_know() {
+    let end = GameEnd {
+        game: 42,
+        gseq: 9,
+        status: GameStatus::Draw,
+        reason: EndReason::ResignationVsInsufficient,
+        white_ms: 1000,
+        black_ms: 2000,
+        server_time: 1.79e12,
+    };
+    let frame = end.to_vec().unwrap();
+    let older = frame_for_minor(&frame, 0).expect("rewritten for minor 0");
+    assert_eq!(older.len(), frame.len());
+    assert_eq!(GameEnd::decode_exact(&older), Ok(GameEnd { reason: EndReason::Resignation, ..end.clone() }));
+    for minor in [1, MINOR, u16::MAX] {
+        assert_eq!(frame_for_minor(&frame, minor), None, "minor {minor} knows the value");
+    }
+    let snapshot = GameSnapshot {
+        game: 42,
+        category: "blitz".into(),
+        status: GameStatus::Draw,
+        reason: EndReason::ResignationVsInsufficient,
+        white: PlayerInfo { name: "w".into(), ..PlayerInfo::default() },
+        black: PlayerInfo { name: "b".into(), ..PlayerInfo::default() },
+        moves: vec![MoveRec { r#move: 796, spent_ms: 0, clock_ms: 0 }],
+        ..GameSnapshot::default()
+    };
+    let frame = snapshot.to_vec().unwrap();
+    let older = GameSnapshot::decode_exact(&frame_for_minor(&frame, 0).unwrap()).unwrap();
+    assert_eq!(older, GameSnapshot { reason: EndReason::Resignation, ..snapshot });
+    // Every other frame suits a session of minor 0 as it is.
+    for reason in EndReason::ALL.into_iter().filter(|&r| r != EndReason::ResignationVsInsufficient) {
+        let frame = GameEnd { reason, ..end.clone() }.to_vec().unwrap();
+        assert_eq!(frame_for_minor(&frame, 0), None, "{reason:?}");
+    }
+    assert_eq!(frame_for_minor(&Ack { r#ref: 3 }.to_vec().unwrap(), 0), None);
+    assert_eq!(frame_for_minor(&[], 0), None);
+    assert_eq!(frame_for_minor(&frame[..frame.len() - 1], 0), None);
+}
+
+#[test]
 fn peeking() {
     let frame = Move { seq: 0x0102_0304, ..Move::default() }.to_vec().unwrap();
     assert_eq!(peek_seq(&frame), Some(0x0102_0304));

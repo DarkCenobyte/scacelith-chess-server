@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::{BoxFut, PASSWORD, login, new_account};
+use super::{BoxFut, fixed_pw, login, new_account, pw};
 use crate::duo::{Duo, Side, fresh_ip};
 use crate::http::{Client, Req};
 
@@ -21,15 +21,15 @@ pub fn open(d: &mut Duo) -> BoxFut<'_> {
     Box::pin(async move {
         let ip = fresh_ip();
         d.step("info", ip, 200, |_| Req::get("/api/v1/info")).await;
-        d.step("register", ip, 201, |_| register("opal", "opal@example.org", PASSWORD)).await;
+        d.step("register", ip, 201, |_| register("opal", "opal@example.org", pw())).await;
         d.mail_count("register-mail", "opal@example.org", 0, 800).await;
-        d.step("register-same-name", ip, 409, |_| register("Opal", "opal2@example.org", PASSWORD)).await;
-        d.step("register-same-email", ip, 409, |_| register("opal2", "OPAL@example.org", PASSWORD)).await;
+        d.step("register-same-name", ip, 409, |_| register("Opal", "opal2@example.org", pw())).await;
+        d.step("register-same-email", ip, 409, |_| register("opal2", "OPAL@example.org", pw())).await;
         d.mail_count("register-same-email-mail", "opal@example.org", 1, 800).await;
-        d.step("register-invalid", ip, 400, |_| register("o", "opal3@example.org", PASSWORD)).await;
-        d.step("register-other", ip, 201, |_| register("otto", "otto@example.org", PASSWORD)).await;
-        login(d, ip, "opal", PASSWORD, "opal.token").await;
-        login(d, ip, "otto", PASSWORD, "otto.token").await;
+        d.step("register-invalid", ip, 400, |_| register("o", "opal3@example.org", pw())).await;
+        d.step("register-other", ip, 201, |_| register("otto", "otto@example.org", pw())).await;
+        login(d, ip, "opal", pw(), "opal.token").await;
+        login(d, ip, "otto", pw(), "otto.token").await;
         d.step("me", ip, 200, |s| Req::get("/api/v1/account/me").bearer(&s.v("opal.token"))).await;
         d.step("resend", ip, 202, |_| {
             Req::post("/api/v1/auth/verify-email/resend").json(json!({"email": "opal@example.org"}))
@@ -43,7 +43,7 @@ pub fn open(d: &mut Duo) -> BoxFut<'_> {
             move |s: &Side| {
                 Req::post("/api/v1/account/email")
                     .bearer(&s.v("opal.token"))
-                    .json(json!({"newEmail": email, "password": PASSWORD}))
+                    .json(json!({"newEmail": email, "password": pw()}))
             }
         };
         d.step("email-taken", ip, 409, change("otto@example.org")).await;
@@ -53,8 +53,7 @@ pub fn open(d: &mut Duo) -> BoxFut<'_> {
         d.mail_count("email-change-new-address", "opal.new@example.org", 0, 300).await;
         d.step("me-changed", ip, 200, |s| Req::get("/api/v1/account/me").bearer(&s.v("opal.token"))).await;
         d.step("login-new-address", ip, 200, |_| {
-            Req::post("/api/v1/auth/login")
-                .json(json!({"login": "opal.new@example.org", "password": PASSWORD}))
+            Req::post("/api/v1/auth/login").json(json!({"login": "opal.new@example.org", "password": pw()}))
         })
         .await;
         d.step("forgot", ip, 202, |_| {
@@ -69,7 +68,7 @@ pub fn open(d: &mut Duo) -> BoxFut<'_> {
         .await;
         d.step("old-session", ip, 401, |s| Req::get("/api/v1/account/me").bearer(&s.v("opal.token"))).await;
         d.step("export", ip, 200, |s| {
-            Req::post("/api/v1/account/export").bearer(&s.v("otto.token")).json(json!({"password": PASSWORD}))
+            Req::post("/api/v1/account/export").bearer(&s.v("otto.token")).json(json!({"password": pw()}))
         })
         .await;
     })
@@ -80,15 +79,15 @@ pub fn closed(d: &mut Duo) -> BoxFut<'_> {
     Box::pin(async move {
         let ip = fresh_ip();
         d.step("info", ip, 200, |_| Req::get("/api/v1/info")).await;
-        d.step("register", ip, 403, |_| register("carl", "carl@example.org", PASSWORD)).await;
-        d.step("register-invalid", ip, 403, |_| register("c", "not an address", "x")).await;
+        d.step("register", ip, 403, |_| register("carl", "carl@example.org", pw())).await;
+        d.step("register-invalid", ip, 403, |_| register("c", "not an address", fixed_pw("short"))).await;
         d.step("register-bad-body", ip, 0, |_| {
             Req::post("/api/v1/auth/register").json(json!({"username": 5}))
         })
         .await;
         d.mail_count("register-mail", "carl@example.org", 0, 500).await;
         d.step("login", ip, 401, |_| {
-            Req::post("/api/v1/auth/login").json(json!({"login": "carl", "password": PASSWORD}))
+            Req::post("/api/v1/auth/login").json(json!({"login": "carl", "password": pw()}))
         })
         .await;
         d.step("resend", ip, 202, |_| {
@@ -109,10 +108,16 @@ pub fn custom(d: &mut Duo) -> BoxFut<'_> {
     Box::pin(async move {
         let ip = fresh_ip();
         d.step("info", ip, 200, |_| Req::get("/api/v1/info")).await;
-        d.step("username-3", ip, 400, |_| register("abc", "abc@example.org", PASSWORD)).await;
-        d.step("username-17", ip, 400, |_| register("abcdefghijklmnopq", "abc@example.org", PASSWORD)).await;
-        d.step("password-11", ip, 400, |_| register("abcd", "abcd@example.org", "elevenchars")).await;
-        d.step("password-12", ip, 202, |_| register("abcd", "abcd@example.org", "twelve chars")).await;
+        d.step("username-3", ip, 400, |_| register("abc", "abc@example.org", pw())).await;
+        d.step("username-17", ip, 400, |_| register("abcdefghijklmnopq", "abc@example.org", pw())).await;
+        d.step("password-11", ip, 400, |_| {
+            register("abcd", "abcd@example.org", fixed_pw("elevenCharacters"))
+        })
+        .await;
+        d.step("password-12", ip, 202, |_| {
+            register("abcd", "abcd@example.org", fixed_pw("twelveCharacters"))
+        })
+        .await;
         d.mail("password-12-mail", "abcd@example.org", None).await;
         new_account(d, ip, "ulla", "ulla@example.org").await;
         new_account(d, ip, "abcdefghijklmnop", "long@example.org").await;
@@ -134,7 +139,7 @@ pub fn custom(d: &mut Duo) -> BoxFut<'_> {
         d.step("password-change-over-limit", ip, 413, |s| {
             Req::post("/api/v1/account/password")
                 .bearer(&s.v("ulla.token"))
-                .json(json!({"currentPassword": PASSWORD, "newPassword": "n".repeat(2100)}))
+                .json(json!({"currentPassword": pw(), "newPassword": "n".repeat(2100)}))
         })
         .await;
 
@@ -236,7 +241,7 @@ pub fn proxy(d: &mut Duo) -> BoxFut<'_> {
         let p = d
             .step("login-forwarded", ip, 200, |_| {
                 Req::post("/api/v1/auth/login")
-                    .json(json!({"login": "pia", "password": PASSWORD}))
+                    .json(json!({"login": "pia", "password": pw()}))
                     .header("X-Forwarded-For", "198.51.100.77")
             })
             .await;
@@ -252,7 +257,7 @@ pub fn proxy(d: &mut Duo) -> BoxFut<'_> {
             Req::post("/api/v1/account/export")
                 .bearer(&s.v("pia.fwd"))
                 .header("X-Forwarded-For", "2001:db8:1:2::3")
-                .json(json!({"password": PASSWORD}))
+                .json(json!({"password": pw()}))
         })
         .await;
         d.step("security-headers", ip, 400, |_| {

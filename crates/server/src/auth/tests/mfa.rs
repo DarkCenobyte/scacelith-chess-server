@@ -4,8 +4,9 @@
 use serde_json::{Value, json};
 use tokio::task::JoinSet;
 
-use super::{Harness, NEW_PW, PW, Setup};
+use super::{Harness, Setup, new_pw, pw};
 use crate::ids::UserId;
+use crate::security::testing::random_password;
 use crate::security::totp::{base32_decode, hotp, totp, totp_step};
 use crate::store::{NewSanction, SanctionKind, Source, UserUpdate};
 
@@ -23,8 +24,8 @@ struct Enrolled {
 async fn enrolled(setup: Setup) -> Enrolled {
     let h = Harness::build(setup).await;
     let id = h.create_user("alice").await;
-    let token = h.token("alice", PW).await;
-    let r = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": PW })).await;
+    let token = h.token("alice", pw()).await;
+    let r = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": pw() })).await;
     assert_eq!(r.status, 200, "{}", r.text());
     let secret = base32_decode(r.json()["secret"].as_str().unwrap()).unwrap();
     let r =
@@ -42,7 +43,7 @@ async fn enrolled(setup: Setup) -> Enrolled {
 
 /// Logs in with the password: the `mfaToken` of the second step.
 async fn mfa_step(h: &Harness) -> String {
-    let r = h.post("/api/v1/auth/login", json!({ "login": "alice", "password": PW })).await;
+    let r = h.post("/api/v1/auth/login", json!({ "login": "alice", "password": pw() })).await;
     assert_eq!(r.status, 200);
     let body = r.json();
     assert_eq!(body["mfaRequired"], true);
@@ -76,12 +77,12 @@ async fn recovery_count(h: &Harness, id: UserId) -> i64 {
 async fn setup_needs_the_password_and_gives_a_secret_and_an_otpauth_uri_pending_until_enabled() {
     let h = Harness::with_env(&[("SERVER_NAME", "Scacelith Club")]).await;
     let id = h.create_user("alice").await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     let setup = "/api/v1/account/mfa/totp/setup";
     let r = h.post_as(&token, setup, json!({ "password": "wrong password" })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (403, json!("invalid_password")));
-    assert_eq!(h.post(setup, json!({ "password": PW })).await.status, 401, "needs a session");
-    let r = h.post_as(&token, setup, json!({ "password": PW })).await;
+    assert_eq!(h.post(setup, json!({ "password": pw() })).await.status, 401, "needs a session");
+    let r = h.post_as(&token, setup, json!({ "password": pw() })).await;
     assert_eq!(r.status, 200);
     let body = r.json();
     let secret = body["secret"].as_str().unwrap();
@@ -98,10 +99,10 @@ async fn setup_needs_the_password_and_gives_a_secret_and_an_otpauth_uri_pending_
     let row = h.user(id).await;
     assert!(!row.mfa_enabled);
     let pending = row.pending_mfa_secret_enc.unwrap();
-    assert!(pending.starts_with("v1."), "{pending}");
+    assert_eq!(pending.get(..3), Some("v1."), "the version prefix of the encrypted secret");
     assert!(!pending.contains(secret), "encrypted at rest");
     assert_eq!(
-        h.login("alice", PW).await.get("mfaRequired"),
+        h.login("alice", pw()).await.get("mfaRequired"),
         None,
         "a pending secret does not change the login"
     );
@@ -134,7 +135,7 @@ async fn enable_gives_10_hashed_recovery_codes_and_login_then_needs_the_second_f
     let row = h.user(e.id).await;
     assert!(row.mfa_enabled);
     assert_eq!(row.pending_mfa_secret_enc, None);
-    let r = h.post_as(&e.token, "/api/v1/account/mfa/totp/setup", json!({ "password": PW })).await;
+    let r = h.post_as(&e.token, "/api/v1/account/mfa/totp/setup", json!({ "password": pw() })).await;
     assert_eq!(r.json()["error"], "mfa_already_enabled");
     let tok = mfa_step(h).await;
     let r = h.post(MFA, json!({ "mfaToken": tok, "code": totp(&e.secret, h.now()) })).await;
@@ -276,23 +277,23 @@ async fn disable_needs_the_password_and_a_code_or_recovery_code_and_sends_a_noti
     let e = enrolled(Setup::default()).await;
     let (h, token) = (&e.h, e.token.as_str());
     let disable = "/api/v1/account/mfa/totp/disable";
-    let r = h.post_as(token, disable, json!({ "password": PW })).await;
+    let r = h.post_as(token, disable, json!({ "password": pw() })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (403, json!("mfa_code_required")));
     let r = h
         .post_as(token, disable, json!({ "password": "bad password", "code": totp(&e.secret, h.now()) }))
         .await;
     assert_eq!(r.json()["error"], "invalid_password");
-    let r = h.post_as(token, disable, json!({ "password": PW, "code": "000000" })).await;
+    let r = h.post_as(token, disable, json!({ "password": pw(), "code": "000000" })).await;
     assert_eq!(r.json()["error"], "invalid_code");
-    let r = h.post_as(token, disable, json!({ "password": PW, "recoveryCode": e.recovery_codes[3] })).await;
+    let r = h.post_as(token, disable, json!({ "password": pw(), "recoveryCode": e.recovery_codes[3] })).await;
     assert_eq!((r.status, r.json()), (200, json!({ "status": "mfa_disabled" })));
     let row = h.user(e.id).await;
     assert!(!row.mfa_enabled);
     assert_eq!(row.mfa_secret_enc, None);
     assert_eq!(recovery_count(h, e.id).await, 0);
     assert!(h.sent().await.iter().any(|m| m.subject.contains("Two-step verification was turned off")));
-    assert_eq!(h.login("alice", PW).await.get("mfaRequired"), None);
-    let r = h.post_as(token, disable, json!({ "password": PW, "code": "123456" })).await;
+    assert_eq!(h.login("alice", pw()).await.get("mfaRequired"), None);
+    let r = h.post_as(token, disable, json!({ "password": pw(), "code": "123456" })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (409, json!("mfa_not_enabled")));
 }
 
@@ -301,9 +302,9 @@ async fn recovery_codes_are_regenerated_with_the_password_and_a_totp_code_not_a_
     let e = enrolled(Setup::default()).await;
     let (h, token) = (&e.h, e.token.as_str());
     let path = "/api/v1/account/mfa/recovery-codes";
-    let r = h.post_as(token, path, json!({ "password": PW, "code": e.recovery_codes[0] })).await;
+    let r = h.post_as(token, path, json!({ "password": pw(), "code": e.recovery_codes[0] })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (403, json!("invalid_code")));
-    let r = h.post_as(token, path, json!({ "password": PW, "code": totp(&e.secret, h.now()) })).await;
+    let r = h.post_as(token, path, json!({ "password": pw(), "code": totp(&e.secret, h.now()) })).await;
     assert_eq!(r.status, 200);
     let fresh: Vec<String> = r.json()["recoveryCodes"]
         .as_array()
@@ -324,22 +325,22 @@ async fn recovery_codes_are_regenerated_with_the_password_and_a_totp_code_not_a_
 async fn reauthentication_failures_are_throttled_per_account() {
     let h = Harness::with_env(&[("AUTH_FAILURES_PER_ACCOUNT", "2")]).await;
     h.create_user("alice").await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     let setup = "/api/v1/account/mfa/totp/setup";
     for _ in 0..2 {
         assert_eq!(h.post_as(&token, setup, json!({ "password": "nope nope" })).await.status, 403);
     }
-    let r = h.post_as(&token, setup, json!({ "password": PW })).await;
+    let r = h.post_as(&token, setup, json!({ "password": pw() })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (429, json!("too_many_attempts")));
     h.advance(r.json()["retryAfter"].as_i64().unwrap() * 1000);
-    assert_eq!(h.post_as(&token, setup, json!({ "password": PW })).await.status, 200);
+    assert_eq!(h.post_as(&token, setup, json!({ "password": pw() })).await.status, 200);
 }
 
 #[tokio::test]
 async fn enable_without_setup() {
     let h = Harness::new().await;
     h.create_user("alice").await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     let r = h.post_as(&token, "/api/v1/account/mfa/totp/enable", json!({ "code": "123456" })).await;
     assert_eq!((r.status, r.json()["error"].clone()), (409, json!("mfa_setup_required")));
 }
@@ -348,8 +349,8 @@ async fn enable_without_setup() {
 async fn enable_requests_sent_at_once_enable_once_and_the_recovery_codes_given_work() {
     let h = Harness::new().await;
     let id = h.create_user("alice").await;
-    let token = h.token("alice", PW).await;
-    let r = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": PW })).await;
+    let token = h.token("alice", pw()).await;
+    let r = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": pw() })).await;
     let secret = base32_decode(r.json()["secret"].as_str().unwrap()).unwrap();
     let code = totp(&secret, h.now());
     let mut set = JoinSet::new();
@@ -388,9 +389,9 @@ async fn enable_requests_sent_at_once_enable_once_and_the_recovery_codes_given_w
 async fn an_enable_checked_against_a_secret_a_new_setup_replaced_enables_nothing() {
     let h = Harness::new().await;
     let id = h.create_user("alice").await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     async fn setup(h: &Harness, token: &str) -> Vec<u8> {
-        let r = h.post_as(token, "/api/v1/account/mfa/totp/setup", json!({ "password": PW })).await;
+        let r = h.post_as(token, "/api/v1/account/mfa/totp/setup", json!({ "password": pw() })).await;
         base32_decode(r.json()["secret"].as_str().unwrap()).unwrap()
     }
     let first = setup(&h, &token).await;
@@ -416,7 +417,7 @@ async fn a_password_reset_between_the_two_steps_of_a_login_ends_the_mfa_step() {
     let mail =
         h.sent().await.into_iter().rev().find(|m| m.subject.contains("Reset your")).expect("the reset mail");
     let reset = super::token_of(&super::link_in(&mail.text).unwrap()).unwrap();
-    let r = h.post("/api/v1/auth/password/reset", json!({ "token": reset, "newPassword": NEW_PW })).await;
+    let r = h.post("/api/v1/auth/password/reset", json!({ "token": reset, "newPassword": new_pw() })).await;
     assert_eq!(r.status, 200);
     assert_eq!(live_sessions(h, e.id).await, 0);
     let r = h.post(MFA, json!({ "mfaToken": step, "code": totp(&e.secret, h.now()) })).await;
@@ -429,7 +430,7 @@ async fn a_password_reset_between_the_two_steps_of_a_login_ends_the_mfa_step() {
     let r = h.post(MFA, json!({ "mfaToken": step, "code": totp(&e.secret, h.now()) })).await;
     assert_eq!(r.json()["error"], "invalid_mfa_token", "the step is spent");
     // A login with the new password goes through both steps.
-    let fresh = h.post("/api/v1/auth/login", json!({ "login": "alice", "password": NEW_PW })).await.json();
+    let fresh = h.post("/api/v1/auth/login", json!({ "login": "alice", "password": new_pw() })).await.json();
     assert_eq!(fresh["mfaRequired"], true);
     let r = h.post(MFA, json!({ "mfaToken": fresh["mfaToken"], "recoveryCode": e.recovery_codes[0] })).await;
     assert_eq!(r.status, 200, "{}", r.text());
@@ -440,7 +441,7 @@ async fn a_password_change_between_the_two_steps_of_a_login_ends_the_mfa_step() 
     let e = enrolled(Setup::default()).await;
     let h = &e.h;
     let step = mfa_step(h).await;
-    let body = json!({ "currentPassword": PW, "newPassword": NEW_PW });
+    let body = json!({ "currentPassword": pw(), "newPassword": new_pw() });
     let r = h.post_as(&e.token, "/api/v1/account/password", body).await;
     assert_eq!(r.status, 200, "{}", r.text());
     let before = live_sessions(h, e.id).await;
@@ -455,7 +456,7 @@ async fn a_password_changed_elsewhere_before_the_code_is_checked_still_wins() {
     let h = &e.h;
     let step = mfa_step(h).await;
     // Another process writes a new hash between the two steps.
-    let other = h.hasher.hash("someone else's passphrase").unwrap();
+    let other = h.hasher.hash(&random_password()).unwrap();
     let update = UserUpdate { password_hash: Some(Some(other)), ..UserUpdate::default() };
     h.store.users().update(e.id, update).await.unwrap();
     let before = live_sessions(h, e.id).await;

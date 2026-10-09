@@ -589,9 +589,11 @@ derived from `SERVER_SECRET`: after a restart each player makes one full handsha
 - When the journal cannot be written (a full disk, a failing volume),
   `scacelith_journal_errors_total` grows and the server logs `journal write failed`. Finished games
   still reach the database, rating changes included, after three failed journal flushes in a row:
-  `scacelith_game_commit_unjournaled_total` counts them, with one error logged per episode. Free
-  the space or fix the volume before a restart: a finished game whose end the journal lost would
-  come back as a game in progress (the database keeps its first result).
+  `scacelith_game_commit_unjournaled_total` counts them, with one error logged per episode (alert
+  on both: [docs/SIZING.md](docs/SIZING.md#alert-rules)). Free the space or fix the volume. A
+  finished game whose end the journal lost still shows as running in the journal; the next start
+  finds it in the database and drops it from the journal, so it does not come back and its rating
+  change is not applied twice.
 
 ## Moderation and anti-cheat
 
@@ -656,9 +658,14 @@ analysis backlog, the skipped games, and the analysis engines running and sharin
 `scacelith_anticheat_analysis_engines*`), the retention purge (`scacelith_retention_*`), the
 process (`scacelith_process_*`: CPU, memory, file descriptors, threads), how late the async
 runtime runs its timers (`scacelith_runtime_lateness_*`), the stalls of the game host actors and
-the time given back to the players for them (`scacelith_game_stall_*`), and the gesture relay
-(`scacelith_gestures_*`). `/healthz` answers while the process runs, `/readyz` while it accepts
-players. The logs (stdout, one JSON object per line) are described in
+the time given back to the players for them (`scacelith_game_stall_*`), the gesture relay
+(`scacelith_gestures_*`), the work waiting inside the process and what the server refused because
+of it (`scacelith_game_inbox_messages`, `scacelith_journal_pending_bytes`,
+`scacelith_db_write_queue`, `scacelith_games_refused_busy_total`,
+`scacelith_db_writes_refused_total`), and the free disk space
+(`scacelith_database_disk_free_bytes`, `scacelith_journal_disk_free_bytes`). Alert rules:
+[docs/SIZING.md](docs/SIZING.md#alert-rules). `/healthz` answers while the process runs, `/readyz`
+while it accepts players. The logs (stdout, one JSON object per line) are described in
 [docs/DEPLOY.md](docs/DEPLOY.md) (section 7).
 
 ## Scaling
@@ -708,8 +715,10 @@ Rust and C++ codecs: change it, run `protogen`, and commit the generated files w
 The game and the server share a contract, kept on both sides: the realtime protocol (the schema,
 the frozen manifests, [docs/PROTOCOL.md](docs/PROTOCOL.md) and the golden vectors, of which the
 game keeps a copy in its `protocol/` folder), the rating vectors (`test/fixtures/elo-vectors.json`,
-the game's `tests/data/elo-vectors.json`) and the server's PGN files (`test/fixtures/server-pgn/`,
-the game's `tests/data/server-pgn/`). `protogen -- --client ../scacelith-chess` writes the game's
+the game's `tests/data/elo-vectors.json`), the positions of who can still mate
+(`test/fixtures/mating-material.json`, the game's `tests/data/mating-material.json`: the material
+that decides whether a resignation, a flag fall or a forfeit is a loss or a draw) and the server's
+PGN files (`test/fixtures/server-pgn/`, the game's `tests/data/server-pgn/`). `protogen -- --client ../scacelith-chess` writes the game's
 C++ codec and its copy of the protocol in a checkout of the game, and
 `tools/interop/check-game.sh ../scacelith-chess` checks the whole contract against one. The
 configuration keys live in `crates/server/src/config/keys.rs`: after a change, run
@@ -720,9 +729,13 @@ otherwise.
 GitHub Actions runs all of these on every push to master and every pull request
 (`.github/workflows/ci.yml`), with the real-engine tests (Ubuntu's Stockfish), the static release
 build, a dependency review of pull requests, the contract with the game and its live tests (against
-the game's master; a manual run of the workflow takes another branch of the game as `game-revision`, for
-a change made on both sides) and a lint of the workflows (actionlint, zizmor); a weekly run catches
-new advisories and changes on the game's side. CodeQL (`.github/workflows/codeql.yml`) scans the Rust code and the workflows. Dependabot
+the game's commit pinned in `tools/interop/game-revision`, so that a run of a server commit always
+tests the same pair; a manual run of the workflow takes another branch of the game as
+`game-revision`, for a change made on both sides) and a lint of the workflows (actionlint, zizmor); a
+weekly run catches new advisories and, against the game's master, changes on the game's side. Move
+the pin forward with every change of the contract; the game pins this server the same way (its
+`tools/interop/server-revision`) and runs the same contract and live tests in its own CI. CodeQL
+(`.github/workflows/codeql.yml`) scans the Rust code and the workflows. Dependabot
 (`.github/dependabot.yml`) proposes the updates of the crates, the Rust toolchain and the actions,
 each a week after its release.
 

@@ -203,7 +203,7 @@ Errors that any endpoint can give:
 | 415 | `unsupported_media_type` | The body is not `application/json`, or its charset is not UTF-8. |
 | 429 | `rate_limited` | A rate limit (section 1.5): `retryAfter` plus a `Retry-After` header. |
 | 500 | `internal_error` | An unexpected failure. The server logs it. |
-| 503 | `server_busy` | The database stayed locked while the session token was checked (`retryAfter: 1`, section 1.4). |
+| 503 | `server_busy` | The database stayed locked while the session token was checked (`retryAfter: 1`, section 1.4). Also, for a `POST`, `PUT`, `PATCH` or `DELETE`, the database has too many writes waiting: the request was not run, and its rate limits took nothing (`retryAfter` of 2 to 5 s). |
 | 503 | `timeout` | The server did not answer within 30 s (60 s for the export, 45 s for the GIFs with the default settings). |
 
 The read endpoints (sections 10 to 12) and the export answer 503 `busy` with `retryAfter: 1`
@@ -267,7 +267,9 @@ Authorization: Bearer sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8
   - an administrator (`scacelith-server admin user revoke-sessions`).
 
   A revocation from the API takes effect at once, and the WebSocket opened with a revoked session
-  is closed (`Notice{SessionRevoked}`, then close 4003). The server caches session lookups for
+  is closed (`Notice{SessionRevoked}`, then close 4003). A password change or reset and the
+  deletion of the account revoke in the same transaction as the change itself: when one of them
+  fails, no session was revoked and nothing else changed either. The server caches session lookups for
   30 s, so a revocation by the admin command, a separate process, takes effect within 30 s.
 - **Scope.** A token belongs to one server and opens its WebSocket too (`Hello.token`,
   [PROTOCOL.md](PROTOCOL.md)). Never send it to another server.
@@ -434,7 +436,7 @@ Errors of the re-authentication:
 
 | Status | `error` | When |
 |---|---|---|
-| 403 | `invalid_password` | Wrong password. |
+| 403 | `invalid_password` | Wrong password, or the password was reset or changed while the request ran (nothing was changed). |
 | 403 | `mfa_code_required` | Two-step verification is on and neither `code` nor `recoveryCode` was sent. |
 | 403 | `invalid_code` | Wrong or already used code. |
 | 400 | `password_not_set` | A Google-only account has no password yet ("Forgot password" sets one). |
@@ -513,7 +515,7 @@ curl -sS "$API/info"
   "name": "Scacelith",
   "serverId": "07dd26af-672a-43af-a8af-34011c7e977b",
   "motd": "",
-  "protocol": { "min": 1, "max": 1, "schema": 97842216, "subprotocol": "scacelith.rt1" },
+  "protocol": { "min": 1, "max": 1, "schema": 1852590473, "subprotocol": "scacelith.rt1" },
   "wsPort": 443,
   "wsPath": "/ws",
   "registration": "open",
@@ -534,7 +536,7 @@ curl -sS "$API/info"
   restarts. It is `null` when the database cannot give it.
 - `protocol`: the WebSocket protocol versions that the server speaks (`min` to `max`), the
   schema fingerprint `schema` (the first 4 bytes, big-endian, of the SHA-256 of the canonical
-  schema, as an unsigned integer: `0x05d4f428`; informational, never compared) and the
+  schema, as an unsigned integer: `0x6e6c4989`; informational, never compared) and the
   subprotocol (PROTOCOL.md).
 - `wsPort`: the WebSocket port that players use: `PUBLIC_WS_PORT`, else `WS_PORT`, else
   `API_PORT`. Behind a proxy that publishes 443, set `PUBLIC_WS_PORT` as well as
@@ -741,7 +743,8 @@ with the page: each attempt hashes a password).
 | `token` | string, 1-128 | The `token` parameter of the link. |
 | `newPassword` | string, 1-1024 | Password rules as at registration. |
 
-Answer: 200 `{ "status": "password_reset" }`. The password reset has these effects:
+Answer: 200 `{ "status": "password_reset" }`. The password reset has these effects, in one
+transaction (all of them, or none):
 
 - every session is revoked, and a pending e-mail change is cancelled;
 - the other reset links of the account stop working;
@@ -751,8 +754,8 @@ Answer: 200 `{ "status": "password_reset" }`. The password reset has these effec
 
 Errors: 400 `invalid_token` (link invalid, used or expired, or mailed to an address the account
 no longer has), 400 `weak_password`, the hash queue errors, and 503 `server_busy` with
-`retryAfter: 1` when the database stayed locked (nothing changed). After a hash queue error or a
-503, the link stays valid.
+`retryAfter: 1` when the database stayed locked (nothing changed). After a hash queue error, a 503
+or a 500, nothing changed: the old password and the sessions stay, and the link stays valid.
 
 ### Google sign-in
 
@@ -1051,14 +1054,16 @@ Changes the password. **Auth** session. **Limits** `reauth`, `reauth_user`. Body
 `{ "currentPassword": string 1-1024, "newPassword": string 1-1024 }`. The current password is
 needed, but no second factor, even with two-step verification on.
 
-Answer: 200 `{ "status": "password_changed" }`. The change has these effects:
+Answer: 200 `{ "status": "password_changed" }`. The change has these effects, in one transaction
+(all of them, or none):
 
 - every other session is revoked, and this one stays signed in;
 - a pending e-mail change is cancelled, and the account's password reset links stop working;
 - the owner gets a mail.
 
-Errors: the re-authentication errors (section 1.7) and 400 `weak_password` (checked after the
-current password).
+Errors: the re-authentication errors (section 1.7), 400 `weak_password` (checked after the
+current password), and 503 `server_busy` with `retryAfter: 1` when the database stayed locked
+(nothing changed).
 
 ```sh
 curl -sS "$API/account/password" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
@@ -1650,10 +1655,12 @@ after a 429 or a 503.
 
 `status`: 1 `WhiteWins`, 2 `BlackWins`, 3 `Draw`, 4 `Aborted`. Only finished games are stored.
 
-`reason`, with its name (`termination`) and the words that end the PGN file's move text. Codes 7
-and 21 are draws: the player who ran out of time or abandoned faced an opponent who could not
-checkmate. The server never ends a game with codes 4 and 13; they are part of the shared list of
-reasons.
+`reason`, with its name (`termination`) and the words that end the PGN file's move text. Codes 7,
+14 and 21 are draws: the player who ran out of time, resigned or abandoned faced an opponent who
+could not checkmate (FIDE 6.9 and 5.1.2; DESIGN.md 6.3 gives the rule). The server never ends a
+game with codes 4 and 13; they are part of the shared list of reasons. Code 14 is new in protocol
+minor 1: a client written before it should show an unknown code as a plain end of game with its
+`result`.
 
 | Code | `termination` | Words in the PGN |
 |---|---|---|
@@ -1670,6 +1677,7 @@ reasons.
 | 11 | `FiftyMoveClaim` | 50-move rule (claimed) |
 | 12 | `Agreement` | Draw by agreement |
 | 13 | `IllegalMovesVsInsufficient` | Second illegal move, but the opponent cannot checkmate |
+| 14 | `ResignationVsInsufficient` | Resignation, but the opponent cannot checkmate |
 | 20 | `Abandonment` | Abandoned (disconnected for too long) |
 | 21 | `AbandonmentVsInsufficient` | Abandoned, but the opponent cannot checkmate |
 | 22 | `Aborted` | Game aborted |
@@ -1759,7 +1767,9 @@ curl -sS "$API/leaderboard?category=3%2B2&limit=10"
 
 - The list holds the top 100 rated records with at least `minGames` (`PROVISIONAL_GAMES`) counted
   games. It leaves out deleted accounts and confirmed cheaters.
-- The server computes it again at most every 10 seconds; `updatedAt` says when.
+- The server computes it again at most every 10 seconds; `updatedAt` says when. One computation
+  of a category runs at a time: meanwhile the other requests get the previous list, or wait for
+  the computation when there is none yet.
 
 Errors: 400 `invalid_category`, 400 `invalid_limit`, 503 `busy`.
 

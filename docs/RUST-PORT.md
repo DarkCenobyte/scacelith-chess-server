@@ -87,8 +87,9 @@ scacelith-chess-server/
   crates/server           scacelith-server: the server library and binary, migrations
   crates/client           scacelith-client: Rust client SDK (integration tests, `scacelith-bench`)
   assets/                 GIF fonts and piece set (embedded at build time)
-  test/fixtures           shared vectors (Elo, protocol, chess cross-check, the server's PGN files);
-                          the game keeps copies of the Elo and protocol vectors and of the PGN files
+  test/fixtures           shared vectors (Elo, protocol, chess cross-check, the server's PGN files)
+                          and the fixed inputs of the security tests (security-vectors.json); the
+                          game keeps copies of the Elo and protocol vectors and of the PGN files
   tools/                  chess cross-check generator (C++), interop check, live-check, rest-diff
   bench/                  benchmark harness (docs/BENCHMARK.md)
   deploy/systemd          example unit and its companion files (docs/DEPLOY.md)
@@ -243,9 +244,9 @@ With `--client DIR` (after `--` when run through cargo), `DIR` being a checkout 
 `protogen --check` writes nothing and fails when a derived file is stale (with `--client`, also
 one of the game's); a test of the `scacelith-protocol` crate runs the same check, on the game too
 when `SCACELITH_CLIENT_DIR` names a checkout of it. The CI's interop job runs it against the
-game's `master`. Every released minor is frozen as
-`protocol/frozen/v1.<minor>.json` (`protogen --freeze`), and `protogen` refuses a schema that
-breaks the append-only rules of PROTOCOL.md "Versions and evolution" against those manifests.
+game's commit pinned in `tools/interop/game-revision` (the weekly run: the game's `master`). Every
+released minor is frozen as `protocol/frozen/v1.<minor>.json` (`protogen --freeze`), and
+`protogen` refuses a schema that breaks the append-only rules of PROTOCOL.md "Versions and evolution" against those manifests.
 
 On the server side, client messages decode strictly (`ClientMsg::decode`): a connection task
 reads the Hello prefix first (`HelloPrefix::read`), then decodes the Hello of any minor

@@ -955,9 +955,10 @@ fn lenient(b: &mut Builder<'_>, e: &EnumOf<'_>) {
     let mut snap = b.enc("GameSnapshot", &t("GameSnapshot"));
     snap.push(0);
     b.lenient(snap, s2c, "GameSnapshot with one byte of a later minor");
-    let mut welcome = b.enc("Welcome", &with(&t("Welcome"), json!({ "minor": 1, "caps": 5 })));
+    let later = b.schema.minor + 1;
+    let mut welcome = b.enc("Welcome", &with(&t("Welcome"), json!({ "minor": later, "caps": 5 })));
     welcome.extend_from_slice(&[0x2a, 0, 0, 0, 3, b'a', b'b', b'c']);
-    b.lenient(welcome, s2c, "Welcome of a minor 1 server with two appended fields");
+    b.lenient(welcome, s2c, &format!("Welcome of a minor {later} server with two appended fields"));
 
     let unknown: [(&str, &str, u8, &str); 15] = [
         ("Error", "code", 0, "Error.code = 0"),
@@ -965,7 +966,7 @@ fn lenient(b: &mut Builder<'_>, e: &EnumOf<'_>) {
         ("Error", "code", e("ErrorCode", "CheatDetected") + 1, "Error.code = 243 (SlowConsumer, retired)"),
         ("Error", "code", 244, "Error.code = 244"),
         ("MoveRejected", "code", 99, "MoveRejected.code = 99"),
-        ("GameSnapshot", "reason", 14, "GameSnapshot.reason = 14 (gap before Abandonment)"),
+        ("GameSnapshot", "reason", 15, "GameSnapshot.reason = 15 (gap before Abandonment)"),
         ("GameSnapshot", "reason", 27, "GameSnapshot.reason = 27 (after BothDisconnected)"),
         ("GameEnd", "reason", 255, "GameEnd.reason = 255"),
         ("GameEvent", "kind", 0, "GameEvent.kind = 0"),
@@ -982,11 +983,11 @@ fn lenient(b: &mut Builder<'_>, e: &EnumOf<'_>) {
         b.lenient(bytes, s2c, &format!("{note}: a value of a later minor"));
     }
 
-    let mut hello = b.enc("Hello", &with(&t("Hello"), json!({ "minor": 1, "caps": 3 })));
+    let mut hello = b.enc("Hello", &with(&t("Hello"), json!({ "minor": later, "caps": 3 })));
     hello.extend_from_slice(&[7, 0, 0, 0]);
     b.lenient(
         hello,
         Dir::C2s,
-        "Hello of a minor 1 client with trailing bytes (the server reads its own fields)",
+        &format!("Hello of a minor {later} client with trailing bytes (the server reads its own fields)"),
     );
 }

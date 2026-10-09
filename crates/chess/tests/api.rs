@@ -41,6 +41,7 @@ fn enums_are_the_protocol_values() {
         (EndReason::FiftyMoveClaim, 11),
         (EndReason::Agreement, 12),
         (EndReason::IllegalMovesVsInsufficient, 13),
+        (EndReason::ResignationVsInsufficient, 14),
         (EndReason::Abandonment, 20),
         (EndReason::AbandonmentVsInsufficient, 21),
         (EndReason::Aborted, 22),

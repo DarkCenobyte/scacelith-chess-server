@@ -4,7 +4,7 @@
 use http::Method;
 use serde_json::{Value, json};
 
-use super::{DAY_MS, Harness, NEW_PW, PW, sha256_hex};
+use super::{DAY_MS, Harness, new_pw, pw, sha256_hex};
 use crate::auth::{SESSION_CACHE_TTL_MS, SessionInfo};
 use crate::ids::UserId;
 use crate::store::{UserStatus, UserUpdate};
@@ -39,7 +39,7 @@ fn other_session(list: &Value) -> Value {
 #[tokio::test]
 async fn validate_token_shape_format_check_unknown_tokens() {
     let (h, id) = setup(&[]).await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     let v = h.auth.validate_token(&token).await.unwrap().expect("valid");
     let mut hash = [0u8; 32];
     hex::decode_to_slice(sha256_hex(&token), &mut hash).unwrap();
@@ -69,9 +69,9 @@ async fn validate_token_shape_format_check_unknown_tokens() {
 #[tokio::test]
 async fn sessions_list_and_revocation_of_another_session() {
     let (h, _) = setup(&[]).await;
-    let a = h.login_with("alice", PW, json!({ "clientLabel": "Laptop" })).await;
+    let a = h.login_with("alice", pw(), json!({ "clientLabel": "Laptop" })).await;
     h.advance(1000);
-    let b = h.login_with("alice", PW, json!({ "clientLabel": "Desktop" })).await;
+    let b = h.login_with("alice", pw(), json!({ "clientLabel": "Desktop" })).await;
     let (a, b) = (a["token"].as_str().unwrap(), b["token"].as_str().unwrap());
     let r = h.get_as(a, "/api/v1/auth/sessions").await;
     assert_eq!(r.status, 200);
@@ -91,7 +91,7 @@ async fn sessions_list_and_revocation_of_another_session() {
     assert_eq!(h.call(Method::DELETE, "/api/v1/auth/sessions/9999").bearer(a).send().await.status, 404);
     // Another user's session cannot be revoked.
     h.create_user("bob").await;
-    let c = h.token("bob", PW).await;
+    let c = h.token("bob", pw()).await;
     let bobs = h.get_as(&c, "/api/v1/auth/sessions").await.json()["sessions"][0].clone();
     let path = format!("/api/v1/auth/sessions/{}", bobs["id"]);
     assert_eq!(h.call(Method::DELETE, &path).bearer(a).send().await.status, 404);
@@ -101,7 +101,7 @@ async fn sessions_list_and_revocation_of_another_session() {
 #[tokio::test]
 async fn logout_revokes_the_session_everywhere() {
     let (h, id) = setup(&[]).await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     assert_eq!(h.me_status(&token).await, 200);
     let r = h.post_as(&token, "/api/v1/auth/logout", json!({})).await;
     assert_eq!((r.status, r.json()), (200, json!({ "status": "logged_out" })));
@@ -113,11 +113,11 @@ async fn logout_revokes_the_session_everywhere() {
 #[tokio::test]
 async fn revoking_another_session_broadcasts_its_token_hash() {
     let (h, id) = setup(&[]).await;
-    let a = h.login_with("alice", PW, json!({ "clientLabel": "Laptop" })).await["token"]
+    let a = h.login_with("alice", pw(), json!({ "clientLabel": "Laptop" })).await["token"]
         .as_str()
         .unwrap()
         .to_owned();
-    let b = h.login_with("alice", PW, json!({ "clientLabel": "Desktop" })).await["token"]
+    let b = h.login_with("alice", pw(), json!({ "clientLabel": "Desktop" })).await["token"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -134,27 +134,30 @@ async fn revoking_another_session_broadcasts_its_token_hash() {
 #[tokio::test]
 async fn logout_all_a_password_reset_and_the_deletion_revoke_every_session_without_a_list() {
     let (h, id) = setup(&[]).await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     assert_eq!(h.post_as(&token, "/api/v1/auth/logout-all", json!({})).await.status, 200);
     assert_eq!(h.revoked.calls(), [(id, None)]);
 
-    h.token("alice", PW).await;
+    h.token("alice", pw()).await;
     h.post("/api/v1/auth/password/forgot", json!({ "email": "alice@example.com" })).await;
     let reset = h.last_link_token().await;
-    let r = h.post("/api/v1/auth/password/reset", json!({ "token": reset, "newPassword": NEW_PW })).await;
+    let r = h.post("/api/v1/auth/password/reset", json!({ "token": reset, "newPassword": new_pw() })).await;
     assert_eq!(r.status, 200, "{}", r.text());
     assert_eq!(h.revoked.calls()[1..], [(id, None)]);
 
-    let token = h.token("alice", NEW_PW).await;
-    assert_eq!(h.post_as(&token, "/api/v1/account/delete", json!({ "password": NEW_PW })).await.status, 200);
+    let token = h.token("alice", new_pw()).await;
+    assert_eq!(
+        h.post_as(&token, "/api/v1/account/delete", json!({ "password": new_pw() })).await.status,
+        200
+    );
     assert_eq!(h.revoked.calls()[2..], [(id, None)]);
 }
 
 #[tokio::test]
 async fn logout_all() {
     let (h, _) = setup(&[]).await;
-    let a = h.token("alice", PW).await;
-    let b = h.token("alice", PW).await;
+    let a = h.token("alice", pw()).await;
+    let b = h.token("alice", pw()).await;
     assert_eq!(h.post_as(&a, "/api/v1/auth/logout-all", json!({})).await.status, 200);
     for t in [a, b] {
         assert_eq!(h.me_status(&t).await, 401);
@@ -164,11 +167,11 @@ async fn logout_all() {
 #[tokio::test]
 async fn idle_expiry_sliding_with_use_and_the_absolute_maximum() {
     let (h, _) = setup(&[("SESSION_IDLE_DAYS", "2"), ("SESSION_MAX_DAYS", "5")]).await;
-    let idle = h.token("alice", PW).await;
+    let idle = h.token("alice", pw()).await;
     h.advance(2 * DAY_MS + 1);
     assert_eq!(h.me_status(&idle).await, 401, "unused for 2 days");
 
-    let used = h.token("alice", PW).await;
+    let used = h.token("alice", pw()).await;
     for d in 0..4 {
         h.advance(DAY_MS + 3_600_000);
         assert_eq!(h.me_status(&used).await, 200, "day {}", d + 1);
@@ -180,7 +183,7 @@ async fn idle_expiry_sliding_with_use_and_the_absolute_maximum() {
 #[tokio::test]
 async fn last_seen_is_written_at_most_every_5_minutes() {
     let (h, id) = setup(&[]).await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     let before = last_seen(&h, id).await;
     for _ in 0..10 {
         h.auth.validate_token(&token).await.unwrap().expect("valid");
@@ -199,20 +202,20 @@ async fn last_seen_is_written_at_most_every_5_minutes() {
 #[tokio::test]
 async fn the_cache_sees_a_revocation_made_elsewhere_within_30_s_and_invalidate_drops_it_at_once() {
     let (h, id) = setup(&[]).await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     assert!(h.auth.validate_token(&token).await.unwrap().is_some());
     revoke_in_store(&h, id).await;
     assert!(h.auth.validate_token(&token).await.unwrap().is_some(), "still cached");
     h.advance(SESSION_CACHE_TTL_MS);
     assert_eq!(h.auth.validate_token(&token).await.unwrap(), None, "reloaded after 30 s");
 
-    let b = h.token("alice", PW).await;
+    let b = h.token("alice", pw()).await;
     assert!(h.auth.validate_token(&b).await.unwrap().is_some());
     revoke_in_store(&h, id).await;
     h.auth.invalidate(Some(id), &[sha256_hex(&b)]);
     assert_eq!(h.auth.validate_token(&b).await.unwrap(), None, "dropped by hash");
 
-    let c = h.token("alice", PW).await;
+    let c = h.token("alice", pw()).await;
     assert!(h.auth.validate_token(&c).await.unwrap().is_some());
     revoke_in_store(&h, id).await;
     h.auth.invalidate(Some(id), &[]);
@@ -222,7 +225,7 @@ async fn the_cache_sees_a_revocation_made_elsewhere_within_30_s_and_invalidate_d
 #[tokio::test]
 async fn a_deleted_user_has_no_valid_session() {
     let (h, id) = setup(&[]).await;
-    let token = h.token("alice", PW).await;
+    let token = h.token("alice", pw()).await;
     let update = UserUpdate { status: Some(UserStatus::Deleted), ..UserUpdate::default() };
     h.store.users().update(id, update).await.expect("updated");
     h.advance(SESSION_CACHE_TTL_MS);

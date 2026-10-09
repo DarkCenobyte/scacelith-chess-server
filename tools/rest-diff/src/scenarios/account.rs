@@ -3,7 +3,7 @@
 
 use serde_json::json;
 
-use super::{BoxFut, PASSWORD, login, new_account};
+use super::{BoxFut, login, new_account, pw};
 use crate::duo::{Duo, Side, fresh_ip};
 use crate::http::Req;
 
@@ -20,10 +20,9 @@ pub fn email_change(d: &mut Duo) -> BoxFut<'_> {
         // Ten requests of mia (the account's re-authentication limit).
         let ip = fresh_ip();
         let body = |email: &str, pw: &str| json!({"newEmail": email, "password": pw});
-        d.step("invalid-email", ip, 400, change_email("mia.token", body("not-an-address", PASSWORD))).await;
-        d.step("same-email", ip, 400, change_email("mia.token", body("mia@example.org", PASSWORD))).await;
-        d.step("same-email-case", ip, 400, change_email("mia.token", body(" MIA@Example.org ", PASSWORD)))
-            .await;
+        d.step("invalid-email", ip, 400, change_email("mia.token", body("not-an-address", pw()))).await;
+        d.step("same-email", ip, 400, change_email("mia.token", body("mia@example.org", pw()))).await;
+        d.step("same-email-case", ip, 400, change_email("mia.token", body(" MIA@Example.org ", pw()))).await;
         d.step(
             "same-email-wrong-password",
             ip,
@@ -48,15 +47,14 @@ pub fn email_change(d: &mut Duo) -> BoxFut<'_> {
         d.step("request", ip, 202, |s| {
             Req::post("/api/v1/account/email")
                 .bearer(&s.v("mia.token"))
-                .json(json!({"newEmail": " Mia.New@Example.org ", "password": PASSWORD, "code": "123456"}))
+                .json(json!({"newEmail": " Mia.New@Example.org ", "password": pw(), "code": "123456"}))
         })
         .await;
         d.mail("request-link-mail", "mia.new@example.org", Some("mia.change")).await;
         d.mail("request-notice-mail", "mia@example.org", None).await;
         d.step("me-pending", ip, 200, |s| Req::get("/api/v1/account/me").bearer(&s.v("mia.token"))).await;
         // The same request again within 5 minutes: no new link, the same answer, a notice.
-        d.step("request-again", ip, 202, change_email("mia.token", body("mia.new@example.org", PASSWORD)))
-            .await;
+        d.step("request-again", ip, 202, change_email("mia.token", body("mia.new@example.org", pw()))).await;
         d.mail_count("request-again-mail", "mia.new@example.org", 0, 800).await;
         d.mail_count("request-again-notice", "mia@example.org", 1, 0).await;
 
@@ -96,19 +94,18 @@ pub fn email_change(d: &mut Duo) -> BoxFut<'_> {
         .await;
         d.step("me-changed", ip, 200, |s| Req::get("/api/v1/account/me").bearer(&s.v("mia.token"))).await;
         d.step("login-new-address", ip, 200, |_| {
-            Req::post("/api/v1/auth/login")
-                .json(json!({"login": "mia.new@example.org", "password": PASSWORD}))
+            Req::post("/api/v1/auth/login").json(json!({"login": "mia.new@example.org", "password": pw()}))
         })
         .await;
         d.step("login-old-address", ip, 401, |_| {
-            Req::post("/api/v1/auth/login").json(json!({"login": "mia@example.org", "password": PASSWORD}))
+            Req::post("/api/v1/auth/login").json(json!({"login": "mia@example.org", "password": pw()}))
         })
         .await;
 
         // A change to the address of another account: the same answer, a notice to its owner,
         // and no link.
         let ip = fresh_ip();
-        d.step("taken-address", ip, 202, change_email("mia.token", body("ned@example.org", PASSWORD))).await;
+        d.step("taken-address", ip, 202, change_email("mia.token", body("ned@example.org", pw()))).await;
         d.mail("taken-address-notice", "ned@example.org", None).await;
         d.mail("taken-address-old-notice", "mia.new@example.org", None).await;
         d.step("me-pending-taken", ip, 200, |s| Req::get("/api/v1/account/me").bearer(&s.v("mia.token")))
@@ -121,7 +118,7 @@ pub fn email_change(d: &mut Duo) -> BoxFut<'_> {
             "request-before-password-change",
             ip,
             202,
-            change_email("nina.token", body("nina2@example.org", PASSWORD)),
+            change_email("nina.token", body("nina2@example.org", pw())),
         )
         .await;
         d.mail("cancelled-link-mail", "nina2@example.org", Some("nina.change")).await;
@@ -129,7 +126,7 @@ pub fn email_change(d: &mut Duo) -> BoxFut<'_> {
         d.step("password-change", ip, 200, |s| {
             Req::post("/api/v1/account/password")
                 .bearer(&s.v("nina.token"))
-                .json(json!({"currentPassword": PASSWORD, "newPassword": "my second passphrase"}))
+                .json(json!({"currentPassword": pw(), "newPassword": "my second passphrase"}))
         })
         .await;
         d.mail("password-change-mail", "nina@example.org", None).await;
@@ -149,7 +146,7 @@ pub fn email_change(d: &mut Duo) -> BoxFut<'_> {
         // A link whose address another account took meanwhile: 409.
         let ip = fresh_ip();
         new_account(d, ip, "olga", "olga@example.org").await;
-        d.step("race-request", ip, 202, change_email("olga.token", body("race@example.org", PASSWORD))).await;
+        d.step("race-request", ip, 202, change_email("olga.token", body("race@example.org", pw()))).await;
         d.mail("race-link-mail", "race@example.org", Some("olga.change")).await;
         d.mail("race-notice-mail", "olga@example.org", None).await;
         new_account(d, ip, "pete", "race@example.org").await;
@@ -204,35 +201,34 @@ pub fn account(d: &mut Duo) -> BoxFut<'_> {
         d.step("export-missing-password", ip, 400, export(json!({}))).await;
         // Security events are saved in batches one second after the first one.
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        d.step("export", ip, 200, export(json!({"password": PASSWORD}))).await;
-        d.step("export-again", ip, 200, export(json!({"password": PASSWORD}))).await;
+        d.step("export", ip, 200, export(json!({"password": pw()}))).await;
+        d.step("export-again", ip, 200, export(json!({"password": pw()}))).await;
         d.step("export-get", ip, 405, |s| Req::get("/api/v1/account/export").bearer(&s.v("quinn.token")))
             .await;
 
         // The deletion.
         let ip = fresh_ip();
         new_account(d, ip, "rosa", "rosa@example.org").await;
-        login(d, ip, "rosa", PASSWORD, "rosa.other").await;
+        login(d, ip, "rosa", pw(), "rosa.other").await;
         let delete = |body: serde_json::Value| {
             move |s: &Side| Req::post("/api/v1/account/delete").bearer(&s.v("rosa.token")).json(body.clone())
         };
         d.step("delete-wrong-password", ip, 403, delete(json!({"password": "wrong"}))).await;
-        d.step("delete-extra-field", ip, 400, delete(json!({"password": PASSWORD, "confirm": true}))).await;
+        d.step("delete-extra-field", ip, 400, delete(json!({"password": pw(), "confirm": true}))).await;
         d.step("delete-missing-password", ip, 400, delete(json!({}))).await;
         // A code without two-step verification is ignored.
-        d.step("delete", ip, 200, delete(json!({"password": PASSWORD, "recoveryCode": "aaaa-bbbb-cc"})))
-            .await;
-        d.step("delete-again", ip, 401, delete(json!({"password": PASSWORD}))).await;
+        d.step("delete", ip, 200, delete(json!({"password": pw(), "recoveryCode": "aaaa-bbbb-cc"}))).await;
+        d.step("delete-again", ip, 401, delete(json!({"password": pw()}))).await;
         d.step("deleted-token", ip, 401, |s| Req::get("/api/v1/account/me").bearer(&s.v("rosa.token"))).await;
         d.step("deleted-other-token", ip, 401, |s| Req::get("/api/v1/account/me").bearer(&s.v("rosa.other")))
             .await;
         d.step("deleted-profile", ip, 404, |_| Req::get("/api/v1/players/rosa")).await;
         d.step("deleted-login", ip, 401, |_| {
-            Req::post("/api/v1/auth/login").json(json!({"login": "rosa", "password": PASSWORD}))
+            Req::post("/api/v1/auth/login").json(json!({"login": "rosa", "password": pw()}))
         })
         .await;
         d.step("deleted-login-email", ip, 401, |_| {
-            Req::post("/api/v1/auth/login").json(json!({"login": "rosa@example.org", "password": PASSWORD}))
+            Req::post("/api/v1/auth/login").json(json!({"login": "rosa@example.org", "password": pw()}))
         })
         .await;
         d.step("deleted-forgot", ip, 202, |_| {
@@ -242,12 +238,12 @@ pub fn account(d: &mut Duo) -> BoxFut<'_> {
         d.mail_count("deleted-forgot-mail", "rosa@example.org", 0, 800).await;
         d.step("deleted-username-reuse", ip, 0, |_| {
             Req::post("/api/v1/auth/register")
-                .json(json!({"username": "rosa", "email": "rosa2@example.org", "password": PASSWORD}))
+                .json(json!({"username": "rosa", "email": "rosa2@example.org", "password": pw()}))
         })
         .await;
         d.step("deleted-email-reuse", ip, 202, |_| {
             Req::post("/api/v1/auth/register")
-                .json(json!({"username": "rosanna", "email": "rosa@example.org", "password": PASSWORD}))
+                .json(json!({"username": "rosanna", "email": "rosa@example.org", "password": pw()}))
         })
         .await;
         // The address got its confirmation mail less than 5 minutes ago.

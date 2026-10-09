@@ -328,10 +328,12 @@ impl OidcClient {
     }
 
     /// Verifies an ID token and returns its claims (`sub`, `email`, `email_verified`, `name`...).
+    /// `nonce` is the one of the sign-in attempt; without one (or with an empty one), no token
+    /// passes the nonce check.
     pub async fn verify_id_token(
         &self,
         id_token: &str,
-        nonce: &str,
+        nonce: Option<&str>,
     ) -> Result<Map<String, Value>, OidcError> {
         let jwt = decode_jwt(id_token)?;
         if jwt.header.get("alg").and_then(Value::as_str) != Some("RS256") {
@@ -376,7 +378,8 @@ impl OidcClient {
         let nonce_ok = c
             .get("nonce")
             .and_then(Value::as_str)
-            .is_some_and(|n| !nonce.is_empty() && safe_eq(n.as_bytes(), nonce.as_bytes()));
+            .zip(nonce)
+            .is_some_and(|(n, want)| !want.is_empty() && safe_eq(n.as_bytes(), want.as_bytes()));
         if !nonce_ok {
             return Err(OidcError::bare("bad_nonce"));
         }

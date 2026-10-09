@@ -261,7 +261,9 @@ pub static KEYS: &[KeySpec] = &[
         Text,
         "Game shards, and threads of the server's async runtime: a number from 1 to 64, or \"auto\" (one per \
          CPU core, at most 16). Each shard hosts its part of the games; the threads serve the connections, \
-         the API and the games of every shard. Several defaults below scale with it.",
+         the API and the games of every shard. Several defaults below scale with it. It can change between \
+         two starts, games in progress included: the games of a shard no longer in the range are served \
+         until they end, and that shard takes no new game (docs/DEPLOY.md section 11).",
     )
     .default("auto"),
     key(
@@ -270,7 +272,8 @@ pub static KEYS: &[KeySpec] = &[
         Int,
         "First shard number of this instance (multi-instance deployments give each instance its own range): \
          the shards are SHARD_BASE to SHARD_BASE + WORKERS - 1, and every game id holds the number of its \
-         shard.",
+         shard. Each shard keeps its journal in JOURNAL_DIR/shard-<n>; like WORKERS, it can change between \
+         two starts (docs/DEPLOY.md section 11).",
     )
     .default("0")
     .range(0, 56),
@@ -367,7 +370,9 @@ pub static KEYS: &[KeySpec] = &[
         "JOURNAL_DIR",
         Storage,
         Path,
-        "Append-only journal of the games in progress, replayed after a crash (default: DATA_DIR/journal).",
+        "Append-only journal of the games in progress, replayed after a crash (default: DATA_DIR/journal). \
+         One server per directory: a running server locks the shard directories it serves, and refuses a \
+         journal that holds the games of another database.",
     )
     .default(""),
     key(

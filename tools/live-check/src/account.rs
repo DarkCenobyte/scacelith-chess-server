@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 use crate::control::{Call, Control, Reply, Routes};
 use crate::support::players::verified_account;
 use crate::support::web::{call, link_path, page, query_param, text};
-use crate::support::{PASSWORD, Player, Table, TestServer, WAIT, connect, metric_value};
+use crate::support::{Player, Table, TestServer, WAIT, connect, metric_value, password};
 use crate::{Ctx, fresh_totp, now_ms, run_cpp, wait_msg};
 
 /// The C++ player's account (played by the harness here, then signed in by the C++ test).
@@ -88,7 +88,7 @@ async fn check(ctx: &Ctx, srv: &TestServer, pin: &str) -> i32 {
         .collect();
     println!("[account] games of {ACCOUNT_USER}: {}; other game {}", summary.join(", "), other["id"]);
     let state = json!({
-        "user": ACCOUNT_USER, "password": PASSWORD, "email": me.acc.email, "userId": me.acc.user_id,
+        "user": ACCOUNT_USER, "password": password(), "email": me.acc.email, "userId": me.acc.user_id,
         "rival": rival.name(), "third": third.name(), "harnessLabel": HARNESS_LABEL,
         "games": games, "other": other, "gifUserRendersPerMin": renders,
     });

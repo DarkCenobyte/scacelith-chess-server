@@ -14,7 +14,7 @@ use parking_lot::{Condvar, Mutex};
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
-use super::{Harness, NEW_PW, PW, Setup, link_in, test_hasher, token_of};
+use super::{Harness, Setup, link_in, new_pw, pw, test_hasher, token_of};
 use crate::http::testing::{TestRequest, TestResponse};
 use crate::ids::UserId;
 use crate::log::{Level, capture_logs};
@@ -22,6 +22,7 @@ use crate::metrics;
 use crate::security::password::{
     Argon2Hasher, Argon2Params, HashFailure, HashLimiter, PasswordHasher, Verified,
 };
+use crate::security::testing::random_password;
 use crate::store::{NewUser, User};
 
 const LOGIN: &str = "/api/v1/auth/login";
@@ -272,7 +273,7 @@ async fn reset_token(h: &Harness, email: &str) -> String {
 }
 
 fn reset_page_form(token: &str) -> String {
-    let pw = NEW_PW.replace(' ', "%20");
+    let pw = new_pw().replace(' ', "%20");
     format!("token={token}&newPassword={pw}&confirmPassword={pw}")
 }
 
@@ -319,11 +320,12 @@ async fn a_login_flood_the_cap_holds_and_the_queue_overflow_gets_503_server_busy
 
     g.close();
     let answered = Arc::new(Mutex::new(Vec::new()));
+    let wrong = random_password();
     // Unknown accounts: their dummy verification goes through the same queue.
     let flood: Vec<_> = (0..12)
         .map(|i| {
             let ip = format!("203.0.113.{i}");
-            spawn_into(login_from(&h, &ip, &format!("ghost{i}"), "not the password"), &answered)
+            spawn_into(login_from(&h, &ip, &format!("ghost{i}"), &wrong), &answered)
         })
         .collect();
     wait_for("8 refusals and 3 waiters", || answered.lock().len() == 8 && limiter(&h).stats().waiting == 3)
@@ -348,7 +350,7 @@ async fn a_login_flood_the_cap_holds_and_the_queue_overflow_gets_503_server_busy
 
     // Refusals are not failed logins: only the 4 checked passwords were counted.
     assert_eq!(h.event_kinds().await.iter().filter(|k| *k == "login_failed").count(), 4);
-    assert_eq!(h.post(LOGIN, json!({ "login": "alice", "password": PW })).await.status, 200);
+    assert_eq!(h.post(LOGIN, json!({ "login": "alice", "password": pw() })).await.status, 200);
 }
 
 #[tokio::test]
@@ -364,13 +366,12 @@ async fn a_wait_longer_than_the_queue_timeout_is_answered_503_server_busy() {
     let timeout0 = rejected("timeout");
 
     g.close();
-    let first = spawn(login_from(&h, "203.0.113.10", "alice", PW));
+    let first = spawn(login_from(&h, "203.0.113.10", "alice", pw()));
     wait_for("the first login to hold the slot", || limiter(&h).stats().active == 1).await;
     let answered = Arc::new(Mutex::new(Vec::new()));
+    let wrong = random_password();
     let waiters: Vec<_> = (0..2)
-        .map(|i| {
-            spawn_into(login_from(&h, "203.0.113.10", &format!("ghost{i}"), "whatever it is"), &answered)
-        })
+        .map(|i| spawn_into(login_from(&h, "203.0.113.10", &format!("ghost{i}"), &wrong), &answered))
         .collect();
     wait_for("the two waiters to give up", || answered.lock().len() == 2).await;
     for r in answered.lock().iter() {
@@ -391,24 +392,24 @@ async fn every_password_endpoint_goes_through_the_cap_and_a_refused_request_chan
     let (h, g, _release) = gated(&[("PASSWORD_HASH_QUEUE_MAX", "0")]).await;
     let alice_id = h.create_user("alice").await;
     h.create_user("bob").await;
-    let alice = h.token("alice", PW).await;
-    let bob = h.token("bob", PW).await;
+    let alice = h.token("alice", pw()).await;
+    let bob = h.token("bob", pw()).await;
     let token = reset_token(&h, "alice@example.com").await;
     let alice_hash = h.user(alice_id).await.password_hash;
 
     // One login holds the only slot; with no queue, every other hash is refused at once.
     g.close();
-    let holder = spawn(login_from(&h, "203.0.113.10", "ghost", "whatever it is"));
+    let holder = spawn(login_from(&h, "203.0.113.10", "ghost", &random_password()));
     wait_for("the holder to take the slot", || limiter(&h).stats().active == 1).await;
 
-    assert_busy(&h.post(LOGIN, json!({ "login": "alice", "password": PW })).await);
+    assert_busy(&h.post(LOGIN, json!({ "login": "alice", "password": pw() })).await);
     let carol =
         json!({ "username": "carol", "email": "carol@example.com", "password": "a fine passphrase of hers" });
     assert_busy(&h.post("/api/v1/auth/register", carol).await);
     assert!(user_named(&h, "carol").await.is_none(), "no account created");
     assert!(h.store.signups().by_username("carol".into()).await.unwrap().is_none(), "no signup pending");
     assert_busy(
-        &h.post("/api/v1/auth/password/reset", json!({ "token": token, "newPassword": NEW_PW })).await,
+        &h.post("/api/v1/auth/password/reset", json!({ "token": token, "newPassword": new_pw() })).await,
     );
     let page = h.call(Method::POST, "/reset-password").body(FORM, reset_page_form(&token)).send().await;
     assert_eq!(page.status, 503);
@@ -420,10 +421,10 @@ async fn every_password_endpoint_goes_through_the_cap_and_a_refused_request_chan
         page.text().contains(&format!("<input type=\"hidden\" name=\"token\" value=\"{token}\">")),
         "the form is shown again"
     );
-    let change = json!({ "currentPassword": PW, "newPassword": NEW_PW });
+    let change = json!({ "currentPassword": pw(), "newPassword": new_pw() });
     assert_busy(&h.post_as(&alice, "/api/v1/account/password", change).await);
-    assert_busy(&h.post_as(&alice, "/api/v1/account/mfa/totp/setup", json!({ "password": PW })).await);
-    assert_busy(&h.post_as(&bob, "/api/v1/account/delete", json!({ "password": PW })).await);
+    assert_busy(&h.post_as(&alice, "/api/v1/account/mfa/totp/setup", json!({ "password": pw() })).await);
+    assert_busy(&h.post_as(&bob, "/api/v1/account/delete", json!({ "password": pw() })).await);
     assert_eq!(h.user(alice_id).await.password_hash, alice_hash, "password unchanged");
     assert!(user_named(&h, "bob").await.is_some_and(|b| b.status == crate::store::UserStatus::Active));
     assert_eq!(h.me_status(&alice).await, 200, "sessions untouched");
@@ -431,10 +432,10 @@ async fn every_password_endpoint_goes_through_the_cap_and_a_refused_request_chan
     g.open();
     assert_eq!(holder.await.unwrap().status, 401);
     // The reset link survived the refusals.
-    let r = h.post("/api/v1/auth/password/reset", json!({ "token": token, "newPassword": NEW_PW })).await;
+    let r = h.post("/api/v1/auth/password/reset", json!({ "token": token, "newPassword": new_pw() })).await;
     assert_eq!(r.status, 200, "{}", r.text());
-    h.login("alice", NEW_PW).await;
-    assert_eq!(h.post_as(&bob, "/api/v1/account/delete", json!({ "password": PW })).await.status, 200);
+    h.login("alice", new_pw()).await;
+    assert_eq!(h.post_as(&bob, "/api/v1/account/delete", json!({ "password": pw() })).await.status, 200);
 }
 
 #[tokio::test]
@@ -443,29 +444,30 @@ async fn a_password_change_waits_for_both_of_its_hashes_within_one_queue_timeout
     let _serial = SERIAL.lock().await;
     let (h, g, _release) = gated(&[("PASSWORD_HASH_QUEUE_TIMEOUT_MS", "1200")]).await;
     let id = h.create_user("alice").await;
-    let alice = h.token("alice", PW).await;
-    let other = h.token("alice", PW).await;
+    let alice = h.token("alice", pw()).await;
+    let other = h.token("alice", pw()).await;
     let alice_hash = h.user(id).await.password_hash;
     let timeout0 = rejected("timeout");
 
     // Queue: [holder 1 (running), the change's check of the current password, holder 2].
-    g.hold("holder one pw");
-    g.hold("holder two pw");
-    let h1 = spawn(login_from(&h, "203.0.113.1", "ghost1", "holder one pw"));
+    let (holder_one, holder_two) = (random_password(), random_password());
+    g.hold(&holder_one);
+    g.hold(&holder_two);
+    let h1 = spawn(login_from(&h, "203.0.113.1", "ghost1", &holder_one));
     wait_for("holder 1 to take the slot", || limiter(&h).stats().active == 1 && g.blocked() == 1).await;
     let t0 = Instant::now();
     let change = spawn(
         h.call_from("203.0.113.2", Method::POST, "/api/v1/account/password")
             .bearer(&alice)
-            .json(&json!({ "currentPassword": PW, "newPassword": NEW_PW })),
+            .json(&json!({ "currentPassword": pw(), "newPassword": new_pw() })),
     );
     wait_for("the change to wait", || limiter(&h).stats().waiting == 1).await;
-    let h2 = spawn(login_from(&h, "203.0.113.3", "ghost2", "holder two pw"));
+    let h2 = spawn(login_from(&h, "203.0.113.3", "ghost2", &holder_two));
     wait_for("holder 2 to wait", || limiter(&h).stats().waiting == 2).await;
     // Half the budget is spent; then the current password is checked, and holder 2 takes the
     // slot before the new password's hash, which may only wait for what is left.
     tokio::time::sleep(Duration::from_millis(Q / 2)).await;
-    g.release("holder one pw");
+    g.release(&holder_one);
     let r = change.await.unwrap();
     let ms = t0.elapsed().as_millis();
     assert_busy(&r);
@@ -474,34 +476,38 @@ async fn a_password_change_waits_for_both_of_its_hashes_within_one_queue_timeout
     assert!(rejected("timeout") > timeout0);
     assert_eq!(h.user(id).await.password_hash, alice_hash, "password unchanged");
     assert_eq!(h.me_status(&other).await, 200, "other sessions untouched");
-    g.release("holder two pw");
+    g.release(&holder_two);
     assert_eq!((h1.await.unwrap().status, h2.await.unwrap().status), (401, 401));
     // With a free queue the same change goes through.
     let ok = h
-        .post_as(&alice, "/api/v1/account/password", json!({ "currentPassword": PW, "newPassword": NEW_PW }))
+        .post_as(
+            &alice,
+            "/api/v1/account/password",
+            json!({ "currentPassword": pw(), "newPassword": new_pw() }),
+        )
         .await;
     assert_eq!(ok.status, 200, "{}", ok.text());
-    h.login("alice", NEW_PW).await;
+    h.login("alice", new_pw()).await;
 }
 
 #[tokio::test]
 async fn the_login_rehash_of_an_outdated_hash_does_not_wait_for_a_slot_and_is_not_an_error_when_skipped() {
-    const P1: &str = "legacy passphrase one";
+    let (p1, holder_pw) = (random_password(), random_password());
     let _serial = SERIAL.lock().await;
     let (h, g, _release) = gated(&[]).await;
-    let old = outdated_hash(P1);
+    let old = outdated_hash(&p1);
     let id = user_with_hash(&h, "legacy", &old).await;
 
     // The login's check holds the slot; a holder queues behind it and gets the slot next.
-    g.hold(P1);
-    g.hold("holder pw");
-    let login = spawn(login_from(&h, "203.0.113.1", "legacy", P1));
+    g.hold(&p1);
+    g.hold(&holder_pw);
+    let login = spawn(login_from(&h, "203.0.113.1", "legacy", &p1));
     wait_for("the login check to hold the slot", || limiter(&h).stats().active == 1 && g.blocked() == 1)
         .await;
-    let holder = spawn(login_from(&h, "203.0.113.2", "ghost", "holder pw"));
+    let holder = spawn(login_from(&h, "203.0.113.2", "ghost", &holder_pw));
     wait_for("the holder to wait", || limiter(&h).stats().waiting == 1).await;
     let logs = capture_logs(Level::Warn);
-    g.release(P1);
+    g.release(&p1);
     let r = tokio::time::timeout(Duration::from_secs(3), login)
         .await
         .expect("the login answered while the slot was still taken (it did not wait again for the rehash)")
@@ -515,34 +521,33 @@ async fn the_login_rehash_of_an_outdated_hash_does_not_wait_for_a_slot_and_is_no
         .collect();
     assert!(complaints.is_empty(), "a skipped rehash is no refusal: {complaints:?}");
     drop(logs);
-    g.release("holder pw");
+    g.release(&holder_pw);
     assert_eq!(holder.await.unwrap().status, 401);
 
     // With a free slot, the next login upgrades the hash.
     wait_for("the queue to drain", || limiter(&h).stats().active == 0).await;
-    h.login("legacy", P1).await;
+    h.login("legacy", &p1).await;
     let upgraded = h.user(id).await.password_hash.unwrap();
     assert!(upgraded.starts_with("$argon2id$v=19$m=64,t=1,p=1$"), "{upgraded}");
 }
 
 #[tokio::test]
 async fn a_password_reset_that_lands_during_a_login_with_a_rehash_wins() {
-    const P1: &str = "old leaked passphrase";
-    const P2: &str = "fresh secret passphrase";
+    let (p1, p2) = (random_password(), random_password());
     let _serial = SERIAL.lock().await;
     for concurrency in ["1", "2"] {
         let (h, g, _release) = gated(&[("PASSWORD_HASH_CONCURRENCY", concurrency)]).await;
-        let id = user_with_hash(&h, "alice", &outdated_hash(P1)).await;
+        let id = user_with_hash(&h, "alice", &outdated_hash(&p1)).await;
         let token = reset_token(&h, "alice@example.com").await;
 
         // The login checks P1 (an outdated hash, so it will want to rehash); the reset runs while
         // the check is in its slot (concurrency 2), or right after it (concurrency 1).
-        g.hold(P1);
-        let login = spawn(login_from(&h, "203.0.113.9", "alice", P1));
+        g.hold(&p1);
+        let login = spawn(login_from(&h, "203.0.113.9", "alice", &p1));
         wait_for("the login check to start", || g.blocked() == 1).await;
         let reset = spawn(
             h.call(Method::POST, "/api/v1/auth/password/reset")
-                .json(&json!({ "token": token, "newPassword": P2 })),
+                .json(&json!({ "token": token, "newPassword": p2 })),
         );
         let reset = if concurrency == "2" {
             let r = reset.await.unwrap();
@@ -552,7 +557,7 @@ async fn a_password_reset_that_lands_during_a_login_with_a_rehash_wins() {
             wait_for("the reset to wait", || limiter(&h).stats().waiting == 1).await;
             Some(reset)
         };
-        g.release(P1);
+        g.release(&p1);
         let rl = login.await.unwrap();
         if let Some(reset) = reset {
             let rr = reset.await.unwrap();
@@ -560,61 +565,61 @@ async fn a_password_reset_that_lands_during_a_login_with_a_rehash_wins() {
         }
         assert!(rl.status == 200 || rl.status == 401, "{}", rl.text());
         let stored = h.user(id).await.password_hash.unwrap();
-        assert!(matches(&stored, P2), "the reset password is the one stored (concurrency {concurrency})");
-        assert!(!matches(&stored, P1), "the old password no longer works");
+        assert!(matches(&stored, &p2), "the reset password is the one stored (concurrency {concurrency})");
+        assert!(!matches(&stored, &p1), "the old password no longer works");
         assert_eq!(
             live_sessions(&h, id).await,
             0,
             "no session opened with the old password survives the reset"
         );
-        assert_eq!(h.post(LOGIN, json!({ "login": "alice", "password": P1 })).await.status, 401);
-        h.login("alice", P2).await;
+        assert_eq!(h.post(LOGIN, json!({ "login": "alice", "password": p1 })).await.status, 401);
+        h.login("alice", &p2).await;
     }
 }
 
 #[tokio::test]
 async fn a_password_reset_that_lands_while_a_password_change_hashes_the_new_password_wins() {
-    const P2: &str = "the reset passphrase";
+    let p2 = random_password();
     let _serial = SERIAL.lock().await;
     let (h, g, _release) = gated(&[("PASSWORD_HASH_CONCURRENCY", "2")]).await;
     let id = h.create_user("alice").await;
-    let alice = h.token("alice", PW).await;
+    let alice = h.token("alice", pw()).await;
     let token = reset_token(&h, "alice@example.com").await;
 
-    g.hold(NEW_PW);
+    g.hold(new_pw());
     let change = spawn(
         h.call(Method::POST, "/api/v1/account/password")
             .bearer(&alice)
-            .json(&json!({ "currentPassword": PW, "newPassword": NEW_PW })),
+            .json(&json!({ "currentPassword": pw(), "newPassword": new_pw() })),
     );
     wait_for("the change to hash the new password", || g.blocked() == 1).await;
-    let rr = h.post("/api/v1/auth/password/reset", json!({ "token": token, "newPassword": P2 })).await;
+    let rr = h.post("/api/v1/auth/password/reset", json!({ "token": token, "newPassword": p2 })).await;
     assert_eq!(rr.status, 200);
-    g.release(NEW_PW);
+    g.release(new_pw());
     let r = change.await.unwrap();
     assert_eq!((r.status, r.json()["error"].clone()), (403, json!("invalid_password")), "{}", r.text());
     let stored = h.user(id).await.password_hash.unwrap();
-    assert!(matches(&stored, P2), "the reset password is the one stored");
-    assert!(!matches(&stored, NEW_PW));
+    assert!(matches(&stored, &p2), "the reset password is the one stored");
+    assert!(!matches(&stored, new_pw()));
 }
 
 #[tokio::test]
 async fn a_concurrent_login_that_upgraded_the_hash_does_not_make_another_login_of_the_same_password_fail() {
-    const P1: &str = "legacy passphrase one";
+    let p1 = random_password();
     let _serial = SERIAL.lock().await;
     let (h, g, _release) = gated(&[("PASSWORD_HASH_CONCURRENCY", "2")]).await;
-    let old = outdated_hash(P1);
+    let old = outdated_hash(&p1);
     let id = user_with_hash(&h, "legacy", &old).await;
     // Login A checks P1 and waits; login B checks, rehashes and stores the new hash; A then finds
     // another hash than the one it checked, and checks the password again against it.
-    g.hold(P1);
-    let a = spawn(login_from(&h, "203.0.113.1", "legacy", P1));
+    g.hold(&p1);
+    let a = spawn(login_from(&h, "203.0.113.1", "legacy", &p1));
     wait_for("login A to start", || g.blocked() == 1).await;
-    let upgraded = test_hasher().hash(P1).unwrap(); // what login B stored
+    let upgraded = test_hasher().hash(&p1).unwrap(); // what login B stored
     let update =
         crate::store::UserUpdate { password_hash: Some(Some(upgraded.clone())), ..Default::default() };
     h.store.users().update(id, update).await.unwrap();
-    g.release(P1);
+    g.release(&p1);
     let r = a.await.unwrap();
     assert_eq!(r.status, 200, "{}", r.text());
     assert_eq!(h.user(id).await.password_hash, Some(upgraded), "A's rehash did not replace B's");
@@ -628,7 +633,7 @@ async fn a_session_opens_only_while_the_password_hash_its_login_proved_is_still_
     let user = h.user(id).await;
     let sessions = &h.auth.inner.sessions;
     let stored = user.password_hash.clone().unwrap();
-    let stale = test_hasher().hash(PW).unwrap();
+    let stale = test_hasher().hash(pw()).unwrap();
     assert!(sessions.create_if_current(&user, None, None, &stale).await.unwrap().is_none());
     assert_eq!(live_sessions(&h, id).await, 0);
     let opened = sessions.create_if_current(&user, None, None, &stored).await.unwrap().expect("a session");
@@ -644,11 +649,12 @@ async fn once_the_queue_is_half_full_one_source_has_at_most_2_hashes_waiting_and
     assert_eq!(limiter(&h).per_source_max(), Some(2), "2 per source for one worker");
     let token = reset_token(&h, "alice@example.com").await;
     let src0 = rejected("source_limit");
-    g.hold("holder pw");
-    let holder = spawn(login_from(&h, "192.0.2.1", "ghost", "holder pw"));
+    let (holder_pw, wrong) = (random_password(), random_password());
+    g.hold(&holder_pw);
+    let holder = spawn(login_from(&h, "192.0.2.1", "ghost", &holder_pw));
     wait_for("the holder to take the slot", || limiter(&h).stats().active == 1 && g.blocked() == 1).await;
 
-    let send = |ip: &str| login_from(&h, ip, "nobody", "not the password");
+    let send = |ip: &str| login_from(&h, ip, "nobody", &wrong);
     let server = &h;
     let waiting = |n: usize| move || limiter(server).stats().waiting == n;
     let mut queued = Vec::new();
@@ -689,16 +695,16 @@ async fn once_the_queue_is_half_full_one_source_has_at_most_2_hashes_waiting_and
     wait_for("6 waiters", waiting(6)).await;
     assert!(rejected("source_limit") >= src0 + 3);
 
-    g.release("holder pw");
+    g.release(&holder_pw);
     assert_eq!(holder.await.unwrap().status, 401);
     for q in queued {
         assert_eq!(q.await.unwrap().status, 401);
     }
     // Once its waiters are served, the source may queue again; the reset link survived.
-    assert_eq!(login_from(&h, "198.51.100.7", "alice", PW).send().await.status, 200);
+    assert_eq!(login_from(&h, "198.51.100.7", "alice", pw()).send().await.status, 200);
     let reset = h
         .call_from("198.51.100.7", Method::POST, "/api/v1/auth/password/reset")
-        .json(&json!({ "token": token, "newPassword": NEW_PW }))
+        .json(&json!({ "token": token, "newPassword": new_pw() }))
         .send()
         .await;
     assert_eq!(reset.status, 200);
@@ -742,7 +748,7 @@ async fn an_idle_server_lets_10_simultaneous_logins_from_one_ipv4_address_in() {
     }
     g.close();
     let logins: Vec<_> =
-        (0..10).map(|i| spawn(login_from(&h, "198.51.100.7", &format!("pupil{i}"), PW))).collect();
+        (0..10).map(|i| spawn(login_from(&h, "198.51.100.7", &format!("pupil{i}"), pw()))).collect();
     // One check runs, the 9 others wait (beyond the per-source cap of 2: the queue of 32 is far
     // from half full).
     wait_for("1 running and 9 waiting", || {
@@ -770,14 +776,13 @@ async fn a_request_refused_for_its_source_gives_its_auth_rate_tokens_back() {
     ])
     .await;
     assert_eq!(limiter(&h).per_source_max(), Some(1));
-    g.hold("holder pw");
-    let holder = spawn(login_from(&h, "192.0.2.1", "ghost", "holder pw"));
+    let (holder_pw, wrong) = (random_password(), random_password());
+    g.hold(&holder_pw);
+    let holder = spawn(login_from(&h, "192.0.2.1", "ghost", &holder_pw));
     wait_for("the holder to take the slot", || limiter(&h).stats().active == 1 && g.blocked() == 1).await;
     // A new login each time, so that no account's failure delay starts.
     let n = AtomicUsize::new(0);
-    let send = |ip: &str| {
-        login_from(&h, ip, &format!("nobody{}", n.fetch_add(1, Ordering::SeqCst)), "not the password")
-    };
+    let send = |ip: &str| login_from(&h, ip, &format!("nobody{}", n.fetch_add(1, Ordering::SeqCst)), &wrong);
 
     // IPv4: one login waits (1 of the 3 tokens); 4 more are refused for the source, and each
     // gives its token back, so none of them meets the rate limit (whose Retry-After is longer).
@@ -796,7 +801,7 @@ async fn a_request_refused_for_its_source_gives_its_auth_rate_tokens_back() {
     // A request refused by the queue itself (queue full) is no source refusal.
     assert_busy(&send("203.0.113.50").send().await);
 
-    g.release("holder pw");
+    g.release(&holder_pw);
     assert_eq!(holder.await.unwrap().status, 401);
     assert_eq!((waiter_a.await.unwrap().status, waiter_x.await.unwrap().status), (401, 401));
     // A still has its 2 other attempts, the /48 too; then the limit of 3 applies.

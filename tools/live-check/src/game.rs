@@ -13,7 +13,7 @@ use scacelith_server::security::pow::solve_pow;
 use serde_json::{Value, json};
 
 use crate::support::web::call;
-use crate::support::{PASSWORD, TestServer, sign_in};
+use crate::support::{TestServer, password, sign_in};
 use crate::{Ctx, run_cpp};
 
 /// The C++ player of the part (registered by the C++ test).
@@ -28,7 +28,7 @@ const GESTURE_IDLE_MS: &str = "2500";
 /// Registers `name` on a server that asks for a proof of work: the first request gets the
 /// challenge (428 `pow_required`), the second carries its solution.
 async fn register_with_pow(api: &ApiClient, name: &str) -> Result<(), String> {
-    let mut body = json!({"username": name, "email": format!("{name}@example.org"), "password": PASSWORD});
+    let mut body = json!({"username": name, "email": format!("{name}@example.org"), "password": password()});
     let (res, answer) = call(api, "POST", "/auth/register", None, Some(body.clone())).await;
     let (res, answer) = if res.status == 428 {
         let challenge = answer["pow"]["challenge"].as_str().unwrap_or_default().to_owned();

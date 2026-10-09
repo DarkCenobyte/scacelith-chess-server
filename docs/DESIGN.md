@@ -41,9 +41,11 @@ analysis pool (Stockfish child processes, nice 19) · GIF render threads (nice 1
   runs on tokio's blocking pool (store reads, password hashes, the journal replay) or on dedicated
   threads.
 * **Game shards.** `WORKERS` host actors, numbered `SHARD_BASE` to `SHARD_BASE + WORKERS - 1`
-  (64 shard numbers at most, checked at start). A game id packs `(ms since 2026-01-01) << 12 |
-  shard << 6 | seq` and stays below 2^53; its shard bits name the host, so a message reaches its
-  game without a lookup table (`ids`). Section 5.3.
+  (64 shard numbers at most, checked at start), each with its journal in `JOURNAL_DIR/shard-<n>`.
+  A game id packs `(ms since 2026-01-01) << 12 | shard << 6 | seq` and stays below 2^53; its shard
+  bits name the host, so a message reaches its game without a lookup table (`ids`), whatever the
+  range of the instance. A shard outside the range whose journal still holds games (the range
+  changed) gets a draining host at start, which serves them until they end. Section 5.3.
 * **Lobby.** One actor owns what must be unique in the server: presence (one live connection per
   account), the matchmaker queues, challenges and private codes, conduct cooldowns, game creation
   and placement, rematches, the ban cache and the rating refund notices. Sections 5.4 and 5.8.
@@ -196,10 +198,10 @@ the third failed flush in a row (`JOURNAL_GATE_TRIES`, about 0.3 s after the fir
 journal. Its snapshots and `committed` records are still appended in case the journal comes back.
 The host logs one error per episode and counts these games in
 `scacelith_game_commit_unjournaled_total`; the first flush that writes without a failure ends the
-episode. The database is then the only durable copy of these results. One risk remains, the one the
-wait avoids: after a crash before the journal has written the game's snapshot or `committed`
-record, a game whose `ended` record was lost comes back running; whatever result it ends with, the
-database keeps the first one.
+episode. The database is then the only durable copy of these results. After a crash before the
+journal has written the game's snapshot or `committed` record, the journal still shows such a game
+running; the next start asks the database first (Recovery, 5.3), finds the game there and drops it
+from the journal, so it neither comes back nor changes a rating twice.
 
 **Reconnection.** A lost connection keeps the game running (the player's clock too, except for the
 clock hold of a game restored after a restart: 6.4). The opponent gets
@@ -312,12 +314,21 @@ anything, and spawns the actor. The actor handles its inbox one message at a tim
 messages and its detach stay ordered), and a 10 ms beat (`MissedTickBehavior::Delay`) fires due
 deadlines, detects stalls (6.1), starts commits and builds compaction snapshots (at most 2 per
 beat). A beat first handles the messages already in the inbox, never those that arrive meanwhile,
-so a busy inbox cannot hold the timers back. `HostHandle` is the cloneable way in: `client` (a
-strictly decoded game request with its read time), `gesture`, `attach` (binds a connection and
-sends it a `GameSnapshot`), `detach`, `rtt`, `forfeit_user`, `decline_rematch`, `create`, `cancel`
-(a game whose creation came after the lobby's timeout: `ServerAborted`, no conduct incident),
-`load` and `stats`. `Hosts::pick` places a new game (5.4). The host talks back through
-`HostEvents` and `AnomalySink`.
+so a busy inbox cannot hold the timers back. The inbox is unbounded, but what it holds is counted
+(`game::host::inbox`): a gesture, which the next one supersedes, is dropped before it when
+`GESTURE_INBOX_MAX` (8,192) gestures wait (`scacelith_gestures_dropped_total{reason="overload"}`);
+every other message (requests, attach and detach, creations, cancels, forfeits, rematch windows,
+the shutdown) is always delivered. A host with `INBOX_BUSY` (16,384) messages waiting, or
+`JOURNAL_PENDING_BUSY` (16 MiB) of journal records not handed to its I/O thread, is busy and gets
+no new game (`Hosts::pick`); the games it holds go on. Each beat exports the counts
+(`scacelith_game_inbox_messages`, `scacelith_journal_pending_bytes`).
+
+`HostHandle` is the cloneable way in: `client` (a strictly decoded game request with its read
+time), `gesture`, `attach` (binds a connection and sends it a `GameSnapshot`), `detach`, `rtt`,
+`forfeit_user`, `decline_rematch`, `create`, `cancel` (a game whose creation came after the
+lobby's timeout: `ServerAborted`, no conduct incident), `load`, `busy` and `stats`.
+`Hosts::place` places a new game (5.4). The host talks back through `HostEvents` and
+`AnomalySink`.
 
 A panic in room code is caught: the request gets `Error{Internal}` and the game goes on (a timer
 that panicked is retried a second later). A request for a game the sender does not play gets
@@ -329,11 +340,31 @@ holds before anything of it reaches the client; then it ends the game as a forfe
 of the request and sends the sender a fatal `Error{CheatDetected}` (close 4302). Queuing the
 forfeit, the `Error` or the close before that call would let a client that reconnects at once in.
 
-**Recovery.** At start each shard rebuilds its games from the journal: a running game is restored
-with the restart rules of 6.4 and announced to the lobby (`HostEvents::game_recovered`), a game
-that ended but was not committed is queued for its commit, a game whose records cannot all be
-replayed is rebuilt as far as they allow and ended `ServerAborted`, and one that cannot be rebuilt
-at all is dropped (its `committed` record is appended so that its segments go).
+**Shard directories.** `Hosts::start` starts the shards of the range and every other
+`JOURNAL_DIR/shard-<n>` directory that holds journal segments. It first claims each directory
+(`journal::owner`): an exclusive `flock` on its `owner` file, held while the process runs, and the
+server id of the database (`server_meta`) written in it. A shard of the range that another process
+holds, or whose journal holds the games of another database (another server id) refuses the start
+(`HostError::ShardInUse`, `HostError::ForeignJournal`); a directory written by 0.9.1 or older has no
+server id and is taken, then marked. A shard outside the range is left alone in these cases, and
+when its journal holds no game; otherwise it gets a draining host (`HostHandle::draining`,
+`scacelith_game_shards_draining`): it recovers and serves its games like any host, takes no new
+game (`Hosts::pick` skips it, rematches included), and lasts until the process stops; the next
+start finds its journal empty and leaves it out. Changing `WORKERS` or `SHARD_BASE` therefore never
+abandons a game in progress (DEPLOY.md section 11).
+
+**Recovery.** At start each shard rebuilds its games from the journal, then reconciles them with
+the database before it publishes anything (`GameStore::lookup`, one read): the database has the
+last word. A game the database already holds is finished whatever the journal says (committed
+while the journal could not be written, or a journal older than the database), and a game with a
+player the database does not know can never be committed (a database older than the journal):
+both are dropped, their `committed` record appended, with no event, commit or rating change
+(`scacelith_game_recovery_dropped_total{reason}`). Then a running game is restored with the restart
+rules of 6.4 and announced to the lobby (`HostEvents::game_recovered`), a game that ended but was
+not committed is queued for its commit, a game whose records cannot all be replayed is rebuilt as
+far as they allow and ended `ServerAborted`, and one that cannot be rebuilt at all is dropped (its
+`committed` record is appended so that its segments go). docs/DEPLOY.md section 10 states the
+policy for a journal and a database of different instants.
 
 ### 5.4 Matching (`matching`, `realtime::lobby`)
 
@@ -359,8 +390,13 @@ store or a host afterwards runs in spawned tasks that report back. Its timers: t
 refund notice poll (5 s). Game creation: a player already busy gets `AlreadyInGame`, a player with
 a cached ban `UserUnavailable`; a creation task reads the stored bans (a ban found there is
 enforced, not only cached), reads the ratings again for challenges and rematches, and asks
-`Hosts::pick` for a host (the rematch's former shard, otherwise the host with the fewest games).
-On success the players count as in a game, leave their queues and their live connections attach.
+`Hosts::place` for a host (the rematch's former shard, otherwise the host with the fewest games,
+among the hosts of the range that are not busy: 5.3). On success the players count as in a game,
+leave their queues and their live connections attach. While the server is saturated (every host
+of the range busy, or the store's writer backlogged: `GameHosts::saturated`), a queue join, a
+challenge, its acceptance and a private code are answered `RateLimited` before anything is kept or
+spent, and a creation already under way fails with `RateLimited` (a pairing is tried again after
+the matchmaker's hold, a rematch gets `RematchUnavailable`).
 A ban (`SanctionEvents::sanction_applied`, or a stored ban found at a queue join, challenge,
 rematch or game creation) kicks the player (`Notice{Banned}`, `Error{Banned}`, close 4004),
 forfeits a game in progress, and drops the player's queue entry and challenges; a stored ban found
@@ -382,7 +418,11 @@ embedded in the binary and recorded in `schema_migrations`.
 * **Writer.** One thread, one connection, one FIFO: a job is queued when it is submitted, and each
   runs in its own `BEGIN IMMEDIATE` transaction. Two jobs submitted one after the other run in that
   order, which the anti-cheat relies on (anomalies before the commit that reads them, a certain
-  anomaly before the ban it causes).
+  anomaly before the ban it causes). No job is refused for the queue's length
+  (`scacelith_db_write_queue`); from `WRITE_BACKLOG_BUSY` (10,000) jobs waiting the store is
+  backlogged (`Store::writes_backlogged`): the API refuses the requests that may write (`POST`,
+  `PUT`, `PATCH`, `DELETE`: 503 `server_busy` before authentication, rates and body) and no new
+  game is created, until the writer catches up.
 * **Readers.** `query_only` connections on the blocking pool; a read started after a write job
   answered sees that write.
 * **API.** `Store::read` and `Store::write` run a closure on a `Db`, which has a typed API per
@@ -411,7 +451,9 @@ in-memory buffer; the shard's I/O thread writes a batch `JOURNAL_FLUSH_MS` after
 or at once on `flush()`, with one `write` (+ `fdatasync` when `JOURNAL_FSYNC` is on), one batch in
 flight. Segments rotate at 16 MiB; the first batch after a start opens a new segment. The API:
 `open`, `append`, `committed`, `flush`, `has_unwritten`, `failed_writes`,
-`compaction_candidates`, `recover`, `stats`, `close`. A journal directory belongs to one process.
+`compaction_candidates`, `recover`, `stats`, `close`. A journal directory belongs to one process,
+which holds the lock of its `owner` file (5.3); the journal itself only reads and writes the
+`segment-<seq>.log` files.
 
 **Deletion.** A segment is deleted when no game needs it any more: every game it mentions is ended
 *and* committed, or has a newer snapshot. A segment holding a game's `committed` record outlives
@@ -755,8 +797,18 @@ happen with a modified client.
 * `DrawClaim`: accepted when the current position occurred 3 times or the halfmove clock is at
   least 100; otherwise `NothingToClaim`. Automatic endings: mate, stalemate, insufficient material,
   fivefold repetition, 75 moves (as in the game). A game reaching 1200 plies ends `ServerAborted`.
-* `Resign` at any time while the game runs. `Abort` only before the sender's own first move
-  (conduct incident `abort`).
+* `Resign` at any time while the game runs: a loss, or a draw (`ResignationVsInsufficient`, FIDE
+  5.1.2) when the opponent cannot mate. `Abort` only before the sender's own first move (conduct
+  incident `abort`).
+* "Cannot mate" (`Position::can_color_mate`, the same rule as the game's `canColorMate` and as
+  python-chess and lichess): a side with a pawn, a rook or a queen can mate; a side with a knight
+  cannot only when it has that single knight and the opponent has nothing but queens; a side with
+  bishops alone cannot only when every bishop of the board stands on one square colour and there
+  is no pawn and no knight; a bare king cannot. A position that is merely hard to win is not
+  "cannot mate". It turns resignation, flag fall (`TimeoutVsInsufficient`) and abandonment
+  (`AbandonmentVsInsufficient`) into draws (in the offline game, the second illegal move too);
+  `test/fixtures/mating-material.json` holds the positions both sides' tests check, with a mating
+  line for each "can mate" that is not obvious. The anti-cheat `Forfeit` stays a loss.
 * `Rematch` within 60 s after the end: when both accept, the host asks the lobby
   (`HostEvents::rematch`), which creates a new game with the colours swapped, the same time control,
   rated flag and `autoPress`, after checking bans, presence, another game and, for a rated game,
@@ -1033,7 +1085,9 @@ checkpoint (it is truncated to 64 MiB and removed when the server stops). A back
   keeps a SHA-256 digest of the hash the password matched, and `POST /auth/login/mfa` fails with
   `invalid_mfa_token` when the stored hash is no longer that one. So a password reset always wins
   against a login, a rehash or a password change in flight, and no session is opened with a password
-  the reset replaced.
+  the reset replaced. The re-authenticated account changes (password, address, deletion, disabling
+  two-step verification, new recovery codes) are written the same way: only while the stored hash is
+  still the one the request's password matched, in the transaction of the change.
 * **Sessions and tokens**: session tokens and every single-use token are 32 random bytes, stored as
   SHA-256 only. Session lookups are cached 30 s (positive and negative); the API drops revoked
   sessions from the cache at once. Single-use tokens: e-mail verification (24 h), password reset
@@ -1041,9 +1095,11 @@ checkpoint (it is truncated to 64 MiB and removed when the server stops). A back
   a reset or a password change ends the account's other reset links), e-mail change (24 h, sent to
   the new address; a new request replaces it, a password change or reset cancels it), MFA login step
   (5 minutes), SSO attempt, ticket and link ticket (10 minutes each; a link ticket allows 5 password
-  tries). Confirming an e-mail change and a password reset are each one transaction; a store that
-  stays locked answers 503 `server_busy` with `retryAfter: 1`, nothing changed and the link still
-  valid.
+  tries). Confirming an e-mail change, a password reset and a password change are each one
+  transaction, with the revocation of the sessions and the end of the links they call for; the
+  session cache and the WebSocket connections hear of a revocation only once it committed. A failure
+  changes nothing: a store that stays locked answers 503 `server_busy` with `retryAfter: 1`, any other
+  failure 500, and the old password, the sessions and the link stay as they were.
 * **TOTP**: RFC 6238 (HMAC-SHA1, 6 digits, 30 s, one step either way), 20-byte secrets sealed with
   AES-256-GCM (`v1.` format, bound to the account), replay refused (the last step used is stored).
   10 recovery codes (`xxxx-xxxx-xx`, 50 bits) stored as HMAC-SHA256 under a derived pepper, single
@@ -1150,9 +1206,11 @@ checkpoint (it is truncated to 64 MiB and removed when the server stops). A back
 
 One process serves one machine: `WORKERS` shards share one runtime, and every limit of the
 configuration is a whole-server limit. Several instances are independent servers, each with its
-own accounts, database, journal and ports (DEPLOY.md, section 11). `SHARD_BASE` gives an instance
-its own range of shard numbers, so that the game ids of instances given distinct ranges never
-collide. Nothing more is implemented for several machines: presence, queues and limits live in one
+own accounts, database, journal and ports (DEPLOY.md, section 11); the lock and the server id of
+each shard directory (5.3) refuse a start that would share a journal. `SHARD_BASE` gives an
+instance its own range of shard numbers, so that the game ids of instances given distinct ranges
+never collide. The range of an instance can change between two starts: the games left in the
+journals of shards it no longer covers are served by draining hosts until they end (5.3). Nothing more is implemented for several machines: presence, queues and limits live in one
 process, the store is a local SQLite file, and no channel connects the hosts of different
 instances. Capacity on one machine: SIZING.md.
 

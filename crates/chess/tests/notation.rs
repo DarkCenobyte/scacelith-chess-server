@@ -427,6 +427,50 @@ fn insufficient_material_and_can_color_mate() {
     assert!(p.can_color_mate(Color::Black));
 }
 
+/// `can_color_mate` by the material (python-chess `has_insufficient_material`): each case gives
+/// whether White, then Black, can still mate. The shared vectors of
+/// test/fixtures/mating-material.json (tests/mating_material.rs) carry the mating lines.
+#[test]
+fn can_color_mate_by_material() {
+    let cases: [(&str, bool, bool, &str); 22] = [
+        ("7k/8/8/8/8/8/8/K7 w - - 0 1", false, false, "bare kings"),
+        ("7k/7q/8/8/8/8/8/K7 b - - 0 1", false, true, "bare king v queen"),
+        ("7k/8/8/8/8/8/8/KN5q b - - 0 1", false, true, "K+N v K+Q: a queen always takes the knight"),
+        ("7k/5q1q/8/8/8/8/8/KN6 b - - 0 1", false, true, "K+N v K+2Q"),
+        ("7k/8/8/8/8/8/8/KN5r b - - 0 1", true, true, "K+N v K+R: the rook can block"),
+        ("7k/7p/8/8/8/8/8/KN6 b - - 0 1", true, true, "K+N v K+P"),
+        ("7k/8/8/8/8/8/8/KN5b b - - 0 1", true, true, "K+N v K+B"),
+        ("7k/8/8/8/8/8/8/KN5n b - - 0 1", true, true, "K+N v K+N"),
+        ("7k/5q2/8/8/8/8/8/KNN5 b - - 0 1", true, true, "K+2N v K+Q"),
+        ("7k/8/8/8/8/8/8/KNN5 b - - 0 1", true, false, "K+2N v K"),
+        ("7k/8/8/8/8/8/8/KNB5 b - - 0 1", true, false, "K+B+N v K"),
+        ("7k/8/8/8/8/8/8/KB5r b - - 0 1", false, true, "K+B v K+R"),
+        ("7k/5q2/8/8/8/8/8/KB6 b - - 0 1", false, true, "K+B v K+Q"),
+        ("7k/8/8/8/8/8/8/KB4b1 b - - 0 1", true, true, "K+B v K+B, opposite colours (b1 light, g1 dark)"),
+        ("7k/8/8/8/8/8/6b1/KB6 b - - 0 1", false, false, "K+B v K+B, both light: dead"),
+        ("7k/6rb/8/8/8/8/8/KB6 b - - 0 1", false, true, "K+B v K+R+B, all bishops light"),
+        ("7k/6r1/7b/8/8/8/8/KB6 b - - 0 1", true, true, "K+B v K+R+B, opposite colours"),
+        ("7k/8/8/8/8/8/8/KBB5 b - - 0 1", true, false, "K+2B of both colours v K"),
+        ("7k/8/8/8/8/8/2B5/KB6 b - - 0 1", false, false, "K+2B both light v K: dead"),
+        ("7k/8/8/8/8/8/8/KB5n b - - 0 1", true, true, "K+B v K+N"),
+        ("7k/7p/8/8/8/8/8/KB6 b - - 0 1", true, true, "K+B v K+P"),
+        ("7k/8/8/8/8/8/P7/K7 b - - 0 1", true, false, "K+P v K"),
+    ];
+    for (fen, white, black, what) in cases {
+        let p = pos(fen);
+        assert_eq!(
+            (p.can_color_mate(Color::White), p.can_color_mate(Color::Black)),
+            (white, black),
+            "{what}"
+        );
+        assert_eq!(
+            p.has_insufficient_material(),
+            !white && !black,
+            "{what}: dead exactly when neither can mate"
+        );
+    }
+}
+
 #[test]
 fn generation_order_is_the_games() {
     // Squares a1, b1 .. h8; pawn push, double push; knights in their step order; castling last.

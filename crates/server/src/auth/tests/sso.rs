@@ -10,7 +10,7 @@ use http::Method;
 use serde_json::{Value, json};
 
 use super::fake_oidc::{FakeOidc, ISSUER, Redirect, Signing};
-use super::{CountingHasher, Harness, PW, START_MS, Setup, link_in, token_of};
+use super::{CountingHasher, Harness, START_MS, Setup, link_in, pw, token_of};
 use crate::auth::oidc::{OidcClient, form_urlencode, pkce_challenge};
 use crate::clock::{ManualClock, SharedClock};
 use crate::config::{sso_origin_tag, test_config};
@@ -23,6 +23,7 @@ use crate::mail::message::utc_string;
 use crate::security::keys::{random_token, sha256_hex};
 use crate::security::password::{Argon2Hasher, Argon2Params, PasswordHasher};
 use crate::security::pow::solve_pow;
+use crate::security::testing::random_password;
 use crate::security::totp::{base32_decode, totp};
 use crate::store::{NewSanction, NewToken, NewUser, SanctionKind, SecurityEvent, Source, UserUpdate};
 
@@ -237,8 +238,8 @@ async fn ban(h: &Harness, id: UserId, ends_at: i64) {
 
 /// Turns two-step verification on for a password account; returns its secret.
 async fn enable_mfa(h: &Harness, username: &str) -> Vec<u8> {
-    let token = h.token(username, PW).await;
-    let st = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": PW })).await;
+    let token = h.token(username, pw()).await;
+    let st = h.post_as(&token, "/api/v1/account/mfa/totp/setup", json!({ "password": pw() })).await;
     let secret = base32_decode(st.json()["secret"].as_str().unwrap()).unwrap();
     let en =
         h.post_as(&token, "/api/v1/account/mfa/totp/enable", json!({ "code": totp(&secret, h.now()) })).await;
@@ -281,7 +282,7 @@ async fn disabled_unless_enabled_and_the_poll_route_and_callback_page_of_the_bro
             FINISH,
             json!({ "attemptId": tok, "codeVerifier": "v".repeat(43), "state": "s".repeat(43), "code": "c" }),
         ),
-        (LINK, json!({ "linkTicket": tok, "password": PW })),
+        (LINK, json!({ "linkTicket": tok, "password": pw() })),
     ];
     for (path, body) in cases {
         let r = h.post(path, body).await;
@@ -420,7 +421,10 @@ async fn start_and_finish_validate_their_body() {
         body.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
         assert_eq!(x.post(FINISH, body).await.status, 400, "{bad}");
     }
-    assert_eq!(x.post(LINK, json!({ "linkTicket": "sso_x", "password": PW, "extra": 1 })).await.status, 400);
+    assert_eq!(
+        x.post(LINK, json!({ "linkTicket": "sso_x", "password": pw(), "extra": 1 })).await.status,
+        400
+    );
 }
 
 #[tokio::test]
@@ -452,7 +456,7 @@ async fn a_first_google_sign_in_finishes_with_the_games_verifier_then_a_username
     assert_ne!(call["code_verifier"], a.verifier, "the server's own verifier");
     assert_eq!(x.finish(&a, &q, json!({})).await.status, 410, "an attempt finishes once");
 
-    h.create_user_with("Magnus", Some("other@example.com"), Some(PW), true).await;
+    h.create_user_with("Magnus", Some("other@example.com"), Some(pw()), true).await;
     let complete = |username: &str| x.post(COMPLETE, json!({ "ssoTicket": ticket, "username": username }));
     let c = complete("magnus").await;
     assert_eq!((c.status, c.json()["error"].clone()), (409, json!("username_taken")));
@@ -484,10 +488,35 @@ async fn a_first_google_sign_in_finishes_with_the_games_verifier_then_a_username
 }
 
 #[tokio::test]
+async fn a_new_account_that_cannot_be_linked_is_not_created_and_its_ticket_still_works() {
+    let x = Sso::new(&[]).await;
+    let h = &x.h;
+    let r = x.sign_in(claims(json!({}))).await;
+    let ticket = r.json()["ssoTicket"].as_str().unwrap().to_owned();
+    let complete = || x.post(COMPLETE, json!({ "ssoTicket": ticket, "username": "Magnus" }));
+    h.break_writes("fail_link", "INSERT ON sso_identities").await;
+    assert_eq!(complete().await.status, 500);
+    h.mend("fail_link").await;
+    assert!(
+        h.store.users().by_username("Magnus".into()).await.unwrap().is_none(),
+        "no account without its link"
+    );
+    assert!(h.store.users().by_email("magnus@gmail.com".into()).await.unwrap().is_none());
+    assert!(events_of(h, "sso_account_created").await.is_empty());
+    let c = complete().await;
+    assert_eq!(c.status, 200, "{}", c.text());
+    assert_eq!(c.json()["user"]["googleLinked"], true);
+    assert_eq!(
+        google_link(h, "1098765").await,
+        Some(h.store.users().by_username("Magnus".into()).await.unwrap().unwrap().id)
+    );
+}
+
+#[tokio::test]
 async fn a_linked_account_with_two_step_verification_gets_the_mfa_step_then_a_google_totp_session() {
     let x = Sso::new(&[]).await;
     let h = &x.h;
-    let id = h.create_user_with("magnus", Some("magnus@gmail.com"), Some(PW), true).await;
+    let id = h.create_user_with("magnus", Some("magnus@gmail.com"), Some(pw()), true).await;
     let secret = enable_mfa(h, "magnus").await;
     link_identity(h, id, "1098765", "magnus@gmail.com").await;
     let r = x.sign_in(claims(json!({}))).await;
@@ -552,7 +581,7 @@ async fn finish_a_wrong_state_or_issuer_fails_and_uses_the_attempt_and_dead_atte
 #[tokio::test]
 async fn a_code_minted_for_one_attempt_fails_through_another_and_opens_no_session() {
     let x = Sso::new(&[]).await;
-    let id = x.h.create_user_with("magnus", Some("magnus@gmail.com"), Some(PW), true).await;
+    let id = x.h.create_user_with("magnus", Some("magnus@gmail.com"), Some(pw()), true).await;
     link_identity(&x.h, id, "1098765", "magnus@gmail.com").await;
     for port in [PORT, PORT + 1] {
         let a = x.start().await;
@@ -569,7 +598,7 @@ async fn cross_device_phishing_whoever_started_the_attempt_never_gets_the_sign_i
  {
     let x = Sso::new(&[]).await;
     let h = &x.h;
-    let victim = h.create_user_with("victor", Some("victim@gmail.com"), Some(PW), true).await;
+    let victim = h.create_user_with("victor", Some("victim@gmail.com"), Some(pw()), true).await;
     link_identity(h, victim, "v-sub", "victim@gmail.com").await;
     // The attacker starts from a script and sends the genuine Google link to the victim.
     let a = x.start_at(PORT, ATTACKER).await;
@@ -662,8 +691,9 @@ async fn no_secret_leaks_a_failed_sign_in_shows_no_provider_text_code_or_token_a
         &a.verifier,
         "invalid_grant",
     ];
-    for v in secrets {
-        assert!(!refused.text().contains(v) && !forged.text().contains(v), "{v}");
+    // The failure names the index of the value, not the value.
+    for (i, v) in secrets.into_iter().enumerate() {
+        assert!(!refused.text().contains(v) && !forged.text().contains(v), "secrets[{i}]");
     }
     // Neither in the log (the token endpoint's error code, 60 characters at most, is).
     let logged = logs.lines().concat();
@@ -682,8 +712,8 @@ async fn no_secret_leaks_a_failed_sign_in_shows_no_provider_text_code_or_token_a
         x.finish(&c, &qc, json!({})).await,
         x.post(FINISH, attempt(&unknown)).await,
         x.post(FINISH, attempt("nope")).await,
-        x.link(&unknown, PW).await,
-        x.link("nope", PW).await,
+        x.link(&unknown, pw()).await,
+        x.link("nope", pw()).await,
         x.post(COMPLETE, json!({ "ssoTicket": unknown, "username": "Someone" })).await,
     ];
     for r in answers {
@@ -751,7 +781,7 @@ async fn key_rotation_an_unknown_key_id_refreshes_the_keys() {
 async fn banned_accounts_closed_registration_and_addresses_google_has_not_confirmed() {
     let x = Sso::new(&[("REGISTRATION", "closed")]).await;
     let h = &x.h;
-    let id = h.create_user_with("magnus", Some("magnus@gmail.com"), Some(PW), true).await;
+    let id = h.create_user_with("magnus", Some("magnus@gmail.com"), Some(pw()), true).await;
     link_identity(h, id, "1098765", "magnus@gmail.com").await;
     ban(h, id, h.now() + 1000).await;
     let r = x.sign_in(claims(json!({}))).await;
@@ -777,7 +807,7 @@ async fn an_account_with_the_google_address_is_linked_only_after_its_password_ty
     for verification in MODES {
         let x = Sso::new(&[mode(verification)]).await;
         let h = &x.h;
-        let id = h.create_user_with("Magnus", Some("magnus@gmail.com"), Some(PW), false).await;
+        let id = h.create_user_with("Magnus", Some("magnus@gmail.com"), Some(pw()), false).await;
         let (_, _, r) = x.sign_in_from(VICTIM, claims(json!({}))).await;
         assert_eq!(r.status, 200, "{}", r.text());
         let b = r.json();
@@ -794,13 +824,13 @@ async fn an_account_with_the_google_address_is_linked_only_after_its_password_ty
             events_of(h, "sso_link_required").await.into_iter().map(|e| (e.user_id, e.ip)).collect();
         assert_eq!(required, [(Some(id), None)]);
         // A wrong password: 401, the ticket stays, the account's login counter counts it.
-        let l = x.link_from(VICTIM, &ticket, "wrong password 1", json!({})).await;
+        let l = x.link_from(VICTIM, &ticket, &random_password(), json!({})).await;
         assert_eq!((l.status, l.json()["error"].clone()), (401, json!("invalid_credentials")));
         assert_eq!(h.auth.inner.failures.failures("l:magnus"), 1);
         let failed = events_of(h, "login_failed").await.pop().unwrap();
         assert_eq!(failed.detail.unwrap()["method"], "google_link");
         assert_eq!(google_link(h, "1098765").await, None);
-        let l = x.link_from(VICTIM, &ticket, PW, json!({ "clientLabel": "Scacelith (test)" })).await;
+        let l = x.link_from(VICTIM, &ticket, pw(), json!({ "clientLabel": "Scacelith (test)" })).await;
         assert_eq!(l.status, 200, "{}", l.text());
         let lb = l.json();
         assert!(lb["token"].as_str().unwrap().starts_with("sct_"));
@@ -821,7 +851,7 @@ async fn an_account_with_the_google_address_is_linked_only_after_its_password_ty
             )]
         );
         assert_eq!(last_login_method(h).await, "google+password");
-        assert_eq!(x.link(&ticket, PW).await.status, 410, "the ticket is used");
+        assert_eq!(x.link(&ticket, pw()).await.status, 410, "the ticket is used");
         // The next Google sign-in needs no password.
         let again = x.sign_in(claims(json!({}))).await;
         assert_eq!(again.status, 200, "{}", again.text());
@@ -841,21 +871,21 @@ async fn the_5th_wrong_password_ends_the_ticket_ten_at_once_cost_at_most_5_check
         })
         .await;
         let h = &x.h;
-        h.create_user_with("Magnus", Some("magnus@gmail.com"), Some(PW), true).await;
+        h.create_user_with("Magnus", Some("magnus@gmail.com"), Some(pw()), true).await;
         let r = x.sign_in(claims(json!({}))).await;
         let ticket = r.json()["linkTicket"].as_str().unwrap().to_owned();
         for i in 1..=4 {
             assert_eq!(x.link(&ticket, &format!("wrong password {i}")).await.status, 401, "try {i}");
         }
-        let l = x.link(&ticket, "wrong password 5").await;
+        let l = x.link(&ticket, &random_password()).await;
         assert_eq!((l.status, l.json()["error"].clone()), (410, json!("sso_expired")));
-        assert_eq!(x.link(&ticket, PW).await.status, 410, "dead, even with the right password");
+        assert_eq!(x.link(&ticket, pw()).await.status, 410, "dead, even with the right password");
         assert_eq!(google_link(h, "1098765").await, None);
         // AUTH_FAILURES_PER_ACCOUNT (5) link failures: the password login waits as well.
-        let l = x.post(LOGIN, json!({ "login": "magnus", "password": PW })).await;
+        let l = x.post(LOGIN, json!({ "login": "magnus", "password": pw() })).await;
         assert_eq!((l.status, l.json()["error"].clone()), (429, json!("too_many_attempts")));
         h.advance(2001);
-        h.login("magnus", PW).await;
+        h.login("magnus", pw()).await;
 
         let r = x.sign_in(claims(json!({}))).await;
         let ticket = r.json()["linkTicket"].as_str().unwrap().to_owned();
@@ -876,7 +906,7 @@ async fn the_5th_wrong_password_ends_the_ticket_ten_at_once_cost_at_most_5_check
         // Past the ticket's tries 410, or first 429 once the failures counted reach the account's wait.
         assert!(statuses.iter().all(|s| [401, 410, 429].contains(s)), "{statuses:?}");
         assert!(statuses.iter().filter(|s| **s == 401).count() <= 4, "{statuses:?}");
-        assert_eq!(x.link(&ticket, PW).await.status, 410);
+        assert_eq!(x.link(&ticket, pw()).await.status, 410);
         assert_eq!(google_link(h, "1098765").await, None);
     }
 }
@@ -908,7 +938,7 @@ async fn a_squatters_account_with_the_address_is_not_opened_by_the_address_owner
             (r.json()["needsPassword"].clone(), r.json()["username"].clone()),
             (json!(true), json!("squatter"))
         );
-        let l = x.link(r.json()["linkTicket"].as_str().unwrap(), PW).await;
+        let l = x.link(r.json()["linkTicket"].as_str().unwrap(), pw()).await;
         assert_eq!((l.status, l.json()["error"].clone()), (401, json!("invalid_credentials")));
         assert_eq!(google_link(&x.h, "1098765").await, None);
         assert_eq!(live_sessions(&x.h, squatter.id).await, 0);
@@ -920,11 +950,11 @@ async fn with_two_step_verification_the_link_is_stored_only_once_the_code_passes
     for verification in MODES {
         let x = Sso::new(&[mode(verification)]).await;
         let h = &x.h;
-        let id = h.create_user_with("Magnus", Some("magnus@gmail.com"), Some(PW), true).await;
+        let id = h.create_user_with("Magnus", Some("magnus@gmail.com"), Some(pw()), true).await;
         let secret = enable_mfa(h, "Magnus").await;
         let step = async || {
             let r = x.sign_in(claims(json!({}))).await;
-            let l = x.link_from(VICTIM, r.json()["linkTicket"].as_str().unwrap(), PW, json!({})).await;
+            let l = x.link_from(VICTIM, r.json()["linkTicket"].as_str().unwrap(), pw(), json!({})).await;
             assert_eq!(l.status, 200, "{}", l.text());
             let b = l.json();
             assert_eq!(
@@ -976,13 +1006,13 @@ async fn a_password_change_between_the_password_and_the_code_ends_the_step_and_a
     for verification in MODES {
         let x = Sso::new(&[mode(verification)]).await;
         let h = &x.h;
-        let id = h.create_user_with("Magnus", Some("magnus@gmail.com"), Some(PW), true).await;
+        let id = h.create_user_with("Magnus", Some("magnus@gmail.com"), Some(pw()), true).await;
         let secret = enable_mfa(h, "Magnus").await;
         let r = x.sign_in(claims(json!({}))).await;
-        let l = x.link(r.json()["linkTicket"].as_str().unwrap(), PW).await;
+        let l = x.link(r.json()["linkTicket"].as_str().unwrap(), pw()).await;
         assert_eq!(l.json()["mfaRequired"], true, "{}", l.text());
         let other = UserUpdate {
-            password_hash: Some(Some(h.hasher.hash("another password 12").unwrap())),
+            password_hash: Some(Some(h.hasher.hash(&random_password()).unwrap())),
             ..Default::default()
         };
         h.store.users().update(id, other).await.unwrap();
@@ -991,10 +1021,10 @@ async fn a_password_change_between_the_password_and_the_code_ends_the_step_and_a
         assert_eq!((m.status, m.json()["error"].clone()), (401, json!("invalid_mfa_token")));
         assert_eq!(google_link(h, "1098765").await, None);
         // An outdated hash: the link's check upgrades it, and the step is bound to the new one.
-        let old = UserUpdate { password_hash: Some(Some(outdated_hash(PW))), ..Default::default() };
+        let old = UserUpdate { password_hash: Some(Some(outdated_hash(pw()))), ..Default::default() };
         h.store.users().update(id, old).await.unwrap();
         let r = x.sign_in(claims(json!({}))).await;
-        let l = x.link(r.json()["linkTicket"].as_str().unwrap(), PW).await;
+        let l = x.link(r.json()["linkTicket"].as_str().unwrap(), pw()).await;
         assert_eq!(l.json()["mfaRequired"], true, "{}", l.text());
         let stored = h.user(id).await.password_hash.unwrap();
         assert!(stored.starts_with("$argon2id$v=19$m=64,t=1,p=1$"), "upgraded: {stored}");
@@ -1010,10 +1040,10 @@ async fn an_account_that_changes_after_its_password_or_an_identity_linked_elsewh
     for verification in MODES {
         let x = Sso::new(&[mode(verification)]).await;
         let h = &x.h;
-        let id = h.create_user_with("Magnus", Some("magnus@gmail.com"), Some(PW), true).await;
-        let other = h.create_user_with("other", Some("other@example.com"), Some(PW), true).await;
+        let id = h.create_user_with("Magnus", Some("magnus@gmail.com"), Some(pw()), true).await;
+        let other = h.create_user_with("other", Some("other@example.com"), Some(pw()), true).await;
         let before = h.user(id).await;
-        let other_hash = h.hasher.hash("another password 12").unwrap();
+        let other_hash = h.hasher.hash(&random_password()).unwrap();
         // `change` runs once the password matched, as the link ticket is used up, just before
         // the link is stored (a trigger on the writer connection).
         let race = async |change: String| {
@@ -1025,7 +1055,7 @@ async fn an_account_that_changes_after_its_password_or_an_identity_linked_elsewh
                  BEGIN {change}; END"
             );
             h.store.write(move |db| db.exec(&trigger, [])).await.unwrap();
-            let l = x.link(r.json()["linkTicket"].as_str().unwrap(), PW).await;
+            let l = x.link(r.json()["linkTicket"].as_str().unwrap(), pw()).await;
             h.store.write(|db| db.exec("DROP TRIGGER temp.race", [])).await.unwrap();
             l
         };
@@ -1098,14 +1128,14 @@ async fn a_banned_account_gets_no_link_and_403_banned_only_after_the_right_passw
     for verification in MODES {
         let x = Sso::new(&[mode(verification)]).await;
         let h = &x.h;
-        let id = h.create_user_with("Magnus", Some("magnus@gmail.com"), Some(PW), true).await;
+        let id = h.create_user_with("Magnus", Some("magnus@gmail.com"), Some(pw()), true).await;
         let until = h.now() + 3_600_000;
         ban(h, id, until).await;
         let r = x.sign_in(claims(json!({}))).await;
         let ticket = r.json()["linkTicket"].as_str().unwrap().to_owned();
-        let l = x.link(&ticket, "wrong password 1").await;
+        let l = x.link(&ticket, &random_password()).await;
         assert_eq!((l.status, l.json()["error"].clone()), (401, json!("invalid_credentials")));
-        let l = x.link(&ticket, PW).await;
+        let l = x.link(&ticket, pw()).await;
         assert_eq!(
             (l.status, l.json()["error"].clone(), l.json()["until"].clone()),
             (403, json!("banned"), json!(until))
@@ -1122,23 +1152,23 @@ async fn the_accounts_wait_and_a_login_proof_of_work_wave_apply_to_the_link_step
         let x = Sso::new(&[mode(verification), ("POW_LOGIN_BITS", "4"), ("POW_LOGIN_TRIGGER_PER_MIN", "6")])
             .await;
         let h = &x.h;
-        let id = h.create_user_with("Magnus", Some("magnus@gmail.com"), Some(PW), true).await;
+        let id = h.create_user_with("Magnus", Some("magnus@gmail.com"), Some(pw()), true).await;
         for i in 1..=5 {
             x.post(LOGIN, json!({ "login": "magnus", "password": format!("wrong password {i}") })).await;
         }
         let r = x.sign_in(claims(json!({}))).await;
         let ticket = r.json()["linkTicket"].as_str().unwrap().to_owned();
         for _ in 0..6 {
-            let l = x.link(&ticket, PW).await;
+            let l = x.link(&ticket, pw()).await;
             assert_eq!((l.status, l.json()["error"].clone()), (429, json!("too_many_attempts")));
         }
         let row = h.store.tokens().get("sso_link".into(), sha256_hex(&ticket)).await.unwrap().unwrap();
         assert_eq!(row.data.unwrap()["tries"], 0);
         h.advance(2001);
-        assert_eq!(x.link(&ticket, PW).await.status, 200);
+        assert_eq!(x.link(&ticket, pw()).await.status, 200);
         assert_eq!(google_link(h, "1098765").await, Some(id));
 
-        let v = h.create_user_with("Hikaru", Some("hikaru@gmail.com"), Some(PW), true).await;
+        let v = h.create_user_with("Hikaru", Some("hikaru@gmail.com"), Some(pw()), true).await;
         let r = x.sign_in(claims(json!({ "sub": "2002", "email": "hikaru@gmail.com" }))).await;
         let ticket = r.json()["linkTicket"].as_str().unwrap().to_owned();
         assert_eq!(
@@ -1158,7 +1188,7 @@ async fn the_accounts_wait_and_a_login_proof_of_work_wave_apply_to_the_link_step
         for i in 1..=4 {
             assert_eq!(with_pow(&format!("wrong password {i}")).await.status, 401, "try {i}");
         }
-        let l = with_pow(PW).await;
+        let l = with_pow(pw()).await;
         assert_eq!(l.status, 200, "{}", l.text());
         assert_eq!(google_link(h, "2002").await, Some(v));
     }
@@ -1194,13 +1224,14 @@ async fn an_address_confirmed_for_someone_elses_account_is_not_linked_without_th
     );
     assert_eq!(google_link(h, "1098765").await, None);
     // Another account's change to the victim's address, confirmed by the victim.
-    h.create_user_with("deputy2", Some("deputy2@example.com"), Some("deputy password 2"), true).await;
-    let session = h.token("deputy2", "deputy password 2").await;
+    let deputy_pw = random_password();
+    h.create_user_with("deputy2", Some("deputy2@example.com"), Some(&deputy_pw), true).await;
+    let session = h.token("deputy2", &deputy_pw).await;
     let ch = h
         .post_as(
             &session,
             "/api/v1/account/email",
-            json!({ "newEmail": "victim2@gmail.com", "password": "deputy password 2" }),
+            json!({ "newEmail": "victim2@gmail.com", "password": deputy_pw }),
         )
         .await;
     assert_eq!(ch.status, 202, "{}", ch.text());
@@ -1223,7 +1254,7 @@ async fn the_link_step_counts_its_tries_in_the_store_and_the_next_sign_in_finds_
     let reg = x
         .post(
             "/api/v1/auth/register",
-            json!({ "username": "Magnus", "email": "magnus@gmail.com", "password": PW }),
+            json!({ "username": "Magnus", "email": "magnus@gmail.com", "password": pw() }),
         )
         .await;
     assert_eq!(reg.status, 201);
@@ -1235,7 +1266,7 @@ async fn the_link_step_counts_its_tries_in_the_store_and_the_next_sign_in_finds_
     }
     let row = |h: &Harness| h.store.tokens().get("sso_link".into(), sha256_hex(&ticket));
     assert_eq!(row(h).await.unwrap().unwrap().data.unwrap()["tries"], 2);
-    let r = x.link(&ticket, PW).await;
+    let r = x.link(&ticket, pw()).await;
     assert_eq!(r.status, 200, "{}", r.text());
     let id = r.json()["user"]["id"].as_u64().unwrap() as UserId;
     assert_eq!(google_link(h, "1098765").await, Some(id));
@@ -1294,14 +1325,14 @@ async fn notices_when_google_creates_an_account_or_is_added_after_the_password_n
     assert_eq!(notices_to(h, "magnus@gmail.com").await.len(), 1, "a plain Google sign-in sends nothing");
 
     // Google added to a password account: once its password passes.
-    h.create_user_with("Judit", Some("judit@gmail.com"), Some(PW), true).await;
+    h.create_user_with("Judit", Some("judit@gmail.com"), Some(pw()), true).await;
     let (_, _, j) =
         x.sign_in_from(VICTIM, claims(json!({ "sub": "2001", "email": "judit@gmail.com" }))).await;
     assert_eq!(j.json()["needsPassword"], true, "{}", j.text());
     let link_ticket = j.json()["linkTicket"].as_str().unwrap().to_owned();
-    assert_eq!(x.link(&link_ticket, "wrong password 1").await.status, 401);
+    assert_eq!(x.link(&link_ticket, &random_password()).await.status, 401);
     assert!(notices_to(h, "judit@gmail.com").await.is_empty(), "not for a wrong password");
-    let l = x.link_from(VICTIM, &link_ticket, PW, json!({})).await;
+    let l = x.link_from(VICTIM, &link_ticket, pw(), json!({})).await;
     assert_eq!(l.status, 200, "{}", l.text());
     assert_eq!(
         notices_to(h, "judit@gmail.com").await,
@@ -1322,10 +1353,10 @@ async fn notices_when_google_creates_an_account_or_is_added_after_the_password_n
     assert_eq!(notices_to(h, "judit@gmail.com").await.len(), 1, "the next Google sign-in sends nothing");
 
     // With two-step verification: only once the code passes.
-    h.create_user_with("Hou", Some("hou@gmail.com"), Some(PW), true).await;
+    h.create_user_with("Hou", Some("hou@gmail.com"), Some(pw()), true).await;
     let secret = enable_mfa(h, "Hou").await;
     let hr = x.sign_in(claims(json!({ "sub": "2002", "email": "hou@gmail.com" }))).await;
-    let step = x.link(hr.json()["linkTicket"].as_str().unwrap(), PW).await;
+    let step = x.link(hr.json()["linkTicket"].as_str().unwrap(), pw()).await;
     assert_eq!(step.json()["mfaRequired"], true, "{}", step.text());
     let mfa_token = step.json()["mfaToken"].as_str().unwrap().to_owned();
     let wrong =
@@ -1348,17 +1379,17 @@ async fn notices_when_google_creates_an_account_or_is_added_after_the_password_n
         l.json()["token"].as_str().unwrap().to_owned(),
         mfa_token,
         m.json()["token"].as_str().unwrap().to_owned(),
-        PW.to_owned(),
+        pw().to_owned(),
         VICTIM.to_owned(),
         "198.51.100".to_owned(),
     ];
     let all = notices(h).await;
     assert_eq!(all.len(), 3);
     for mail in &all {
-        for v in &secrets {
+        for (i, v) in secrets.iter().enumerate() {
             assert!(
                 !mail.text.contains(v.as_str()) && !mail.subject.contains(v.as_str()),
-                "{}: {v}",
+                "{}: secrets[{i}]",
                 mail.subject
             );
         }
@@ -1397,9 +1428,9 @@ async fn notices_an_smtp_failure_never_fails_the_google_sign_in_and_with_no_tran
         let r = x.sign_in(claims(json!({}))).await;
         let c = x.post(COMPLETE, json!({ "ssoTicket": r.json()["ssoTicket"], "username": "MagnusH" })).await;
         assert_eq!(c.status, 200, "{transport}: {}", c.text());
-        h.create_user_with("Judit", Some("judit@gmail.com"), Some(PW), true).await;
+        h.create_user_with("Judit", Some("judit@gmail.com"), Some(pw()), true).await;
         let j = x.sign_in(claims(json!({ "sub": "2001", "email": "judit@gmail.com" }))).await;
-        let l = x.link(j.json()["linkTicket"].as_str().unwrap(), PW).await;
+        let l = x.link(j.json()["linkTicket"].as_str().unwrap(), pw()).await;
         assert_eq!(l.status, 200, "{transport}: {}", l.text());
         h.mailer.idle().await;
         let failed: Vec<String> =

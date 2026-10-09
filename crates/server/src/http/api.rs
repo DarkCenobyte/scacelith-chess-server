@@ -31,11 +31,12 @@ use super::url::parse_urlencoded;
 use crate::clock::{self, SharedClock};
 use crate::config::{Config, TlsMode};
 use crate::log::Logger;
-use crate::metrics::{self, CounterVec, Histogram};
+use crate::metrics::{self, Counter, CounterVec, Histogram};
 use crate::net::guard::{AddressKeys, IpGuard};
 use crate::net::health::Readiness;
 use crate::net::ip::for_log;
 use crate::net::limits::SharedLimits;
+use crate::security::ratelimit::random_retry_after;
 use crate::{log_debug, log_error};
 
 /// The longest request target (bytes).
@@ -59,6 +60,7 @@ pub type PageRenderer = Arc<dyn Fn(&str, &str) -> String + Send + Sync>;
 struct HttpMetrics {
     requests: CounterVec,
     duration: Histogram,
+    writes_refused: Counter,
 }
 
 fn http_metrics() -> &'static HttpMetrics {
@@ -69,9 +71,20 @@ fn http_metrics() -> &'static HttpMetrics {
             "API request duration",
             &[2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0],
         ),
+        writes_refused: metrics::counter(
+            "scacelith_db_writes_refused_total",
+            "API requests (POST, PUT, PATCH, DELETE) answered 503 server_busy without being run, because \
+             the database writer had too many jobs waiting",
+        ),
     });
     &M
 }
+
+/// Tells whether the database has too many write jobs waiting (`Store::writes_backlogged`).
+pub type WriteBacklog = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// The `retryAfter` range (seconds) of a request refused for the database's write backlog.
+const WRITE_BACKLOG_RETRY_AFTER_SEC: (u64, u64) = (2, 5);
 
 /// Escapes text for HTML (`& < > " '`).
 pub fn escape_html(s: &str) -> String {
@@ -113,6 +126,7 @@ pub struct ApiBuilder {
     page_renderer: PageRenderer,
     body_timeout: Duration,
     handler_timeout: Duration,
+    write_backlog: Option<WriteBacklog>,
 }
 
 impl ApiBuilder {
@@ -173,6 +187,13 @@ impl ApiBuilder {
         self
     }
 
+    /// Whether the database has too many write jobs waiting: requests with a body method are then
+    /// refused with 503 `server_busy` before anything runs (default: never).
+    pub fn write_backlog(mut self, backlogged: impl Fn() -> bool + Send + Sync + 'static) -> ApiBuilder {
+        self.write_backlog = Some(Arc::new(backlogged));
+        self
+    }
+
     /// The API.
     pub fn build(mut self) -> Arc<Api> {
         let shared = self.shared.unwrap_or_else(|| Arc::new(SharedLimits::new(self.clock.clone())));
@@ -193,6 +214,7 @@ impl ApiBuilder {
             page_renderer: self.page_renderer,
             body_timeout: self.body_timeout,
             handler_timeout: self.handler_timeout,
+            write_backlog: self.write_backlog,
             handlers: Arc::new(Handlers::default()),
         })
     }
@@ -240,6 +262,7 @@ pub struct Api {
     handler_timeout: Duration,
     hsts: bool,
     cors: Cors,
+    write_backlog: Option<WriteBacklog>,
     handlers: Arc<Handlers>,
 }
 
@@ -324,6 +347,7 @@ impl Api {
             page_renderer: Arc::new(fallback_page),
             body_timeout: BODY_TIMEOUT,
             handler_timeout: HANDLER_TIMEOUT,
+            write_backlog: None,
         }
     }
 
@@ -482,6 +506,14 @@ impl Api {
         progress.label = Cow::Owned(route.label().to_string());
         progress.page = route.opts().page;
         let opts = route.opts();
+        // A request that may write waits for nothing while the database writer is far behind:
+        // refused before its authentication, rates and body (nothing taken, nothing changed).
+        if BODY_METHODS.contains(&method) && self.write_backlog.as_ref().is_some_and(|f| f()) {
+            http_metrics().writes_refused.inc();
+            let (min, max) = WRITE_BACKLOG_RETRY_AFTER_SEC;
+            return Err(ApiError::new(503, "server_busy", "The server is busy; try again in a few seconds.")
+                .with_extra("retryAfter", Value::from(random_retry_after(min, max))));
+        }
 
         let auth = self.authenticate(&parts.headers, opts.auth).await?;
         if let Some(a) = &auth {

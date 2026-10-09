@@ -12,11 +12,11 @@ use crate::wire::{self, DecodeError, Defect, EncodeError, Reader};
 /// Major protocol version (`Hello.proto`, `Welcome.proto`).
 pub const PROTOCOL_VERSION: u16 = 1;
 /// Minor version of this codec: the `Hello.minor` it sends, the highest minor it decodes.
-pub const MINOR: u16 = 0;
+pub const MINOR: u16 = 1;
 /// WebSocket subprotocol token (`Sec-WebSocket-Protocol`).
 pub const SUBPROTOCOL: &str = "scacelith.rt1";
 /// Fingerprint of the schema (first 4 bytes of SHA-256 of its canonical form): informational.
-pub const FINGERPRINT: u32 = 0x05d4f428;
+pub const FINGERPRINT: u32 = 0x6e6c4989;
 /// Capability bits this codec knows (`Hello.caps`, `Welcome.caps`).
 pub const CAPS: u64 = 0x0;
 /// Largest client message, in bytes (type byte included). The server refuses a larger WebSocket message from
@@ -256,7 +256,7 @@ impl GameStatus {
     }
 }
 
-/// Why a game ended. 0..13 are the game's chess::GameEndReason values (14..19 are kept for new ones), 20 and
+/// Why a game ended. 0..14 are the game's chess::GameEndReason values (15..19 are kept for new ones), 20 and
 /// above happen online only. The same numbers are the `reason` of the game records of the HTTPS API.
 ///
 /// Open enum: a later minor may add values, which decode as `Unknown` (a receiver should show a generic end
@@ -292,6 +292,9 @@ pub enum EndReason {
     Agreement,
     /// Offline games only.
     IllegalMovesVsInsufficient,
+    /// Minor 1: resigned, but the opponent cannot mate: draw (a session of minor 0 gets Resignation, with the
+    /// Draw status, in its place).
+    ResignationVsInsufficient,
     /// Disconnected longer than the reconnection grace: loss.
     Abandonment,
     /// Abandoned, but the opponent cannot mate: draw.
@@ -312,7 +315,7 @@ pub enum EndReason {
 
 impl EndReason {
     /// Every member, in schema order.
-    pub const ALL: [Self; 21] = [Self::None, Self::Checkmate, Self::Resignation, Self::Timeout, Self::IllegalMoves, Self::Stalemate, Self::InsufficientMaterial, Self::TimeoutVsInsufficient, Self::FivefoldRepetition, Self::SeventyFiveMoves, Self::ThreefoldClaim, Self::FiftyMoveClaim, Self::Agreement, Self::IllegalMovesVsInsufficient, Self::Abandonment, Self::AbandonmentVsInsufficient, Self::Aborted, Self::NoShow, Self::Forfeit, Self::ServerAborted, Self::BothDisconnected];
+    pub const ALL: [Self; 22] = [Self::None, Self::Checkmate, Self::Resignation, Self::Timeout, Self::IllegalMoves, Self::Stalemate, Self::InsufficientMaterial, Self::TimeoutVsInsufficient, Self::FivefoldRepetition, Self::SeventyFiveMoves, Self::ThreefoldClaim, Self::FiftyMoveClaim, Self::Agreement, Self::IllegalMovesVsInsufficient, Self::ResignationVsInsufficient, Self::Abandonment, Self::AbandonmentVsInsufficient, Self::Aborted, Self::NoShow, Self::Forfeit, Self::ServerAborted, Self::BothDisconnected];
 
     /// The member of a wire value (`Unknown` when it is not a member).
     pub const fn from_u8(value: u8) -> Self {
@@ -331,6 +334,7 @@ impl EndReason {
             11 => Self::FiftyMoveClaim,
             12 => Self::Agreement,
             13 => Self::IllegalMovesVsInsufficient,
+            14 => Self::ResignationVsInsufficient,
             20 => Self::Abandonment,
             21 => Self::AbandonmentVsInsufficient,
             22 => Self::Aborted,
@@ -359,6 +363,7 @@ impl EndReason {
             Self::FiftyMoveClaim => 11,
             Self::Agreement => 12,
             Self::IllegalMovesVsInsufficient => 13,
+            Self::ResignationVsInsufficient => 14,
             Self::Abandonment => 20,
             Self::AbandonmentVsInsufficient => 21,
             Self::Aborted => 22,
@@ -392,6 +397,7 @@ impl EndReason {
             Self::FiftyMoveClaim => "FiftyMoveClaim",
             Self::Agreement => "Agreement",
             Self::IllegalMovesVsInsufficient => "IllegalMovesVsInsufficient",
+            Self::ResignationVsInsufficient => "ResignationVsInsufficient",
             Self::Abandonment => "Abandonment",
             Self::AbandonmentVsInsufficient => "AbandonmentVsInsufficient",
             Self::Aborted => "Aborted",

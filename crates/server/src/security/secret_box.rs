@@ -118,7 +118,10 @@ mod tests {
         assert!(b.open("v1.", "mfa:1").is_none());
         assert!(b.open("v1.AAAA", "mfa:1").is_none());
         assert_ne!(b.seal(secret.as_ref(), "mfa:1"), sealed, "random IV");
-        assert_eq!(SecretBox::new(&[0u8; 16]).unwrap_err().to_string(), "secret box key must be 32 bytes");
+        assert_eq!(
+            SecretBox::new(&random_bytes::<16>()).unwrap_err().to_string(),
+            "secret box key must be 32 bytes"
+        );
         assert_eq!(format!("{b:?}"), "SecretBox(<redacted>)");
     }
 

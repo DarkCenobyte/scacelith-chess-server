@@ -1,0 +1,49 @@
+{
+  "about": "The fixed inputs of the security tests: published test vectors and the passwords whose content is what a test checks (password policy, Unicode normalisation, the differential test of tools/rest-diff). The tests read this file when they run, so that no password, key or salt is written in their sources; every other test password is drawn at random when the tests run.",
+  "hmacSha256": {
+    "source": "RFC 4231, test case 2",
+    "key": "Jefe",
+    "data": "what do ya want for nothing?"
+  },
+  "totp": {
+    "source": "RFC 6238 appendix B and RFC 4226 appendix D (HMAC-SHA-1 seed)",
+    "secret": "12345678901234567890"
+  },
+  "argon2id": {
+    "source": "the test vector of the Argon2 reference implementation (phc-winner-argon2): argon2id, v=19, t=2, m=65536, p=1",
+    "password": "password",
+    "salt": "somesalt",
+    "otherCase": "Password"
+  },
+  "nfc": {
+    "about": "One password in NFC and NFD (precomposed e-acute against e + combining acute accent)",
+    "composed": "café au lait noir",
+    "decomposed": "café au lait noir"
+  },
+  "passwords": {
+    "about": "Passwords of the policy tests (crates/server/src/security/password/policy.rs, with the user name Magnus_C and the address grandpatzer@example.com) and of the registration steps of tools/rest-diff",
+    "short": "short",
+    "containsUsername": "my magnus_c secret!",
+    "containsEmail": "grandpatzer forever",
+    "containsEmailUpperCase": "GRANDPATZER forever",
+    "containsShortName": "ab ivory rook takes",
+    "common": "password1234",
+    "commonUpperCase": "PASSWORD1234",
+    "commonKeyboard": "qwertyuiop",
+    "commonPattern": "1q2w3e4r5t",
+    "acceptable": "ivory rook takes e5",
+    "unlisted": "a very unusual passphrase 42",
+    "listedDigits": "123456",
+    "listedCapitalised": "Password",
+    "listedWords": "iloveyou",
+    "decomposedShort": "café",
+    "nineDigits": "123456789",
+    "tenDigits": "1234567890",
+    "commonWithDigits": "password123",
+    "containsValid1": "my valid1 password",
+    "containsValid1UpperCase": "my VALID1 password",
+    "containsSecretlocal": "the secretlocal part",
+    "elevenCharacters": "elevenchars",
+    "twelveCharacters": "twelve chars"
+  }
+}

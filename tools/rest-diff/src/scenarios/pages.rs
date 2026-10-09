@@ -4,7 +4,7 @@
 
 use serde_json::json;
 
-use super::{BoxFut, PASSWORD, login, new_account};
+use super::{BoxFut, login, new_account, pw};
 use crate::duo::{Duo, fresh_ip};
 use crate::http::Req;
 
@@ -21,7 +21,7 @@ async fn verify_pages(d: &mut Duo) {
     let ip = fresh_ip();
     d.step("pam-register", ip, 202, |_| {
         Req::post("/api/v1/auth/register")
-            .json(json!({"username": "pam", "email": "pam@example.org", "password": PASSWORD}))
+            .json(json!({"username": "pam", "email": "pam@example.org", "password": pw()}))
     })
     .await;
     d.mail("pam-mail", "pam@example.org", Some("pam.verify")).await;
@@ -99,7 +99,7 @@ async fn verify_pages(d: &mut Duo) {
         .await;
     d.step("verify-page-used", ip, 400, |s| Req::get(format!("/verify-email?token={}", s.v("pam.verify"))))
         .await;
-    login(d, ip, "pam", PASSWORD, "pam.token").await;
+    login(d, ip, "pam", pw(), "pam.token").await;
 }
 
 /// A signup whose address an account took before its link was used: the link gets 409 and
@@ -108,20 +108,20 @@ async fn signup_taken(d: &mut Duo) {
     let ip = fresh_ip();
     d.step("rex-register", ip, 202, |_| {
         Req::post("/api/v1/auth/register")
-            .json(json!({"username": "rex", "email": "rex1@example.org", "password": PASSWORD}))
+            .json(json!({"username": "rex", "email": "rex1@example.org", "password": pw()}))
     })
     .await;
     d.mail("rex-mail", "rex1@example.org", Some("rex.one")).await;
     d.step("rex-register-same-name", ip, 409, |_| {
         Req::post("/api/v1/auth/register")
-            .json(json!({"username": "Rex", "email": "rex2@example.org", "password": PASSWORD}))
+            .json(json!({"username": "Rex", "email": "rex2@example.org", "password": pw()}))
     })
     .await;
     // pam takes the address with an e-mail change.
     d.step("pam-takes-address", ip, 202, |s| {
         Req::post("/api/v1/account/email")
             .bearer(&s.v("pam.token"))
-            .json(json!({"newEmail": "rex1@example.org", "password": PASSWORD}))
+            .json(json!({"newEmail": "rex1@example.org", "password": pw()}))
     })
     .await;
     d.mail("pam-change-mail", "rex1@example.org", Some("pam.change")).await;
@@ -136,13 +136,13 @@ async fn signup_taken(d: &mut Duo) {
     d.step("rex-verify-again", ip, 0, |s| Req::post("/verify-email").form(&[("token", &s.v("rex.one"))]))
         .await;
     d.step("rex-login", ip, 401, |_| {
-        Req::post("/api/v1/auth/login").json(json!({"login": "rex", "password": PASSWORD}))
+        Req::post("/api/v1/auth/login").json(json!({"login": "rex", "password": pw()}))
     })
     .await;
     d.step("rex-profile", ip, 404, |_| Req::get("/api/v1/players/rex")).await;
     d.step("rex-name-free", ip, 0, |_| {
         Req::post("/api/v1/auth/register")
-            .json(json!({"username": "rex", "email": "rex3@example.org", "password": PASSWORD}))
+            .json(json!({"username": "rex", "email": "rex3@example.org", "password": pw()}))
     })
     .await;
 }
@@ -151,7 +151,7 @@ async fn signup_taken(d: &mut Duo) {
 async fn reset_pages(d: &mut Duo) {
     let ip = fresh_ip();
     new_account(d, ip, "ross", "ross@example.org").await;
-    login(d, ip, "ross", PASSWORD, "ross.other").await;
+    login(d, ip, "ross", pw(), "ross.other").await;
     let ip = fresh_ip();
     d.step("forgot", ip, 202, |_| {
         Req::post("/api/v1/auth/password/forgot").json(json!({"email": "ross@example.org"}))
@@ -241,7 +241,7 @@ async fn reset_pages(d: &mut Duo) {
     d.step("reset-signed-out-other", ip, 401, |s| Req::get("/api/v1/account/me").bearer(&s.v("ross.other")))
         .await;
     d.step("reset-old-password", ip, 401, |_| {
-        Req::post("/api/v1/auth/login").json(json!({"login": "ross", "password": PASSWORD}))
+        Req::post("/api/v1/auth/login").json(json!({"login": "ross", "password": pw()}))
     })
     .await;
     d.step("reset-new-password", ip, 200, |_| {

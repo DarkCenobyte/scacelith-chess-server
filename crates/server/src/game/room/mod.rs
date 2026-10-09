@@ -754,13 +754,19 @@ impl GameRoom {
         out
     }
 
-    /// Resignation (any time while the game runs).
+    /// Resignation (any time while the game runs): a loss, or a draw when the opponent cannot
+    /// mate (FIDE 5.1.2, `ResignationVsInsufficient`).
     pub fn on_resign(&mut self, side: Side, seq: u32, t: impl Into<Timing>) -> Outcome {
         let (now, mut out) = self.begin_at_arrival(t.into());
         if self.is_over() {
             return self.refuse(out, ErrorCode::GameOver, seq);
         }
-        self.end(win_for(side.opponent()), EndReason::Resignation, now, &mut out, Some(side), None);
+        let opp = side.opponent();
+        if self.rules.can_color_mate(opp) {
+            self.end(win_for(opp), EndReason::Resignation, now, &mut out, Some(side), None);
+        } else {
+            self.end(GameStatus::Draw, EndReason::ResignationVsInsufficient, now, &mut out, Some(side), None);
+        }
         out
     }
 

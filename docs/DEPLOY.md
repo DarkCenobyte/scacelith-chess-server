@@ -414,19 +414,35 @@ sudo install -m 0600 -o scacelith -g scacelith scacelith-20261003T043000Z.db /va
 sudo systemctl start scacelith-server
 ```
 
-The journal must not be replayed against an older copy. It holds the games that were in progress
-when the server stopped, and the server replays each of them at the start without looking at the
-database, then commits it to the database when it ends. A game whose player registered after the
-copy was made can never be committed (the copy has no such account): its commit fails and is
-retried for ever, at least every 10 seconds and with an error in the log each time; the other
-finished games of its shard can wait up to 10 seconds for their own commit; its other player
-stays "in a game" for matchmaking and challenges until the next restart; and the journal keeps
-it, so every later start replays it again. The journal cannot bring back the games that ended between the copy and the
-stop either: once they are in the database, the journal forgets them. So the games in progress at
-the stop are lost with a restore, and their players find no game when they reconnect. Keep the
-journal only with a copy made after the server stopped (it then matches the journal exactly), for
-example when moving the server to another machine: stop it, take the copy, and move the copy and
-`journal/` together.
+**A journal and a database of different instants.** The journal belongs to the instant of the
+stop: it holds the games that were in progress then. A copy of the database belongs to the instant
+it was taken. The procedure above therefore moves the journal aside with the database: the games
+in progress at the stop are lost with a restore (they would be committed on top of the copy's
+older ratings, and the games that ended between the copy and the stop are in neither), and their
+players find no game when they reconnect. Keep the journal only with a copy made after the server
+stopped (it then matches the journal exactly), for example when moving the server to another
+machine: stop it, take the copy, and move the copy and `journal/` together.
+
+If a journal and a database of different instants meet all the same (the journal left in place by
+mistake, or a journal copy older than the database), the start reconciles them before it takes any
+game back, and the database has the last word:
+
+- A game the database already holds is finished, whatever the journal says (a journal older than
+  the database, or a game committed while the journal could not be written: SIZING.md, "Database
+  and disk"). The journal forgets it: no game comes back and no rating changes twice. The log has
+  an info line for a game the journal shows finished (also the trace of a stop right after a
+  commit), a warning for one it shows running.
+- A game with a player the database does not know (a database older than that player's account)
+  can never be committed: it is dropped from the journal, with an error in the log naming the game
+  and its players, instead of being retried for ever.
+- Every other game is taken back and later committed to this database.
+
+`scacelith_game_recovery_dropped_total{reason="in_database"|"unknown_player"}` counts these games.
+
+The journal of another database is never taken: each shard directory of the journal holds the
+server id of its database (`journal/shard-<n>/owner`), and a server refuses to start on a journal
+that holds the games of another server id ([section 11](#11-several-instances)). A restored copy
+keeps the server id of the database it was taken from, so the reconciliation above applies to it.
 
 ## 11. Several instances
 
@@ -434,7 +450,37 @@ Each instance is an independent server, with its own accounts, ratings and games
 environment file, data directory, ports and certificate. Never point two instances at the same
 `DATA_DIR`, `DB_PATH` or `JOURNAL_DIR`: a server assumes it is the only process writing its
 database and journal. Independent instances can all keep `SHARD_BASE` at its default. A template
-unit, `scacelith-server@<name>.service`, derived from the example:
+unit, `scacelith-server@<name>.service`, derived from the example, follows the next paragraphs.
+
+**What protects a journal.** Each game shard keeps its journal in `JOURNAL_DIR/shard-<n>`, `n`
+from `SHARD_BASE` to `SHARD_BASE + WORKERS - 1`. A running server holds a lock on the `owner` file
+of every shard directory it serves (released by the kernel when the process ends, a crash
+included) and writes in that file the server id of its database (`server_meta`, printed by the
+`started` log line as `serverId`; directories written by 0.9.1 or older have none until the first
+start of a newer version). A server refuses to start, with an error naming the shard and the cure,
+when a shard of its range is locked by another running process (`in use by another process`) or
+holds games of another database (`holds N games of another database`): point `JOURNAL_DIR` at the
+right journal, or, for a journal that is truly abandoned, move that `shard-<n>` directory aside
+(its games are then lost). The lock needs a local file system with `flock` (ext4, xfs, btrfs,
+tmpfs); on one without, the server logs `journal directory not locked` and only the server id
+check remains.
+
+**Changing `WORKERS` or `SHARD_BASE`.** Both can change between two starts, with games in progress
+(`WORKERS=auto` changes them by itself when the machine gets more or fewer cores). A game keeps the
+shard written in its id, and its journal stays in that shard's directory, so the shards of the new
+range take back the games of their journals, and every other `shard-<n>` directory whose journal
+still holds games of this database gets a draining host: it serves these games until they end and
+commits them, takes no new game, and lasts until the server stops. The `started` log line counts
+them (`drainingShards`, among `shards`), and a warning names each one; the gauge
+`scacelith_game_shards_draining` counts them. The start after the last of these games ended leaves
+the directory out (its journal is empty); delete it then if you like. A draining host takes a share
+of the CPU like any other: after shrinking `WORKERS` because of a smaller machine, expect the
+former shards to compete with the new ones until their games end (a few hours at most with the
+longest time controls). To move every game into the new range before the change, drain instead:
+stop accepting players (a maintenance notice), wait for the games in progress to end
+(`scacelith_games_active` at 0), then restart with the new values.
+
+The template unit:
 
 ```sh
 sed -e 's|^Description=.*|Description=Scacelith dedicated server (%i)|' \

@@ -124,7 +124,8 @@ pub struct LoginParams {
 /// `POST /auth/login/mfa`.
 #[derive(Clone, Debug, Default)]
 pub struct MfaLoginParams {
-    pub mfa_token: String,
+    /// `mfaToken`: the token of the pending login step.
+    pub token: String,
     pub code: Option<String>,
     pub recovery_code: Option<String>,
     pub ip: Option<String>,
