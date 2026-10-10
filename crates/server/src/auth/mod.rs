@@ -51,7 +51,10 @@ pub use self::identity::{
 pub use self::oidc::{
     OidcClient, OidcEndpoints, OidcError, check_redirect_uri, decode_jwt, form_urlencode, pkce_challenge,
 };
-pub use self::sessions::{NewSessionToken, SESSION_CACHE_TTL_MS, SESSION_TOUCH_EVERY_MS};
+pub use self::sessions::{
+    NewSessionToken, SESSION_CACHE_TTL_MS, SESSION_TOUCH_DEFER_BACKLOG, SESSION_TOUCH_EVERY_MS,
+    SESSION_TOUCH_URGENT_MS, SESSION_TOUCHES_IN_FLIGHT_MAX,
+};
 pub use self::tokens::{is_link_token, is_prefixed_token};
 
 use self::accounts::FactorRule;
@@ -439,6 +442,18 @@ impl Auth {
     /// most 30 s; revocations made through this service take effect at once.
     pub async fn validate_token(&self, token: &str) -> Result<Option<SessionInfo>, AuthError> {
         self.inner.sessions.validate(token).await
+    }
+
+    /// The session renewals of this service, by outcome.
+    #[cfg(test)]
+    pub(crate) fn session_touches(&self) -> &sessions::TouchCounts {
+        self.inner.sessions.touches()
+    }
+
+    /// Session renewals queued on the database writer and not answered yet.
+    #[cfg(test)]
+    pub(crate) fn session_touches_in_flight(&self) -> usize {
+        self.inner.sessions.touches_in_flight()
     }
 
     /// Drops cached sessions: those of `token_hashes` (lower hex), or, when empty, every session

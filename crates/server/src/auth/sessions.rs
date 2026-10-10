@@ -3,9 +3,32 @@
 //! A session token is `sct_` + 43 base64url characters (32 random bytes); only its SHA-256 (lower
 //! hex) is stored. [`Sessions::validate`] keeps what it read for at most 30 s in a bounded LRU
 //! cache (positive and negative answers), checks revocation, the absolute expiry
-//! (`SESSION_MAX_DAYS`) and the idle expiry (`SESSION_IDLE_DAYS`), and writes the last use at most
+//! (`SESSION_MAX_DAYS`) and the idle expiry (`SESSION_IDLE_DAYS`), and renews the last use at most
 //! every 5 minutes (sliding the idle expiry). A revocation through the API drops the cache entries
 //! at once; one written by another process (the admin CLI) is seen within 30 s.
+//!
+//! # Renewals
+//!
+//! A validation never waits for the database writer: a renewal is a write job queued in the
+//! background, under an explicit policy, so that the authenticated reads (`GET`), which the HTTP
+//! layer lets through while the writer is backlogged, add a bounded and coalesced amount of work
+//! to it. When a session's last use is [`SESSION_TOUCH_EVERY_MS`] old, the renewal is:
+//!
+//! * coalesced when one of that session is already in flight (one at most per session: it is
+//!   marked in flight, and the cache marked renewed, before the write is queued, so neither the
+//!   concurrent validations nor a reload of the session during the write queue another one);
+//! * deferred when the writer has [`SESSION_TOUCH_DEFER_BACKLOG`] jobs or more waiting, or when
+//!   [`SESSION_TOUCHES_IN_FLIGHT_MAX`] renewals are in flight: nothing is written, and a later
+//!   request of the session renews it once the writer caught up. The last use (`lastSeenAt` of
+//!   the session list) then lags by the time of the pressure, and the idle expiry slides later;
+//!   a session whose idle expiry is less than [`SESSION_TOUCH_URGENT_MS`] away is renewed despite
+//!   the backlog (never beyond the in-flight cap), so that a busy writer never lets an active
+//!   session expire;
+//! * queued otherwise, as an ordinary job of the writer (refused when its queue is full). A
+//!   renewal that fails is logged; the cache's mark is undone, and a later request renews it.
+//!
+//! `scacelith_session_touches_total{result}` counts these outcomes (`queued`, `coalesced`,
+//! `deferred`), and the queued renewals that failed (`failed`).
 //!
 //! Revocations are told to the realtime layer through [`SessionEvents`]: the listed sessions'
 //! connections are closed, or, without a list ("every session of the user"), the user's
@@ -14,7 +37,9 @@
 //! revokes in its own transaction ([`Sessions::revoked_all`]): the cache and the connections hear
 //! of it only once it committed, and a change that failed revoked nothing.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -28,6 +53,7 @@ use crate::events::SessionEvents;
 use crate::ids::UserId;
 use crate::log::{self, Logger};
 use crate::log_warn;
+use crate::metrics::{self as prom, Counter};
 use crate::security::keys::{random_token, sha256_hex};
 use crate::security::ratelimit::LruMap;
 use crate::store::{self, NewSession, Store, User, UserStatus};
@@ -36,6 +62,15 @@ use crate::store::{self, NewSession, Store, User, UserStatus};
 pub const SESSION_CACHE_TTL_MS: i64 = 30_000;
 /// How often, at most, the last use of a session is written.
 pub const SESSION_TOUCH_EVERY_MS: i64 = 5 * 60_000;
+/// Database write jobs waiting from which the renewals are deferred (module documentation): a
+/// tenth of `WRITE_BACKLOG_BUSY`, so that the renewals give way long before the API's writes
+/// are refused.
+pub const SESSION_TOUCH_DEFER_BACKLOG: usize = crate::store::WRITE_BACKLOG_BUSY / 10;
+/// Renewals queued on the database writer at once, at most (module documentation).
+pub const SESSION_TOUCHES_IN_FLIGHT_MAX: usize = 1024;
+/// A session whose idle expiry is closer than this is renewed despite a backlogged writer (module
+/// documentation).
+pub const SESSION_TOUCH_URGENT_MS: i64 = 3_600_000;
 /// Sessions kept in the validation cache at most.
 pub const SESSION_CACHE_SIZE: usize = 10_000;
 /// Loads of a session retried when invalidations land during them.
@@ -67,6 +102,81 @@ struct Cache {
     /// Incremented by every invalidation: a load that saw it change may hold what was just
     /// revoked, and is read again.
     epoch: u64,
+    /// The renewals in flight ([`SESSION_TOUCHES_IN_FLIGHT_MAX`] at most): session id ->
+    /// (last use, idle expiry) being written.
+    touching: HashMap<i64, (i64, i64)>,
+}
+
+impl Cache {
+    /// Marks the cached session of `hash` as used at `t` with the idle expiry `idle`, unless it
+    /// is another session or holds a later use.
+    fn mark(&mut self, hash: &str, id: i64, (t, idle): (i64, i64)) {
+        if let Some(c) = self.map.peek_mut(hash).and_then(|e| e.session.as_mut())
+            && c.id == id
+            && c.last_seen_at < t
+        {
+            c.last_seen_at = t;
+            c.idle_expires_at = c.idle_expires_at.max(idle);
+        }
+    }
+}
+
+/// What became of the renewals due (label of `scacelith_session_touches_total`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TouchOutcome {
+    /// Queued on the writer.
+    Queued,
+    /// One of the same session was in flight.
+    Coalesced,
+    /// Not written: the writer was backlogged, or too many renewals were in flight.
+    Deferred,
+    /// Queued, and failed (or refused by a full writer queue).
+    Failed,
+}
+
+impl TouchOutcome {
+    const ALL: [TouchOutcome; 4] =
+        [TouchOutcome::Queued, TouchOutcome::Coalesced, TouchOutcome::Deferred, TouchOutcome::Failed];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            TouchOutcome::Queued => "queued",
+            TouchOutcome::Coalesced => "coalesced",
+            TouchOutcome::Deferred => "deferred",
+            TouchOutcome::Failed => "failed",
+        }
+    }
+}
+
+static TOUCHES: LazyLock<[Counter; 4]> = LazyLock::new(|| {
+    let c = prom::counter_vec(
+        "scacelith_session_touches_total",
+        "Session renewals (the last use written, at most every 5 minutes per session), by outcome: queued on \
+         the database writer, coalesced with one in flight, deferred (the writer had \
+         SESSION_TOUCH_DEFER_BACKLOG jobs waiting, or SESSION_TOUCHES_IN_FLIGHT_MAX renewals were in flight), \
+         failed",
+        &["result"],
+    );
+    TouchOutcome::ALL.map(|o| c.with(&[o.as_str()]))
+});
+
+/// The renewals of one session manager, by outcome (the metric sums every manager).
+#[derive(Debug, Default)]
+pub(crate) struct TouchCounts([AtomicU64; 4]);
+
+impl TouchCounts {
+    fn count(&self, outcome: TouchOutcome) {
+        let i = TouchOutcome::ALL.iter().position(|&o| o == outcome).unwrap_or(0);
+        self.0[i].fetch_add(1, Ordering::Relaxed);
+        TOUCHES[i].inc();
+    }
+
+    /// The renewals that ended with `outcome`.
+    #[cfg(test)]
+    pub(crate) fn get(&self, outcome: TouchOutcome) -> u64 {
+        let i = TouchOutcome::ALL.iter().position(|&o| o == outcome).unwrap_or(0);
+        self.0[i].load(Ordering::Relaxed)
+    }
 }
 
 /// A session just opened.
@@ -91,7 +201,8 @@ pub(crate) struct Sessions {
     idle_ms: i64,
     max_ms: i64,
     max_per_user: i64,
-    cache: Mutex<Cache>,
+    cache: Arc<Mutex<Cache>>,
+    touches: Arc<TouchCounts>,
 }
 
 /// A lower-hex SHA-256 as bytes (`None` for anything else).
@@ -118,7 +229,12 @@ impl Sessions {
             idle_ms: config.session_idle_days.saturating_mul(DAY_MS),
             max_ms: config.session_max_days.saturating_mul(DAY_MS),
             max_per_user: config.max_sessions_per_user,
-            cache: Mutex::new(Cache { map: LruMap::new(cache_size), epoch: 0 }),
+            cache: Arc::new(Mutex::new(Cache {
+                map: LruMap::new(cache_size),
+                epoch: 0,
+                touching: HashMap::new(),
+            })),
+            touches: Arc::new(TouchCounts::default()),
         }
     }
 
@@ -233,13 +349,25 @@ impl Sessions {
 
     /// Reads the session of `hash` and caches it, unless an invalidation landed during the read:
     /// the read is then made again, so that it sees the revocation that the invalidation follows.
+    /// A renewal the cache holds and the read may predate (in flight, or committed after the read
+    /// began) is kept.
     async fn load_and_cache(&self, hash: &str, t: i64) -> AuthResult<Entry> {
         let mut attempt = 0;
         loop {
             attempt += 1;
             let epoch = self.cache.lock().epoch;
-            let entry = self.load(hash, t).await?;
+            let mut entry = self.load(hash, t).await?;
             let mut cache = self.cache.lock();
+            if let Some(new) = entry.session.as_mut() {
+                let old = cache.map.peek(hash).and_then(|e| e.session.as_ref()).filter(|o| o.id == new.id);
+                let renewed = old.map(|o| (o.last_seen_at, o.idle_expires_at));
+                for (last, idle) in [renewed, cache.touching.get(&new.id).copied()].into_iter().flatten() {
+                    if last > new.last_seen_at {
+                        new.last_seen_at = last;
+                        new.idle_expires_at = new.idle_expires_at.max(idle);
+                    }
+                }
+            }
             if cache.epoch == epoch {
                 cache.map.insert(hash, entry.clone());
                 return Ok(entry);
@@ -252,7 +380,8 @@ impl Sessions {
     }
 
     /// Validates a session token: the session and its account, or `None` (malformed, unknown,
-    /// revoked, expired, or the account is no longer active).
+    /// revoked, expired, or the account is no longer active). Never waits for the database
+    /// writer: a renewal due is queued in the background ([`Sessions::renew`]).
     pub(crate) async fn validate(&self, token: &str) -> AuthResult<Option<SessionInfo>> {
         if !is_prefixed_token(token, SESSION_PREFIX) {
             return Ok(None);
@@ -268,18 +397,7 @@ impl Sessions {
             return Ok(None);
         }
         if t - s.last_seen_at >= SESSION_TOUCH_EVERY_MS {
-            let idle = s.expires_at.min(t.saturating_add(self.idle_ms));
-            match self.store.sessions().touch(s.id, t, idle).await {
-                Ok(()) => {
-                    if let Some(e) = self.cache.lock().map.peek_mut(&hash)
-                        && let Some(c) = e.session.as_mut().filter(|c| c.id == s.id)
-                    {
-                        c.last_seen_at = t;
-                        c.idle_expires_at = idle;
-                    }
-                }
-                Err(e) => log_warn!(self.log, "session touch failed", { "err": log::error(&e) }),
-            }
+            self.renew(&hash, &s, t);
         }
         let token_hash = hash_bytes(&hash).expect("sha256_hex gives 64 hex digits");
         Ok(Some(SessionInfo {
@@ -289,6 +407,69 @@ impl Sessions {
             email_verified: s.email_verified,
             token_hash,
         }))
+    }
+
+    /// Renews the last use of session `s` (of token hash `hash`) at `t`, under the policy of the
+    /// module documentation: coalesced, deferred, or queued in the background (the cache marked
+    /// renewed first, the mark undone if the write fails).
+    fn renew(&self, hash: &str, s: &Cached, t: i64) {
+        let idle = s.expires_at.min(t.saturating_add(self.idle_ms));
+        let urgent = s.idle_expires_at - t < SESSION_TOUCH_URGENT_MS && idle > s.idle_expires_at;
+        let backlogged = self.store.write_backlog() >= SESSION_TOUCH_DEFER_BACKLOG;
+        let outcome = {
+            let mut cache = self.cache.lock();
+            if let Some(&renewal) = cache.touching.get(&s.id) {
+                cache.mark(hash, s.id, renewal);
+                TouchOutcome::Coalesced
+            } else if cache.touching.len() >= SESSION_TOUCHES_IN_FLIGHT_MAX || (backlogged && !urgent) {
+                TouchOutcome::Deferred
+            } else {
+                cache.touching.insert(s.id, (t, idle));
+                cache.mark(hash, s.id, (t, idle));
+                TouchOutcome::Queued
+            }
+        };
+        self.touches.count(outcome);
+        if outcome != TouchOutcome::Queued {
+            return;
+        }
+        // Queued now (the writer's order): the task only waits for its outcome.
+        let write = self.store.sessions().touch(s.id, t, idle);
+        let (cache, touches, log) = (self.cache.clone(), self.touches.clone(), self.log.clone());
+        let (id, hash, before) = (s.id, hash.to_owned(), (s.last_seen_at, s.idle_expires_at));
+        tokio::spawn(async move {
+            let out = write.await;
+            let mut c = cache.lock();
+            c.touching.remove(&id);
+            let Err(e) = out else {
+                // A reload during the write may have left the cache without the mark.
+                c.mark(&hash, id, (t, idle));
+                return;
+            };
+            if let Some(m) = c
+                .map
+                .peek_mut(&hash)
+                .and_then(|e| e.session.as_mut())
+                .filter(|m| m.id == id && m.last_seen_at == t && m.idle_expires_at == idle)
+            {
+                (m.last_seen_at, m.idle_expires_at) = before;
+            }
+            drop(c);
+            touches.count(TouchOutcome::Failed);
+            log_warn!(log, "session touch failed; a later request renews it", { "err": log::error(&e) });
+        });
+    }
+
+    /// The renewals of this manager, by outcome.
+    #[cfg(test)]
+    pub(crate) fn touches(&self) -> &TouchCounts {
+        &self.touches
+    }
+
+    /// Renewals in flight.
+    #[cfg(test)]
+    pub(crate) fn touches_in_flight(&self) -> usize {
+        self.cache.lock().touching.len()
     }
 
     /// Drops cached sessions: those of `hashes` when there are any, else every session of
