@@ -16,9 +16,9 @@ use crate::net::ws::tests::frame;
 /// Reconnections of the player while its game's host is held.
 const ROUNDS: usize = 50;
 
-/// Closes the connection the way a client does (a close frame) and waits for the server's: by
-/// then the session ended and detached its games.
-async fn close(c: &mut Client) {
+/// Closes the connection the way a client does: a close frame, the server's in return, then the
+/// socket (the session ends once it is gone, and detaches its games).
+async fn close(mut c: Client) {
     c.io.write_all(&frame(0x8, &1000u16.to_be_bytes())).await.expect("sent");
     assert_eq!(c.closed().await, 1000);
 }
@@ -58,18 +58,23 @@ async fn a_player_reconnecting_over_and_over_to_a_held_host_leaves_its_inbox_bou
     let mut board = ChessGame::default();
     c.play(game, 0, &mut board, "e2e4").await;
     black.c.until("MoveMade").await;
+    let user = server.instance().auth().validate_token(&white.token).await.unwrap().unwrap().user_id;
     let host = server.instance().hosts().get(game).expect("the game's host").clone();
     let release = host.hold().await;
 
     // The host does not run: White's connection closes and a new one opens, ROUNDS times.
-    let mut user = 0;
     let mut most = 0;
     for round in 0..ROUNDS {
-        close(&mut c).await;
+        close(c).await;
+        // The next connection opens once the closed one's detach is posted (the first two
+        // connections, whose attach was posted), so that the host gets them in this order: the
+        // opponent then sees White leave and come back once per connection the host handled.
+        let posted = if round == 0 { 1 } else { LINK_PENDING_MAX + 1 };
+        until("the detach posted", || host.links(game, user).0 == posted).await;
         let before = host.attaches_deferred();
         let (next, w) = server.login(&white.token).await;
-        assert_eq!(w.active_game, game);
-        (c, user) = (next, w.user_id);
+        assert_eq!((w.active_game, w.user_id), (game, user));
+        c = next;
         if round > 0 {
             // The first connection's detach and the second one's attach and detach wait: the
             // attach of this one waits in its connection.
