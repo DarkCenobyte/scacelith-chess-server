@@ -1103,7 +1103,7 @@ async fn late_handlers_beyond_their_budget_refuse_new_requests_until_they_end() 
     r.get("/stuck", RouteOpts::new(), move |_| {
         let gate = gate.clone();
         async move {
-            let _ = gate.acquire().await.expect("open").forget();
+            gate.acquire().await.expect("open").forget();
             Ok(Answer::json(json!({"late": true})))
         }
     });
