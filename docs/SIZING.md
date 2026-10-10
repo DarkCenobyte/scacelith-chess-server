@@ -323,7 +323,7 @@ Behind a reverse proxy (`TLS_MODE=proxy`) only the request budget, the requests 
 
 ### When the server falls behind
 
-The work waiting inside the process is counted and bounded, so that a host that falls behind (an overloaded CPU, a stalled disk) does not grow its memory without limit. Each queue has two thresholds: a busy one, the admission signal from which the server takes no new work of that kind (no new game, no API write), and a cap, beyond which what can be lost is dropped and what cannot is refused with an answer the client sees. Above the cap, a reserve is kept for what must never be lost: the end of a game, its commit, a connection's lifecycle. Nothing that carries a move, a clock or a result is dropped silently, and every refusal is counted and logged once per episode (a warning when it starts, the count when the queue is back under its busy threshold).
+The work waiting inside the process is counted and bounded, so that a host that falls behind (an overloaded CPU, a stalled disk) does not grow its memory without limit. Each queue has two thresholds: a busy one, the admission signal from which the server takes no new work of that kind (no new game, no API write), and a cap, beyond which what can be lost is dropped and what cannot is refused with an answer the client sees. Above the cap, a reserve is kept for what must never be lost: the end of a game, its commit, a connection's lifecycle. Nothing that carries a move, a clock or a result is dropped silently. Every refusal is counted, and those at the cap of a game host's inbox or of the database writer's queue are also logged once per episode (a warning when it starts, the count when the queue is back under its busy threshold).
 
 | Queue | Bound and reaction | Metric |
 |---|---|---|
