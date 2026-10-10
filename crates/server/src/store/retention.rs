@@ -375,7 +375,7 @@ impl RetentionApi {
             return Err(StoreError::new(ErrorKind::ReadOnly, "read-only store"));
         };
         writer
-            .submit(move |w| {
+            .submit(super::writer::Lane::Ordinary, move |w| {
                 let t0 = clock();
                 let (n, _) = w.transact(|db| db.exec(step.sql, params![step.cutoff, limit]));
                 let t1 = clock();

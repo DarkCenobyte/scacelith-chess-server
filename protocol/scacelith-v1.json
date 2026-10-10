@@ -1,7 +1,7 @@
 {
   "about": "Scacelith realtime protocol, version 1: the single source of the wire format. protogen (crates/protocol, `cargo run -p scacelith-protocol --features gen --bin protogen`) validates this file and writes the Rust codec (crates/protocol/src/gen.rs), the game's C++ codec (src/net/protocol_gen.h/.cpp), the tables of docs/PROTOCOL.md and the golden vectors (test/fixtures/protocol-vectors.json). Keys named `doc` or ending in `Doc` are prose: they are left out of the fingerprint and of the frozen manifests (protocol/frozen/). Field types: u8 u16 u32 u64 i32 f64 id53 bool str8 enum:<Enum> struct:<Struct> list16:<scalar or struct:Struct>; `min`/`max` bound integers, string byte lengths (str8) and item counts (list16).",
   "protocol": 1,
-  "minor": 1,
+  "minor": 2,
   "subprotocol": "scacelith.rt1",
   "constants": [
     { "name": "MaxClientMessage", "value": 512, "doc": "Largest client message, in bytes (type byte included). The server refuses a larger WebSocket message from its frame header, before reading it (close 1009)." },
@@ -181,6 +181,17 @@
       ],
       "reserved": [
         { "value": 243, "name": "SlowConsumer", "doc": "never sent in an Error: a client that does not read gets close 4303 alone" }
+      ]
+    },
+    {
+      "name": "Stance", "open": true,
+      "doc": "Minor 2: where a player is (Stance). Only Seated plays: a player who stands cannot touch a piece or press the clock until seated again. Left and right are the player's own, as seen from the seat; each client draws them on its own copy of the table, around the same board, so the receiver does not mirror them (unlike the Side gesture flag).",
+      "unknownDoc": "show the player seated",
+      "values": [
+        { "name": "Seated", "value": 0, "doc": "in the chair (the default, and the stance of a player who sends no Stance)" },
+        { "name": "Standing", "value": 1, "doc": "standing in front of the chair, pushed back, looking down at the board" },
+        { "name": "SideLeft", "value": 2, "doc": "standing at the end of the table on the player's left, looking at the board from the side" },
+        { "name": "SideRight", "value": 3, "doc": "standing at the end of the table on the player's right" }
       ]
     }
   ],
@@ -427,9 +438,18 @@
         { "name": "aim", "type": "u8", "max": 64, "doc": "square the piece is aimed at (64 = none)" },
         { "name": "placed", "type": "u16", "max": 32767, "doc": "move placed on the board before the clock press, packed (0 = none)" },
         { "name": "flags", "type": "u8", "max": 7, "doc": "GestureFlag bits" },
-        { "name": "yaw", "type": "i32", "min": -3142, "max": 3142, "doc": "look, milliradians, seat-relative, > 0 to the left" },
+        { "name": "yaw", "type": "i32", "min": -3142, "max": 3142, "doc": "look, milliradians, seat-relative (relative to the body when the Stance is not Seated), > 0 to the left" },
         { "name": "pitch", "type": "i32", "min": -1571, "max": 1571, "doc": "look, milliradians, < 0 down" },
         { "name": "lean", "type": "u8", "max": 100, "doc": "lean towards the board, percent" }
+      ]
+    },
+    {
+      "id": 41, "name": "Stance", "dir": "c2s",
+      "doc": "Minor 2: the player's stance in game `game` (seated, or standing to look at the board), relayed to the opponent byte for byte (server Stance) when the opponent's session is of minor 2 or later, and never answered, stored or looked at beyond decoding. Sent when it changes and, while not Seated, again at least every gesture keepalive (Welcome.gestureIdleMs clamped to 1000..10000 ms, so 1000 ms when gestureRate is 0): a receiver that hears no Stance for 5 keepalives shows the player seated. It travels whatever gestureRate says (the head of a player whose gestures are not relayed looks at the board). Cosmetic, never authoritative.",
+      "fields": [
+        { "name": "seq", "type": "u32" },
+        { "name": "game", "type": "id53" },
+        { "name": "stance", "type": "enum:Stance" }
       ]
     },
     {
@@ -636,6 +656,14 @@
         { "name": "yaw", "type": "i32", "min": -3142, "max": 3142 },
         { "name": "pitch", "type": "i32", "min": -1571, "max": 1571 },
         { "name": "lean", "type": "u8", "max": 100 }
+      ]
+    },
+    {
+      "id": 167, "name": "Stance", "dir": "s2c", "relayOf": "Stance",
+      "doc": "Minor 2: the opponent's stance: the client Stance without its seq, byte for byte. Cosmetic, never authoritative; sessions of minor 0 and 1 never receive it.",
+      "fields": [
+        { "name": "game", "type": "id53" },
+        { "name": "stance", "type": "enum:Stance" }
       ]
     }
   ]

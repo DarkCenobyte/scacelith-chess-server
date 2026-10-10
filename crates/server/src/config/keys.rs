@@ -708,7 +708,8 @@ pub static KEYS: &[KeySpec] = &[
          second, sustained, announced in Welcome. The server relays each one to the opponent as it is and \
          never stores it; it costs server CPU for every player in a game (docs/SIZING.md). A client beyond it \
          has its gestures dropped silently, and only a gross excess closes the connection as a flood. 0 turns \
-         the relay off (the clients then send none).",
+         the relay off (the clients then send none); the stance of a player who stands up to look at the \
+         board (protocol minor 2) is relayed all the same, as a message of WS_MSG_RATE.",
     )
     .default("4")
     .range(0, 60),
@@ -730,7 +731,10 @@ pub static KEYS: &[KeySpec] = &[
          relay's server CPU in a calm game (docs/SIZING.md): a longer interval saves it, but the game clients' \
          timeouts follow it, so they take longer to notice that the opponent's gestures stopped (the \
          opponent's robot stops following their head 2.5 intervals after their last gesture, and puts a piece \
-         held live back after 5). Not used when GESTURE_RATE is 0.",
+         held live back after 5). A player who stands up to look at the board repeats its stance at this \
+         interval too (protocol minor 2), and the opponent's robot sits back down after 5 intervals without \
+         it. When GESTURE_RATE is 0 the server announces 0 instead and the clients repeat a stance every \
+         1000 ms.",
     )
     .default("1000")
     .range(1000, 10_000),

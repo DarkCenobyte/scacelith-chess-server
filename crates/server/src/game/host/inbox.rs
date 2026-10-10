@@ -1,22 +1,39 @@
-//! What waits for a host actor, and its bounds. The inbox is an unbounded channel: a message that
-//! carries a move, a clock, a result or a connection's lifecycle (attach, detach, a game created
-//! or cancelled, a forfeit, a rematch window, the shutdown) is never refused nor dropped, since
-//! losing it would lose a game's data or leave a player stuck. What the inbox holds is counted
-//! instead, and bounded where it can be:
+//! What waits for a host actor, and its bounds. The inbox is one channel, so that a connection's
+//! frames and its detach stay ordered; what it holds is counted, and every message is admitted at
+//! the door under the budget of its [`Class`], so that a host that falls behind (an overloaded
+//! CPU, a stalled disk under its journal) holds a bounded amount of work:
 //!
-//! * a gesture is replaceable (the player's next one supersedes it, and the opponent's client
-//!   copes with missing ones, as with those dropped for a slow link): beyond
-//!   [`GESTURE_INBOX_MAX`] gestures waiting, a new one is dropped at the door
-//!   (`scacelith_gestures_dropped_total{reason="overload"}`);
-//! * a host with [`INBOX_BUSY`] messages or more waiting, or [`JOURNAL_PENDING_BUSY`] bytes or
-//!   more of journal records not handed to its I/O thread, is busy: no new game is placed on it,
-//!   and once every host of the range is busy, new games and the lobby requests that would create
-//!   one are refused with `RateLimited` until the hosts catch up. The games in progress go on.
+//! * from [`INBOX_BUSY`] messages waiting, or [`JOURNAL_PENDING_BUSY`] bytes or more of journal
+//!   records not handed to its I/O thread, the host is busy: no new game is placed on it, and
+//!   once every host of the range is busy, new games and the lobby requests that would create one
+//!   are refused with `RateLimited` until the hosts catch up. The games in progress go on. This is
+//!   the admission signal: it keeps new games out, it caps nothing by itself;
+//! * a cosmetic message is dropped at the door (nothing answers it, nothing depends on it): a
+//!   gesture beyond [`GESTURE_INBOX_MAX`] gestures waiting (the player's next one supersedes it,
+//!   and the opponent's client copes with missing ones, as with those dropped for a slow link),
+//!   and any gesture, stance, round-trip measurement or rematch decline (the window closes on its
+//!   own timer) while [`INBOX_MAX`] messages wait;
+//! * a game request (Move, DrawOffer, Resync, Rematch) is refused while [`INBOX_MAX`] messages
+//!   wait: its connection gets `Error{RateLimited}` with the request's `seq` at once, so the
+//!   client knows it was not played, and may send it again;
+//! * a request that ends a game (Resign, Abort, DrawAnswer, DrawClaim) may also use the
+//!   [`INBOX_RESERVE`] messages above [`INBOX_MAX`], and is refused the same way beyond them:
+//!   a player can still end a game on a host far behind;
+//! * a lifecycle message (a connection attached or detached, a game created or cancelled, a
+//!   sanction's forfeit, the stats, the shutdown) is never refused: losing it would leave a
+//!   player bound to a closed connection or lose a game. Its sources are bounded (each
+//!   connection attaches and detaches at most a few games, under `MAX_CONNECTIONS` and the TLS
+//!   gate; the lobby creates games only on hosts that are not busy, with its own requests in
+//!   flight bounded per connection; one stats or shutdown request per caller at a time), and the
+//!   reserve is sized for them. One beyond [`INBOX_MAX`] + [`INBOX_RESERVE`] is still delivered,
+//!   and counted (`scacelith_game_inbox_over_reserve_total`).
 //!
-//! Every other message comes from a source limited elsewhere (the message rate of each
-//! connection, `MAX_CONNECTIONS`, the lobby's requests in flight per connection), for the games
-//! the host already holds, which no longer grow once it is busy. The counts are exported every
-//! beat (`scacelith_game_inbox_messages` and `scacelith_journal_pending_bytes`, per shard).
+//! The inbox therefore holds at most [`INBOX_MAX`] cosmetic messages and requests, and
+//! [`INBOX_MAX`] + [`INBOX_RESERVE`] messages while the lifecycle sources keep their bounds. The
+//! refusals are counted by kind (`scacelith_game_inbox_refused_total{kind}`, the gestures in
+//! `scacelith_gestures_dropped_total{reason="overload"}`) and logged once per episode by the
+//! host's beat. The counts are exported every beat (`scacelith_game_inbox_messages` and
+//! `scacelith_journal_pending_bytes`, per shard).
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -31,9 +48,79 @@ pub const GESTURE_INBOX_MAX: usize = 8192;
 /// documentation).
 pub const INBOX_BUSY: usize = 16_384;
 
+/// Messages waiting in a host's inbox from which the cosmetic messages are dropped and the game
+/// requests refused (see the module documentation): twice [`INBOX_BUSY`], room for the requests
+/// of the games already running once the host took no new one.
+pub const INBOX_MAX: usize = 2 * INBOX_BUSY;
+
+/// Messages above [`INBOX_MAX`] that only the requests ending a game and the lifecycle messages
+/// may take (see the module documentation): the attach and detach of 8,192 reconnecting players.
+pub const INBOX_RESERVE: usize = INBOX_BUSY;
+
 /// Journal bytes not handed to the I/O thread from which a host takes no new game: minutes of
 /// records of a busy shard whose disk does not answer.
 pub const JOURNAL_PENDING_BUSY: usize = 16 << 20;
+
+/// The budget a message is admitted under (module documentation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Class {
+    /// Dropped while [`INBOX_MAX`] messages wait (a gesture also beyond [`GESTURE_INBOX_MAX`]
+    /// gestures).
+    Cosmetic(Refusal),
+    /// A game request: refused while [`INBOX_MAX`] messages wait.
+    Request,
+    /// A request that ends a game: refused while [`INBOX_MAX`] + [`INBOX_RESERVE`] wait.
+    Ending,
+    /// Never refused.
+    Lifecycle,
+}
+
+/// What was refused at the door of an inbox (label of `scacelith_game_inbox_refused_total`; the
+/// gestures are counted as `scacelith_gestures_dropped_total{reason="overload"}`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Refusal {
+    /// A gesture (dropped).
+    Gesture,
+    /// A stance (dropped).
+    Stance,
+    /// A round-trip measurement (dropped).
+    Rtt,
+    /// A rematch decline (dropped: the window closes on its timer).
+    RematchDecline,
+    /// A game request (answered `Error{RateLimited}`).
+    Request,
+    /// A request that ends a game (answered `Error{RateLimited}`).
+    Ending,
+}
+
+impl Refusal {
+    /// Every kind, in label order.
+    pub const ALL: [Refusal; 6] = [
+        Refusal::Gesture,
+        Refusal::Stance,
+        Refusal::Rtt,
+        Refusal::RematchDecline,
+        Refusal::Request,
+        Refusal::Ending,
+    ];
+
+    /// The metric label.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Refusal::Gesture => "gesture",
+            Refusal::Stance => "stance",
+            Refusal::Rtt => "rtt",
+            Refusal::RematchDecline => "rematch_decline",
+            Refusal::Request => "request",
+            Refusal::Ending => "ending",
+        }
+    }
+
+    fn index(self) -> usize {
+        Refusal::ALL.iter().position(|&r| r == self).unwrap_or(0)
+    }
+}
 
 /// The counts of what waits for one host, shared by its handles and its actor.
 #[derive(Debug, Default)]
@@ -42,29 +129,53 @@ pub(super) struct Backlog {
     messages: AtomicUsize,
     /// Gestures among them.
     gestures: AtomicUsize,
-    /// Gestures dropped at the door since the host started.
-    refused: AtomicU64,
+    /// Messages refused at the door since the host started, by [`Refusal`] kind.
+    refused: [AtomicU64; 6],
+    /// Lifecycle messages admitted beyond [`INBOX_MAX`] + [`INBOX_RESERVE`] since the host
+    /// started.
+    over_reserve: AtomicU64,
     /// Journal bytes not handed to the I/O thread, as of the latest beat.
     journal_pending: AtomicUsize,
 }
 
 impl Backlog {
-    /// A message is about to be posted.
-    pub(super) fn posting(&self) {
-        self.messages.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// A gesture is about to be posted: false when [`GESTURE_INBOX_MAX`] gestures already wait
-    /// (it is dropped and counted).
-    pub(super) fn posting_gesture(&self) -> bool {
-        if self.gestures.fetch_add(1, Ordering::Relaxed) >= GESTURE_INBOX_MAX {
+    /// A message of `class` is about to be posted: false when it is refused (counted).
+    pub(super) fn admit(&self, class: Class) -> bool {
+        let (limit, refusal) = match class {
+            Class::Cosmetic(r) => (INBOX_MAX, Some(r)),
+            Class::Request => (INBOX_MAX, Some(Refusal::Request)),
+            Class::Ending => (INBOX_MAX + INBOX_RESERVE, Some(Refusal::Ending)),
+            Class::Lifecycle => (usize::MAX, None),
+        };
+        let gesture = class == Class::Cosmetic(Refusal::Gesture);
+        if gesture && self.gestures.fetch_add(1, Ordering::Relaxed) >= GESTURE_INBOX_MAX {
             self.gestures.fetch_sub(1, Ordering::Relaxed);
-            self.refused.fetch_add(1, Ordering::Relaxed);
-            metrics::gesture_overload();
+            self.refuse(Refusal::Gesture);
             return false;
         }
-        self.posting();
+        let waiting = self.messages.fetch_add(1, Ordering::Relaxed);
+        if waiting >= limit {
+            self.messages.fetch_sub(1, Ordering::Relaxed);
+            if gesture {
+                self.gestures.fetch_sub(1, Ordering::Relaxed);
+            }
+            self.refuse(refusal.unwrap_or(Refusal::Request));
+            return false;
+        }
+        if class == Class::Lifecycle && waiting >= INBOX_MAX + INBOX_RESERVE {
+            self.over_reserve.fetch_add(1, Ordering::Relaxed);
+            metrics::inbox_over_reserve();
+        }
         true
+    }
+
+    fn refuse(&self, kind: Refusal) {
+        self.refused[kind.index()].fetch_add(1, Ordering::Relaxed);
+        if kind == Refusal::Gesture {
+            metrics::gesture_overload();
+        } else {
+            metrics::inbox_refused(kind);
+        }
     }
 
     /// A message left the inbox: taken by the actor, or never posted (the host is gone).
@@ -85,9 +196,19 @@ impl Backlog {
         self.gestures.load(Ordering::Relaxed)
     }
 
-    /// Gestures dropped at the door since the host started.
-    pub(super) fn refused(&self) -> u64 {
-        self.refused.load(Ordering::Relaxed)
+    /// Messages of `kind` refused at the door since the host started.
+    pub(super) fn refused(&self, kind: Refusal) -> u64 {
+        self.refused[kind.index()].load(Ordering::Relaxed)
+    }
+
+    /// Messages refused at the door since the host started, every kind together.
+    pub(super) fn refused_total(&self) -> u64 {
+        Refusal::ALL.iter().map(|&k| self.refused(k)).sum()
+    }
+
+    /// Lifecycle messages admitted beyond the reserve since the host started.
+    pub(super) fn over_reserve(&self) -> u64 {
+        self.over_reserve.load(Ordering::Relaxed)
     }
 
     /// The journal bytes not handed to the I/O thread (every beat).

@@ -172,6 +172,24 @@ gestures; they are relayed as long as the room exists, the rematch window includ
 `scacelith_gestures_relayed_total` and `scacelith_gestures_dropped_total{reason}` (`rate`,
 `not_attached`, `no_game`, `not_player`, `no_opponent`, `backlog`, `malformed`). Cost: SIZING.md.
 
+**Stances** (protocol minor 2). A player may stand up to look at the board, in front of the chair
+or at an end of the table, while the clock runs; the opponent's robot does the same. The client
+sends `Stance` (C2S `0x29`) when its player's stance changes and, while not seated, again every
+gesture keepalive (expired by the receiver after 5); the server relays it as the server `Stance`
+(`0xA7`) and never stores it. Unlike a gesture it takes the `WS_MSG_RATE` bucket, so it travels
+whatever `GESTURE_RATE` is (0 included): a change, then one per keepalive while standing, which
+the message rate absorbs. It is decoded strictly and its seq checked like any message, and it must
+name a game attached to the connection; the host relays it like a gesture
+(`ClientStance::relay_frame`, `send_droppable`: a lost stance heals with the next keepalive, or
+the receiver's expiry, or the opponent's next move, which only a seated player makes). It reaches
+the host as a request does (it is never dropped at the inbox's door like a gesture). Nothing
+else looks at it. Only sessions of minor 2 take part: a `Stance` from a session of minor 0 or 1
+is dropped silently (its client should send none; an `Error` would only add noise to a game that
+goes on without it), and the writer of a session of minor 0 or 1 withholds the server `Stance`
+(`frame_for_minor`), so that the hosts never need to know a session's minor. Metric:
+`scacelith_stances_relayed_total` (the frames queued for the opponent, those withheld from an
+older session included); `scacelith_ws_messages_in_total{type="C_Stance"}` counts what arrives.
+
 **End of game.** The room decides the result (mate, flag, resignation, agreement, claim,
 abandonment, abort...); the host sends `GameEnd` to both players, journals it and queues the game
 for the database. A batch of finished games is committed at most `DB_COMMIT_MS` after the first of
@@ -256,8 +274,8 @@ as 60 s at most.
 
 ### 5.1 Realtime protocol v1
 
-The protocol is specified, and frozen as version 1 (minor 0), in [PROTOCOL.md](PROTOCOL.md). Its
-single source is `protocol/scacelith-v1.json`; `protogen` generates the Rust codec
+The protocol is specified, and frozen as version 1 (minors 0, 1 and 2), in
+[PROTOCOL.md](PROTOCOL.md). Its single source is `protocol/scacelith-v1.json`; `protogen` generates the Rust codec
 (`crates/protocol/src/gen.rs`), the tables of PROTOCOL.md and the golden vectors
 (`test/fixtures/protocol-vectors.json`), read by the Rust tests; in a checkout of the game
 ([DarkCenobyte/scacelith-chess](https://github.com/DarkCenobyte/scacelith-chess)) it also writes the game's C++ codec
@@ -265,18 +283,19 @@ single source is `protocol/scacelith-v1.json`; `protogen` generates the Rust cod
 (`protocol/`: the schema, the frozen manifests, this specification and the golden vectors, read by
 its `tests/net_tests.cpp`). RUST-PORT.md section 7 describes the generator and the freeze.
 
-* Constants: `PROTOCOL_VERSION` 1, `PROTOCOL_MINOR` 0, subprotocol `scacelith.rt1`, `CAPS` 0,
+* Constants: `PROTOCOL_VERSION` 1, `MINOR` 2, subprotocol `scacelith.rt1`, `CAPS` 0,
   `FINGERPRINT` (the first 4 bytes, big-endian, of the SHA-256 of the schema's canonical JSON),
   client messages of at most 512 bytes, server messages of at most 65,536, games of at most 1200
   plies. The C++ names are `kProtocolVersion`, `kMinor`, `kWsSubprotocol`, `kFingerprint`, ...
 * Rust: one struct per message implementing `Message` (`encode`, `to_bytes`, `decode`,
   `validate`); `ClientMsg::decode` is strict (the server's side), `ServerMsg::decode` is lenient
   (unknown types and trailing bytes of a later minor are skipped). `HelloPrefix` and
-  `decode_hello` read the Hello of any minor; `close_code_for` maps a fatal error code to its close
-  code. The names used in both directions are `ClientPing`/`ServerPing`, `ClientPong`/`ServerPong`
-  and `ClientGesture`/`ServerGesture`.
-* C++: one struct per message with the schema's field names, `C_`/`S_` prefixes for Ping, Pong and
-  Gesture; `encode(m, out)` appends, `decode(p, n, out)` is strict for client messages and lenient
+  `decode_hello` read the Hello of any minor; `frame_for_minor` adapts a server frame to a session
+  of an older minor (a value replaced, a message type withheld); `close_code_for` maps a fatal
+  error code to its close code. The names used in both directions are `ClientPing`/`ServerPing`,
+  `ClientPong`/`ServerPong`, `ClientGesture`/`ServerGesture` and `ClientStance`/`ServerStance`.
+* C++: one struct per message with the schema's field names, `C_`/`S_` prefixes for Ping, Pong,
+  Gesture and Stance; `encode(m, out)` appends, `decode(p, n, out)` is strict for client messages and lenient
   for server messages, plus `decodeHello`, `peekType`, `peekSeq` and `errorCodeForClose`.
 * Moves are the u16 `from | to << 6 | promo << 12` (squares `file + 8 * rank`, a1 = 0);
   `posHash` is the position digest of the chess crate (5.2).
@@ -314,19 +333,34 @@ anything, and spawns the actor. The actor handles its inbox one message at a tim
 messages and its detach stay ordered), and a 10 ms beat (`MissedTickBehavior::Delay`) fires due
 deadlines, detects stalls (6.1), starts commits and builds compaction snapshots (at most 2 per
 beat). A beat first handles the messages already in the inbox, never those that arrive meanwhile,
-so a busy inbox cannot hold the timers back. The inbox is unbounded, but what it holds is counted
-(`game::host::inbox`): a gesture, which the next one supersedes, is dropped before it when
-`GESTURE_INBOX_MAX` (8,192) gestures wait (`scacelith_gestures_dropped_total{reason="overload"}`);
-every other message (requests, attach and detach, creations, cancels, forfeits, rematch windows,
-the shutdown) is always delivered. A host with `INBOX_BUSY` (16,384) messages waiting, or
-`JOURNAL_PENDING_BUSY` (16 MiB) of journal records not handed to its I/O thread, is busy and gets
-no new game (`Hosts::pick`); the games it holds go on. Each beat exports the counts
-(`scacelith_game_inbox_messages`, `scacelith_journal_pending_bytes`).
+so a busy inbox cannot hold the timers back. The inbox is one channel, and every message is
+admitted at its door under the budget of its class (`game::host::inbox`):
+
+* a host with `INBOX_BUSY` (16,384) messages waiting, or `JOURNAL_PENDING_BUSY` (16 MiB) of
+  journal records not handed to its I/O thread, is busy and gets no new game (`Hosts::pick`); the
+  games it holds go on;
+* a cosmetic message is dropped at the door: a gesture, which the next one supersedes, when
+  `GESTURE_INBOX_MAX` (8,192) gestures wait (`scacelith_gestures_dropped_total{reason="overload"}`),
+  and any gesture, stance, round-trip measurement or rematch decline while `INBOX_MAX` (32,768)
+  messages wait;
+* a game request (`Move`, `DrawOffer`, `Resync`, `Rematch`) is refused while `INBOX_MAX` messages
+  wait: the connection answers `Error{RateLimited}` with its `seq` and `game` (never fatal), so
+  the client knows it was not played;
+* a request that ends a game (`Resign`, `Abort`, `DrawAnswer`, `DrawClaim`) also takes the
+  `INBOX_RESERVE` (16,384) messages above `INBOX_MAX`, and is refused the same way beyond them;
+* a lifecycle message (attach and detach, creations, cancels, forfeits, the stats, the shutdown)
+  is never refused: its sources are bounded by the connections and the lobby, and one beyond the
+  reserve is still delivered and counted (`scacelith_game_inbox_over_reserve_total`).
+
+A host therefore holds at most `INBOX_MAX` + `INBOX_RESERVE` messages (about 6.4 MiB at 136 bytes
+each). The refusals are counted by kind (`scacelith_game_inbox_refused_total{kind}`) and logged
+once per episode by the beat, which also exports the counts (`scacelith_game_inbox_messages`,
+`scacelith_journal_pending_bytes`).
 
 `HostHandle` is the cloneable way in: `client` (a strictly decoded game request with its read
-time), `gesture`, `attach` (binds a connection and sends it a `GameSnapshot`), `detach`, `rtt`,
-`forfeit_user`, `decline_rematch`, `create`, `cancel` (a game whose creation came after the
-lobby's timeout: `ServerAborted`, no conduct incident), `load`, `busy` and `stats`.
+time), `gesture`, `stance`, `attach` (binds a connection and sends it a `GameSnapshot`),
+`detach`, `rtt`, `forfeit_user`, `decline_rematch`, `create`, `cancel` (a game whose creation
+came after the lobby's timeout: `ServerAborted`, no conduct incident), `load`, `busy` and `stats`.
 `Hosts::place` places a new game (5.4). The host talks back through `HostEvents` and
 `AnomalySink`.
 
@@ -418,11 +452,19 @@ embedded in the binary and recorded in `schema_migrations`.
 * **Writer.** One thread, one connection, one FIFO: a job is queued when it is submitted, and each
   runs in its own `BEGIN IMMEDIATE` transaction. Two jobs submitted one after the other run in that
   order, which the anti-cheat relies on (anomalies before the commit that reads them, a certain
-  anomaly before the ban it causes). No job is refused for the queue's length
-  (`scacelith_db_write_queue`); from `WRITE_BACKLOG_BUSY` (10,000) jobs waiting the store is
-  backlogged (`Store::writes_backlogged`): the API refuses the requests that may write (`POST`,
-  `PUT`, `PATCH`, `DELETE`: 503 `server_busy` before authentication, rates and body) and no new
-  game is created, until the writer catches up.
+  anomaly before the ban it causes). From `WRITE_BACKLOG_BUSY` (10,000) jobs waiting
+  (`scacelith_db_write_queue`) the store is backlogged (`Store::writes_backlogged`): the API
+  refuses the requests that may write (`POST`, `PUT`, `PATCH`, `DELETE`: 503 `server_busy` before
+  authentication, rates and body), no new game is created and the session renewals are deferred,
+  until the writer catches up. The queue is bounded per lane (`store::writer`): an ordinary job
+  (`Store::write`: the API's writes, the session renewals, the anti-cheat's and the lobby's
+  writes, the retention purge) is refused with a `busy` error, without running, while
+  `WRITE_QUEUE_MAX` (20,000) jobs wait (`scacelith_db_write_jobs_refused_total`, logged once per
+  episode); a critical one (`Store::write_critical` and the game commits: a finished game, the
+  anomaly batch an analysis reads, the migrations) also takes the `WRITE_CRITICAL_RESERVE`
+  (1,024) jobs above and is never refused (`scacelith_db_write_queue_critical`; one beyond the
+  reserve is still queued, counted in `scacelith_db_write_reserve_exceeded_total` and logged as an
+  error). Both lanes share the one FIFO, so the order above holds.
 * **Readers.** `query_only` connections on the blocking pool; a read started after a write job
   answered sees that write.
 * **API.** `Store::read` and `Store::write` run a closure on a `Db`, which has a typed API per
@@ -619,7 +661,7 @@ message that is not a `Hello`, is `HelloRequired` (4010); the `Hello` must carry
 (`UnsupportedProtocol`, 4002), decode strictly (`Malformed`, 4001) and carry seq 1
 (`ProtocolViolation`, 4300). Then come the token (an invalid one: `Unauthorized`, 4003), e-mail
 verification (`EmailUnverified`, 4011), the stored ban and the lobby's claim (section 3), and
-`Welcome` with `minor` = min(client, 0), `caps` = client & `CAPS`, the server time, the player,
+`Welcome` with `minor` = min(client, 2), `caps` = client & `CAPS`, the server time, the player,
 `heartbeatMs`, `clientPingMs`, `maxMsgPerSec`, `msgBurst`, `activeGame`, `gestureRate`,
 `gestureBurst` and `gestureIdleMs`. Up to 8 messages that arrive during the authentication are
 kept; a ninth is a flood. After `Welcome`:
@@ -633,7 +675,7 @@ kept; a ninth is a flood. After `Welcome`:
   anomaly `malformed` and closes 4001. A second `Hello` gets a non-fatal `ProtocolViolation`.
 * A seq that is not the last plus one is dropped and recorded once as `bad_seq`; the next message
   resynchronises.
-* Gestures: section 3. A client `Ping` gets a `Pong` at most once per 950 ms.
+* Gestures and stances: section 3. A client `Ping` gets a `Pong` at most once per 950 ms.
 * Heartbeat: a server `Ping` every `HEARTBEAT_INTERVAL_MS` (the first after half an interval). The
   round trip feeds an exponential average (weight 0.2 for each new sample, capped at 2 s) passed to
   the rooms for lag compensation; a sample whose `Ping` preceded a stall of a host (6.1) is left
@@ -644,8 +686,10 @@ kept; a ninth is a flood. After `Welcome`:
 
 **Outbound queue.** Frames are queued with a byte count. A connection whose unsent bytes exceed
 `WS_SEND_BUFFER_LIMIT` is a slow consumer: closed 4303 without an `Error` frame (the queue is
-full); the game goes on and the player may reconnect. `send_droppable` (gestures) skips a frame
-while a quarter of the limit is in use.
+full); the game goes on and the player may reconnect. `send_droppable` (gestures, stances) skips a
+frame while a quarter of the limit is in use. The writer adapts each frame to the session's minor
+(`frame_for_minor`): a session of minor 0 gets `Resignation` in place of the end reason 14, and
+one of minor 0 or 1 never gets the server `Stance`.
 
 **Server-full signal** (`realtime::admission`). The TLS gate sheds (5.7) while the last refusal of
 the global check at the upgrade is newer than the last admitted upgrade and less than 5 s old, or
@@ -690,7 +734,11 @@ query and body validation, the handler under its timeout, and the answer with it
   half a minute, whole server).
 * **Timeouts and bodies.** The handler timeout is 30 s (the export 60 s; a GIF
   `GIF_QUEUE_TIMEOUT_MS + GIF_RENDER_TIMEOUT_MS` + 5 s). A body must arrive within 10 s (408) and
-  within its limit (413); either closes the connection.
+  within its limit (413); either closes the connection. The authentication has its own deadline,
+  `AUTH_TIMEOUT` (5 s): beyond it the request is answered 503 `server_busy`. A handler past its
+  timeout keeps running (its effects happen) as a late handler; while `LATE_HANDLERS_MAX` (1,024)
+  of them run, new requests are answered 503 `server_busy` before anything runs
+  (`scacelith_http_busy_total{reason}`, `scacelith_http_late_handlers`).
 * **Headers.** Every answer carries `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
   `Referrer-Policy: no-referrer`, a `Content-Security-Policy` (strict for HTML pages), and
   `Strict-Transport-Security` with native TLS. JSON errors are `{ "error": "<snake_case_code>",
@@ -1090,7 +1138,12 @@ checkpoint (it is truncated to 64 MiB and removed when the server stops). A back
   still the one the request's password matched, in the transaction of the change.
 * **Sessions and tokens**: session tokens and every single-use token are 32 random bytes, stored as
   SHA-256 only. Session lookups are cached 30 s (positive and negative); the API drops revoked
-  sessions from the cache at once. Single-use tokens: e-mail verification (24 h), password reset
+  sessions from the cache at once. The last use is renewed at most every 5 minutes by a write
+  queued in the background, never awaited by the request: one in flight per session (the
+  concurrent requests coalesce), `SESSION_TOUCHES_IN_FLIGHT_MAX` (1,024) in all, and deferred to a
+  later request while the writer has `SESSION_TOUCH_DEFER_BACKLOG` (1,000) jobs waiting, unless
+  the idle expiry is less than `SESSION_TOUCH_URGENT_MS` (1 hour) away
+  (`scacelith_session_touches_total{result}`). Single-use tokens: e-mail verification (24 h), password reset
   (1 h; revokes every session; works only while the account still has the address it was mailed to;
   a reset or a password change ends the account's other reset links), e-mail change (24 h, sent to
   the new address; a new request replaces it, a password change or reset cancels it), MFA login step

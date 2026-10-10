@@ -664,3 +664,6 @@ async fn a_port_in_use_fails_the_start_and_stops_what_was_started() {
     let mut server = server;
     server.stop().await;
 }
+
+/// The closure test of audit A10 (a stalled database writer under a mixed load).
+mod overload;

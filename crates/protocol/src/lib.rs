@@ -38,8 +38,9 @@
 //! message types, appends fields to server messages (a client message never gains fields: the
 //! server must keep decoding older clients), adds values to open enums and defines capability
 //! bits ([`CAPS`]); the server reads the Hello of any minor ([`decode_hello`],
-//! [`HelloPrefix`]) and gives a session of an older minor the values that minor knows
-//! ([`frame_for_minor`]). [`FINGERPRINT`] identifies the schema in logs and is never compared.
+//! [`HelloPrefix`]) and gives a session of an older minor the values and the messages that minor
+//! knows ([`frame_for_minor`]). [`FINGERPRINT`] identifies the schema in logs and is never
+//! compared.
 
 mod moves;
 pub mod wire;
@@ -183,43 +184,74 @@ pub fn decode_hello(buf: &[u8]) -> Result<Hello, DecodeError> {
     Ok(hello)
 }
 
-/// The frame a session of an older `minor` receives in place of `frame`, a server message of this
-/// minor ([`MINOR`]) that carries a value `minor` does not define; `None` when the frame suits
-/// that session as it is (and when it does not decode).
+/// The first minor that defines the stance ([`ClientStance`], [`ServerStance`], [`Stance`]): a
+/// session of an older minor never receives a [`ServerStance`] ([`frame_for_minor`]), and its
+/// client sends no [`ClientStance`].
+pub const STANCE_MIN_MINOR: u16 = 2;
+
+/// What a session of an older minor receives in place of a server frame of this minor
+/// ([`frame_for_minor`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ForMinor {
+    /// The frame as it is: nothing in it is of a later minor (or it does not decode).
+    Keep,
+    /// This frame in its place: a value of a later minor replaced by one the session knows.
+    Replace(Bytes),
+    /// Nothing: a message type of a later minor, which the session never receives.
+    Withhold,
+}
+
+/// What a session of an older `minor` receives in place of `frame`, a server message of this
+/// minor ([`MINOR`]): the frame as it is, another frame, or nothing at all.
 ///
-/// Minor 1 added [`EndReason::ResignationVsInsufficient`]: a session of minor 0 receives
-/// [`EndReason::Resignation`] in its place, in `GameEnd` and `GameSnapshot`, whose `status`
-/// (`Draw`) still gives the result.
+/// * Minor 1 added [`EndReason::ResignationVsInsufficient`]: a session of minor 0 receives
+///   [`EndReason::Resignation`] in its place, in `GameEnd` and `GameSnapshot`, whose `status`
+///   (`Draw`) still gives the result.
+/// * Minor 2 ([`STANCE_MIN_MINOR`]) added [`ServerStance`]: a session of minor 0 or 1 never
+///   receives it (a cosmetic relay its client could not read).
 ///
 /// ```
-/// use scacelith_protocol::{EndReason, GameEnd, GameStatus, Message, frame_for_minor};
+/// use scacelith_protocol::{
+///     EndReason, ForMinor, GameEnd, GameStatus, Message, ServerStance, Stance, frame_for_minor,
+/// };
 ///
 /// let end = GameEnd { game: 7, status: GameStatus::Draw, reason: EndReason::ResignationVsInsufficient, ..GameEnd::default() };
 /// let frame = end.to_vec().unwrap();
-/// let older = GameEnd::decode(&frame_for_minor(&frame, 0).unwrap()).unwrap();
+/// let ForMinor::Replace(older) = frame_for_minor(&frame, 0) else { panic!("rewritten") };
+/// let older = GameEnd::decode(&older).unwrap();
 /// assert_eq!((older.status, older.reason), (GameStatus::Draw, EndReason::Resignation));
-/// assert_eq!(frame_for_minor(&frame, 1), None);
+/// assert_eq!(frame_for_minor(&frame, 1), ForMinor::Keep);
+///
+/// let stance = ServerStance { game: 7, stance: Stance::Standing }.to_vec().unwrap();
+/// assert_eq!(frame_for_minor(&stance, 1), ForMinor::Withhold);
+/// assert_eq!(frame_for_minor(&stance, 2), ForMinor::Keep);
 /// ```
-pub fn frame_for_minor(frame: &[u8], minor: u16) -> Option<Bytes> {
+pub fn frame_for_minor(frame: &[u8], minor: u16) -> ForMinor {
+    if minor >= MINOR {
+        return ForMinor::Keep;
+    }
+    let Some(msg_type) = peek_type(frame) else { return ForMinor::Keep };
+    if msg_type == MsgType::ServerStance {
+        return if minor < STANCE_MIN_MINOR { ForMinor::Withhold } else { ForMinor::Keep };
+    }
     if minor >= 1 {
-        return None;
+        return ForMinor::Keep;
     }
     let older = |reason: EndReason| {
         (reason == EndReason::ResignationVsInsufficient).then_some(EndReason::Resignation)
     };
-    match peek_type(frame)? {
-        MsgType::GameEnd => {
-            let mut m = GameEnd::decode(frame).ok()?;
+    let replaced = match msg_type {
+        MsgType::GameEnd => GameEnd::decode(frame).ok().and_then(|mut m| {
             m.reason = older(m.reason)?;
             m.to_bytes().ok()
-        }
-        MsgType::GameSnapshot => {
-            let mut m = GameSnapshot::decode(frame).ok()?;
+        }),
+        MsgType::GameSnapshot => GameSnapshot::decode(frame).ok().and_then(|mut m| {
             m.reason = older(m.reason)?;
             m.to_bytes().ok()
-        }
+        }),
         _ => None,
-    }
+    };
+    replaced.map_or(ForMinor::Keep, ForMinor::Replace)
 }
 
 /// Type of a frame, from its first byte (`None` when empty or unknown).

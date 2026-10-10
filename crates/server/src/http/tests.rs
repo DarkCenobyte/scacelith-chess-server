@@ -1066,3 +1066,66 @@ async fn a_request_that_may_write_is_refused_while_the_database_writer_is_far_be
     assert_eq!(t.post("/api/v1/write").send().await.status, 429);
     assert_eq!(ran.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn an_authentication_that_does_not_answer_in_time_is_answered_503_server_busy() {
+    /// A validator stuck on its database read for one token.
+    struct StuckAuth;
+    impl Authenticator for StuckAuth {
+        async fn validate_token(&self, token: &str) -> Result<Option<AuthInfo>, ApiError> {
+            if token == BOB {
+                std::future::pending::<()>().await;
+            }
+            FakeAuth.validate_token(token).await
+        }
+    }
+    let config = Arc::new(config_with(|_| {}));
+    let api = Api::builder(config, router_under_test()).authenticator(StuckAuth).build();
+    let t = TestApi::new(api);
+    let busy_total = || crate::metrics::counter_vec("scacelith_http_busy_total", "", &["reason"]);
+    let t0 = tokio::time::Instant::now();
+    let r = t.get("/api/v1/private").bearer(BOB).send().await;
+    assert_eq!((r.status, r.json()["error"].clone()), (503, json!("server_busy")));
+    assert!((2..=5).contains(&r.json()["retryAfter"].as_u64().expect("a retryAfter")));
+    assert_eq!(t0.elapsed(), api::AUTH_TIMEOUT, "bounded by the authentication's deadline, not the route's");
+    assert!(busy_total().with(&["auth_timeout"]).get() >= 1);
+    assert_eq!(t.api.handlers_running(), 0, "no handler ran");
+    // The other sessions are not held up.
+    assert_eq!(t.get("/api/v1/private").bearer(TOKEN).send().await.status, 200);
+}
+
+#[tokio::test]
+async fn late_handlers_beyond_their_budget_refuse_new_requests_until_they_end() {
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut r = Router::new();
+    r.get("/read", RouteOpts::new(), |_| async { Ok(Answer::json(json!({"ok": true}))) });
+    let gate = release.clone();
+    r.get("/stuck", RouteOpts::new(), move |_| {
+        let gate = gate.clone();
+        async move {
+            gate.acquire().await.expect("open").forget();
+            Ok(Answer::json(json!({"late": true})))
+        }
+    });
+    let config = Arc::new(config_with(|_| {}));
+    let api = Api::builder(config, r).handler_timeout(Duration::from_millis(20)).late_handlers_max(2).build();
+    let t = TestApi::new(api);
+    let busy_total = || crate::metrics::counter_vec("scacelith_http_busy_total", "", &["reason"]);
+    for late in 1..=2 {
+        let r = t.get("/api/v1/stuck").send().await;
+        assert_eq!((r.status, r.json()["error"].clone()), (503, json!("timeout")));
+        assert_eq!(t.api.handlers_late(), late, "the handler goes on, counted late");
+    }
+    // The budget of late handlers is spent: nothing new starts, reads included.
+    let refused = busy_total().with(&["late_handlers"]).get();
+    let r = t.get("/api/v1/read").send().await;
+    assert_eq!((r.status, r.json()["error"].clone()), (503, json!("server_busy")));
+    assert_eq!(t.get("/api/v1/stuck").send().await.status, 503);
+    assert_eq!(t.api.handlers_running(), 2, "the refused requests ran nothing");
+    assert!(busy_total().with(&["late_handlers"]).get() >= refused + 2);
+    // The late handlers end: the server takes requests again.
+    release.add_permits(2);
+    assert!(t.api.quiesce(Duration::from_secs(5)).await);
+    assert_eq!(t.api.handlers_late(), 0);
+    assert_eq!(t.get("/api/v1/read").send().await.status, 200);
+}

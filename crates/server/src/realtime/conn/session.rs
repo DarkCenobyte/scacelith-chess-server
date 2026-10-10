@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use scacelith_protocol::{
-    ClientGesture, ClientMsg, ErrorCode, Message, MsgType, NoticeCode, ServerPing, ServerPong,
-    close_code_for, decode_hello, peek_seq,
+    ClientGesture, ClientMsg, ErrorCode, Message, MsgType, NoticeCode, STANCE_MIN_MINOR, ServerPing,
+    ServerPong, close_code_for, decode_hello, peek_seq,
 };
 use serde_json::{Value, json};
 use tokio::task::{JoinError, JoinHandle};
@@ -90,6 +90,8 @@ pub(crate) struct Session {
     ep: Endpoint,
     info: WsInfo,
     user: UserId,
+    /// The negotiated minor (`Welcome.minor`).
+    minor: u16,
     last_seq: u32,
     bad_seq_reported: bool,
     msgs: Bucket,
@@ -109,7 +111,8 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    pub(crate) fn new(ctx: Arc<ConnContext>, link: Arc<ConnLink>, info: WsInfo) -> Session {
+    /// The session of a connection welcomed with the negotiated `minor`.
+    pub(crate) fn new(ctx: Arc<ConnContext>, link: Arc<ConnLink>, info: WsInfo, minor: u16) -> Session {
         let now = ctx.clock.mono_ms();
         let s = &ctx.settings;
         let gesture_tokens = if s.gesture_rate > 0.0 { s.gesture_burst } else { 0.0 };
@@ -117,6 +120,7 @@ impl Session {
             m: metrics::conn(),
             ep: link.endpoint().clone(),
             user: link.user_id(),
+            minor,
             last_seq: 1,
             bad_seq_reported: false,
             msgs: Bucket::new(s.msg_burst, now),
@@ -244,7 +248,23 @@ impl Session {
             ClientMsg::Rematch(m) => self.game(seq, m.game, ClientMsg::Rematch(m)),
             // Handled before the message bucket.
             ClientMsg::Gesture(_) => {}
+            ClientMsg::Stance(m) => self.stance(m.game, buf),
         }
+    }
+
+    /// A stance (minor 2), once the message bucket, the decoding and the seq let it through like
+    /// any message (it never touches the gesture bucket: it travels whatever `GESTURE_RATE` is):
+    /// the raw frame goes to the game's host, which relays it to the opponent. Cosmetic and never
+    /// answered, it is dropped silently for a game not attached to the connection (as a gesture
+    /// is), for a game no host here holds, and from a session that negotiated an older minor. Such
+    /// a client should not send one; an `Error` would only add a message per keepalive to a game
+    /// that goes on well without the stance, and a fatal one would end a game for a cosmetic
+    /// message, so a client that gets the minors wrong keeps playing (its stance unseen).
+    fn stance(&self, game: GameId, frame: Bytes) {
+        if self.minor < STANCE_MIN_MINOR || !self.games.contains(&game) {
+            return;
+        }
+        self.ctx.hosts.stance(game, self.user, frame);
     }
 
     /// A gesture: its own bucket, then the checks of any message, then the relay.
@@ -577,7 +597,7 @@ pub(crate) async fn run(
     let Welcomed { link, out, mut cmds, claim, active_game, pending, minor } = welcomed;
     let _player = Gauge::up(&metrics::conn().players);
     let mut writer_task = tokio::spawn(super::writer::run(writer, out.clone(), minor));
-    let mut s = Session::new(ctx.clone(), link, info.clone());
+    let mut s = Session::new(ctx.clone(), link, info.clone(), minor);
     if active_game != 0 {
         s.attach(active_game);
     }

@@ -320,11 +320,11 @@ fn older_minors_get_the_values_they_know() {
         server_time: 1.79e12,
     };
     let frame = end.to_vec().unwrap();
-    let older = frame_for_minor(&frame, 0).expect("rewritten for minor 0");
+    let ForMinor::Replace(older) = frame_for_minor(&frame, 0) else { panic!("rewritten for minor 0") };
     assert_eq!(older.len(), frame.len());
     assert_eq!(GameEnd::decode_exact(&older), Ok(GameEnd { reason: EndReason::Resignation, ..end.clone() }));
     for minor in [1, MINOR, u16::MAX] {
-        assert_eq!(frame_for_minor(&frame, minor), None, "minor {minor} knows the value");
+        assert_eq!(frame_for_minor(&frame, minor), ForMinor::Keep, "minor {minor} knows the value");
     }
     let snapshot = GameSnapshot {
         game: 42,
@@ -337,16 +337,39 @@ fn older_minors_get_the_values_they_know() {
         ..GameSnapshot::default()
     };
     let frame = snapshot.to_vec().unwrap();
-    let older = GameSnapshot::decode_exact(&frame_for_minor(&frame, 0).unwrap()).unwrap();
-    assert_eq!(older, GameSnapshot { reason: EndReason::Resignation, ..snapshot });
+    let ForMinor::Replace(older) = frame_for_minor(&frame, 0) else { panic!("rewritten for minor 0") };
+    assert_eq!(
+        GameSnapshot::decode_exact(&older).unwrap(),
+        GameSnapshot { reason: EndReason::Resignation, ..snapshot }
+    );
     // Every other frame suits a session of minor 0 as it is.
     for reason in EndReason::ALL.into_iter().filter(|&r| r != EndReason::ResignationVsInsufficient) {
         let frame = GameEnd { reason, ..end.clone() }.to_vec().unwrap();
-        assert_eq!(frame_for_minor(&frame, 0), None, "{reason:?}");
+        assert_eq!(frame_for_minor(&frame, 0), ForMinor::Keep, "{reason:?}");
     }
-    assert_eq!(frame_for_minor(&Ack { r#ref: 3 }.to_vec().unwrap(), 0), None);
-    assert_eq!(frame_for_minor(&[], 0), None);
-    assert_eq!(frame_for_minor(&frame[..frame.len() - 1], 0), None);
+    assert_eq!(frame_for_minor(&Ack { r#ref: 3 }.to_vec().unwrap(), 0), ForMinor::Keep);
+    assert_eq!(frame_for_minor(&[], 0), ForMinor::Keep);
+    assert_eq!(frame_for_minor(&frame[..frame.len() - 1], 0), ForMinor::Keep);
+}
+
+#[test]
+fn older_minors_never_get_a_stance() {
+    for stance in Stance::ALL.into_iter().chain([Stance::Unknown(9)]) {
+        let frame = ServerStance { game: 42, stance }
+            .to_vec()
+            .unwrap_or_else(|_| vec![0xa7, 42, 0, 0, 0, 0, 0, 0, 0, 9]);
+        for minor in 0..STANCE_MIN_MINOR {
+            assert_eq!(frame_for_minor(&frame, minor), ForMinor::Withhold, "{stance:?} to minor {minor}");
+        }
+        for minor in [STANCE_MIN_MINOR, MINOR, u16::MAX] {
+            assert_eq!(frame_for_minor(&frame, minor), ForMinor::Keep, "{stance:?} to minor {minor}");
+        }
+    }
+    // Withheld by its type byte alone, whatever follows it.
+    assert_eq!(frame_for_minor(&[MsgType::ServerStance.to_u8()], 1), ForMinor::Withhold);
+    // The gesture relay of minor 0 still reaches every session.
+    let gesture = ServerGesture { game: 42, ply: 3, touch: 64, aim: 64, ..ServerGesture::default() };
+    assert_eq!(frame_for_minor(&gesture.to_vec().unwrap(), 0), ForMinor::Keep);
 }
 
 #[test]
@@ -418,6 +441,36 @@ fn gesture_relay_is_a_byte_copy() {
     bad[15] = 65; // touch: after type, seq, game and ply
     assert_eq!(ClientGesture::relay_frame(&bad).unwrap_err().to_string(), "touch above max");
     assert!(ClientGesture::relay_frame(&frame[..frame.len() - 1]).is_err());
+}
+
+#[test]
+fn stance_relay_is_a_byte_copy() {
+    for stance in Stance::ALL {
+        let c = ClientStance { seq: 9, game: (1 << 53) - 1, stance };
+        let s = ServerStance { game: (1 << 53) - 1, stance };
+        let frame = c.to_vec().unwrap();
+        assert_eq!(frame.len(), ClientStance::MAX_LEN);
+        assert_eq!(ClientStance::relay_frame(&frame).unwrap().as_slice(), s.to_vec().unwrap(), "{stance:?}");
+        assert_eq!(&ClientStance::relay_frame(&frame).unwrap()[1..], &frame[5..], "the fields after seq");
+    }
+    let frame = ClientStance { seq: 3, game: 77, stance: Stance::SideRight }.to_vec().unwrap();
+    // The server decodes strictly: a value of a later minor, a truncated or longer frame, another
+    // message type are refused, as a malformed message.
+    let mut later = frame.clone();
+    later[13] = 4;
+    assert_eq!(ClientStance::relay_frame(&later).unwrap_err().to_string(), "stance not in Stance");
+    assert!(ClientStance::relay_frame(&frame[..frame.len() - 1]).is_err());
+    assert!(ClientStance::relay_frame(&[frame.as_slice(), &[0]].concat()).is_err());
+    let mut other = frame.clone();
+    other[0] = MsgType::ClientGesture.to_u8();
+    assert!(ClientStance::relay_frame(&other).is_err());
+    // A client reads an unknown value of the open enum (a later minor's server) as Unknown.
+    let mut unknown = ServerStance { game: 77, stance: Stance::Seated }.to_vec().unwrap();
+    unknown[9] = 200;
+    assert_eq!(
+        ServerMsg::decode(&unknown),
+        Ok(Some(ServerMsg::Stance(ServerStance { game: 77, stance: Stance::Unknown(200) })))
+    );
 }
 
 #[test]

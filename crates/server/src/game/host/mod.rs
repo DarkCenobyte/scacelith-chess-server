@@ -16,16 +16,20 @@
 //! to `GAME_STALL_CREDIT_MAX_MS` earlier), and only then fires the deadlines due by that beat, so
 //! that a flag that fell during the stall overtakes no request that waited through it.
 //!
-//! The inbox is unbounded, but what it holds is counted (`inbox`): gestures beyond
-//! [`GESTURE_INBOX_MAX`] are dropped before it, every other message is delivered, and a host
-//! with too much waiting ([`HostHandle::busy`]) gets no new game ([`Hosts::place`]).
+//! What the inbox holds is counted and bounded at its door (`inbox`): a host with too much
+//! waiting ([`HostHandle::busy`], from [`INBOX_BUSY`] messages) gets no new game
+//! ([`Hosts::place`]); gestures beyond [`GESTURE_INBOX_MAX`], and every cosmetic message beyond
+//! [`INBOX_MAX`], are dropped before it; a game request beyond [`INBOX_MAX`] (one that ends a game
+//! beyond [`INBOX_MAX`] + [`INBOX_RESERVE`]) is answered `Error{RateLimited}` at once; the
+//! lifecycle messages (attach, detach, create, cancel, forfeit, stats, shutdown) are always
+//! delivered.
 //!
 //! [`HostHandle`] is the cheap, cloneable way in: every method posts to the inbox and returns
 //! (only [`HostHandle::create`] waits for the game id). The realtime connection tasks call
-//! [`HostHandle::client`], [`HostHandle::gesture`], [`HostHandle::attach`],
-//! [`HostHandle::detach`] and [`HostHandle::rtt`]; the lobby creates games, cancels them,
-//! forfeits sanctioned players and closes rematch windows. The host talks back through
-//! [`HostEvents`] and [`AnomalySink`].
+//! [`HostHandle::client`], [`HostHandle::gesture`], [`HostHandle::stance`],
+//! [`HostHandle::attach`], [`HostHandle::detach`] and [`HostHandle::rtt`]; the lobby creates
+//! games, cancels them, forfeits sanctioned players and closes rematch windows. The host talks
+//! back through [`HostEvents`] and [`AnomalySink`].
 //!
 //! A panic in room code is caught: the request gets `Error{Internal}` and the game goes on (a
 //! timer that panicked is retried a second later); a panic anywhere else in a message's handling
@@ -54,11 +58,14 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 pub use self::commit::{CommitFuture, GameStore, JOURNAL_GATE_TRIES, LookupFuture, MAX_BACKOFF_MS, Stored};
-pub use self::inbox::{GESTURE_INBOX_MAX, INBOX_BUSY, JOURNAL_PENDING_BUSY};
+pub use self::inbox::{
+    GESTURE_INBOX_MAX, INBOX_BUSY, INBOX_MAX, INBOX_RESERVE, JOURNAL_PENDING_BUSY, Refusal,
+};
 pub use self::metrics::{Counters, GestureDrop, RecoveryDrop};
 pub use self::shard::{Recovery, RulesFactory, SLOT_MS, Shard, ShardDeps, ShardSettings};
 
-use self::shard::{Shared, panic_message};
+use self::inbox::Class;
+use self::shard::{Shared, error_frame, panic_message};
 use crate::clock::SharedClock;
 use crate::config::Config;
 use crate::events::{AnomalySink, HostEvents, NewGame};
@@ -163,10 +170,18 @@ pub struct HostStats {
 impl HostStats {
     fn of(shard: &Shard) -> HostStats {
         let mut counters = shard.counters().clone();
-        let refused = shard.shared().backlog.refused();
+        let backlog = &shard.shared().backlog;
+        let refused = backlog.refused(Refusal::Gesture);
         if refused > 0 {
             *counters.gesture_drops.entry(GestureDrop::Overload.as_str()).or_default() += refused;
         }
+        for kind in Refusal::ALL.into_iter().filter(|&k| k != Refusal::Gesture) {
+            let n = backlog.refused(kind);
+            if n > 0 {
+                counters.inbox_refused.insert(kind.as_str(), n);
+            }
+        }
+        counters.inbox_over_reserve = backlog.over_reserve();
         HostStats {
             shard: shard.shard,
             games: shard.games(),
@@ -184,6 +199,7 @@ impl HostStats {
 enum Msg {
     Client { user: UserId, msg: ClientMsg, ep: Endpoint, recv_at: f64 },
     Gesture { game: GameId, user: UserId, frame: Bytes },
+    Stance { game: GameId, user: UserId, frame: Bytes },
     Attach { game: GameId, user: UserId, ep: Endpoint },
     Detach { game: GameId, user: UserId, conn: ConnId },
     Rtt { game: GameId, user: UserId, rtt_ms: u32 },
@@ -198,6 +214,30 @@ enum Msg {
 impl Msg {
     fn is_gesture(&self) -> bool {
         matches!(self, Msg::Gesture { .. })
+    }
+
+    /// The budget of the message at the inbox's door (`inbox`).
+    fn class(&self) -> Class {
+        match self {
+            Msg::Gesture { .. } => Class::Cosmetic(Refusal::Gesture),
+            Msg::Stance { .. } => Class::Cosmetic(Refusal::Stance),
+            Msg::Rtt { .. } => Class::Cosmetic(Refusal::Rtt),
+            Msg::DeclineRematch { .. } => Class::Cosmetic(Refusal::RematchDecline),
+            Msg::Client { msg, .. } => match msg {
+                ClientMsg::Resign(_)
+                | ClientMsg::Abort(_)
+                | ClientMsg::DrawAnswer(_)
+                | ClientMsg::DrawClaim(_) => Class::Ending,
+                _ => Class::Request,
+            },
+            Msg::Attach { .. }
+            | Msg::Detach { .. }
+            | Msg::ForfeitUser { .. }
+            | Msg::Create { .. }
+            | Msg::Cancel { .. }
+            | Msg::Stats { .. }
+            | Msg::Shutdown { .. } => Class::Lifecycle,
+        }
     }
 }
 
@@ -237,9 +277,14 @@ impl HostHandle {
         self.draining
     }
 
-    fn post(&self, msg: Msg) {
-        self.shared.backlog.posting();
+    /// Posts a message admitted under its class's budget (`inbox`); false when it was refused
+    /// at the door (counted; nothing was posted).
+    fn post(&self, msg: Msg) -> bool {
+        if !self.shared.backlog.admit(msg.class()) {
+            return false;
+        }
         self.send(msg);
+        true
     }
 
     /// Sends a message counted in the backlog.
@@ -253,17 +298,32 @@ impl HostHandle {
     /// A strictly decoded game request (Move, Resign, DrawOffer, DrawAnswer, DrawClaim, Abort,
     /// Resync, Rematch) with the connection it came from and its read time (monotonic ms). A
     /// connection the player has not attached yet is bound (a player back after a restart may
-    /// only send Resync).
+    /// only send Resync). Refused when the host is that far behind ([`INBOX_MAX`] messages
+    /// waiting, [`INBOX_MAX`] + [`INBOX_RESERVE`] for a request that ends a game): the
+    /// connection gets `Error{RateLimited}` for it at once, and nothing is played.
     pub fn client(&self, user: UserId, msg: ClientMsg, ep: Endpoint, recv_at: f64) {
-        self.post(Msg::Client { user, msg, ep, recv_at });
+        let (seq, game) = (msg.seq(), shard::game_of(&msg));
+        let refused = ep.clone();
+        if !self.post(Msg::Client { user, msg, ep, recv_at }) {
+            metrics::busy_reject(ErrorCode::RateLimited);
+            if let Some(frame) = error_frame(ErrorCode::RateLimited, seq, false, game) {
+                refused.send(frame);
+            }
+        }
     }
 
     /// A raw `C_Gesture` frame, relayed to the opponent (validated here). Dropped at once when
-    /// [`GESTURE_INBOX_MAX`] gestures already wait for the host.
+    /// [`GESTURE_INBOX_MAX`] gestures, or [`INBOX_MAX`] messages, already wait for the host.
     pub fn gesture(&self, game: GameId, user: UserId, frame: Bytes) {
-        if self.shared.backlog.posting_gesture() {
-            self.send(Msg::Gesture { game, user, frame });
-        }
+        self.post(Msg::Gesture { game, user, frame });
+    }
+
+    /// A raw `C_Stance` frame (minor 2), relayed to the opponent (validated here). Not capped
+    /// like the gestures (a client sends one when its player's stance changes and, standing, one
+    /// per gesture keepalive, within its connection's message rate), but cosmetic: dropped while
+    /// [`INBOX_MAX`] messages wait.
+    pub fn stance(&self, game: GameId, user: UserId, frame: Bytes) {
+        self.post(Msg::Stance { game, user, frame });
     }
 
     /// Binds the player's connection to the game and sends it a `GameSnapshot`
@@ -277,7 +337,8 @@ impl HostHandle {
         self.post(Msg::Detach { game, user, conn });
     }
 
-    /// A round-trip measurement of the player.
+    /// A round-trip measurement of the player (dropped while [`INBOX_MAX`] messages wait: the
+    /// next one comes with the next heartbeat).
     pub fn rtt(&self, game: GameId, user: UserId, rtt_ms: u32) {
         self.post(Msg::Rtt { game, user, rtt_ms });
     }
@@ -287,7 +348,8 @@ impl HostHandle {
         self.post(Msg::ForfeitUser { user });
     }
 
-    /// The player joined a queue: the finished game's rematch window closes.
+    /// The player joined a queue: the finished game's rematch window closes (dropped while
+    /// [`INBOX_MAX`] messages wait: the window then closes on its timer).
     pub fn decline_rematch(&self, game: GameId, user: UserId) {
         self.post(Msg::DeclineRematch { game, user });
     }
@@ -655,6 +717,9 @@ fn handle(shard: &mut Shard, msg: Msg) -> Option<oneshot::Sender<()>> {
         Msg::Client { user, msg, ep, recv_at } => shard.client(user, &msg, Some(ep), recv_at),
         Msg::Gesture { game, user, frame } => {
             shard.gesture(game, user, &frame);
+        }
+        Msg::Stance { game, user, frame } => {
+            shard.stance(game, user, &frame);
         }
         Msg::Attach { game, user, ep } => {
             shard.attach(game, user, ep);

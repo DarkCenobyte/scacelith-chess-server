@@ -1,7 +1,7 @@
 //! The state of one host actor and everything it does between two awaits: the rooms of its
-//! shard, their endpoints and timers, the stall credit, the gesture relay, the anomalies, the
-//! journal appends, compaction and recovery. The commit pipeline is in `commit.rs`; the actor
-//! loop and the public handles in `mod.rs`.
+//! shard, their endpoints and timers, the stall credit, the gesture and stance relays, the
+//! anomalies, the journal appends, compaction and recovery. The commit pipeline is in
+//! `commit.rs`; the actor loop and the public handles in `mod.rs`.
 //!
 //! Every method runs to completion on the actor's task and never blocks: journal appends are
 //! buffered by the journal, notifications post to their actors, and the few things to wait for
@@ -19,13 +19,13 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use indexmap::IndexSet;
-use scacelith_protocol::{ClientGesture, ClientMsg, ErrorCode, Message, close};
+use scacelith_protocol::{ClientGesture, ClientMsg, ClientStance, ErrorCode, Message, close};
 use serde_json::json;
 use tokio::sync::oneshot;
 use tokio::task::{Id as TaskId, JoinError, JoinSet};
 
 use super::commit::{CommitError, Done, GameStore, Stored, TaskKind};
-use super::inbox::Backlog;
+use super::inbox::{Backlog, INBOX_BUSY, INBOX_MAX, INBOX_RESERVE, Refusal};
 use super::metrics::{self, Counters, GestureDrop, Meter, RecoveryDrop};
 use crate::clock::SharedClock;
 use crate::config::Config;
@@ -283,7 +283,7 @@ pub(super) fn send(ep: Option<&Endpoint>, frame: &Bytes) {
 }
 
 /// The game a client request is about (0 for a message that is not a game request).
-fn game_of(msg: &ClientMsg) -> GameId {
+pub(super) fn game_of(msg: &ClientMsg) -> GameId {
     match msg {
         ClientMsg::Move(m) => m.game,
         ClientMsg::Resign(m) => m.game,
@@ -321,6 +321,9 @@ pub struct Shard {
     shared: Arc<Shared>,
     /// `scacelith_game_inbox_messages` of the shard.
     inbox_gauge: Gauge,
+    /// The refusals at the inbox's door already logged, and whether an episode of refusals is
+    /// open (logged once at its start, once when the inbox is back under `INBOX_BUSY`).
+    inbox_refusals: (u64, bool),
     /// Time of the latest beat (`None`: no stall detection yet, or shut down).
     beat: Option<i64>,
     /// Start of the stall the latest beat detected, until its timers ran.
@@ -389,6 +392,7 @@ impl Shard {
             active: 0,
             meter: Meter::new(),
             inbox_gauge: metrics::inbox_gauge(deps.shard),
+            inbox_refusals: (0, false),
             beat: None,
             stall_from: None,
             last_stall_end: i64::MIN,
@@ -482,11 +486,30 @@ impl Shard {
     }
 
     /// Publishes what waits for the host (every beat): the journal bytes not handed to its I/O
-    /// thread (read for placement) and the gauges.
-    pub(super) fn publish_backlog(&self) {
+    /// thread (read for placement) and the gauges; logs the start and the end of an episode of
+    /// refusals at the inbox's door.
+    pub(super) fn publish_backlog(&mut self) {
         let pending = self.journal.as_ref().map_or(0, Journal::publish_pending);
-        self.shared.backlog.set_journal_pending(pending);
-        self.inbox_gauge.set(self.shared.backlog.messages() as f64);
+        let backlog = &self.shared.backlog;
+        backlog.set_journal_pending(pending);
+        let waiting = backlog.messages();
+        self.inbox_gauge.set(waiting as f64);
+        let refused = backlog.refused_total() + backlog.over_reserve();
+        let (logged, open) = self.inbox_refusals;
+        if refused > logged && !open {
+            let by_kind: serde_json::Map<String, serde_json::Value> =
+                Refusal::ALL.iter().map(|&k| (k.as_str().to_owned(), backlog.refused(k).into())).collect();
+            log_warn!(self.log, "game host inbox full: cosmetic messages dropped, requests answered RateLimited", {
+                "shard": self.shard, "waiting": waiting, "max": INBOX_MAX, "reserve": INBOX_RESERVE,
+                "refusedSinceStart": by_kind, "overReserveSinceStart": backlog.over_reserve(),
+            });
+            self.inbox_refusals = (logged, true);
+        } else if open && waiting < INBOX_BUSY {
+            log_info!(self.log, "game host inbox back under its busy threshold", {
+                "shard": self.shard, "refused": refused - logged, "busy": INBOX_BUSY,
+            });
+            self.inbox_refusals = (refused, false);
+        }
     }
 
     /// Publishes the load numbers to the handles.
@@ -702,6 +725,26 @@ impl Shard {
         };
         self.meter.gesture_dropped(dropped);
         false
+    }
+
+    /// Relays a player's stance (the raw `C_Stance` frame, minor 2) to the opponent as a droppable
+    /// `S_Stance`, as a gesture is relayed: cosmetic, nothing is journaled, timed or checked
+    /// beyond decoding, and it is dropped without an anomaly when it cannot be relayed (no such
+    /// game, not a player, no opponent attached, an opponent's backlog). Droppable, because a
+    /// stance must never be what closes a slow consumer, and a lost one heals by itself: a
+    /// player who stands sends the stance again every gesture keepalive, and a receiver shows a
+    /// stance not repeated within 5 keepalives, or an opponent who moves, seated. The writer of
+    /// an opponent's session of minor 0 or 1 withholds it. Returns whether it was queued.
+    pub fn stance(&mut self, game: GameId, user: UserId, frame: &[u8]) -> bool {
+        let Some(entry) = self.rooms.get(&game) else { return false };
+        let Some(side) = entry.room.side_of(user) else { return false };
+        let Some(ep) = &entry.ep[side.opponent().index()] else { return false };
+        let Ok(out) = ClientStance::relay_frame(frame) else { return false };
+        if !ep.send_droppable(Bytes::copy_from_slice(&out)) {
+            return false;
+        }
+        self.meter.stance_relayed();
+        true
     }
 
     /// A round-trip measurement of a player (it moves the deadlines).

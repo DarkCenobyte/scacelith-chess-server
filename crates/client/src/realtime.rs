@@ -146,6 +146,14 @@ impl Connection {
         &self.welcome
     }
 
+    /// The negotiated minor (`Welcome.minor`, the lower of [`ConnectOptions::minor`] and the
+    /// server's): the messages the connection may send (a `Stance` from
+    /// [`STANCE_MIN_MINOR`](scacelith_protocol::STANCE_MIN_MINOR) on) and those the server sends
+    /// it (a session of an older minor never receives the opponent's `Stance`).
+    pub fn minor(&self) -> u16 {
+        self.welcome.minor
+    }
+
     /// Sends a message, numbered with the next `seq` (the `seq` it carries is replaced), and
     /// returns that `seq`: the `ref` of its `Ack` or `Error`.
     pub fn send(&self, msg: impl Into<ClientMsg>) -> Result<u32> {

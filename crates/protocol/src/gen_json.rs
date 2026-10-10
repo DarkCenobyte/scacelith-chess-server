@@ -51,6 +51,10 @@ fn error_code_from(v: &Value) -> Option<ErrorCode> {
     Some(ErrorCode::from_u8(u8::try_from(v.as_u64()?).ok()?))
 }
 
+fn stance_from(v: &Value) -> Option<Stance> {
+    Some(Stance::from_u8(u8::try_from(v.as_u64()?).ok()?))
+}
+
 fn player_info_to_json(m: &PlayerInfo) -> Value {
     let mut o = Map::new();
     o.insert("userId".into(), m.user_id.into());
@@ -412,6 +416,22 @@ fn client_gesture_from_json(v: &Value) -> Option<ClientGesture> {
         yaw: int(v, "yaw")?,
         pitch: int(v, "pitch")?,
         lean: uint(v, "lean")?,
+    })
+}
+
+fn client_stance_to_json(m: &ClientStance) -> Value {
+    let mut o = Map::new();
+    o.insert("seq".into(), m.seq.into());
+    o.insert("game".into(), m.game.into());
+    o.insert("stance".into(), m.stance.to_u8().into());
+    Value::Object(o)
+}
+
+fn client_stance_from_json(v: &Value) -> Option<ClientStance> {
+    Some(ClientStance {
+        seq: uint(v, "seq")?,
+        game: uint(v, "game")?,
+        stance: stance_from(v.get("stance")?)?,
     })
 }
 
@@ -795,6 +815,20 @@ fn server_gesture_from_json(v: &Value) -> Option<ServerGesture> {
     })
 }
 
+fn server_stance_to_json(m: &ServerStance) -> Value {
+    let mut o = Map::new();
+    o.insert("game".into(), m.game.into());
+    o.insert("stance".into(), m.stance.to_u8().into());
+    Value::Object(o)
+}
+
+fn server_stance_from_json(v: &Value) -> Option<ServerStance> {
+    Some(ServerStance {
+        game: uint(v, "game")?,
+        stance: stance_from(v.get("stance")?)?,
+    })
+}
+
 /// The vector name and the JSON fields of a client message.
 pub fn client_to_json(m: &ClientMsg) -> (&'static str, Value) {
     match m {
@@ -817,6 +851,7 @@ pub fn client_to_json(m: &ClientMsg) -> (&'static str, Value) {
         ClientMsg::Resync(m) => ("Resync", resync_to_json(m)),
         ClientMsg::Rematch(m) => ("Rematch", rematch_to_json(m)),
         ClientMsg::Gesture(m) => ("C_Gesture", client_gesture_to_json(m)),
+        ClientMsg::Stance(m) => ("C_Stance", client_stance_to_json(m)),
     }
 }
 
@@ -842,6 +877,7 @@ pub fn client_from_json(key: &str, v: &Value) -> Option<ClientMsg> {
         "Resync" => ClientMsg::Resync(resync_from_json(v)?),
         "Rematch" => ClientMsg::Rematch(rematch_from_json(v)?),
         "C_Gesture" => ClientMsg::Gesture(client_gesture_from_json(v)?),
+        "C_Stance" => ClientMsg::Stance(client_stance_from_json(v)?),
         _ => return None,
     })
 }
@@ -865,6 +901,7 @@ pub fn server_to_json(m: &ServerMsg) -> (&'static str, Value) {
         ServerMsg::GameEnd(m) => ("GameEnd", game_end_to_json(m)),
         ServerMsg::RatingUpdate(m) => ("RatingUpdate", rating_update_to_json(m)),
         ServerMsg::Gesture(m) => ("S_Gesture", server_gesture_to_json(m)),
+        ServerMsg::Stance(m) => ("S_Stance", server_stance_to_json(m)),
     }
 }
 
@@ -887,6 +924,7 @@ pub fn server_from_json(key: &str, v: &Value) -> Option<ServerMsg> {
         "GameEnd" => ServerMsg::GameEnd(game_end_from_json(v)?),
         "RatingUpdate" => ServerMsg::RatingUpdate(rating_update_from_json(v)?),
         "S_Gesture" => ServerMsg::Gesture(server_gesture_from_json(v)?),
+        "S_Stance" => ServerMsg::Stance(server_stance_from_json(v)?),
         _ => return None,
     })
 }

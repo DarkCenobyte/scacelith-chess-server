@@ -17,15 +17,18 @@
 //!   close reaches the client), strict decoding (malformed; a second Hello is read as at the
 //!   handshake and gets a non-fatal `ProtocolViolation`), `seq` = last + 1 (else dropped, anomaly
 //!   once, and a gap resynchronises). Gestures have a bucket of their own and are dropped
-//!   silently. Client pings are answered once per 950 ms; the heartbeat pings every
-//!   `HEARTBEAT_INTERVAL_MS` (the first half an interval after the connection opened), measures
-//!   the round trip (an average capped at 2 s, a sample across a host stall left out) and closes
-//!   a connection silent for `HEARTBEAT_TIMEOUT_MS` with 1001. Lobby requests go to the lobby
-//!   actor (answered there with one `Ack` or `Error`) after the store reads they need, in order;
-//!   game messages go to the host of the game's shard.
+//!   silently. A `Stance` (minor 2) takes the message bucket like any message, then goes to the
+//!   game's host for a game attached to the connection; otherwise, or from a session of an older
+//!   minor, it is dropped silently. Client pings are answered once per 950 ms; the heartbeat
+//!   pings every `HEARTBEAT_INTERVAL_MS` (the first half an interval after the connection
+//!   opened), measures the round trip (an average capped at 2 s, a sample across a host stall
+//!   left out) and closes a connection silent for `HEARTBEAT_TIMEOUT_MS` with 1001. Lobby
+//!   requests go to the lobby actor (answered there with one `Ack` or `Error`) after the store
+//!   reads they need, in order; game messages go to the host of the game's shard.
 //! * **Writer** ([`writer`]): drains the [`Outbound`](super::Outbound) queue in batches. Every
-//!   frame the host actors and the lobby send goes through it; over `WS_SEND_BUFFER_LIMIT` bytes
-//!   waiting, the connection closes with 4303 and no `Error`.
+//!   frame the host actors and the lobby send goes through it, adapted to the session's minor
+//!   (`frame_for_minor`: a later value replaced, a later message type withheld); over
+//!   `WS_SEND_BUFFER_LIMIT` bytes waiting, the connection closes with 4303 and no `Error`.
 //!
 //! Every fatal `Error` is the connection's last message and is followed by its close code
 //! (`close_code_for`). Timers run on tokio's clock, timestamps (buckets, round trips,

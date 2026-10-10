@@ -939,7 +939,7 @@ fn lenient(b: &mut Builder<'_>, e: &EnumOf<'_>) {
 
     for (bytes, note) in [
         (vec![0x00], "type 0x00"),
-        (vec![0xa7, 0], "unassigned server type 0xA7"),
+        (vec![0xa8, 0], "unassigned server type 0xA8"),
         (vec![0xc0, 1, 2, 3], "server type 0xC0 of a later minor"),
         (vec![0xf0], "experimental server type 0xF0"),
         (vec![0xff], "type 0xFF"),

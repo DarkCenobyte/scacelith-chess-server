@@ -19,21 +19,22 @@ HTTPS account API is described in `docs/API.md` of the server repository.
 | | |
 |---|---|
 | Protocol version (`proto`) | 1 |
-| Minor version (`minor`) | 1 |
+| Minor version (`minor`) | 2 |
 | Capability bits (`caps`) | none defined |
 | WebSocket subprotocol | `scacelith.rt1` |
-| Schema fingerprint | `0x6e6c4989` (informational) |
+| Schema fingerprint | `0xc649140f` (informational) |
 | `MaxClientMessage` | 512 |
 | `MaxServerMessage` | 65536 |
 | `MaxPlies` | 1200 |
-| Messages | 19 client to server, 16 server to client |
+| Messages | 20 client to server, 17 server to client |
 
 <!-- protogen:end summary -->
 
 Contents: [Conventions](#conventions) · [Transport](#transport) · [Encoding](#encoding) ·
 [Versions](#versions-and-evolution) · [Connection](#connection-lifecycle) ·
 [Requests and answers](#requests-and-answers) · [Games](#games) · [Clocks](#clocks) ·
-[Gestures](#gesture-relay) · [Rate limits](#rate-limits) · [Errors and closing](#errors-and-close-codes) ·
+[Gestures](#gesture-relay) · [Stances](#stance-relay) · [Rate limits](#rate-limits) ·
+[Errors and closing](#errors-and-close-codes) ·
 [Moves and positions](#moves-and-positions) · [Messages](#messages) · [Structs](#structs) ·
 [Enums](#enums) · [Flags](#flags) · [Golden vectors](#golden-vectors)
 
@@ -132,12 +133,12 @@ published ranges; the experimental ranges are never published, and a published p
 |---|---|---|---|
 | `0x01`-`0x0F` | c2s | connection | 3 assigned |
 | `0x10`-`0x1F` | c2s | lobby | 7 assigned |
-| `0x20`-`0x3F` | c2s | game | 9 assigned |
+| `0x20`-`0x3F` | c2s | game | 10 assigned |
 | `0x40`-`0x6F` | c2s | future | reserved for later minors |
 | `0x70`-`0x7F` | c2s | experimental | never published: private experiments, refused by every published peer |
 | `0x80`-`0x8F` | s2c | connection | 6 assigned |
 | `0x90`-`0x9F` | s2c | lobby | 3 assigned |
-| `0xA0`-`0xBF` | s2c | game | 7 assigned |
+| `0xA0`-`0xBF` | s2c | game | 8 assigned |
 | `0xC0`-`0xEF` | s2c | future | reserved for later minors |
 | `0xF0`-`0xFF` | s2c | experimental | never published: private experiments, refused by every published peer |
 
@@ -148,7 +149,7 @@ published ranges; the experimental ranges are never published, and a published p
 * **`proto`** is the major version: 1 for the whole life of this protocol. A change that breaks
   compatibility would be a new protocol with a new subprotocol token, not a new `proto` value on
   this one.
-* **`minor`** numbers the additions to version 1; this document describes minor 1. The client
+* **`minor`** numbers the additions to version 1; this document describes minor 2. The client
   sends the highest minor it speaks in `Hello.minor`; the server answers with the negotiated minor
   `Welcome.minor = min(Hello.minor, server minor)`. Both sides then use only what the negotiated
   minor defines: a client sends the fields and messages of that minor and no more, and the server
@@ -163,7 +164,11 @@ published ranges; the experimental ranges are never published, and a published p
   place, in `GameEnd` and `GameSnapshot`: an older client shows a drawn game ended by a
   resignation. The game records of the HTTPS API, which no
   minor governs, carry 14 (an older client shows a generic end there, as for any unknown value of
-  an open enum).
+  an open enum). Minor 2 (`protocol/frozen/v1.2.json`) adds the player's stance (seated, or
+  standing to look at the board): the C2S `Stance` (`0x29`), its relay the S2C `Stance` (`0xA7`)
+  and the open enum `Stance`, and makes the look of a `Gesture` relative to the body while the
+  sender is not seated ([Stance relay](#stance-relay)). A session of minor 0 or 1 never receives
+  the S2C `Stance` (the opponent's robot stays seated there), and its client sends none.
 * **Frozen anchors.** Whatever the minor, these never change, so that any client and any server
   can always understand each other's first words:
   1. the Hello prefix: `0x01 | seq u32 | proto u16 | minor u16 | caps u64` (17 bytes);
@@ -382,7 +387,8 @@ published ranges; the experimental ranges are never published, and a published p
 
 * **What.** `Gesture` carries a player's live, cosmetic state to the opponent, whose robot mirrors
   it: the head (`yaw` and `pitch` of the look in milliradians, seat-relative, 0 straight ahead and
-  level, `yaw` > 0 to the left, `pitch` < 0 down; `lean` towards the board in percent; the
+  level, `yaw` > 0 to the left, `pitch` < 0 down, relative to the body instead while the player
+  stands, [Stance relay](#stance-relay); `lean` towards the board in percent; the
   `GestureFlag` bits for a glance at one's scoresheet and a look at the table beside the board),
   the piece in hand (`touch`) and where it is aimed (`aim`), and the move placed on the board
   before the clock press (`placed`, games without `autoPress`). It is never authoritative: only
@@ -406,10 +412,11 @@ published ranges; the experimental ranges are never published, and a published p
   copied byte for byte after checking that it decodes. It never goes back to the sender and is
   never stored, timed or looked at otherwise.
 * **Receiving.** The latest gesture wins. Its head (`yaw`, `pitch`, `lean`, `Glance`, `Side`)
-  always applies. Its hand (`touch`, `aim`, `placed`, `Promoting`) applies only while the
-  receiver's game has exactly `ply` plies and it is the sender's turn: an earlier ply is stale,
-  a later one is ahead of a `MoveMade` not received yet. Gestures come from the other client: a
-  receiver checks the hand against its own position before showing it.
+  always applies, to a standing robot too. Its hand (`touch`, `aim`, `placed`, `Promoting`)
+  applies only while the receiver's game has exactly `ply` plies, it is the sender's turn and the
+  sender shows seated: an earlier ply is stale, a later one is ahead of a `MoveMade` not received
+  yet. Gestures come from the other client: a receiver checks the hand against its own position
+  before showing it.
 * **Silence.** The keepalive tells a receiver an opponent who sits still from one whose gestures
   stopped coming. The game client follows the head of the latest gesture for 2.5 x
   `gestureIdleMs` (the clamped interval; 2.5 s at the default) and puts a piece held live back
@@ -422,13 +429,53 @@ published ranges; the experimental ranges are never published, and a published p
   another game, for an absent opponent, or towards a connection that already has a backlog is
   dropped as well: a slow link loses gestures first.
 
+## Stance relay
+
+Minor 2 only: a client sends no `Stance` unless the negotiated minor (`Welcome.minor`) is 2 or
+more, and the server never sends one to a session of minor 0 or 1.
+
+* **What.** `Stance` tells the opponent where the player is, and the opponent's robot gets up,
+  walks there and looks at the board: `Seated` (in the chair: the default, and the only stance
+  that plays), `Standing` (risen, in front of its pushed-back chair, looking down at the board),
+  `SideLeft` or `SideRight` (standing at an end of the table, on the player's own left or right as
+  seen from the seat; each client draws them around its own copy of the table, so the receiver
+  does not mirror them, unlike the `Side` gesture flag). The clock keeps running. A player who
+  stands cannot touch a piece or press the clock until seated again, which the client enforces:
+  like a gesture, a stance is cosmetic and never authoritative, and the server looks at nothing
+  but its decoding.
+* **Sending.** A client sends `Stance{seq, game, stance}` for its game when its player's stance
+  changes and, while it is not `Seated`, again at least once per gesture keepalive (the clamped
+  `gestureIdleMs` of [Gesture relay](#gesture-relay), so 1000 ms when `gestureRate` is 0, which
+  makes `gestureIdleMs` 0), on both players' turns. It goes whatever `gestureRate` says, the relay
+  of gestures off included. After a reconnection or a resume, the client sends the current stance
+  again when it is not `Seated`. A `Stance` takes the next `seq` and a token of the message rate
+  limit like any message, not of the gesture bucket: one per change, and one per keepalive while
+  standing.
+* **Relay.** The server sends the opponent the S2C `Stance`: the C2S message without its `seq`,
+  copied byte for byte after checking that it decodes, when the opponent's session is of minor 2
+  or later. It never goes back to the sender and is never answered, stored or timed. A `Stance`
+  for another game than the connection's, for an absent opponent, or towards a connection that
+  already has a backlog is dropped silently, as a gesture is; so is one from a session of minor 0
+  or 1 (no `Error`: its client gets the minors wrong, and its game goes on).
+* **Receiving.** The latest stance wins. A stance other than `Seated` not repeated within 5
+  keepalives (5 x the clamped `gestureIdleMs`, 5 s at the default) reads as `Seated`, and so does
+  a value of a later minor (`Stance` is an open enum). The opponent's `MoveMade` means that the
+  opponent sat down to play: the receiver shows it seated before the move. The end of the game,
+  the opponent's disconnection and a new game bring it back to `Seated` too.
+* **Gestures while standing.** `Gesture` keeps flowing in every stance, under its own rules: the
+  head of a standing player is relayed too (when `gestureRate` allows). While the sender is not
+  `Seated`, `yaw` and `pitch` are relative to its body, which faces the board from every spot, and
+  the `Side` and `Glance` flags are never set (the table beside the board and the scoresheet are
+  a seated player's looks). A receiver with no head to show (no gesture relay, gestures stopped,
+  or the player chose to ignore the opponent's head) has a standing robot look at the board.
+
 ## Rate limits
 
 * **Messages.** Each connection has a token bucket of `Welcome.maxMsgPerSec` messages per second
   (`WS_MSG_RATE`, 20) holding `Welcome.msgBurst` tokens (`WS_MSG_BURST`, 40). A message beyond it
   is dropped and answered with `Error{RateLimited}` (at most one such error per second); repeated
   excess is a fatal `Flood` (the reference server: more than max(10, `msgBurst`) messages dropped
-  within 10 s). Gestures use their own bucket (above).
+  within 10 s). Gestures use their own bucket (above); a `Stance` takes a token like any message.
 * **Client pings** beyond one per 950 ms get no `Pong`.
 * **Connections.** The server limits simultaneous WebSocket connections per address
   (`MAX_CONNECTIONS_PER_IP`, HTTP 429 `too_many_connections` at the upgrade) and players on the
@@ -450,7 +497,12 @@ published ranges; the experimental ranges are never published, and a published p
   `ChallengeAccept` and `ChallengeJoinCode` then get `Error{RateLimited}` (non-fatal) and nothing
   changes (a challenge or a code stays open), and a rematch both players asked for gets
   `Error{RematchUnavailable}`. Try again a few seconds later; games in progress are not affected.
-  The gestures of a player whose game host is that far behind may be dropped, as for a slow link.
+  The gestures and stances of a player whose game host is that far behind may be dropped, as for
+  a slow link. Further behind still, a game request (`Move`, `DrawOffer`, `Resync`, `Rematch`)
+  may get `Error{RateLimited}` (non-fatal, with its `ref` and `game`) instead of its usual answer:
+  it had no effect (a move was not played), and the client may send it again once the server
+  answers. A request that ends a game (`Resign`, `Abort`, `DrawAnswer`, `DrawClaim`) is refused
+  that way only even further behind.
 
 ## Errors and close codes
 
@@ -543,6 +595,7 @@ fixed) and bounds. Sizes include the type byte.
 | `0x26` | [Resync](#26-resync) | c2s | 13 | Ask for the game's GameSnapshot. |
 | `0x27` | [Rematch](#27-rematch) | c2s | 14 | After the end: accept = true offers (or accepts) a rematch with colours swapped, accept = false declines or withdraws. |
 | `0x28` | [C_Gesture](#28-c-gesture) | c2s | 29 | The player's live, cosmetic state in game `game`, relayed to the opponent byte for byte (server Gesture) and never answered, stored or looked at beyond decoding. |
+| `0x29` | [C_Stance](#29-c-stance) | c2s | 14 | Minor 2: the player's stance in game `game` (seated, or standing to look at the board), relayed to the opponent byte for byte (server Stance) when the opponent's session is of minor 2 or later, and never answered, stored or looked at beyond decoding. |
 | `0x80` | [Welcome](#80-welcome) | s2c | 54..141 | Hello accepted. |
 | `0x81` | [Error](#81-error) | s2c | 15 | A request was refused. |
 | `0x82` | [S_Ping](#82-s-ping) | s2c | 13 | Heartbeat, about every Welcome.heartbeatMs: answer with the client Pong at once. |
@@ -559,6 +612,7 @@ fixed) and bounds. Sizes include the type byte.
 | `0xA4` | [GameEnd](#a4-gameend) | s2c | 31 | Final result, to both players. |
 | `0xA5` | [RatingUpdate](#a5-ratingupdate) | s2c | 29..35 | Rating changes of a finished rated game, once the result is committed. |
 | `0xA6` | [S_Gesture](#a6-s-gesture) | s2c | 25 | The opponent's gestures: the client Gesture without its seq, byte for byte. |
+| `0xA7` | [S_Stance](#a7-s-stance) | s2c | 10 | Minor 2: the opponent's stance: the client Stance without its seq, byte for byte. |
 
 <!-- protogen:end messages -->
 
@@ -773,9 +827,20 @@ The player's live, cosmetic state in game `game`, relayed to the opponent byte f
 | 16 | `aim` | `u8` | 0..64 | square the piece is aimed at (64 = none) |
 | 17 | `placed` | `u16` | 0..32767 | move placed on the board before the clock press, packed (0 = none) |
 | 19 | `flags` | `u8` | 0..7 | GestureFlag bits |
-| 20 | `yaw` | `i32` | -3142..3142 | look, milliradians, seat-relative, > 0 to the left |
+| 20 | `yaw` | `i32` | -3142..3142 | look, milliradians, seat-relative (relative to the body when the Stance is not Seated), > 0 to the left |
 | 24 | `pitch` | `i32` | -1571..1571 | look, milliradians, < 0 down |
 | 28 | `lean` | `u8` | 0..100 | lean towards the board, percent |
+
+<a id="29-c-stance"></a>
+#### `0x29` C_Stance (c2s, 14 bytes)
+
+Minor 2: the player's stance in game `game` (seated, or standing to look at the board), relayed to the opponent byte for byte (server Stance) when the opponent's session is of minor 2 or later, and never answered, stored or looked at beyond decoding. Sent when it changes and, while not Seated, again at least every gesture keepalive (Welcome.gestureIdleMs clamped to 1000..10000 ms, so 1000 ms when gestureRate is 0): a receiver that hears no Stance for 5 keepalives shows the player seated. It travels whatever gestureRate says (the head of a player whose gestures are not relayed looks at the board). Cosmetic, never authoritative.
+
+| Offset | Field | Type | Bounds | Meaning |
+|---|---|---|---|---|
+| 1 | `seq` | `u32` |  | number of the message on its connection: 1 for the Hello, then one more per message |
+| 5 | `game` | `id53` | < 2^53 |  |
+| 13 | `stance` | enum [Stance](#stance) |  |  |
 
 <a id="80-welcome"></a>
 #### `0x80` Welcome (s2c, 54 to 141 bytes)
@@ -1017,6 +1082,18 @@ The relay of the client `Gesture`: the same fields without `seq`, copied byte fo
 | 20 | `pitch` | `i32` | -1571..1571 |  |
 | 24 | `lean` | `u8` | 0..100 |  |
 
+<a id="a7-s-stance"></a>
+#### `0xA7` S_Stance (s2c, 10 bytes)
+
+Minor 2: the opponent's stance: the client Stance without its seq, byte for byte. Cosmetic, never authoritative; sessions of minor 0 and 1 never receive it.
+
+The relay of the client `Stance`: the same fields without `seq`, copied byte for byte.
+
+| Offset | Field | Type | Bounds | Meaning |
+|---|---|---|---|---|
+| 1 | `game` | `id53` | < 2^53 |  |
+| 9 | `stance` | enum [Stance](#stance) |  |  |
+
 <!-- protogen:end fields -->
 
 ## Structs
@@ -1223,6 +1300,17 @@ Why a request was refused (Error.code, MoveRejected.code). 1..99: connection, 10
 | 241 | `Flood` | message or gesture flood (fatal) |
 | 242 | `CheatDetected` | certain cheat (fatal) |
 | 243 | ~~`SlowConsumer`~~ | Reserved: never sent in an Error: a client that does not read gets close 4303 alone |
+
+#### Stance
+
+Minor 2: where a player is (Stance). Only Seated plays: a player who stands cannot touch a piece or press the clock until seated again. Left and right are the player's own, as seen from the seat; each client draws them on its own copy of the table, around the same board, so the receiver does not mirror them (unlike the Side gesture flag). Open: a later minor may add values. A client keeps an unknown value and show the player seated
+
+| Value | Name | Meaning |
+|---|---|---|
+| 0 | `Seated` | in the chair (the default, and the stance of a player who sends no Stance) |
+| 1 | `Standing` | standing in front of the chair, pushed back, looking down at the board |
+| 2 | `SideLeft` | standing at the end of the table on the player's left, looking at the board from the side |
+| 3 | `SideRight` | standing at the end of the table on the player's right |
 
 <!-- protogen:end enums -->
 

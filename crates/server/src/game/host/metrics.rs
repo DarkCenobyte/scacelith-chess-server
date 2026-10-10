@@ -7,6 +7,7 @@ use std::sync::LazyLock;
 
 use scacelith_protocol::{EndReason, ErrorCode};
 
+use super::inbox::Refusal;
 use crate::metrics::{self, Counter, CounterVec, Gauge, GaugeVec, Histogram};
 
 /// Why a gesture was not relayed (label of `scacelith_gestures_dropped_total`).
@@ -107,6 +108,13 @@ pub struct Counters {
     pub gestures: u64,
     /// Gestures dropped, by reason label.
     pub gesture_drops: BTreeMap<&'static str, u64>,
+    /// Stances (minor 2) queued for the opponent.
+    pub stances: u64,
+    /// Messages refused at the door of the inbox, by kind label (the gestures aside: they are in
+    /// `gesture_drops`, as `overload`).
+    pub inbox_refused: BTreeMap<&'static str, u64>,
+    /// Lifecycle messages delivered beyond the inbox's reserve.
+    pub inbox_over_reserve: u64,
     /// Game requests refused, by error code name.
     pub rejects: BTreeMap<&'static str, u64>,
     /// Games ended, by end reason name.
@@ -137,7 +145,10 @@ struct Global {
     timer_late: Histogram,
     gestures: Counter,
     gesture_drops: [Counter; 6],
+    stances: Counter,
     inbox: GaugeVec,
+    inbox_refused: [Counter; 6],
+    inbox_over_reserve: Counter,
 }
 
 static GLOBAL: LazyLock<Global> = LazyLock::new(|| {
@@ -206,10 +217,30 @@ static GLOBAL: LazyLock<Global> = LazyLock::new(|| {
         ),
         gestures: metrics::counter("scacelith_gestures_relayed_total", "Gestures relayed to the opponent"),
         gesture_drops: GestureDrop::ALL.map(|d| drops.with(&[d.as_str()])),
+        stances: metrics::counter(
+            "scacelith_stances_relayed_total",
+            "Stances (protocol minor 2) relayed to the opponent (a session of an older minor never receives them)",
+        ),
         inbox: metrics::gauge_vec(
             "scacelith_game_inbox_messages",
             "Messages waiting in the inbox of a game host (set by its beat)",
             &["shard"],
+        ),
+        inbox_refused: {
+            let refused = metrics::counter_vec(
+                "scacelith_game_inbox_refused_total",
+                "Messages refused at the door of a game host's inbox that held INBOX_MAX (32,768) messages, \
+                 INBOX_MAX + INBOX_RESERVE for a request that ends a game: stance, rtt and rematch_decline \
+                 dropped, request and ending answered Error{RateLimited} (the gestures are \
+                 scacelith_gestures_dropped_total{reason=\"overload\"})",
+                &["kind"],
+            );
+            Refusal::ALL.map(|r| refused.with(&[r.as_str()]))
+        },
+        inbox_over_reserve: metrics::counter(
+            "scacelith_game_inbox_over_reserve_total",
+            "Lifecycle messages (attach, detach, create, cancel, forfeit, stats, shutdown) delivered to a game \
+             host whose inbox already held INBOX_MAX + INBOX_RESERVE messages (never refused)",
         ),
     }
 });
@@ -224,6 +255,24 @@ pub(super) fn draining_shards(n: usize) {
 pub(super) fn gesture_overload() {
     let i = GestureDrop::ALL.iter().position(|&d| d == GestureDrop::Overload).unwrap_or(0);
     GLOBAL.gesture_drops[i].inc();
+}
+
+/// A message refused at the door of a host's inbox (counted by the host's `Backlog`, which the
+/// host's [`Counters`] include).
+pub(super) fn inbox_refused(kind: Refusal) {
+    let i = Refusal::ALL.iter().position(|&r| r == kind).unwrap_or(0);
+    GLOBAL.inbox_refused[i].inc();
+}
+
+/// A lifecycle message delivered beyond the inbox's reserve.
+pub(super) fn inbox_over_reserve() {
+    GLOBAL.inbox_over_reserve.inc();
+}
+
+/// A game request refused at the door of a host's inbox, as the host would count a refusal
+/// (`scacelith_game_rejects_total{code}`).
+pub(super) fn busy_reject(code: ErrorCode) {
+    GLOBAL.rejected.with(&[code.name()]).inc();
 }
 
 /// The gauge of the messages waiting in the inbox of a shard's host.
@@ -332,5 +381,10 @@ impl Meter {
         let i = GestureDrop::ALL.iter().position(|&d| d == why).unwrap_or(0);
         GLOBAL.gesture_drops[i].inc();
         *self.counts.gesture_drops.entry(why.as_str()).or_default() += 1;
+    }
+
+    pub(super) fn stance_relayed(&mut self) {
+        GLOBAL.stances.inc();
+        self.counts.stances += 1;
     }
 }

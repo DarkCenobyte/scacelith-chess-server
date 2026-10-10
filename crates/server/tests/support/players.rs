@@ -66,7 +66,16 @@ pub struct Client {
 impl Client {
     /// Connects to `endpoint` with the session token `token` (Welcome received).
     pub async fn connect(endpoint: &Endpoint, token: &str) -> Result<Client, ClientError> {
-        let conn = Connection::connect(endpoint, token, &ConnectOptions::default()).await?;
+        Client::connect_with(endpoint, token, &ConnectOptions::default()).await
+    }
+
+    /// [`Client::connect`] with other settings (a client of an older minor).
+    pub async fn connect_with(
+        endpoint: &Endpoint,
+        token: &str,
+        opts: &ConnectOptions,
+    ) -> Result<Client, ClientError> {
+        let conn = Connection::connect(endpoint, token, opts).await?;
         Ok(Client { conn, history: Vec::new(), closed: None })
     }
 
