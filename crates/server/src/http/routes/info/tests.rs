@@ -67,7 +67,8 @@ async fn the_info_document() {
     ];
     let at: Vec<usize> = order.iter().map(|k| body.find(k).unwrap()).collect();
     assert!(at.windows(2).all(|w| w[0] < w[1]), "{body}");
-    assert!(body.contains("\"schema\":1852590473,"), "the fingerprint as a decimal integer: {body}");
+    let schema = format!("\"schema\":{},", scacelith_protocol::FINGERPRINT);
+    assert!(body.contains(&schema), "the fingerprint as a decimal integer: {body}");
     // No session, no limit of its own.
     assert_eq!(s.t.get("/api/v1/info").bearer("sct_nobody").send().await.status, 200);
 }

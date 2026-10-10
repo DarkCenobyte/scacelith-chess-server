@@ -107,6 +107,8 @@ pub struct Counters {
     pub gestures: u64,
     /// Gestures dropped, by reason label.
     pub gesture_drops: BTreeMap<&'static str, u64>,
+    /// Stances (minor 2) queued for the opponent.
+    pub stances: u64,
     /// Game requests refused, by error code name.
     pub rejects: BTreeMap<&'static str, u64>,
     /// Games ended, by end reason name.
@@ -137,6 +139,7 @@ struct Global {
     timer_late: Histogram,
     gestures: Counter,
     gesture_drops: [Counter; 6],
+    stances: Counter,
     inbox: GaugeVec,
 }
 
@@ -206,6 +209,10 @@ static GLOBAL: LazyLock<Global> = LazyLock::new(|| {
         ),
         gestures: metrics::counter("scacelith_gestures_relayed_total", "Gestures relayed to the opponent"),
         gesture_drops: GestureDrop::ALL.map(|d| drops.with(&[d.as_str()])),
+        stances: metrics::counter(
+            "scacelith_stances_relayed_total",
+            "Stances (protocol minor 2) relayed to the opponent (a session of an older minor never receives them)",
+        ),
         inbox: metrics::gauge_vec(
             "scacelith_game_inbox_messages",
             "Messages waiting in the inbox of a game host (set by its beat)",
@@ -332,5 +339,10 @@ impl Meter {
         let i = GestureDrop::ALL.iter().position(|&d| d == why).unwrap_or(0);
         GLOBAL.gesture_drops[i].inc();
         *self.counts.gesture_drops.entry(why.as_str()).or_default() += 1;
+    }
+
+    pub(super) fn stance_relayed(&mut self) {
+        GLOBAL.stances.inc();
+        self.counts.stances += 1;
     }
 }

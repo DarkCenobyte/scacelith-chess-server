@@ -20,6 +20,7 @@ use crate::ids::{self, ConnId, GameId, GameIdAllocator, UserId};
 pub(crate) enum HostCall {
     Client { game: GameId, user: UserId, kind: MsgType, recv_at: f64 },
     Gesture { game: GameId, user: UserId, frame: Bytes },
+    Stance { game: GameId, user: UserId, frame: Bytes },
     Attach { game: GameId, user: UserId, conn: ConnId },
     Detach { game: GameId, user: UserId, conn: ConnId },
     Rtt { game: GameId, user: UserId, rtt_ms: u32 },
@@ -130,6 +131,14 @@ impl GameHosts for FakeHosts {
             return false;
         }
         self.record(HostCall::Gesture { game, user, frame });
+        true
+    }
+
+    fn stance(&self, game: GameId, user: UserId, frame: Bytes) -> bool {
+        if !self.hosts(game) {
+            return false;
+        }
+        self.record(HostCall::Stance { game, user, frame });
         true
     }
 
@@ -352,5 +361,6 @@ pub(crate) fn name(msg: &ServerMsg) -> &'static str {
         ServerMsg::GameEnd(_) => "GameEnd",
         ServerMsg::RatingUpdate(_) => "RatingUpdate",
         ServerMsg::Gesture(_) => "S_Gesture",
+        ServerMsg::Stance(_) => "S_Stance",
     }
 }

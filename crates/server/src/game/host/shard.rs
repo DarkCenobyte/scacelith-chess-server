@@ -1,7 +1,7 @@
 //! The state of one host actor and everything it does between two awaits: the rooms of its
-//! shard, their endpoints and timers, the stall credit, the gesture relay, the anomalies, the
-//! journal appends, compaction and recovery. The commit pipeline is in `commit.rs`; the actor
-//! loop and the public handles in `mod.rs`.
+//! shard, their endpoints and timers, the stall credit, the gesture and stance relays, the
+//! anomalies, the journal appends, compaction and recovery. The commit pipeline is in
+//! `commit.rs`; the actor loop and the public handles in `mod.rs`.
 //!
 //! Every method runs to completion on the actor's task and never blocks: journal appends are
 //! buffered by the journal, notifications post to their actors, and the few things to wait for
@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use indexmap::IndexSet;
-use scacelith_protocol::{ClientGesture, ClientMsg, ErrorCode, Message, close};
+use scacelith_protocol::{ClientGesture, ClientMsg, ClientStance, ErrorCode, Message, close};
 use serde_json::json;
 use tokio::sync::oneshot;
 use tokio::task::{Id as TaskId, JoinError, JoinSet};
@@ -702,6 +702,26 @@ impl Shard {
         };
         self.meter.gesture_dropped(dropped);
         false
+    }
+
+    /// Relays a player's stance (the raw `C_Stance` frame, minor 2) to the opponent as a droppable
+    /// `S_Stance`, as a gesture is relayed: cosmetic, nothing is journaled, timed or checked
+    /// beyond decoding, and it is dropped without an anomaly when it cannot be relayed (no such
+    /// game, not a player, no opponent attached, an opponent's backlog). Droppable, because a
+    /// stance must never be what closes a slow consumer, and a lost one heals by itself: a
+    /// player who stands sends the stance again every gesture keepalive, and a receiver shows a
+    /// stance not repeated within 5 keepalives, or an opponent who moves, seated. The writer of
+    /// an opponent's session of minor 0 or 1 withholds it. Returns whether it was queued.
+    pub fn stance(&mut self, game: GameId, user: UserId, frame: &[u8]) -> bool {
+        let Some(entry) = self.rooms.get(&game) else { return false };
+        let Some(side) = entry.room.side_of(user) else { return false };
+        let Some(ep) = &entry.ep[side.opponent().index()] else { return false };
+        let Ok(out) = ClientStance::relay_frame(frame) else { return false };
+        if !ep.send_droppable(Bytes::copy_from_slice(&out)) {
+            return false;
+        }
+        self.meter.stance_relayed();
+        true
     }
 
     /// A round-trip measurement of a player (it moves the deadlines).

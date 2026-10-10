@@ -1155,7 +1155,7 @@ impl BucketRig {
         let ws = rig.ws(server);
         let (ep, out) = Endpoint::for_tests(ws.info.id(), 1);
         let (link, _cmds) = ConnLink::new(ep, "alice".into(), [0; 32]);
-        let mut session = super::session::Session::new(rig.ctx.clone(), link, ws.info.clone());
+        let mut session = super::session::Session::new(rig.ctx.clone(), link, ws.info.clone(), proto::MINOR);
         let game = rig.hosts.next_id(0);
         session.attach(game);
         BucketRig { rig, clock, session, out, game, seq: 1, _io: io }

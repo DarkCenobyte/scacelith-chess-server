@@ -15,8 +15,11 @@
 //!
 //! Every other message comes from a source limited elsewhere (the message rate of each
 //! connection, `MAX_CONNECTIONS`, the lobby's requests in flight per connection), for the games
-//! the host already holds, which no longer grow once it is busy. The counts are exported every
-//! beat (`scacelith_game_inbox_messages` and `scacelith_journal_pending_bytes`, per shard).
+//! the host already holds, which no longer grow once it is busy. A stance (minor 2) is cosmetic
+//! too but rare (one when it changes, then one per gesture keepalive while the player stands)
+//! and within its connection's message rate: it is delivered like a request. The counts are
+//! exported every beat (`scacelith_game_inbox_messages` and `scacelith_journal_pending_bytes`,
+//! per shard).
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 

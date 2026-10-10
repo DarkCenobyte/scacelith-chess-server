@@ -30,6 +30,10 @@ pub trait GameHosts: Send + Sync + 'static {
     /// no host of this server hosts that shard.
     fn gesture(&self, game: GameId, user: UserId, frame: Bytes) -> bool;
 
+    /// A raw `C_Stance` frame (minor 2), already decoded and checked by the connection. Returns
+    /// false when no host of this server hosts that shard.
+    fn stance(&self, game: GameId, user: UserId, frame: Bytes) -> bool;
+
     /// Binds a connection to a game; the host sends a `GameSnapshot`.
     fn attach(&self, game: GameId, user: UserId, ep: Endpoint);
 
@@ -137,6 +141,10 @@ impl GameHosts for Hosts {
 
     fn gesture(&self, game: GameId, user: UserId, frame: Bytes) -> bool {
         host_of(self, game).map(|h| h.gesture(game, user, frame)).is_some()
+    }
+
+    fn stance(&self, game: GameId, user: UserId, frame: Bytes) -> bool {
+        host_of(self, game).map(|h| h.stance(game, user, frame)).is_some()
     }
 
     fn attach(&self, game: GameId, user: UserId, ep: Endpoint) {

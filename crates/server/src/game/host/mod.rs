@@ -22,10 +22,10 @@
 //!
 //! [`HostHandle`] is the cheap, cloneable way in: every method posts to the inbox and returns
 //! (only [`HostHandle::create`] waits for the game id). The realtime connection tasks call
-//! [`HostHandle::client`], [`HostHandle::gesture`], [`HostHandle::attach`],
-//! [`HostHandle::detach`] and [`HostHandle::rtt`]; the lobby creates games, cancels them,
-//! forfeits sanctioned players and closes rematch windows. The host talks back through
-//! [`HostEvents`] and [`AnomalySink`].
+//! [`HostHandle::client`], [`HostHandle::gesture`], [`HostHandle::stance`],
+//! [`HostHandle::attach`], [`HostHandle::detach`] and [`HostHandle::rtt`]; the lobby creates
+//! games, cancels them, forfeits sanctioned players and closes rematch windows. The host talks
+//! back through [`HostEvents`] and [`AnomalySink`].
 //!
 //! A panic in room code is caught: the request gets `Error{Internal}` and the game goes on (a
 //! timer that panicked is retried a second later); a panic anywhere else in a message's handling
@@ -184,6 +184,7 @@ impl HostStats {
 enum Msg {
     Client { user: UserId, msg: ClientMsg, ep: Endpoint, recv_at: f64 },
     Gesture { game: GameId, user: UserId, frame: Bytes },
+    Stance { game: GameId, user: UserId, frame: Bytes },
     Attach { game: GameId, user: UserId, ep: Endpoint },
     Detach { game: GameId, user: UserId, conn: ConnId },
     Rtt { game: GameId, user: UserId, rtt_ms: u32 },
@@ -264,6 +265,13 @@ impl HostHandle {
         if self.shared.backlog.posting_gesture() {
             self.send(Msg::Gesture { game, user, frame });
         }
+    }
+
+    /// A raw `C_Stance` frame (minor 2), relayed to the opponent (validated here). Delivered like
+    /// the requests, not capped like the gestures: a client sends one when its player's stance
+    /// changes and, standing, one per gesture keepalive, within its connection's message rate.
+    pub fn stance(&self, game: GameId, user: UserId, frame: Bytes) {
+        self.post(Msg::Stance { game, user, frame });
     }
 
     /// Binds the player's connection to the game and sends it a `GameSnapshot`
@@ -655,6 +663,9 @@ fn handle(shard: &mut Shard, msg: Msg) -> Option<oneshot::Sender<()>> {
         Msg::Client { user, msg, ep, recv_at } => shard.client(user, &msg, Some(ep), recv_at),
         Msg::Gesture { game, user, frame } => {
             shard.gesture(game, user, &frame);
+        }
+        Msg::Stance { game, user, frame } => {
+            shard.stance(game, user, &frame);
         }
         Msg::Attach { game, user, ep } => {
             shard.attach(game, user, ep);
