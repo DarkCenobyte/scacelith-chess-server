@@ -3,12 +3,12 @@
 The online multiplayer server of [Scacelith](https://github.com/DarkCenobyte/scacelith-chess), a
 photorealistic chess game played in first person: accounts, rated matchmaking, challenges and private
 games, authoritative games with server clocks (the robots press the clock by themselves unless
-`AUTO_PRESS_CLOCK=false`), the opponent's live gestures (head, hand) relayed without being
-stored, one Elo per official time control, anti-cheat and reports. It is one Rust program,
-`scacelith-server`, a single binary with its database (SQLite) built in. The game (the Windows
-binary, developed in [DarkCenobyte/scacelith-chess](https://github.com/DarkCenobyte/scacelith-chess))
-is only a client of it; anyone can run a community server, and players choose the server in the
-game's Options.
+`AUTO_PRESS_CLOCK=false`), the opponent's live gestures (head, hand) and stance (standing up to
+look at the board) relayed without being stored, one Elo per official time control, anti-cheat
+and reports. It is one Rust program, `scacelith-server`, a single binary with its database
+(SQLite) built in. The game (the Windows binary, developed in
+[DarkCenobyte/scacelith-chess](https://github.com/DarkCenobyte/scacelith-chess)) is only a client
+of it; anyone can run a community server, and players choose the server in the game's Options.
 
 - Official server: `caissa.scacelith.com`, TCP port `443` (HTTPS API and WSS on the same port).
 - Licence: GPL-3.0-or-later, for the source and for the binaries built from it (see
@@ -658,10 +658,10 @@ analysis backlog, the skipped games, and the analysis engines running and sharin
 `scacelith_anticheat_analysis_engines*`), the retention purge (`scacelith_retention_*`), the
 process (`scacelith_process_*`: CPU, memory, file descriptors, threads), how late the async
 runtime runs its timers (`scacelith_runtime_lateness_*`), the stalls of the game host actors and
-the time given back to the players for them (`scacelith_game_stall_*`), the gesture relay
-(`scacelith_gestures_*`), the work waiting inside the process and what the server refused because
-of it (`scacelith_game_inbox_messages`, `scacelith_journal_pending_bytes`,
-`scacelith_db_write_queue`, `scacelith_games_refused_busy_total`,
+the time given back to the players for them (`scacelith_game_stall_*`), the gesture and stance
+relays (`scacelith_gestures_*`, `scacelith_stances_relayed_total`), the work waiting inside the
+process and what the server refused because of it (`scacelith_game_inbox_messages`,
+`scacelith_journal_pending_bytes`, `scacelith_db_write_queue`, `scacelith_games_refused_busy_total`,
 `scacelith_db_writes_refused_total`), and the free disk space
 (`scacelith_database_disk_free_bytes`, `scacelith_journal_disk_free_bytes`). Alert rules:
 [docs/SIZING.md](docs/SIZING.md#alert-rules). `/healthz` answers while the process runs, `/readyz`

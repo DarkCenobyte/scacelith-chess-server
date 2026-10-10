@@ -63,7 +63,9 @@ no shard bus: what the Node primary owned is in-process state.
   game and lobby requests to the lobby actor; a second task per authenticated connection writes
   its byte-accounted outbound queue (`realtime::Outbound`) to the socket. Over
   `WS_SEND_BUFFER_LIMIT` bytes queued the connection is closed with 4303; droppable frames (the
-  opponent's gestures) are skipped above a quarter of it.
+  opponent's gestures and stances) are skipped above a quarter of it. The writer adapts each frame
+  to the session's minor (`frame_for_minor`: a later value replaced, a later message type such as
+  the server `Stance` withheld).
 * **Blocking work never runs on runtime threads.** SQLite (the writer thread, and the reader
   pool on tokio's blocking threads), journal file I/O and fsync (one thread per shard), password
   hashing (blocking threads, at most `PASSWORD_HASH_CONCURRENCY` at a time), GIF rendering (its
@@ -80,7 +82,7 @@ scacelith-chess-server/
   Cargo.toml              workspace (shared dependency versions, lints, profiles)
   rust-toolchain.toml     Rust 1.99.0 (+ x86_64-unknown-linux-musl for the static release build)
   protocol/scacelith-v1.json   realtime protocol schema (source of all generated codecs)
-  protocol/frozen/        manifests of the released protocol minors (v1.0.json, v1.1.json)
+  protocol/frozen/        manifests of the released protocol minors (v1.0.json to v1.2.json)
   crates/protocol         scacelith-protocol: generated codec, constants, the `protogen` generator
   crates/chess            scacelith-chess: rules, SAN/UCI/FEN, digest, PGN (no dependencies)
   crates/gif              scacelith-gif: GIF renderer and encoder
@@ -293,6 +295,7 @@ impl HostHandle {
     /// Resync, Rematch) with the connection it came from and its read time (mono ms).
     pub fn client(&self, user: UserId, msg: ClientMsg, ep: Endpoint, recv_at: f64);
     pub fn gesture(&self, game: GameId, user: UserId, frame: Bytes);  // raw C_Gesture
+    pub fn stance(&self, game: GameId, user: UserId, frame: Bytes);   // raw C_Stance (minor 2)
     pub fn attach(&self, game: GameId, user: UserId, ep: Endpoint);   // sends a GameSnapshot
     pub fn detach(&self, game: GameId, user: UserId, conn: ConnId);   // only if still that endpoint
     pub fn rtt(&self, game: GameId, user: UserId, rtt_ms: u32);

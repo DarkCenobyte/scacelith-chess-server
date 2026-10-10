@@ -515,7 +515,7 @@ curl -sS "$API/info"
   "name": "Scacelith",
   "serverId": "07dd26af-672a-43af-a8af-34011c7e977b",
   "motd": "",
-  "protocol": { "min": 1, "max": 1, "schema": 1852590473, "subprotocol": "scacelith.rt1" },
+  "protocol": { "min": 1, "max": 1, "schema": 3326678031, "subprotocol": "scacelith.rt1" },
   "wsPort": 443,
   "wsPath": "/ws",
   "registration": "open",
@@ -536,8 +536,8 @@ curl -sS "$API/info"
   restarts. It is `null` when the database cannot give it.
 - `protocol`: the WebSocket protocol versions that the server speaks (`min` to `max`), the
   schema fingerprint `schema` (the first 4 bytes, big-endian, of the SHA-256 of the canonical
-  schema, as an unsigned integer: `0x6e6c4989`; informational, never compared) and the
-  subprotocol (PROTOCOL.md).
+  schema, as an unsigned integer: `0xc649140f`, 3326678031, for protocol minor 2; informational,
+  never compared) and the subprotocol (PROTOCOL.md).
 - `wsPort`: the WebSocket port that players use: `PUBLIC_WS_PORT`, else `WS_PORT`, else
   `API_PORT`. Behind a proxy that publishes 443, set `PUBLIC_WS_PORT` as well as
   `PUBLIC_API_PORT`.

@@ -86,6 +86,8 @@ Three settings, all announced to the game in `Welcome`, so a change applies to t
 
 A gesture is small: about 110 bytes in and 100 bytes out at the IP level, one packet each way ([Network](#network)).
 
+A player who stands up to look at the board (protocol minor 2) also sends a `Stance` when it stands, moves or sits, and one per `GESTURE_IDLE_MS` while it stays up, even with `GESTURE_RATE=0`; the server relays it like a gesture (`scacelith_stances_relayed_total`). Players stand now and then, not all game long, so this adds at most one relayed message per second per standing player at the default interval, a fraction of the keepalive gestures: r leaves it out.
+
 ### Capacity per vCore
 
 Games per OVH vCore at the comfortable point (70 %), apart from the fixed cost of about 0.22 vCore per server (inferred):
