@@ -34,8 +34,10 @@ pub trait GameHosts: Send + Sync + 'static {
     /// false when no host of this server hosts that shard.
     fn stance(&self, game: GameId, user: UserId, frame: Bytes) -> bool;
 
-    /// Binds a connection to a game; the host sends a `GameSnapshot`.
-    fn attach(&self, game: GameId, user: UserId, ep: Endpoint);
+    /// Binds a connection to a game; the host sends a `GameSnapshot`. Returns false, doing
+    /// nothing, while the host has not handled an earlier connection's attach and detach of the
+    /// player's game yet (`game::host::LINK_PENDING_MAX`): the connection tries again later.
+    fn attach(&self, game: GameId, user: UserId, ep: Endpoint) -> bool;
 
     /// Unbinds a connection from a game, if it is still that connection.
     fn detach(&self, game: GameId, user: UserId, conn: ConnId);
@@ -147,10 +149,8 @@ impl GameHosts for Hosts {
         host_of(self, game).map(|h| h.stance(game, user, frame)).is_some()
     }
 
-    fn attach(&self, game: GameId, user: UserId, ep: Endpoint) {
-        if let Some(h) = host_of(self, game) {
-            h.attach(game, user, ep);
-        }
+    fn attach(&self, game: GameId, user: UserId, ep: Endpoint) -> bool {
+        host_of(self, game).is_none_or(|h| h.attach(game, user, ep))
     }
 
     fn detach(&self, game: GameId, user: UserId, conn: ConnId) {

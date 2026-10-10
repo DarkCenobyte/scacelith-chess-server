@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use scacelith_chess::ChessGame;
 use scacelith_protocol::{
-    ClientGesture, ClientMsg, ClientStance, Color, EndReason as ER, ErrorCode, GameStatus as GS, Message,
-    Move, MsgType, ServerMsg, Stance,
+    ClientGesture, ClientMsg, ClientStance, Color, EndReason as ER, ErrorCode, GameEventKind,
+    GameStatus as GS, Message, Move, MsgType, ServerMsg, Stance,
 };
 
 use super::persistence::{real_store, shown};
@@ -17,6 +17,7 @@ use crate::config::test_config;
 use crate::events::NewGame;
 use crate::game::host::{
     GESTURE_INBOX_MAX, HostDeps, HostError, HostHandle, HostLoad, Hosts, INBOX_BUSY, JOURNAL_PENDING_BUSY,
+    LINK_PENDING_MAX,
 };
 use crate::game::rules::Rules;
 use crate::game::testing::RecordingEvents;
@@ -447,6 +448,88 @@ async fn a_flood_of_gestures_is_bounded_and_the_messages_behind_it_are_all_handl
     hosts.shutdown().await;
 }
 
+/// White's presence as Black's connection saw it: `true` for each `PlayerReconnected`, `false`
+/// for each `PlayerDisconnected`.
+fn white_presence(ep: &Ep) -> Vec<bool> {
+    ep.msgs()
+        .into_iter()
+        .filter_map(|m| match m {
+            ServerMsg::GameEvent(e) if e.color == Color::White => match e.kind {
+                GameEventKind::PlayerReconnected => Some(true),
+                GameEventKind::PlayerDisconnected => Some(false),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_player_reconnecting_to_a_host_far_behind_leaves_one_earlier_connection_in_its_inbox() {
+    // Audit A10: the host does not run while the test posts (one thread), and White's
+    // connections come and go a thousand times, as the session of each would post them: an
+    // attach, then the detach at its close when the attach was posted.
+    let dir = TempDir::new("e2e");
+    let (store, users) = real_store(&["alice", "bob"]).await;
+    let [alice, bob] = users[..] else { panic!("two accounts") };
+    let events = Arc::new(RecordingEvents::default());
+    let hosts = Hosts::start(deps(&dir, &store, &events), 0..1).await.expect("hosts started");
+    let host = hosts.handles()[0].clone();
+    let spec = NewGame { white: shown(alice, "alice"), black: shown(bob, "bob"), ..new_game(0, 0) };
+    let id = host.create(spec).await.expect("created");
+    let (ew, eb) = (Ep::new(1, alice), Ep::new(2, bob));
+    assert!(host.attach(id, alice, ew.endpoint()) && host.attach(id, bob, eb.endpoint()));
+    until("the snapshots", || got(&ew, MsgType::GameSnapshot) && got(&eb, MsgType::GameSnapshot)).await;
+    let mut mirror = ChessGame::default();
+    play(&host, id, &mut mirror, &["e2e4"], [(alice, &ew), (bob, &eb)]);
+    until("the move", || got(&eb, MsgType::MoveMade)).await;
+
+    host.detach(id, alice, 1);
+    let mut posted = 0;
+    for conn in 3..1003 {
+        let ep = Ep::new(conn, alice);
+        if host.attach(id, alice, ep.endpoint()) {
+            posted += 1;
+            host.detach(id, alice, conn);
+        }
+        let (waiting, games) = host.links(id, alice);
+        assert!(
+            waiting <= LINK_PENDING_MAX + 1 && games == 1,
+            "{waiting} messages of {games} games at {conn}"
+        );
+    }
+    assert_eq!(posted, 1, "only the first return is posted while the host lags behind");
+    assert_eq!(host.attaches_deferred(), 999);
+    assert_eq!(host.inbox().0, 3, "the first connection's detach, the second one's attach and detach");
+    // The connection still open tries again once the host caught up.
+    let last = Ep::new(1003, alice);
+    assert!(!host.attach(id, alice, last.endpoint()), "still deferred");
+    let stats = host.stats().await.expect("the host runs");
+    assert_eq!(stats.counters.attaches_deferred, 1000);
+    assert_eq!(host.links(id, alice), (0, 0), "nothing waits");
+    assert!(host.attach(id, alice, last.endpoint()));
+    until("the snapshot of the last connection", || got(&last, MsgType::GameSnapshot)).await;
+
+    // Black saw White leave and come back once per connection the host handled, White last
+    // present; the game goes on from the last connection, and its result is committed.
+    until("White back", || white_presence(&eb).len() == 4).await;
+    assert_eq!(white_presence(&eb), [false, true, false, true]);
+    let mv = scacelith_protocol::uci_to_move("e7e5").expect("a UCI move");
+    let pos_hash = Rules::digest(&mirror);
+    let reply = Move { seq: 3, game: id, ply: 1, r#move: mv, pos_hash, think_ms: 0, draw_offer: false };
+    host.client(bob, ClientMsg::Move(reply), eb.endpoint(), clock::mono_ms());
+    until("Black's move", || got(&last, MsgType::MoveMade)).await;
+    host.client(alice, resign(id, 9), last.endpoint(), clock::mono_ms());
+    until("the end", || got(&last, MsgType::GameEnd) && got(&eb, MsgType::GameEnd)).await;
+    let end = eb.msgs().into_iter().find_map(|m| match m {
+        ServerMsg::GameEnd(e) => Some((e.status, e.reason)),
+        _ => None,
+    });
+    assert_eq!(end, Some((GS::BlackWins, ER::Resignation)));
+    until("the commit", || !events.ended().is_empty()).await;
+    hosts.shutdown().await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn busy_hosts_take_no_new_game_and_a_saturated_server_refuses_one() {
     let dir = TempDir::new("e2e");
@@ -556,10 +639,11 @@ async fn a_host_far_behind_bounds_its_inbox_and_still_ends_and_commits_its_games
     };
     assert_eq!(refusal(&ew), (2, ErrorCode::RateLimited, false, id));
 
-    // Lifecycle messages are never refused: detaches of a connection that is not attached (they
-    // change nothing) take the reserve but its last place, which Black's resignation takes.
-    for _ in 0..INBOX_RESERVE - 1 {
-        host.detach(id, bob, 99);
+    // Lifecycle messages are never refused: detaches of players who do not play this game (they
+    // change nothing; one player's game would only wait for its own attach and detach) take the
+    // reserve but its last place, which Black's resignation takes.
+    for i in 0..INBOX_RESERVE - 1 {
+        host.detach(id, 1_000_000 + i as UserId, 99);
     }
     host.client(bob, resign(id, 9), eb.endpoint(), clock::mono_ms());
     assert_eq!(host.inbox().0, INBOX_MAX + INBOX_RESERVE);
