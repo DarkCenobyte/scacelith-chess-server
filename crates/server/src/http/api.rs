@@ -5,10 +5,29 @@
 //!
 //! The listener (`net`) admits each request first (blocks, per-address rates, in-flight slots)
 //! and answers `GET`/`HEAD` of the health paths itself; [`Api::handle`] does everything after.
+//!
+//! # When the server falls behind
+//!
+//! Nothing a request starts may wait without a bound, nor pile up once its client is gone:
+//!
+//! * a request that may write (`POST`, `PUT`, `PATCH`, `DELETE`) is answered 503 `server_busy`
+//!   before anything runs while the database writer is backlogged
+//!   ([`ApiBuilder::write_backlog`]); an authenticated read writes nothing it waits for (the
+//!   session renewals are queued in the background, coalesced and deferred under pressure:
+//!   `auth::sessions`);
+//! * the authentication runs under its own deadline ([`AUTH_TIMEOUT`]), before the handler's:
+//!   beyond it the request is answered 503 `server_busy` (`scacelith_http_busy_total{reason=
+//!   "auth_timeout"}`) and the validation is dropped (a read waiting for a reader connection
+//!   stops waiting; one running ends on its blocking thread);
+//! * the handler runs under the route's timeout ([`HANDLER_TIMEOUT`] by default) and, late, keeps
+//!   running (its side effects happen); while [`LATE_HANDLERS_MAX`] late handlers still run, new
+//!   requests are answered 503 `server_busy` before anything runs
+//!   (`scacelith_http_busy_total{reason="late_handlers"}`, `scacelith_http_late_handlers`), so
+//!   that work outliving its clients stays bounded.
 
 use std::borrow::Cow;
 use std::fmt::Display;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
@@ -31,7 +50,7 @@ use super::url::parse_urlencoded;
 use crate::clock::{self, SharedClock};
 use crate::config::{Config, TlsMode};
 use crate::log::Logger;
-use crate::metrics::{self, Counter, CounterVec, Histogram};
+use crate::metrics::{self, Counter, CounterVec, Gauge, Histogram};
 use crate::net::guard::{AddressKeys, IpGuard};
 use crate::net::health::Readiness;
 use crate::net::ip::for_log;
@@ -43,6 +62,12 @@ use crate::{log_debug, log_error};
 pub const MAX_URL: usize = 4096;
 /// How long a handler may take unless its route says otherwise.
 pub const HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the authentication of a request may take (a cached session answers at once; a
+/// session read again takes one read of the database): beyond it, 503 `server_busy`.
+pub const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Handlers that outlived their route's timeout and still run, from which new requests are
+/// answered 503 `server_busy` before anything runs (module documentation).
+pub const LATE_HANDLERS_MAX: usize = 1024;
 /// The content security policy of JSON, text and binary answers.
 pub const API_CSP: &str = "default-src 'none'; frame-ancestors 'none'";
 /// The content security policy of HTML pages.
@@ -61,21 +86,43 @@ struct HttpMetrics {
     requests: CounterVec,
     duration: Histogram,
     writes_refused: Counter,
+    busy_late: Counter,
+    busy_auth: Counter,
+    late: Gauge,
 }
 
 fn http_metrics() -> &'static HttpMetrics {
-    static M: LazyLock<HttpMetrics> = LazyLock::new(|| HttpMetrics {
-        requests: metrics::counter_vec("scacelith_http_requests_total", "API requests", &["route", "status"]),
-        duration: metrics::histogram(
-            "scacelith_http_request_duration_ms",
-            "API request duration",
-            &[2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0],
-        ),
-        writes_refused: metrics::counter(
-            "scacelith_db_writes_refused_total",
-            "API requests (POST, PUT, PATCH, DELETE) answered 503 server_busy without being run, because \
+    static M: LazyLock<HttpMetrics> = LazyLock::new(|| {
+        let busy = metrics::counter_vec(
+            "scacelith_http_busy_total",
+            "API requests answered 503 server_busy because the server fell behind: late_handlers \
+             (LATE_HANDLERS_MAX handlers still ran after their timeout; refused before anything ran), \
+             auth_timeout (the authentication took longer than AUTH_TIMEOUT)",
+            &["reason"],
+        );
+        HttpMetrics {
+            requests: metrics::counter_vec(
+                "scacelith_http_requests_total",
+                "API requests",
+                &["route", "status"],
+            ),
+            duration: metrics::histogram(
+                "scacelith_http_request_duration_ms",
+                "API request duration",
+                &[2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0],
+            ),
+            writes_refused: metrics::counter(
+                "scacelith_db_writes_refused_total",
+                "API requests (POST, PUT, PATCH, DELETE) answered 503 server_busy without being run, because \
              the database writer had too many jobs waiting",
-        ),
+            ),
+            busy_late: busy.with(&["late_handlers"]),
+            busy_auth: busy.with(&["auth_timeout"]),
+            late: metrics::gauge(
+                "scacelith_http_late_handlers",
+                "API handlers still running after their route's timeout answered 503 timeout",
+            ),
+        }
     });
     &M
 }
@@ -83,8 +130,16 @@ fn http_metrics() -> &'static HttpMetrics {
 /// Tells whether the database has too many write jobs waiting (`Store::writes_backlogged`).
 pub type WriteBacklog = Arc<dyn Fn() -> bool + Send + Sync>;
 
-/// The `retryAfter` range (seconds) of a request refused for the database's write backlog.
-const WRITE_BACKLOG_RETRY_AFTER_SEC: (u64, u64) = (2, 5);
+/// The `retryAfter` range (seconds) of a request refused because the server fell behind (the
+/// database's write backlog, the late handlers, an authentication past its deadline).
+const BUSY_RETRY_AFTER_SEC: (u64, u64) = (2, 5);
+
+/// 503 `server_busy` with a random `retryAfter` of [`BUSY_RETRY_AFTER_SEC`].
+fn server_busy() -> ApiError {
+    let (min, max) = BUSY_RETRY_AFTER_SEC;
+    ApiError::new(503, "server_busy", "The server is busy; try again in a few seconds.")
+        .with_extra("retryAfter", Value::from(random_retry_after(min, max)))
+}
 
 /// Escapes text for HTML (`& < > " '`).
 pub fn escape_html(s: &str) -> String {
@@ -126,6 +181,8 @@ pub struct ApiBuilder {
     page_renderer: PageRenderer,
     body_timeout: Duration,
     handler_timeout: Duration,
+    auth_timeout: Duration,
+    late_handlers_max: usize,
     write_backlog: Option<WriteBacklog>,
 }
 
@@ -187,6 +244,18 @@ impl ApiBuilder {
         self
     }
 
+    /// How long the authentication of a request may take (default [`AUTH_TIMEOUT`]).
+    pub fn auth_timeout(mut self, timeout: Duration) -> ApiBuilder {
+        self.auth_timeout = timeout;
+        self
+    }
+
+    /// Late handlers from which new requests are refused (default [`LATE_HANDLERS_MAX`]).
+    pub fn late_handlers_max(mut self, max: usize) -> ApiBuilder {
+        self.late_handlers_max = max;
+        self
+    }
+
     /// Whether the database has too many write jobs waiting: requests with a body method are then
     /// refused with 503 `server_busy` before anything runs (default: never).
     pub fn write_backlog(mut self, backlogged: impl Fn() -> bool + Send + Sync + 'static) -> ApiBuilder {
@@ -214,6 +283,8 @@ impl ApiBuilder {
             page_renderer: self.page_renderer,
             body_timeout: self.body_timeout,
             handler_timeout: self.handler_timeout,
+            auth_timeout: self.auth_timeout,
+            late_handlers_max: self.late_handlers_max,
             write_backlog: self.write_backlog,
             handlers: Arc::new(Handlers::default()),
         })
@@ -224,23 +295,52 @@ impl ApiBuilder {
 #[derive(Default)]
 struct Handlers {
     running: AtomicUsize,
+    /// Those that outlived their route's timeout.
+    late: AtomicUsize,
     idle: tokio::sync::Notify,
 }
 
+/// A handler task running within its timeout.
+const ON_TIME: u8 = 0;
+/// A handler task running after its timeout (counted in `Handlers::late`).
+const LATE: u8 = 1;
+/// A handler task that ended.
+const ENDED: u8 = 2;
+
 /// One running handler task; dropping it (the task ended or panicked) wakes [`Api::quiesce`].
-struct HandlerTask(Arc<Handlers>);
+struct HandlerTask {
+    handlers: Arc<Handlers>,
+    state: Arc<AtomicU8>,
+}
 
 impl HandlerTask {
     fn start(handlers: &Arc<Handlers>) -> HandlerTask {
         handlers.running.fetch_add(1, Ordering::SeqCst);
-        HandlerTask(handlers.clone())
+        HandlerTask { handlers: handlers.clone(), state: Arc::new(AtomicU8::new(ON_TIME)) }
+    }
+
+    /// The task's state, for [`HandlerTask::mark_late`].
+    fn state(&self) -> Arc<AtomicU8> {
+        self.state.clone()
+    }
+
+    /// The route's timeout answered: the task, unless it ended meanwhile, counts as late.
+    fn mark_late(handlers: &Handlers, state: &AtomicU8) {
+        if state.compare_exchange(ON_TIME, LATE, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+            handlers.late.fetch_add(1, Ordering::SeqCst);
+            http_metrics().late.inc();
+        }
     }
 }
 
 impl Drop for HandlerTask {
     fn drop(&mut self) {
-        if self.0.running.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.0.idle.notify_waiters();
+        if self.state.swap(ENDED, Ordering::SeqCst) == LATE {
+            self.handlers.late.fetch_sub(1, Ordering::SeqCst);
+            http_metrics().late.dec();
+        }
+        if self.handlers.running.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.handlers.idle.notify_waiters();
         }
     }
 }
@@ -260,6 +360,8 @@ pub struct Api {
     page_renderer: PageRenderer,
     body_timeout: Duration,
     handler_timeout: Duration,
+    auth_timeout: Duration,
+    late_handlers_max: usize,
     hsts: bool,
     cors: Cors,
     write_backlog: Option<WriteBacklog>,
@@ -347,6 +449,8 @@ impl Api {
             page_renderer: Arc::new(fallback_page),
             body_timeout: BODY_TIMEOUT,
             handler_timeout: HANDLER_TIMEOUT,
+            auth_timeout: AUTH_TIMEOUT,
+            late_handlers_max: LATE_HANDLERS_MAX,
             write_backlog: None,
         }
     }
@@ -390,6 +494,11 @@ impl Api {
     /// Handler tasks running now, late ones included.
     pub fn handlers_running(&self) -> usize {
         self.handlers.running.load(Ordering::SeqCst)
+    }
+
+    /// Handler tasks still running after their route's timeout.
+    pub fn handlers_late(&self) -> usize {
+        self.handlers.late.load(Ordering::SeqCst)
     }
 
     /// Runs the close hooks of the route modules once (the server's shutdown).
@@ -506,16 +615,28 @@ impl Api {
         progress.label = Cow::Owned(route.label().to_string());
         progress.page = route.opts().page;
         let opts = route.opts();
+        // Too much work outlived its clients: nothing more starts until it ends (nothing taken,
+        // nothing changed).
+        if self.handlers.late.load(Ordering::SeqCst) >= self.late_handlers_max {
+            http_metrics().busy_late.inc();
+            return Err(server_busy());
+        }
         // A request that may write waits for nothing while the database writer is far behind:
         // refused before its authentication, rates and body (nothing taken, nothing changed).
         if BODY_METHODS.contains(&method) && self.write_backlog.as_ref().is_some_and(|f| f()) {
             http_metrics().writes_refused.inc();
-            let (min, max) = WRITE_BACKLOG_RETRY_AFTER_SEC;
-            return Err(ApiError::new(503, "server_busy", "The server is busy; try again in a few seconds.")
-                .with_extra("retryAfter", Value::from(random_retry_after(min, max))));
+            return Err(server_busy());
         }
 
-        let auth = self.authenticate(&parts.headers, opts.auth).await?;
+        let auth = match tokio::time::timeout(self.auth_timeout, self.authenticate(&parts.headers, opts.auth))
+            .await
+        {
+            Ok(auth) => auth?,
+            Err(_) => {
+                http_metrics().busy_auth.inc();
+                return Err(server_busy());
+            }
+        };
         if let Some(a) = &auth {
             self.budget.take(a.user_id)?;
         }
@@ -598,10 +719,12 @@ impl Api {
     }
 
     /// Runs the handler on its own task under the route's timeout. A late handler keeps running
-    /// (its side effects happen) and its answer is dropped.
+    /// (its side effects happen), counted until it ends ([`LATE_HANDLERS_MAX`]), and its answer is
+    /// dropped.
     async fn run_handler(&self, route: &Route, ctx: Ctx) -> Result<Answer, ApiError> {
         let timeout = route.opts().timeout.unwrap_or(self.handler_timeout);
         let running = HandlerTask::start(&self.handlers);
+        let state = running.state();
         let handler = (route.handler())(ctx);
         let task = tokio::spawn(async move {
             let _running = running;
@@ -610,7 +733,10 @@ impl Api {
         match tokio::time::timeout(timeout, task).await {
             Ok(Ok(result)) => result,
             Ok(Err(join)) => Err(ApiError::internal(format!("handler panicked: {join}"))),
-            Err(_) => Err(ApiError::new(503, "timeout", "The server took too long to answer; try again.")),
+            Err(_) => {
+                HandlerTask::mark_late(&self.handlers, &state);
+                Err(ApiError::new(503, "timeout", "The server took too long to answer; try again."))
+            }
         }
     }
 
