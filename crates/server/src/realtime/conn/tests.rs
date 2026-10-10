@@ -606,6 +606,45 @@ async fn attaches_the_game_in_progress_after_the_welcome() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_attach_the_host_defers_is_tried_again_until_it_is_posted() {
+    // The game's host has not handled the player's previous connection yet (A10): the game in
+    // progress is attached once it has, the connection trying again meanwhile.
+    let rig = Rig::new(&[]).await;
+    let game = rig.game_in_progress().await;
+    rig.hosts.defer_attaches(3);
+    let t0 = tokio::time::Instant::now();
+    let (_c, w) = rig.login(ALICE).await;
+    assert_eq!(w.active_game, game);
+    let calls = rig.host_calls(1, |c| matches!(c, HostCall::Attach { .. })).await;
+    assert!(matches!(calls[0], HostCall::Attach { game: g, user: 1, .. } if g == game));
+    let deferred = rig.host_calls(3, |c| matches!(c, HostCall::AttachDeferred { .. })).await;
+    assert!(
+        deferred.iter().all(|c| matches!(c, HostCall::AttachDeferred { game: g, user: 1, .. } if *g == game))
+    );
+    assert!(t0.elapsed() >= 2 * super::ATTACH_RETRY, "tried again on its timer: {:?}", t0.elapsed());
+    tokio::time::sleep(5 * super::ATTACH_RETRY).await;
+    let attaches = rig.hosts.calls().into_iter().filter(|c| matches!(c, HostCall::Attach { .. })).count();
+    assert_eq!(attaches, 1, "attached once, not tried again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_connection_closed_before_its_deferred_attach_detaches_nothing() {
+    let rig = Rig::new(&[]).await;
+    let game = rig.game_in_progress().await;
+    rig.hosts.defer_attaches(usize::MAX);
+    let (c, _) = rig.login(ALICE).await;
+    let deferred = rig.host_calls(2, |c| matches!(c, HostCall::AttachDeferred { .. })).await;
+    assert!(matches!(deferred[0], HostCall::AttachDeferred { game: g, user: 1, .. } if g == game));
+    drop(c);
+    rig.idle().await;
+    let calls = rig.hosts.calls();
+    assert!(
+        !calls.iter().any(|c| matches!(c, HostCall::Attach { .. } | HostCall::Detach { .. })),
+        "{calls:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn replaces_an_older_connection_of_the_account() {
     let rig = Rig::new(&[]).await;
     let game = rig.game_in_progress().await;

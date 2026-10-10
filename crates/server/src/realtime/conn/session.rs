@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tokio::task::{JoinError, JoinHandle};
 
 use super::hello::Welcomed;
-use super::{CLIENT_PING_GAP_MS, ConnContext, Gauge, MAX_GAMES_PER_CONN, RTT_CAP_MS};
+use super::{ATTACH_RETRY, CLIENT_PING_GAP_MS, ConnContext, Gauge, MAX_GAMES_PER_CONN, RTT_CAP_MS};
 use crate::events::Anomaly;
 use crate::ids::{self, GameId, UserId};
 use crate::log_error;
@@ -106,6 +106,9 @@ pub(crate) struct Session {
     rtt: f64,
     /// Games attached, the most recent last.
     games: VecDeque<GameId>,
+    /// Games to attach once their host has handled the player's earlier connections to them
+    /// (`GameHosts::attach` said not yet): tried again every [`ATTACH_RETRY`].
+    deferred: Vec<GameId>,
     /// Lobby requests in order of arrival, posted in that order once their reads are done.
     lobby: VecDeque<(u32, Pending)>,
 }
@@ -132,6 +135,7 @@ impl Session {
             next_ping_at: info.opened_at_ms() + s.heartbeat_interval_ms / 2.0,
             rtt: 0.0,
             games: VecDeque::new(),
+            deferred: Vec::new(),
             lobby: VecDeque::new(),
             link,
             info,
@@ -532,11 +536,21 @@ impl Session {
     }
 
     /// Binds the connection to a game (the game in progress at the `Welcome`, or a game the lobby
-    /// created); the host sends the snapshot. The oldest of more than 8 games is detached.
+    /// created); the host sends the snapshot. The oldest of more than 8 games is detached. While
+    /// the host has not handled an earlier connection's attach and detach of the player's game,
+    /// the attach waits here ([`Session::retry_attaches`]): a player who reconnects over and over
+    /// to a host that lags behind leaves at most that much in its inbox.
     pub(crate) fn attach(&mut self, game: GameId) {
         if !ids::is_game_id(game) {
             return;
         }
+        if !self.ctx.hosts.attach(game, self.user, self.ep.clone()) {
+            if !self.deferred.contains(&game) {
+                self.deferred.push(game);
+            }
+            return;
+        }
+        self.deferred.retain(|&g| g != game);
         self.games.retain(|&g| g != game);
         self.games.push_back(game);
         if self.games.len() > MAX_GAMES_PER_CONN
@@ -544,7 +558,18 @@ impl Session {
         {
             self.ctx.hosts.detach(oldest, self.user, self.ep.conn_id());
         }
-        self.ctx.hosts.attach(game, self.user, self.ep.clone());
+    }
+
+    /// Whether an attach waits for its host.
+    pub(crate) fn attach_deferred(&self) -> bool {
+        !self.deferred.is_empty()
+    }
+
+    /// Tries the deferred attaches again (every [`ATTACH_RETRY`] while one waits).
+    pub(crate) fn retry_attaches(&mut self) {
+        for game in std::mem::take(&mut self.deferred) {
+            self.attach(game);
+        }
     }
 
     /// A command of the lobby.
@@ -569,7 +594,7 @@ impl Session {
         }
     }
 
-    /// The connection closed: its games are detached.
+    /// The connection closed: its games are detached (not those whose attach still waited).
     pub(crate) fn detach_all(&mut self) {
         for g in std::mem::take(&mut self.games) {
             self.ctx.hosts.detach(g, self.user, self.ep.conn_id());
@@ -609,6 +634,8 @@ pub(crate) async fn run(
     s.drain(phase);
     let beat = tokio::time::sleep_until(ctx.instant_at(s.first_heartbeat()));
     tokio::pin!(beat);
+    let retry = tokio::time::sleep(ATTACH_RETRY);
+    tokio::pin!(retry);
     let mut reader_done = false;
     loop {
         tokio::select! {
@@ -620,6 +647,10 @@ pub(crate) async fn run(
                 Some(at) => beat.as_mut().reset(ctx.instant_at(at)),
                 None => break,
             },
+            () = &mut retry, if s.attach_deferred() => {
+                s.retry_attaches();
+                retry.as_mut().reset(tokio::time::Instant::now() + ATTACH_RETRY);
+            }
             result = head_reads(&mut s.lobby), if s.reading() => s.read_done(result),
             ev = reader.next() => match ev {
                 WsEvent::Message(buf) => s.on_message(buf),

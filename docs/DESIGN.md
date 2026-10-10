@@ -350,7 +350,14 @@ admitted at its door under the budget of its class (`game::host::inbox`):
   `INBOX_RESERVE` (16,384) messages above `INBOX_MAX`, and is refused the same way beyond them;
 * a lifecycle message (attach and detach, creations, cancels, forfeits, the stats, the shutdown)
   is never refused: its sources are bounded by the connections and the lobby, and one beyond the
-  reserve is still delivered and counted (`scacelith_game_inbox_over_reserve_total`).
+  reserve is still delivered and counted (`scacelith_game_inbox_over_reserve_total`). The
+  attaches and detaches are counted per player's game: while `LINK_PENDING_MAX` (2) of them wait
+  (an earlier connection's attach and detach), a newer connection's attach is not posted but
+  waits in its connection, which tries it again every 200 ms
+  (`scacelith_game_attach_deferred_total`); a connection that closes before does not detach that
+  game. A player who reconnects over and over to a host that does not catch up thus leaves one
+  earlier connection's messages in its inbox (and the detach of each connection still open),
+  not two messages per reconnection.
 
 A host therefore holds at most `INBOX_MAX` + `INBOX_RESERVE` messages (about 6.4 MiB at 136 bytes
 each). The refusals are counted by kind (`scacelith_game_inbox_refused_total{kind}`) and logged

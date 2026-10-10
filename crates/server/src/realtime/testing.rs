@@ -15,13 +15,15 @@ use crate::clock::Clock;
 use crate::events::{Anomaly, AnomalySink, NewGame};
 use crate::ids::{self, ConnId, GameId, GameIdAllocator, UserId};
 
-/// What a [`FakeHosts`] was told.
+/// What a [`FakeHosts`] was told (`AttachDeferred`: an attach answered "not now",
+/// [`FakeHosts::defer_attaches`]).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum HostCall {
     Client { game: GameId, user: UserId, kind: MsgType, recv_at: f64 },
     Gesture { game: GameId, user: UserId, frame: Bytes },
     Stance { game: GameId, user: UserId, frame: Bytes },
     Attach { game: GameId, user: UserId, conn: ConnId },
+    AttachDeferred { game: GameId, user: UserId, conn: ConnId },
     Detach { game: GameId, user: UserId, conn: ConnId },
     Rtt { game: GameId, user: UserId, rtt_ms: u32 },
     Forfeit { game: GameId, user: UserId },
@@ -51,6 +53,8 @@ pub(crate) struct FakeHosts {
     endpoints: Mutex<HashMap<(GameId, UserId), Endpoint>>,
     stalled: AtomicBool,
     saturated: AtomicBool,
+    /// Attaches still to answer "not now".
+    deferred_attaches: Mutex<usize>,
 }
 
 impl FakeHosts {
@@ -63,6 +67,7 @@ impl FakeHosts {
             endpoints: Mutex::new(HashMap::new()),
             stalled: AtomicBool::new(false),
             saturated: AtomicBool::new(false),
+            deferred_attaches: Mutex::new(0),
         })
     }
 
@@ -72,6 +77,12 @@ impl FakeHosts {
 
     pub(crate) fn set_stalled(&self, stalled: bool) {
         self.stalled.store(stalled, Ordering::SeqCst);
+    }
+
+    /// The next `n` attaches are answered "not now" (a host that has not caught up with the
+    /// player's earlier connections).
+    pub(crate) fn defer_attaches(&self, n: usize) {
+        *self.deferred_attaches.lock() = n;
     }
 
     /// What [`GameHosts::saturated`] answers.
@@ -142,9 +153,20 @@ impl GameHosts for FakeHosts {
         true
     }
 
-    fn attach(&self, game: GameId, user: UserId, ep: Endpoint) {
+    fn attach(&self, game: GameId, user: UserId, ep: Endpoint) -> bool {
+        let deferred = {
+            let mut left = self.deferred_attaches.lock();
+            let deferred = *left > 0;
+            *left = left.saturating_sub(1);
+            deferred
+        };
+        if deferred {
+            self.record(HostCall::AttachDeferred { game, user, conn: ep.conn_id() });
+            return false;
+        }
         self.record(HostCall::Attach { game, user, conn: ep.conn_id() });
         self.endpoints.lock().insert((game, user), ep);
+        true
     }
 
     fn detach(&self, game: GameId, user: UserId, conn: ConnId) {

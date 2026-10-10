@@ -663,6 +663,7 @@ relays (`scacelith_gestures_*`, `scacelith_stances_relayed_total`), the work wai
 process and what the server refused because of it (`scacelith_game_inbox_messages`,
 `scacelith_journal_pending_bytes`, `scacelith_db_write_queue`, `scacelith_games_refused_busy_total`,
 `scacelith_db_writes_refused_total`, `scacelith_game_inbox_refused_total`,
+`scacelith_game_attach_deferred_total`,
 `scacelith_db_write_jobs_refused_total`, `scacelith_session_touches_total`,
 `scacelith_http_busy_total`: [docs/SIZING.md](docs/SIZING.md#when-the-server-falls-behind)), and
 the free disk space
