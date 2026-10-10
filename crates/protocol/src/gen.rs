@@ -12,11 +12,11 @@ use crate::wire::{self, DecodeError, Defect, EncodeError, Reader};
 /// Major protocol version (`Hello.proto`, `Welcome.proto`).
 pub const PROTOCOL_VERSION: u16 = 1;
 /// Minor version of this codec: the `Hello.minor` it sends, the highest minor it decodes.
-pub const MINOR: u16 = 1;
+pub const MINOR: u16 = 2;
 /// WebSocket subprotocol token (`Sec-WebSocket-Protocol`).
 pub const SUBPROTOCOL: &str = "scacelith.rt1";
 /// Fingerprint of the schema (first 4 bytes of SHA-256 of its canonical form): informational.
-pub const FINGERPRINT: u32 = 0x6e6c4989;
+pub const FINGERPRINT: u32 = 0xc649140f;
 /// Capability bits this codec knows (`Hello.caps`, `Welcome.caps`).
 pub const CAPS: u64 = 0x0;
 /// Largest client message, in bytes (type byte included). The server refuses a larger WebSocket message from
@@ -964,6 +964,79 @@ impl ErrorCode {
     }
 }
 
+/// Minor 2: where a player is (Stance). Only Seated plays: a player who stands cannot touch a piece or press
+/// the clock until seated again. Left and right are the player's own, as seen from the seat; each client
+/// draws them on its own copy of the table, around the same board, so the receiver does not mirror them
+/// (unlike the Side gesture flag).
+///
+/// Open enum: a later minor may add values, which decode as `Unknown` (a receiver should show the player
+/// seated).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Stance {
+    /// In the chair (the default, and the stance of a player who sends no Stance).
+    #[default]
+    Seated,
+    /// Standing in front of the chair, pushed back, looking down at the board.
+    Standing,
+    /// Standing at the end of the table on the player's left, looking at the board from the side.
+    SideLeft,
+    /// Standing at the end of the table on the player's right.
+    SideRight,
+    /// A value this codec does not know (sent by a later minor).
+    Unknown(u8),
+}
+
+impl Stance {
+    /// Every member, in schema order.
+    pub const ALL: [Self; 4] = [Self::Seated, Self::Standing, Self::SideLeft, Self::SideRight];
+
+    /// The member of a wire value (`Unknown` when it is not a member).
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Seated,
+            1 => Self::Standing,
+            2 => Self::SideLeft,
+            3 => Self::SideRight,
+            other => Self::Unknown(other),
+        }
+    }
+
+    /// The wire value.
+    pub const fn to_u8(self) -> u8 {
+        match self {
+            Self::Seated => 0,
+            Self::Standing => 1,
+            Self::SideLeft => 2,
+            Self::SideRight => 3,
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// Whether this is a member (not `Unknown`).
+    pub const fn is_known(self) -> bool {
+        !matches!(self, Self::Unknown(_))
+    }
+
+    /// The schema name of the value.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Seated => "Seated",
+            Self::Standing => "Standing",
+            Self::SideLeft => "SideLeft",
+            Self::SideRight => "SideRight",
+            Self::Unknown(_) => "Unknown",
+        }
+    }
+
+    fn read(r: &mut Reader<'_>, field: &'static str) -> Result<Self, DecodeError> {
+        let value = Self::from_u8(r.u8()?);
+        if r.is_strict() && !value.is_known() {
+            return Err(DecodeError::new(Defect::NotInEnum("Stance"), field));
+        }
+        Ok(value)
+    }
+}
+
 /// A player as shown to others.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PlayerInfo {
@@ -1081,6 +1154,8 @@ pub enum MsgType {
     Rematch = 0x27,
     /// [`ClientGesture`].
     ClientGesture = 0x28,
+    /// [`ClientStance`].
+    ClientStance = 0x29,
     /// [`Welcome`].
     Welcome = 0x80,
     /// [`Error`].
@@ -1113,17 +1188,20 @@ pub enum MsgType {
     RatingUpdate = 0xa5,
     /// [`ServerGesture`].
     ServerGesture = 0xa6,
+    /// [`ServerStance`].
+    ServerStance = 0xa7,
 }
 
 impl MsgType {
     /// Every message type, in schema order.
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 37] = [
         Self::Hello, Self::ClientPing, Self::ClientPong, Self::QueueJoin, Self::QueueLeave, Self::ChallengeCreate,
         Self::ChallengeAccept, Self::ChallengeDecline, Self::ChallengeCancel, Self::ChallengeJoinCode, Self::Move, Self::Resign,
         Self::DrawOffer, Self::DrawAnswer, Self::DrawClaim, Self::Abort, Self::Resync, Self::Rematch,
-        Self::ClientGesture, Self::Welcome, Self::Error, Self::ServerPing, Self::ServerPong, Self::Ack,
-        Self::Notice, Self::QueueStatus, Self::ChallengeReceived, Self::ChallengeStatus, Self::GameSnapshot, Self::MoveMade,
-        Self::MoveRejected, Self::GameEvent, Self::GameEnd, Self::RatingUpdate, Self::ServerGesture,
+        Self::ClientGesture, Self::ClientStance, Self::Welcome, Self::Error, Self::ServerPing, Self::ServerPong,
+        Self::Ack, Self::Notice, Self::QueueStatus, Self::ChallengeReceived, Self::ChallengeStatus, Self::GameSnapshot,
+        Self::MoveMade, Self::MoveRejected, Self::GameEvent, Self::GameEnd, Self::RatingUpdate, Self::ServerGesture,
+        Self::ServerStance,
     ];
 
     /// The message type of a type byte.
@@ -1148,6 +1226,7 @@ impl MsgType {
             0x26 => Some(Self::Resync),
             0x27 => Some(Self::Rematch),
             0x28 => Some(Self::ClientGesture),
+            0x29 => Some(Self::ClientStance),
             0x80 => Some(Self::Welcome),
             0x81 => Some(Self::Error),
             0x82 => Some(Self::ServerPing),
@@ -1164,6 +1243,7 @@ impl MsgType {
             0xa4 => Some(Self::GameEnd),
             0xa5 => Some(Self::RatingUpdate),
             0xa6 => Some(Self::ServerGesture),
+            0xa7 => Some(Self::ServerStance),
             _ => None,
         }
     }
@@ -1200,6 +1280,7 @@ impl MsgType {
             Self::Resync => "Resync",
             Self::Rematch => "Rematch",
             Self::ClientGesture => "C_Gesture",
+            Self::ClientStance => "C_Stance",
             Self::Welcome => "Welcome",
             Self::Error => "Error",
             Self::ServerPing => "S_Ping",
@@ -1216,6 +1297,7 @@ impl MsgType {
             Self::GameEnd => "GameEnd",
             Self::RatingUpdate => "RatingUpdate",
             Self::ServerGesture => "S_Gesture",
+            Self::ServerStance => "S_Stance",
         }
     }
 
@@ -1241,6 +1323,7 @@ impl MsgType {
             Self::Resync => 13,
             Self::Rematch => 14,
             Self::ClientGesture => 29,
+            Self::ClientStance => 14,
             Self::Welcome => 54,
             Self::Error => 15,
             Self::ServerPing => 13,
@@ -1257,6 +1340,7 @@ impl MsgType {
             Self::GameEnd => 31,
             Self::RatingUpdate => 29,
             Self::ServerGesture => 25,
+            Self::ServerStance => 10,
         }
     }
 
@@ -1282,6 +1366,7 @@ impl MsgType {
             Self::Resync => 13,
             Self::Rematch => 14,
             Self::ClientGesture => 29,
+            Self::ClientStance => 14,
             Self::Welcome => 141,
             Self::Error => 15,
             Self::ServerPing => 13,
@@ -1298,6 +1383,7 @@ impl MsgType {
             Self::GameEnd => 31,
             Self::RatingUpdate => 35,
             Self::ServerGesture => 25,
+            Self::ServerStance => 10,
         }
     }
 }
@@ -2058,7 +2144,8 @@ pub struct ClientGesture {
     pub placed: u16,
     /// GestureFlag bits (0..=7).
     pub flags: u8,
-    /// Look, milliradians, seat-relative, > 0 to the left (-3142..=3142).
+    /// Look, milliradians, seat-relative (relative to the body when the Stance is not Seated), > 0 to the
+    /// left (-3142..=3142).
     pub yaw: i32,
     /// Look, milliradians, < 0 down (-1571..=1571).
     pub pitch: i32,
@@ -2113,6 +2200,53 @@ impl Message for ClientGesture {
             yaw: Reader::bounded(r.i32()?, "yaw", -3142, 3142)?,
             pitch: Reader::bounded(r.i32()?, "pitch", -1571, 1571)?,
             lean: Reader::bounded(r.u8()?, "lean", 0, 100)?,
+        })
+    }
+}
+
+/// `C_Stance` (0x29, client to server). Minor 2: the player's stance in game `game` (seated, or standing to
+/// look at the board), relayed to the opponent byte for byte (server Stance) when the opponent's session is
+/// of minor 2 or later, and never answered, stored or looked at beyond decoding. Sent when it changes and,
+/// while not Seated, again at least every gesture keepalive (Welcome.gestureIdleMs clamped to 1000..10000 ms,
+/// so 1000 ms when gestureRate is 0): a receiver that hears no Stance for 5 keepalives shows the player
+/// seated. It travels whatever gestureRate says (the head of a player whose gestures are not relayed looks at
+/// the board). Cosmetic, never authoritative.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClientStance {
+    /// Number of the message on its connection: 1 for the Hello, then one more per message.
+    pub seq: u32,
+    /// `game` (below 2^53).
+    pub game: u64,
+    /// `stance`.
+    pub stance: Stance,
+}
+
+impl Message for ClientStance {
+    const TYPE: MsgType = MsgType::ClientStance;
+    const MIN_LEN: usize = 14;
+    const MAX_LEN: usize = 14;
+
+    fn encoded_len(&self) -> usize {
+        1 + 13
+    }
+
+    fn validate(&self) -> Result<(), EncodeError> {
+        wire::check_id53("C_Stance", "game", self.game)?;
+        wire::check_known("C_Stance", "stance", self.stance.is_known(), "Stance")?;
+        Ok(())
+    }
+
+    fn write_fields<B: BufMut>(&self, out: &mut B) {
+        out.put_u32_le(self.seq);
+        out.put_u64_le(self.game);
+        out.put_u8(self.stance.to_u8());
+    }
+
+    fn read_fields(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            seq: r.u32()?,
+            game: r.id53("game")?,
+            stance: Stance::read(r, "stance")?,
         })
     }
 }
@@ -3044,7 +3178,8 @@ pub struct ServerGesture {
     pub placed: u16,
     /// GestureFlag bits (0..=7).
     pub flags: u8,
-    /// Look, milliradians, seat-relative, > 0 to the left (-3142..=3142).
+    /// Look, milliradians, seat-relative (relative to the body when the Stance is not Seated), > 0 to the
+    /// left (-3142..=3142).
     pub yaw: i32,
     /// Look, milliradians, < 0 down (-1571..=1571).
     pub pitch: i32,
@@ -3113,6 +3248,56 @@ impl ClientGesture {
     }
 }
 
+/// `S_Stance` (0xa7, server to client). Minor 2: the opponent's stance: the client Stance without its seq,
+/// byte for byte. Cosmetic, never authoritative; sessions of minor 0 and 1 never receive it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ServerStance {
+    /// `game` (below 2^53).
+    pub game: u64,
+    /// `stance`.
+    pub stance: Stance,
+}
+
+impl Message for ServerStance {
+    const TYPE: MsgType = MsgType::ServerStance;
+    const MIN_LEN: usize = 10;
+    const MAX_LEN: usize = 10;
+
+    fn encoded_len(&self) -> usize {
+        1 + 9
+    }
+
+    fn validate(&self) -> Result<(), EncodeError> {
+        wire::check_id53("S_Stance", "game", self.game)?;
+        wire::check_known("S_Stance", "stance", self.stance.is_known(), "Stance")?;
+        Ok(())
+    }
+
+    fn write_fields<B: BufMut>(&self, out: &mut B) {
+        out.put_u64_le(self.game);
+        out.put_u8(self.stance.to_u8());
+    }
+
+    fn read_fields(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            game: r.id53("game")?,
+            stance: Stance::read(r, "stance")?,
+        })
+    }
+}
+
+impl ClientStance {
+    /// The server `Stance` frame that relays the client frame `frame`: `frame` is validated (it must be a
+    /// whole client `Stance`), then copied without its seq.
+    pub fn relay_frame(frame: &[u8]) -> Result<[u8; ServerStance::MAX_LEN], DecodeError> {
+        Self::decode(frame)?;
+        let mut out = [0; ServerStance::MAX_LEN];
+        out[0] = MsgType::ServerStance.to_u8();
+        out[1..].copy_from_slice(&frame[5..]);
+        Ok(out)
+    }
+}
+
 /// A client to server message.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ClientMsg {
@@ -3154,6 +3339,8 @@ pub enum ClientMsg {
     Rematch(Rematch),
     /// [`ClientGesture`].
     Gesture(ClientGesture),
+    /// [`ClientStance`].
+    Stance(ClientStance),
 }
 
 impl ClientMsg {
@@ -3181,6 +3368,7 @@ impl ClientMsg {
             Some(0x26) => Self::Resync(Resync::read_fields(&mut r)?),
             Some(0x27) => Self::Rematch(Rematch::read_fields(&mut r)?),
             Some(0x28) => Self::Gesture(ClientGesture::read_fields(&mut r)?),
+            Some(0x29) => Self::Stance(ClientStance::read_fields(&mut r)?),
             first => return Err(DecodeError::new(type_defect(first, true), "")),
         };
         r.finish()?;
@@ -3209,6 +3397,7 @@ impl ClientMsg {
             Self::Resync(_) => MsgType::Resync,
             Self::Rematch(_) => MsgType::Rematch,
             Self::Gesture(_) => MsgType::ClientGesture,
+            Self::Stance(_) => MsgType::ClientStance,
         }
     }
 
@@ -3234,6 +3423,7 @@ impl ClientMsg {
             Self::Resync(m) => m.seq,
             Self::Rematch(m) => m.seq,
             Self::Gesture(m) => m.seq,
+            Self::Stance(m) => m.seq,
         }
     }
 
@@ -3259,6 +3449,7 @@ impl ClientMsg {
             Self::Resync(m) => m.encoded_len(),
             Self::Rematch(m) => m.encoded_len(),
             Self::Gesture(m) => m.encoded_len(),
+            Self::Stance(m) => m.encoded_len(),
         }
     }
 
@@ -3284,6 +3475,7 @@ impl ClientMsg {
             Self::Resync(m) => m.encode(out),
             Self::Rematch(m) => m.encode(out),
             Self::Gesture(m) => m.encode(out),
+            Self::Stance(m) => m.encode(out),
         }
     }
 
@@ -3409,6 +3601,12 @@ impl From<ClientGesture> for ClientMsg {
     }
 }
 
+impl From<ClientStance> for ClientMsg {
+    fn from(m: ClientStance) -> Self {
+        Self::Stance(m)
+    }
+}
+
 /// A server to client message.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ServerMsg {
@@ -3444,6 +3642,8 @@ pub enum ServerMsg {
     RatingUpdate(RatingUpdate),
     /// [`ServerGesture`].
     Gesture(ServerGesture),
+    /// [`ServerStance`].
+    Stance(ServerStance),
 }
 
 impl ServerMsg {
@@ -3478,6 +3678,7 @@ impl ServerMsg {
             Some(0xa4) => Self::GameEnd(GameEnd::read_fields(&mut r)?),
             Some(0xa5) => Self::RatingUpdate(RatingUpdate::read_fields(&mut r)?),
             Some(0xa6) => Self::Gesture(ServerGesture::read_fields(&mut r)?),
+            Some(0xa7) => Self::Stance(ServerStance::read_fields(&mut r)?),
             None => return Err(DecodeError::new(Defect::Empty, "")),
             Some(_) if !strict => return Ok(None),
             first => return Err(DecodeError::new(type_defect(first, false), "")),
@@ -3505,6 +3706,7 @@ impl ServerMsg {
             Self::GameEnd(_) => MsgType::GameEnd,
             Self::RatingUpdate(_) => MsgType::RatingUpdate,
             Self::Gesture(_) => MsgType::ServerGesture,
+            Self::Stance(_) => MsgType::ServerStance,
         }
     }
 
@@ -3527,6 +3729,7 @@ impl ServerMsg {
             Self::GameEnd(m) => m.encoded_len(),
             Self::RatingUpdate(m) => m.encoded_len(),
             Self::Gesture(m) => m.encoded_len(),
+            Self::Stance(m) => m.encoded_len(),
         }
     }
 
@@ -3549,6 +3752,7 @@ impl ServerMsg {
             Self::GameEnd(m) => m.encode(out),
             Self::RatingUpdate(m) => m.encode(out),
             Self::Gesture(m) => m.encode(out),
+            Self::Stance(m) => m.encode(out),
         }
     }
 
@@ -3653,6 +3857,12 @@ impl From<RatingUpdate> for ServerMsg {
 impl From<ServerGesture> for ServerMsg {
     fn from(m: ServerGesture) -> Self {
         Self::Gesture(m)
+    }
+}
+
+impl From<ServerStance> for ServerMsg {
+    fn from(m: ServerStance) -> Self {
+        Self::Stance(m)
     }
 }
 

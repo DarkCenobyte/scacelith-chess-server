@@ -244,6 +244,8 @@ impl Session {
             ClientMsg::Rematch(m) => self.game(seq, m.game, ClientMsg::Rematch(m)),
             // Handled before the message bucket.
             ClientMsg::Gesture(_) => {}
+            // Placeholder until the Stance relay lands: decoded and dropped.
+            ClientMsg::Stance(_) => {}
         }
     }
 
