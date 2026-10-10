@@ -102,7 +102,7 @@ pub use sessions::{NewSession, SessionAuth, SessionInfo, Sessions};
 pub use tokens::{NewSignup, NewToken, Signup, Signups, Sso, SsoIdentity, SsoLink, Token, Tokens};
 pub use users::{Anonymized, Mfa, NewUser, User, UserStatus, UserUpdate, Users};
 pub use values::{NO_CURSOR, clean_email, js_trim, normalize_email};
-pub use writer::WRITE_BACKLOG_BUSY;
+pub use writer::{WRITE_BACKLOG_BUSY, WRITE_CRITICAL_RESERVE, WRITE_QUEUE_MAX};
 
 use crate::clock::SharedClock;
 use crate::config::Config;
@@ -112,7 +112,7 @@ use crate::log_security;
 use conn::{DbPath, Role, Tuning};
 use db::Ctx;
 use readers::{MAX_READERS, Readers};
-use writer::{CLOSE_TIMEOUT, Writer};
+use writer::{CLOSE_TIMEOUT, Lane, Writer};
 
 /// A uniform draw in `[0, 1)` (the analysis sampling; injectable for tests).
 pub type RandomFn = Arc<dyn Fn() -> f64 + Send + Sync>;
@@ -256,9 +256,18 @@ impl Store {
         self.writer().map_or(0, Writer::backlog)
     }
 
+    /// Critical write jobs (game commits, anomaly batches, migrations) waiting for the writer
+    /// thread.
+    pub fn critical_write_backlog(&self) -> usize {
+        self.writer().map_or(0, Writer::critical_backlog)
+    }
+
     /// Whether [`WRITE_BACKLOG_BUSY`] write jobs or more wait: new work that would write is then
     /// refused (HTTP requests with 503 `server_busy`, new games with `RateLimited`) until the
-    /// writer catches up. Game commits and the other jobs of the server are never refused.
+    /// writer catches up. This is an admission signal; the queue's own bounds are
+    /// [`WRITE_QUEUE_MAX`] for the ordinary jobs, which are refused beyond it, and
+    /// [`WRITE_CRITICAL_RESERVE`] more for the game commits, which are never refused (see the
+    /// writer's documentation).
     pub fn writes_backlogged(&self) -> bool {
         self.write_backlog() >= WRITE_BACKLOG_BUSY
     }
@@ -278,7 +287,7 @@ impl Store {
             }
             match (&inner.readers, &inner.writer) {
                 (Some(readers), _) => readers.read(f).await,
-                (None, Some(writer)) => writer.submit(move |w| w.read(f)).await,
+                (None, Some(writer)) => writer.submit(Lane::Ordinary, move |w| w.read(f)).await,
                 (None, None) => Err(StoreError::closed().into()),
             }
         }
@@ -286,16 +295,47 @@ impl Store {
 
     /// Runs `f` on the writer thread in one `BEGIN IMMEDIATE` transaction, committed when it
     /// returns `Ok`, rolled back when it returns an error or panics. The job is queued now (see
-    /// the module documentation on ordering). Errors: `readonly`, `closed`, `busy` (the lock was
-    /// not obtained within `busy_timeout`), and whatever `f` returns.
+    /// the module documentation on ordering) as an ordinary job. Errors: `readonly`, `closed`,
+    /// `busy` (the lock was not obtained within `busy_timeout`, or [`WRITE_QUEUE_MAX`] jobs
+    /// already waited and the job was refused without running), and whatever `f` returns.
     pub fn write<R, E, F>(&self, f: F) -> impl Future<Output = Result<R, E>> + Send + 'static + use<R, E, F>
     where
         F: FnOnce(&Db<'_>) -> Result<R, E> + Send + 'static,
         R: Send + 'static,
         E: From<StoreError> + Send + 'static,
     {
+        self.write_in(Lane::Ordinary, f)
+    }
+
+    /// [`Store::write`] for a job whose loss would lose a finished game's data: it may take the
+    /// writer's critical reserve ([`WRITE_CRITICAL_RESERVE`]) and is never refused for the
+    /// queue's length. Only for producers that bound what they queue at once (the anomaly batch
+    /// that the next commit's analysis policy reads: one queued at a time); the game commits go
+    /// through [`Store::finish_batch`].
+    pub fn write_critical<R, E, F>(
+        &self,
+        f: F,
+    ) -> impl Future<Output = Result<R, E>> + Send + 'static + use<R, E, F>
+    where
+        F: FnOnce(&Db<'_>) -> Result<R, E> + Send + 'static,
+        R: Send + 'static,
+        E: From<StoreError> + Send + 'static,
+    {
+        self.write_in(Lane::Critical, f)
+    }
+
+    fn write_in<R, E, F>(
+        &self,
+        lane: Lane,
+        f: F,
+    ) -> impl Future<Output = Result<R, E>> + Send + 'static + use<R, E, F>
+    where
+        F: FnOnce(&Db<'_>) -> Result<R, E> + Send + 'static,
+        R: Send + 'static,
+        E: From<StoreError> + Send + 'static,
+    {
         let submitted = match (&self.inner.writer, self.is_closed()) {
-            (Some(writer), false) => Ok(writer.submit(move |w| w.transact(f).0)),
+            (Some(writer), false) => Ok(writer.submit(lane, move |w| w.transact(f).0)),
             (Some(_), true) => Err(StoreError::closed()),
             (None, _) => Err(StoreError::new(ErrorKind::ReadOnly, "read-only store")),
         };
@@ -318,7 +358,7 @@ impl Store {
         let Some(writer) = self.writer() else {
             return Err(StoreError::new(ErrorKind::ReadOnly, "cannot migrate a read-only store"));
         };
-        writer.submit(move |w| migrate::run(w.conn(), &migrations, now)).await
+        writer.submit(Lane::Critical, move |w| migrate::run(w.conn(), &migrations, now)).await
     }
 
     /// The `EXPLAIN QUERY PLAN` rows of a statement (tests and diagnostics).
@@ -359,7 +399,9 @@ impl Store {
     /// rated game (read and written inside the transaction), refunds owed at commit and analysis
     /// jobs. Idempotent per game id (a stored id gives a `duplicate` entry). Entries are in record
     /// order. The whole batch is rolled back on any error; an error caused by one record carries
-    /// its game id. The commit metrics are counted and the refunds logged after the commit.
+    /// its game id. The commit metrics are counted and the refunds logged after the commit. A
+    /// critical job: it may take the writer's reserve and is never refused for the queue's length
+    /// (each game host has one commit in flight at most).
     pub fn finish_batch(
         &self,
         records: Vec<GameRecord>,
@@ -368,7 +410,7 @@ impl Store {
         let submitted = if records.is_empty() {
             None
         } else {
-            Some(self.write_timed(move |db| commit::finish_batch(db, &records, db.now())))
+            Some(self.write_timed(Lane::Critical, move |db| commit::finish_batch(db, &records, db.now())))
         };
         async move {
             let Some(fut) = submitted else { return Ok(Vec::new()) };
@@ -389,14 +431,19 @@ impl Store {
         }
     }
 
-    /// [`Store::write`] that also returns the duration of the transaction in milliseconds.
-    fn write_timed<R, F>(&self, f: F) -> impl Future<Output = Result<(R, f64)>> + Send + 'static + use<R, F>
+    /// [`Store::write`] in `lane` that also returns the duration of the transaction in
+    /// milliseconds.
+    fn write_timed<R, F>(
+        &self,
+        lane: Lane,
+        f: F,
+    ) -> impl Future<Output = Result<(R, f64)>> + Send + 'static + use<R, F>
     where
         F: FnOnce(&Db<'_>) -> Result<R> + Send + 'static,
         R: Send + 'static,
     {
         let submitted = match (&self.inner.writer, self.is_closed()) {
-            (Some(writer), false) => Ok(writer.submit(move |w| {
+            (Some(writer), false) => Ok(writer.submit(lane, move |w| {
                 let (out, ms) = w.transact(f);
                 out.map(|r| (r, ms))
             })),

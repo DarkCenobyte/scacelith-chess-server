@@ -10,7 +10,8 @@ use crate::ids::GameId;
 /// Node store used (`busy`, `username_taken`...), which the routes and logs still use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
-    /// The database lock could not be taken within `busy_timeout` (SQLITE_BUSY / SQLITE_LOCKED).
+    /// The database lock could not be taken within `busy_timeout` (SQLITE_BUSY / SQLITE_LOCKED),
+    /// or the writer's queue was full ([`StoreError::queue_full`]): nothing changed.
     Busy,
     /// A unique constraint on `username_lower` (users or pending signups).
     UsernameTaken,
@@ -92,6 +93,9 @@ pub struct StoreError {
     source: Option<Box<rusqlite::Error>>,
 }
 
+/// Message of the write jobs refused because the writer's queue was full.
+pub(crate) const QUEUE_FULL: &str = "store writer queue full (the job did not run)";
+
 /// Message of the requests a closing writer did not answer in time.
 pub(crate) const UNANSWERED: &str = "store writer closed before answering (outcome unknown)";
 
@@ -120,6 +124,12 @@ impl StoreError {
     /// been carried out or not.
     pub fn unanswered() -> StoreError {
         StoreError::new(ErrorKind::Closed, UNANSWERED)
+    }
+
+    /// The error of an ordinary write job refused because the writer's queue was full
+    /// (`WRITE_QUEUE_MAX` jobs waiting): it never ran, nothing changed.
+    pub fn queue_full() -> StoreError {
+        StoreError::new(ErrorKind::Busy, QUEUE_FULL)
     }
 
     /// The error of a job that panicked.

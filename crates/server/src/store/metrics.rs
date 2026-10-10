@@ -22,6 +22,32 @@ pub(super) static WRITE_QUEUE: LazyLock<Gauge> = LazyLock::new(|| {
     metrics::gauge("scacelith_db_write_queue", "Database write jobs waiting for the writer thread")
 });
 
+/// Critical write jobs (game commits, anomaly batches, migrations) among them.
+pub(super) static WRITE_QUEUE_CRITICAL: LazyLock<Gauge> = LazyLock::new(|| {
+    metrics::gauge(
+        "scacelith_db_write_queue_critical",
+        "Critical database write jobs (game commits, anomaly batches, migrations) waiting for the writer thread",
+    )
+});
+
+/// Ordinary write jobs refused because the queue was full.
+pub(crate) static WRITE_REFUSED: LazyLock<Counter> = LazyLock::new(|| {
+    metrics::counter(
+        "scacelith_db_write_jobs_refused_total",
+        "Database write jobs refused without running because WRITE_QUEUE_MAX (20,000) jobs already waited \
+         (every job but the game commits, the anomaly batches and the migrations; the caller gets a busy error)",
+    )
+});
+
+/// Critical write jobs queued beyond their reserve (a bug of their producers).
+pub(super) static WRITE_OVER_RESERVE: LazyLock<Counter> = LazyLock::new(|| {
+    metrics::counter(
+        "scacelith_db_write_reserve_exceeded_total",
+        "Critical database write jobs queued although WRITE_QUEUE_MAX + WRITE_CRITICAL_RESERVE jobs already \
+         waited (never refused; their producers should never get there)",
+    )
+});
+
 static COMMIT_BATCH_MS: LazyLock<Histogram> = LazyLock::new(|| {
     metrics::histogram(
         "scacelith_store_commit_batch_ms",

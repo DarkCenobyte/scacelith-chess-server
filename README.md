@@ -662,7 +662,10 @@ the time given back to the players for them (`scacelith_game_stall_*`), the gest
 relays (`scacelith_gestures_*`, `scacelith_stances_relayed_total`), the work waiting inside the
 process and what the server refused because of it (`scacelith_game_inbox_messages`,
 `scacelith_journal_pending_bytes`, `scacelith_db_write_queue`, `scacelith_games_refused_busy_total`,
-`scacelith_db_writes_refused_total`), and the free disk space
+`scacelith_db_writes_refused_total`, `scacelith_game_inbox_refused_total`,
+`scacelith_db_write_jobs_refused_total`, `scacelith_session_touches_total`,
+`scacelith_http_busy_total`: [docs/SIZING.md](docs/SIZING.md#when-the-server-falls-behind)), and
+the free disk space
 (`scacelith_database_disk_free_bytes`, `scacelith_journal_disk_free_bytes`). Alert rules:
 [docs/SIZING.md](docs/SIZING.md#alert-rules). `/healthz` answers while the process runs, `/readyz`
 while it accepts players. The logs (stdout, one JSON object per line) are described in

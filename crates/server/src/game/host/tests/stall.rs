@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use super::{Ep, Opts, Rig, T0, ended_at, move_msg, rematch, result, resync, snapshot};
 use crate::config::test_config;
 use crate::events::IncidentKind;
+use crate::game::host::inbox::Class;
 use crate::game::host::{Inbox, Msg, beat};
 use crate::ids::GameId;
 
@@ -261,7 +262,7 @@ async fn a_beat_handles_the_requests_already_queued_before_its_timers() {
     let mut inbox = Inbox { rx, shared: h.shard.shared() };
     let msg = ClientMsg::Move(move_msg(h.room(id), 5));
     let read_at = (deadline - 3) as f64;
-    inbox.shared.backlog.posting();
+    assert!(inbox.shared.backlog.admit(Class::Request));
     tx.send(Msg::Client { user: 1, msg, ep: ew.endpoint(), recv_at: read_at }).expect("inbox open");
     h.set(deadline + 2);
     assert!(beat(&mut h.shard, &mut inbox).await.is_continue());

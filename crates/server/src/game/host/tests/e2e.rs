@@ -503,3 +503,106 @@ async fn busy_hosts_take_no_new_game_and_a_saturated_server_refuses_one() {
     assert!(ids::is_game_id(id));
     hosts.shutdown().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_host_far_behind_bounds_its_inbox_and_still_ends_and_commits_its_games() {
+    use crate::game::host::{INBOX_MAX, INBOX_RESERVE, Msg};
+    use crate::store::WRITE_QUEUE_MAX;
+    let dir = TempDir::new("e2e");
+    let (store, users) = real_store(&["alice", "bob"]).await;
+    let [alice, bob] = users[..] else { panic!("two accounts") };
+    let events = Arc::new(RecordingEvents::default());
+    let hosts = Hosts::start(deps(&dir, &store, &events), 0..1).await.expect("hosts started");
+    let host = hosts.handles()[0].clone();
+    let spec = NewGame { white: shown(alice, "alice"), black: shown(bob, "bob"), ..new_game(0, 0) };
+    let id = host.create(spec).await.expect("created");
+    let (ew, eb) = (Ep::new(1, alice), Ep::new(2, bob));
+    host.attach(id, alice, ew.endpoint());
+    host.attach(id, bob, eb.endpoint());
+    until("the snapshots", || got(&ew, MsgType::GameSnapshot) && got(&eb, MsgType::GameSnapshot)).await;
+
+    // The database writer stalls behind a full queue of ordinary jobs.
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let (running_tx, running) = tokio::sync::oneshot::channel();
+    let blocker = store.write(move |_| {
+        let _ = running_tx.send(());
+        let _ = held.recv();
+        Ok::<_, StoreError>(())
+    });
+    running.await.expect("the writer runs the blocker");
+    let fillers: Vec<_> = (0..WRITE_QUEUE_MAX).map(|_| store.write(|_| Ok::<_, StoreError>(()))).collect();
+    let refused = store.write(|_| Ok::<_, StoreError>(())).await.unwrap_err();
+    assert_eq!(refused.kind(), crate::store::ErrorKind::Busy, "the writer's queue is full");
+
+    // The host falls behind too (its actor does not run while the test posts): cosmetic messages
+    // fill its inbox up to INBOX_MAX, then are dropped at the door.
+    for _ in 0..INBOX_MAX + 100 {
+        host.rtt(id, alice, 50);
+    }
+    assert_eq!(host.inbox().0, INBOX_MAX);
+    let stance = ClientStance { seq: 2, game: id, stance: Stance::SideLeft };
+    host.stance(id, bob, stance.to_bytes().expect("a valid stance"));
+    let gesture = ClientGesture { seq: 1, game: id, ply: 0, touch: 12, aim: 28, ..ClientGesture::default() };
+    host.gesture(id, alice, gesture.to_bytes().expect("a valid gesture"));
+    host.decline_rematch(id, alice);
+    assert_eq!(host.inbox(), (INBOX_MAX, 0), "dropped, not queued");
+
+    // A move is refused at once: its connection is told, nothing is played.
+    let mut mirror = ChessGame::default();
+    play(&host, id, &mut mirror, &["e2e4"], [(alice, &ew), (bob, &eb)]);
+    let refusal = |ep: &Ep| match ep.last() {
+        ServerMsg::Error(e) => (e.r#ref, e.code, e.fatal, e.game),
+        other => panic!("an Error expected, got {other:?}"),
+    };
+    assert_eq!(refusal(&ew), (2, ErrorCode::RateLimited, false, id));
+
+    // Lifecycle messages are never refused: detaches of a connection that is not attached (they
+    // change nothing) take the reserve but its last place, which Black's resignation takes.
+    for _ in 0..INBOX_RESERVE - 1 {
+        host.detach(id, bob, 99);
+    }
+    host.client(bob, resign(id, 9), eb.endpoint(), clock::mono_ms());
+    assert_eq!(host.inbox().0, INBOX_MAX + INBOX_RESERVE);
+    // Beyond the reserve, a resignation is refused like a move...
+    host.client(alice, resign(id, 3), ew.endpoint(), clock::mono_ms());
+    assert_eq!(refusal(&ew), (3, ErrorCode::RateLimited, false, id));
+    // ... and a lifecycle message is still delivered (counted beyond the reserve).
+    let eb2 = Ep::new(3, bob);
+    host.attach(id, bob, eb2.endpoint());
+    assert_eq!(host.inbox().0, INBOX_MAX + INBOX_RESERVE + 1);
+    assert!(host.busy() && hosts.saturated(), "no new game meanwhile");
+    // What the inbox can hold at most, in memory (the gestures' frames aside).
+    let bytes = (INBOX_MAX + INBOX_RESERVE) * std::mem::size_of::<Msg>();
+    assert!(bytes <= 8 << 20, "{bytes} bytes");
+
+    // The host catches up: every message let in is handled, in order.
+    let stats = host.stats().await.expect("the host runs");
+    assert_eq!(host.inbox(), (0, 0));
+    let refused = &stats.counters.inbox_refused;
+    let expected = [("ending", 1), ("rematch_decline", 1), ("request", 1), ("rtt", 100), ("stance", 1)];
+    assert_eq!(refused.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(), expected);
+    assert_eq!(stats.counters.gesture_drops.get("overload"), Some(&1));
+    assert_eq!(stats.counters.inbox_over_reserve, 2, "the attach and the stats request");
+    assert_eq!(stats.counters.moves, 0, "the refused move was not played");
+    until("the end", || got(&ew, MsgType::GameEnd) && got(&eb, MsgType::GameEnd)).await;
+    let end = ew.msgs().into_iter().find_map(|m| match m {
+        ServerMsg::GameEnd(e) => Some((e.status, e.reason)),
+        _ => None,
+    });
+    assert_eq!(end, Some((GS::WhiteWins, ER::Resignation)), "Black's resignation, kept in the reserve");
+    until("the snapshot of the attach", || got(&eb2, MsgType::GameSnapshot)).await;
+
+    // The commit is a critical job of the writer: queued beyond the full ordinary queue.
+    until("the commit queued", || store.critical_write_backlog() == 1).await;
+    assert!(events.ended().is_empty(), "not committed while the writer stalls");
+    release.send(()).expect("the writer waits");
+    blocker.await.expect("written");
+    for job in fillers {
+        job.await.expect("written");
+    }
+    until("the commit", || !events.ended().is_empty()).await;
+    let stored = store.games().by_id(id).await.expect("a read").expect("the game is in the database");
+    assert_eq!(stored.summary.status, crate::store::status::WHITE_WINS);
+    hosts.shutdown().await;
+    store.close().await;
+}
