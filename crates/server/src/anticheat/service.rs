@@ -442,10 +442,11 @@ impl Inner {
         }
     }
 
-    /// Queues the job that writes every buffered row when the writer runs it.
+    /// Queues the job that writes every buffered row when the writer runs it: a critical job of
+    /// the writer (one queued at a time, ahead of the commits whose analysis policy reads it).
     fn queue_drain(self: &Arc<Self>, generation: u64) {
         let inner = self.clone();
-        let fut = self.store.write(move |db| {
+        let fut = self.store.write_critical(move |db| {
             let rows = inner.pending.lock().take(inner.clock.mono_ms());
             let n = rows.len();
             db.anomalies().insert_batch(&rows).map_err(|e| BatchError { rows: n, error: e })?;

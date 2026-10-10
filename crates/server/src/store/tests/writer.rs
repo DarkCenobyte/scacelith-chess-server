@@ -273,3 +273,105 @@ async fn db_cache_mb_is_shared_by_the_writer_and_the_readers() {
     assert_eq!(memory.read(cache_size).await.unwrap(), -100 * 1024);
     memory.close().await;
 }
+
+// ---- bounds (audit A10) -------------------------------------------------------------------------
+
+/// A job that holds the writer thread until released (a stalled disk); returns once it runs.
+async fn block_writer(store: &Store) -> (mpsc::Sender<()>, tokio::task::JoinHandle<Result<(), StoreError>>) {
+    let (release, held) = mpsc::channel::<()>();
+    let (running_tx, running) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(store.write(move |_| {
+        let _ = running_tx.send(());
+        let _ = held.recv();
+        Ok::<_, StoreError>(())
+    }));
+    running.await.expect("the blocker runs");
+    (release, blocker)
+}
+
+/// Appends `tag` to the `order` meta value (the order the writer ran the jobs in).
+fn append(db: &crate::store::Db<'_>, tag: &str) -> Result<(), StoreError> {
+    let cur = db.meta().get("order")?.unwrap_or_default();
+    db.meta().set("order", &if cur.is_empty() { tag.to_owned() } else { format!("{cur},{tag}") })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stalled_writer_refuses_ordinary_jobs_at_its_cap_and_keeps_every_critical_one_in_order() {
+    use crate::store::metrics::WRITE_REFUSED;
+    use crate::store::{WRITE_CRITICAL_RESERVE, WRITE_QUEUE_MAX};
+    let logs = LogCapture::start();
+    let store = memory_store().await;
+    let ids: Vec<_> = futures_create(&store, &["w", "b"]).await;
+    let (release, blocker) = block_writer(&store).await;
+
+    // Ordinary jobs fill the queue up to its cap: the first and the last ones leave a mark.
+    let mut ordinary = vec![tokio::spawn(store.write(|db| append(db, "first")))];
+    ordinary.extend((1..WRITE_QUEUE_MAX - 1).map(|_| tokio::spawn(store.write(|_| Ok::<_, StoreError>(())))));
+    ordinary.push(tokio::spawn(store.write(|db| append(db, "last"))));
+    assert_eq!(store.write_backlog(), WRITE_QUEUE_MAX);
+    assert!(store.writes_backlogged());
+
+    // One more is refused at once, without running: `busy`, counted, logged once.
+    let refused0 = WRITE_REFUSED.get();
+    for _ in 0..3 {
+        let e = store.write(|db| append(db, "refused")).await.unwrap_err();
+        assert_eq!((e.kind(), e.message()), (ErrorKind::Busy, crate::store::error::QUEUE_FULL));
+    }
+    assert!(WRITE_REFUSED.get() >= refused0 + 3, "counted in scacelith_db_write_jobs_refused_total");
+    assert_eq!(store.write_backlog(), WRITE_QUEUE_MAX, "the queue did not grow");
+    let warned = logs.records("store");
+    let warned: Vec<_> =
+        warned.iter().filter(|r| r["msg"].as_str().is_some_and(|m| m.contains("queue full"))).collect();
+    assert_eq!(warned.len(), 1, "one warning per episode: {warned:?}");
+
+    // A game commit is critical: it takes the reserve, and so does an anomaly batch.
+    let commit = tokio::spawn(store.finish_batch(vec![record(7001, ids[0], ids[1])]));
+    let anomaly = tokio::spawn(store.write_critical(|db| append(db, "critical")));
+    assert_eq!(store.write_backlog(), WRITE_QUEUE_MAX + 2);
+    assert_eq!(store.critical_write_backlog(), 2);
+    // The reserve is never refused, even past its size (counted and logged as a bug of the
+    // producers).
+    let over0 = crate::store::metrics::WRITE_OVER_RESERVE.get();
+    let extra: Vec<_> = (0..WRITE_CRITICAL_RESERVE)
+        .map(|_| tokio::spawn(store.write_critical(|_| Ok::<_, StoreError>(()))))
+        .collect();
+    assert_eq!(store.write_backlog(), WRITE_QUEUE_MAX + WRITE_CRITICAL_RESERVE + 2);
+    assert!(crate::store::metrics::WRITE_OVER_RESERVE.get() > over0, "beyond the reserve: counted");
+
+    // The writer comes back: every job queued runs, in the order of submission.
+    let t0 = Instant::now();
+    release.send(()).unwrap();
+    blocker.await.unwrap().unwrap();
+    for job in ordinary {
+        job.await.unwrap().unwrap();
+    }
+    let entries = commit.await.unwrap().expect("the commit landed");
+    assert_eq!(entries.len(), 1);
+    anomaly.await.unwrap().unwrap();
+    for job in extra {
+        job.await.unwrap().unwrap();
+    }
+    assert_eq!(store.write_backlog(), 0);
+    assert_eq!(store.critical_write_backlog(), 0);
+    assert!(t0.elapsed() < Duration::from_secs(10), "drained in {:?}", t0.elapsed());
+    assert_eq!(store.meta().get("order".into()).await.unwrap().as_deref(), Some("first,last,critical"));
+    assert!(store.games().by_id(7001).await.unwrap().is_some(), "the game is stored");
+    let back = logs.records("store");
+    assert!(
+        back.iter()
+            .any(|r| r["msg"] == "store writer queue back under its busy threshold" && r["refused"] == 3),
+        "the end of the episode is logged with its count: {back:?}"
+    );
+    // Ordinary jobs are welcome again.
+    store.write(|db| append(db, "again")).await.unwrap();
+    store.close().await;
+}
+
+/// Creates the accounts (one write job each).
+async fn futures_create(store: &Store, names: &[&str]) -> Vec<u32> {
+    let mut ids = Vec::new();
+    for n in names {
+        ids.push(store.users().create(new_user(n, None)).await.unwrap());
+    }
+    ids
+}
