@@ -237,6 +237,10 @@ pub struct BotConfig {
     pub gesture_hz: f64,
     /// Resign when the game reaches this many plies (0: play to the end).
     pub max_plies: u16,
+    /// Stand up (`Stance::Standing`) after each of its moves and sit down (`Stance::Seated`) once
+    /// the opponent has moved, before its own next move. Only on a connection of protocol minor 2
+    /// or later (`Connection::minor`); never otherwise.
+    pub stand_while_waiting: bool,
     /// Seed of the move choice (`None`: from the operating system).
     pub seed: Option<u64>,
     /// Deadline of each wait (Ack, game start, challenge).
@@ -250,6 +254,7 @@ impl Default for BotConfig {
             move_jitter: 0.0,
             gesture_hz: 0.0,
             max_plies: 0,
+            stand_while_waiting: false,
             seed: None,
             timeout: Duration::from_secs(30),
         }
@@ -271,6 +276,8 @@ pub struct GameResult {
     pub gestures_sent: u32,
     /// Opponent gestures received.
     pub gestures_received: u32,
+    /// Stances sent ([`BotConfig::stand_while_waiting`]).
+    pub stances_sent: u32,
     /// Opponent stances received (protocol minor 2).
     pub stances_received: u32,
     /// The opponent's stance at the end: the latest one received, `Seated` when none came or
@@ -391,8 +398,12 @@ impl Bot {
         let mut moves_rejected = 0;
         let mut gestures_sent = 0;
         let mut gestures_received = 0;
+        let mut stances_sent = 0;
         let mut stances_received = 0;
         let mut opponent_stance = Stance::Seated;
+        let stands =
+            self.cfg.stand_while_waiting && self.conn.minor() >= scacelith_protocol::STANCE_MIN_MINOR;
+        let mut standing = false;
         let mut resigned = false;
         let gesture_period =
             (self.cfg.gesture_hz > 0.0).then(|| Duration::from_secs_f64(1.0 / self.cfg.gesture_hz));
@@ -406,6 +417,11 @@ impl Bot {
                         Applied::Played => {
                             if game.is_my_turn() {
                                 opponent_stance = Stance::Seated;
+                                if standing {
+                                    self.conn.send(game.stance(Stance::Seated))?;
+                                    stances_sent += 1;
+                                    standing = false;
+                                }
                             }
                             turn_started = Instant::now();
                             move_at = self.schedule(&game);
@@ -436,6 +452,7 @@ impl Bot {
                             moves_rejected,
                             gestures_sent,
                             gestures_received,
+                            stances_sent,
                             stances_received,
                             opponent_stance,
                         });
@@ -463,6 +480,11 @@ impl Bot {
                         let think = turn_started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
                         self.conn.send(game.move_msg(mv, think))?;
                         moves_sent += 1;
+                        if stands {
+                            self.conn.send(game.stance(Stance::Standing))?;
+                            stances_sent += 1;
+                            standing = true;
+                        }
                     }
                 }
                 () = sleep_until_opt(next_gesture) => {

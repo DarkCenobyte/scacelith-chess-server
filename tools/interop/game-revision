@@ -3,4 +3,4 @@
 # with every change of the contract (protocol, shared fixtures, chess rules), to a game commit that
 # passes tools/interop/check-game.sh and the live tests. The game pins this server the same way
 # (its tools/interop/server-revision).
-08e4c84922f055438a98a454f5e8f950ad497c5d
+3a57c52a9a6c5bd7acf298d8beb5430f43ab3023

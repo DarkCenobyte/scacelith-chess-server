@@ -1,7 +1,8 @@
 //! The game part: a server with two shards, proof of work on registration, no GIFs and a gesture
-//! keepalive of its own; a bot that queues in rated 3+2 and plays random legal moves; then the C++
-//! test `net_live_server_game` (registration with the proof of work, sign-in, the keepalive of the
-//! Welcome, queue, 12 plies against the bot, resignation, rating update) and
+//! keepalive of its own; a bot that queues in rated 3+2, plays random legal moves and stands up
+//! while the C++ player thinks; then the C++ test `net_live_server_game` (registration with the
+//! proof of work, sign-in, the keepalive of the Welcome, queue, 12 plies against the bot with the
+//! stances of both players relayed (protocol minor 2), resignation, rating update) and
 //! `net_live_account_server_settings` (an e-mail change refused for the bot's address, then
 //! applied at once on a server without e-mail confirmation, and the GIFs turned off).
 
@@ -83,6 +84,7 @@ async fn play(ctx: &Ctx, srv: &TestServer, pin: &str) -> i32 {
         move_delay: Duration::from_millis(350),
         move_jitter: 0.4,
         timeout: Duration::from_secs(300),
+        stand_while_waiting: true,
         ..BotConfig::default()
     };
     let bot = tokio::spawn(async move {
@@ -92,16 +94,24 @@ async fn play(ctx: &Ctx, srv: &TestServer, pin: &str) -> i32 {
         let id = game.game();
         let result = bot.play(game).await?;
         println!(
-            "[game] bot: game over, status {:?} reason {:?}, {} plies",
-            result.end.status, result.end.reason, result.plies
+            "[game] bot: game over, status {:?} reason {:?}, {} plies, stances sent {} received {}",
+            result.end.status, result.end.reason, result.plies, result.stances_sent, result.stances_received
         );
-        Ok::<_, scacelith_client::ClientError>(id)
+        Ok::<_, scacelith_client::ClientError>((id, result.stances_sent, result.stances_received))
     });
 
     let live = format!("{}:{}:{pin}:{CPP_USER}:{CPP_PASSWORD}:{GESTURE_IDLE_MS}", ctx.host, srv.addr.port());
     let mut code = run_cpp(ctx, "net_live_server_game", &[("SCACELITH_NET_LIVE", &live)]).await;
     let game_id = match tokio::time::timeout(Duration::from_secs(30), bot).await {
-        Ok(Ok(Ok(id))) => Some(id),
+        // The C++ player stands up and sits down again once in the game (net_live_server_game):
+        // the bot must have heard both, and have stood up itself.
+        Ok(Ok(Ok((id, sent, received)))) if sent > 0 && received >= 2 => Some(id),
+        Ok(Ok(Ok((_, sent, received)))) => {
+            eprintln!(
+                "[game] bot: stances sent {sent}, received {received} (expected some sent, 2 received)"
+            );
+            None
+        }
         Ok(Ok(Err(e))) => {
             eprintln!("[game] bot: {e}");
             None
