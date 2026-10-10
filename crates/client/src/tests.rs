@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use scacelith_protocol::{
-    Ack, ClientMsg, Color, EndReason, ErrorCode, GameEnd, GameSnapshot, GameStatus, MINOR, Message, MoveMade,
-    PlayerInfo, QueueLeave, Resign, ServerMsg, ServerPing, Welcome, decode_hello,
+    Ack, ClientMsg, ClientStance, Color, EndReason, ErrorCode, GameEnd, GameSnapshot, GameStatus, MINOR,
+    Message, MoveMade, PlayerInfo, QueueLeave, Resign, ServerMsg, ServerPing, ServerStance, Stance, Welcome,
+    decode_hello,
 };
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -393,6 +394,23 @@ async fn protocol_errors_close_the_connection() {
 }
 
 #[tokio::test]
+async fn stances_go_out_numbered_and_come_in_decoded() {
+    let (mut conn, mut server) = connected().await;
+    assert_eq!(conn.minor(), 0, "the fake server's Welcome");
+    let tracker = crate::bot::GameTracker::new(4242, Color::White, []).unwrap();
+    assert_eq!(conn.send(tracker.stance(Stance::Standing)).unwrap(), 2);
+    let sent = ClientStance { seq: 2, game: 4242, stance: Stance::Standing };
+    assert_eq!(server.msg().await, ClientMsg::Stance(sent));
+    server.send(ServerStance { game: 4242, stance: Stance::SideRight }).await;
+    // A value of a later minor decodes as Unknown (a receiver shows the player seated).
+    server.send_frame(true, OP_BINARY, &[0xA7, 0x92, 0x10, 0, 0, 0, 0, 0, 0, 9]).await;
+    let got = [conn.recv_timeout(WAIT).await.unwrap(), conn.recv_timeout(WAIT).await.unwrap()];
+    let stance = |stance| ServerMsg::Stance(ServerStance { game: 4242, stance });
+    assert_eq!(got, [stance(Stance::SideRight), stance(Stance::Unknown(9))]);
+    assert_eq!(conn.ignored_messages(), 0);
+}
+
+#[tokio::test]
 async fn unknown_and_undecodable_messages_are_skipped() {
     let (mut conn, mut server) = connected().await;
     server.send_frame(true, OP_BINARY, &[0xEE, 1, 2, 3]).await;
@@ -496,6 +514,10 @@ async fn bot_finds_a_game_and_plays_legal_moves() {
                 other => panic!("{other:?}"),
             }
         }
+        // The opponent stood up after its last move (and a stance of another game).
+        server.send(ServerStance { game: 4242, stance: Stance::Standing }).await;
+        server.send(ServerStance { game: 99, stance: Stance::SideRight }).await;
+        server.send(ServerStance { game: 4242, stance: Stance::SideLeft }).await;
         server
             .send(GameEnd {
                 game: 4242,
@@ -518,6 +540,7 @@ async fn bot_finds_a_game_and_plays_legal_moves() {
     assert!(game.is_my_turn());
     let result = tokio::time::timeout(WAIT, bot.play(game)).await.unwrap().unwrap();
     assert_eq!((result.end.reason, result.plies, result.moves_sent), (EndReason::Resignation, 6, 3));
+    assert_eq!((result.stances_received, result.opponent_stance), (2, Stance::SideLeft));
     let gestures = script.await.unwrap();
     assert!(gestures > 0 && result.gestures_sent >= gestures);
 }

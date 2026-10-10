@@ -1,6 +1,6 @@
 //! Bots: players that find games (matchmaking queue or challenges) and play random legal moves
-//! at a chosen pace, with head gestures at a chosen rate. For integration tests and the load
-//! generator.
+//! at a chosen pace, with head gestures at a chosen rate. They stay seated (they send no
+//! `Stance`) and follow the opponent's. For integration tests and the load generator.
 //!
 //! * [`GameTracker`] follows one game from the player's side with the chess rules of
 //!   `scacelith-chess`: whose turn it is, a random legal move, the `Move` intent with its `ply`
@@ -29,8 +29,8 @@ use std::time::Duration;
 
 use scacelith_chess::{ChessGame, Position};
 use scacelith_protocol::{
-    ChallengeAccept, ChallengeCreate, ChallengeReceived, ChallengeState, ClientGesture, Color, ColorPref,
-    ErrorCode, GameEnd, GameSnapshot, Move, MoveMade, QueueJoin, Resign, ServerMsg,
+    ChallengeAccept, ChallengeCreate, ChallengeReceived, ChallengeState, ClientGesture, ClientStance, Color,
+    ColorPref, ErrorCode, GameEnd, GameSnapshot, Move, MoveMade, QueueJoin, Resign, ServerMsg, Stance,
 };
 use tokio::time::Instant;
 
@@ -217,6 +217,13 @@ impl GameTracker {
             lean: lean.min(100),
         }
     }
+
+    /// The player's `Stance` in this game (protocol minor 2: a connection sends it only when
+    /// `Welcome.minor` is at least `STANCE_MIN_MINOR`, when it changes and, while not `Seated`,
+    /// again every gesture keepalive).
+    pub fn stance(&self, stance: Stance) -> ClientStance {
+        ClientStance { seq: 0, game: self.game, stance }
+    }
 }
 
 /// How a bot plays.
@@ -264,6 +271,11 @@ pub struct GameResult {
     pub gestures_sent: u32,
     /// Opponent gestures received.
     pub gestures_received: u32,
+    /// Opponent stances received (protocol minor 2).
+    pub stances_received: u32,
+    /// The opponent's stance at the end: the latest one received, `Seated` when none came or
+    /// once the opponent moved after it (a player plays seated).
+    pub opponent_stance: Stance,
 }
 
 /// A player driven by the program (see the module documentation).
@@ -379,6 +391,8 @@ impl Bot {
         let mut moves_rejected = 0;
         let mut gestures_sent = 0;
         let mut gestures_received = 0;
+        let mut stances_received = 0;
+        let mut opponent_stance = Stance::Seated;
         let mut resigned = false;
         let gesture_period =
             (self.cfg.gesture_hz > 0.0).then(|| Duration::from_secs_f64(1.0 / self.cfg.gesture_hz));
@@ -390,6 +404,9 @@ impl Bot {
                 msg = self.conn.recv() => match msg? {
                     ServerMsg::MoveMade(m) if m.game == game.game() => match game.apply_move_made(&m) {
                         Applied::Played => {
+                            if game.is_my_turn() {
+                                opponent_stance = Stance::Seated;
+                            }
                             turn_started = Instant::now();
                             move_at = self.schedule(&game);
                         }
@@ -419,9 +436,15 @@ impl Bot {
                             moves_rejected,
                             gestures_sent,
                             gestures_received,
+                            stances_received,
+                            opponent_stance,
                         });
                     }
                     ServerMsg::Gesture(g) if g.game == game.game() => gestures_received += 1,
+                    ServerMsg::Stance(s) if s.game == game.game() => {
+                        stances_received += 1;
+                        opponent_stance = s.stance;
+                    }
                     ServerMsg::Error(e) if e.game == game.game() && e.code == ErrorCode::NotInGame => {
                         return Err(ClientError::Unexpected("the server says the bot is not in this game".into()));
                     }
@@ -472,7 +495,7 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scacelith_protocol::fen_digest;
+    use scacelith_protocol::{Message, fen_digest};
 
     #[test]
     fn rng_is_reproducible_and_bounded() {
@@ -519,6 +542,9 @@ mod tests {
         assert!(game.is_over() || game.ply() > 600);
         let g = game.gesture(5000, -5000, 200);
         assert_eq!((g.yaw, g.pitch, g.lean, g.touch), (3142, -1571, 100, 64));
+        let s = game.stance(Stance::SideLeft);
+        assert_eq!((s.game, s.stance), (1, Stance::SideLeft));
+        assert!(s.to_vec().is_ok());
         assert!(GameTracker::new(1, Color::White, [0x070c, 0x070c]).is_none());
     }
 }

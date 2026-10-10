@@ -1,8 +1,8 @@
 //! End-to-end multiplayer scenarios against the real server (the `scacelith-server` binary with
 //! two shards, TLS, SQLite), driven through the client SDK: pairing, special moves, duplicates,
 //! out of turn, illegal moves, the cheat sanction, reconnection, resignation, time out, clock
-//! tampering, simultaneous results, protocol abuse, the gesture relay, the clock press across a
-//! restart and a crash.
+//! tampering, simultaneous results, protocol abuse, the gesture and stance relays, the clock
+//! press across a restart and a crash.
 //!
 //! Port of the Node.js `test/integration/multiplayer.test.js`, adapted to protocol v1: a message
 //! with an unassigned type byte of the client's range is `Malformed` (4001), one of the server's
@@ -18,8 +18,9 @@ use scacelith_client::ws::Session;
 use scacelith_client::ws::frame::{Frame, OP_TEXT};
 use scacelith_client::{ClientError, ConnectOptions, Connection};
 use scacelith_protocol::{
-    ClientGesture, ClientPing, Color, EndReason, ErrorCode, GameEnd, GameEventKind, GameSnapshot, GameStatus,
-    Hello, Message, ServerMsg, close, gesture_flag, move_flag,
+    ClientGesture, ClientPing, ClientStance, Color, EndReason, ErrorCode, GameEnd, GameEventKind,
+    GameSnapshot, GameStatus, Hello, MINOR, Message, STANCE_MIN_MINOR, ServerMsg, Stance, close,
+    gesture_flag, move_flag,
 };
 use support::*;
 
@@ -453,6 +454,60 @@ async fn gestures_are_relayed_live_to_the_opponent_only_never_echoed_and_moves_s
     let echoed = a.client.history()[ma..].iter().any(|m| matches!(m, ServerMsg::Gesture(g) if g.yaw == -300));
     assert!(!echoed, "never echoed to the sender");
     assert!(a.client.is_open() && b.client.is_open());
+}
+
+/// The stances of the opponent that `p` received since `since`.
+fn stances_of(p: &Player, since: usize) -> Vec<(u64, Stance)> {
+    p.client.history()[since..]
+        .iter()
+        .filter_map(|m| match m {
+            ServerMsg::Stance(s) => Some((s.game, s.stance)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn stances_reach_an_opponent_of_minor_2_never_one_of_minor_1_whose_game_goes_on() {
+    let srv = server().await;
+    let [mut a, mut b, mut c, mut d] = players(&srv, ["sam", "tia", "uma", "val"]).await;
+    assert_eq!((a.client.conn().minor(), b.client.conn().minor()), (MINOR, MINOR));
+    let id = challenge_game(&mut a, &mut b, 180, 2, false).await;
+    let mut t = Table::new(id);
+    t.play_all(&mut a, &mut b, &["e2e4"]).await;
+    // On Black's turn, White stands up, walks to the side of the table and sits back down.
+    let (ma, mb) = (a.client.mark(), b.client.mark());
+    for stance in [Stance::Standing, Stance::SideLeft, Stance::Seated] {
+        a.client.send(ClientStance { seq: 0, game: id, stance });
+    }
+    wait_msg!(b.client, mb, ServerMsg::Stance(s) if s.stance == Stance::Seated => ());
+    let seen = stances_of(&b, mb);
+    assert_eq!(seen, [(id, Stance::Standing), (id, Stance::SideLeft), (id, Stance::Seated)], "in order");
+    t.play_all(&mut a, &mut b, &["e7e5", "g1f3"]).await;
+    assert!(stances_of(&a, ma).is_empty(), "never echoed to the sender");
+
+    // A client of minor 1 never receives a stance, and its own (it should send none) is dropped
+    // without an answer: the game goes on.
+    let minor1 = ConnectOptions { minor: STANCE_MIN_MINOR - 1, ..ConnectOptions::default() };
+    c.client = Client::connect_with(&srv.endpoint(), c.token(), &minor1).await.expect("connected");
+    assert_eq!(c.client.conn().minor(), 1);
+    let id = challenge_game(&mut d, &mut c, 180, 2, false).await;
+    let mut t = Table::new(id);
+    t.play_all(&mut d, &mut c, &["d2d4"]).await;
+    let (md, mc) = (d.client.mark(), c.client.mark());
+    d.client.send(ClientStance { seq: 0, game: id, stance: Stance::SideRight });
+    c.client.send(ClientStance { seq: 0, game: id, stance: Stance::Standing });
+    t.play_all(&mut d, &mut c, &["d7d5", "c2c4", "e7e6"]).await;
+    assert!(stances_of(&c, mc).is_empty(), "withheld from a session of minor 1");
+    assert!(stances_of(&d, md).is_empty(), "dropped from a session of minor 1");
+    let errors =
+        |p: &Player, since| p.client.history()[since..].iter().any(|m| matches!(m, ServerMsg::Error(_)));
+    assert!(!errors(&d, md) && !errors(&c, mc), "no Error for a stance");
+    assert!(d.client.is_open() && c.client.is_open() && a.client.is_open());
+    // Four relayed (the last withheld by the writer of the session of minor 1), five received.
+    let text = srv.metrics().await;
+    assert_eq!(metric_value(&text, "scacelith_stances_relayed_total"), 4.0);
+    assert_eq!(metric_value(&text, r#"scacelith_ws_messages_in_total{type="C_Stance"}"#), 5.0);
 }
 
 #[tokio::test]
