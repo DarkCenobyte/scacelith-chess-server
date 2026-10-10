@@ -17,9 +17,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use scacelith_protocol::{
-    Abort, ClientGesture, ClientMsg, Color, DrawOffer, EndReason as ER, ErrorCode as EC, GameEventKind as EV,
-    GameSnapshot, GameStatus as GS, Message, Move, MsgType, PlayerInfo, QueueJoin, Rematch, Resign, Resync,
-    ServerMsg, close,
+    Abort, ClientGesture, ClientMsg, ClientStance, Color, DrawOffer, EndReason as ER, ErrorCode as EC,
+    GameEventKind as EV, GameSnapshot, GameStatus as GS, Message, Move, MsgType, PlayerInfo, QueueJoin,
+    Rematch, Resign, Resync, ServerMsg, Stance, close,
 };
 
 use super::{GameStore, RulesFactory, Shard, ShardDeps, ShardSettings};
@@ -486,6 +486,11 @@ fn gesture(seq: u32, game: GameId, yaw: i32) -> Bytes {
     ClientGesture { seq, game, ply: 2, touch: 12, aim: 28, placed: 0, flags: 5, yaw, pitch: 321, lean: 40 }
         .to_bytes()
         .expect("a valid gesture")
+}
+
+/// A `C_Stance` frame.
+fn stance(seq: u32, game: GameId, stance: Stance) -> Bytes {
+    ClientStance { seq, game, stance }.to_bytes().expect("a valid stance")
 }
 
 #[tokio::test]
@@ -1069,6 +1074,71 @@ async fn gestures_are_dropped_without_an_anomaly_when_they_cannot_be_relayed_and
     assert!(!h.shard.gesture(id, 1, &gesture(5, id, 0)));
     assert_eq!(dropped(&h, "no_opponent"), 1);
     assert!(h.events.anomalies().is_empty());
+}
+
+#[tokio::test]
+async fn stances_go_to_the_opponent_only_as_droppable_frames_nothing_journaled_or_timed() {
+    let mut h = Rig::new().await;
+    let id = h.new_game(1, 2);
+    let (ew, eb) = (Ep::new(10, 1), Ep::new(20, 2));
+    h.shard.attach(id, 1, ew.endpoint());
+    h.shard.attach(id, 2, eb.endpoint());
+    h.play(id, 1000);
+    let t = h.t();
+    let state = |h: &Rig| {
+        (h.journal_kinds(id).len(), h.room(id).gseq(), h.shard.deadline_of(id), h.room(id).snapshot(W, t))
+    };
+    let before = state(&h);
+    ew.clear();
+    eb.clear();
+    // Black's turn: White stands up and goes to the side of the table, as the clock runs.
+    assert!(h.shard.stance(id, 1, &stance(41, id, Stance::Standing)));
+    assert!(h.shard.stance(id, 1, &stance(42, id, Stance::SideLeft)));
+    assert!(ew.sent().is_empty(), "never back to the sender");
+    let frame = stance(42, id, Stance::SideLeft);
+    assert_eq!(eb.sent().last().map(|f| f[1..].to_vec()), Some(frame[5..].to_vec()), "byte for byte");
+    match eb.msgs().as_slice() {
+        [ServerMsg::Stance(a), ServerMsg::Stance(b)] => {
+            assert_eq!((a.game, a.stance, b.game, b.stance), (id, Stance::Standing, id, Stance::SideLeft));
+        }
+        other => panic!("not two stances: {other:?}"),
+    }
+    assert!(h.shard.stance(id, 2, &stance(7, id, Stance::SideRight)));
+    assert!(matches!(ew.last(), ServerMsg::Stance(s) if s.stance == Stance::SideRight));
+    assert_eq!(state(&h), before, "no journal record, no gseq, the same deadline and clocks");
+    assert!(h.events.anomalies().is_empty());
+    assert_eq!((h.shard.counters().stances, h.shard.counters().gestures), (3, 0));
+}
+
+#[tokio::test]
+async fn stances_are_dropped_without_an_anomaly_when_they_cannot_be_relayed_and_relayed_in_the_rematch_window()
+ {
+    let mut h = Rig::new().await;
+    let id = h.new_game(1, 2);
+    let (ew, eb) = (Ep::new(10, 1), Ep::with_limit(20, 2, 1000));
+    h.shard.attach(id, 1, ew.endpoint());
+    h.shard.attach(id, 2, eb.endpoint());
+    let standing = stance(5, id, Stance::Standing);
+    assert!(!h.shard.stance(id, 99, &standing), "not a player");
+    assert!(!h.shard.stance(id + 1, 1, &stance(5, id + 1, Stance::Standing)), "no such game");
+    assert!(!h.shard.stance(id, 1, &standing[..13]), "not a whole C_Stance");
+    eb.block(300);
+    assert!(!h.shard.stance(id, 1, &standing), "the opponent's backlog");
+    eb.unblock();
+    assert!(!eb.types().contains(&MsgType::ServerStance));
+    h.advance(1000);
+    h.send(1, resign(id, 3), Some(&ew));
+    assert!(h.room(id).is_over());
+    assert!(
+        h.shard.stance(id, 1, &stance(6, id, Stance::Seated)),
+        "the room still exists: the rematch window"
+    );
+    assert!(matches!(eb.last(), ServerMsg::Stance(s) if s.stance == Stance::Seated));
+    h.shard.detach(id, 2, Some(20));
+    assert!(!h.shard.stance(id, 1, &standing), "no opponent attached");
+    assert!(h.events.anomalies().is_empty());
+    assert_eq!(h.shard.counters().stances, 1);
+    assert!(h.shard.counters().gesture_drops.is_empty(), "not counted as gestures");
 }
 
 #[tokio::test]

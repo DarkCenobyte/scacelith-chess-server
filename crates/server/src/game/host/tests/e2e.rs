@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use scacelith_chess::ChessGame;
 use scacelith_protocol::{
-    ClientGesture, ClientMsg, Color, EndReason as ER, ErrorCode, GameStatus as GS, Message, Move, MsgType,
-    ServerMsg,
+    ClientGesture, ClientMsg, ClientStance, Color, EndReason as ER, ErrorCode, GameStatus as GS, Message,
+    Move, MsgType, ServerMsg, Stance,
 };
 
 use super::persistence::{real_store, shown};
@@ -101,6 +101,11 @@ async fn hosts_play_commit_rate_and_restart_through_their_handles() {
     host.gesture(id, alice, gesture.to_bytes().expect("a valid gesture"));
     until("the gesture", || got(&eb, MsgType::ServerGesture)).await;
     assert!(!got(&ew, MsgType::ServerGesture));
+    // So does a stance.
+    let stance = ClientStance { seq: 2, game: id, stance: Stance::Standing };
+    host.stance(id, alice, stance.to_bytes().expect("a valid stance"));
+    until("the stance", || got(&eb, MsgType::ServerStance)).await;
+    assert!(!got(&ew, MsgType::ServerStance));
 
     // Fool's mate: the end, then the commit (journal flush and database) and the ratings.
     let mut mirror = ChessGame::default();
@@ -129,7 +134,8 @@ async fn hosts_play_commit_rate_and_restart_through_their_handles() {
         (1, 0, 0),
         "the room waits for the rematch window"
     );
-    assert_eq!((stats.counters.moves, stats.counters.committed, stats.counters.gestures), (4, 1, 1));
+    let c = &stats.counters;
+    assert_eq!((c.moves, c.committed, c.gestures, c.stances), (4, 1, 1, 1));
 
     // A second game stays running through a restart.
     let second = NewGame { white: shown(bob, "bob"), black: shown(alice, "alice"), ..new_game(0, 0) };
@@ -399,21 +405,23 @@ async fn a_flood_of_gestures_is_bounded_and_the_messages_behind_it_are_all_handl
     host.attach(id, bob, eb.endpoint());
     until("the snapshots", || got(&ew, MsgType::GameSnapshot) && got(&eb, MsgType::GameSnapshot)).await;
 
-    // Far more gestures than the inbox keeps, then a move, Black's connection replaced and a
-    // resignation: none of these is dropped, and they keep their order.
+    // Far more gestures than the inbox keeps, then a stance, a move, Black's connection replaced
+    // and a resignation: none of these is dropped, and they keep their order.
     let gesture = ClientGesture { seq: 1, game: id, ply: 0, touch: 12, aim: 28, ..ClientGesture::default() };
     let gesture = gesture.to_bytes().expect("a valid gesture");
     let extra = 1000;
     for _ in 0..GESTURE_INBOX_MAX + extra {
         host.gesture(id, alice, gesture.clone());
     }
+    let stance = ClientStance { seq: 2, game: id, stance: Stance::SideLeft };
+    host.stance(id, bob, stance.to_bytes().expect("a valid stance"));
     let mut mirror = ChessGame::default();
     play(&host, id, &mut mirror, &["e2e4"], [(alice, &ew), (bob, &eb)]);
     let eb2 = Ep::new(3, bob);
     host.detach(id, bob, 2);
     host.attach(id, bob, eb2.endpoint());
     host.client(bob, resign(id, 9), eb2.endpoint(), clock::mono_ms());
-    assert_eq!(host.inbox(), (GESTURE_INBOX_MAX + 4, GESTURE_INBOX_MAX));
+    assert_eq!(host.inbox(), (GESTURE_INBOX_MAX + 5, GESTURE_INBOX_MAX));
     assert!(!host.busy(), "gestures alone never make a host busy");
     assert_eq!(hosts.pick(None).map(HostHandle::shard), Some(0));
 
@@ -426,7 +434,8 @@ async fn a_flood_of_gestures_is_bounded_and_the_messages_behind_it_are_all_handl
         GESTURE_INBOX_MAX as u64,
         "every gesture let in was relayed (or met the opponent's backlog)"
     );
-    assert_eq!(stats.counters.moves, 1);
+    assert_eq!((stats.counters.moves, stats.counters.stances), (1, 1));
+    assert!(got(&ew, MsgType::ServerStance), "the stance behind the flood");
     let snap = eb2.msgs().into_iter().find_map(|m| match m {
         ServerMsg::GameSnapshot(s) => Some(s),
         _ => None,

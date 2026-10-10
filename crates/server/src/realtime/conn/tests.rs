@@ -104,6 +104,14 @@ impl Client {
         self.send(ClientGesture { seq, game, ..GESTURE }).await;
     }
 
+    /// Sends a `Stance` and returns its frame.
+    async fn stance(&mut self, game: GameId, stance: proto::Stance) -> Bytes {
+        let seq = self.next_seq();
+        let frame = proto::ClientStance { seq, game, stance }.to_bytes().expect("a valid stance");
+        self.raw(&frame).await;
+        frame
+    }
+
     /// The next frame (a close frame is answered, which ends the handshake).
     async fn recv(&mut self) -> Rx {
         match read_server_frame(&mut self.io).await {
@@ -1129,6 +1137,134 @@ async fn closes_a_gross_gesture_flood_4301_and_a_malformed_gesture_4001() {
     let (e, code) = c.refused().await;
     assert_eq!((e.r#ref, e.code, code), (2, ErrorCode::Malformed, 4001));
     assert_eq!(rig.anomalies.kinds(), ["malformed"]);
+}
+
+// ---- stances (minor 2) ----------------------------------------------------------------------------
+
+/// The stances relayed to the hosts so far, as `(game, user, frame)`.
+fn stances(rig: &Rig) -> Vec<(GameId, UserId, Bytes)> {
+    rig.hosts
+        .calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            HostCall::Stance { game, user, frame } => Some((game, user, frame)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn relays_a_stance_byte_for_byte_through_the_message_bucket_even_at_gesture_rate_zero() {
+    let rig = Rig::new(&[("WS_MSG_RATE", "1"), ("WS_MSG_BURST", "3"), ("GESTURE_RATE", "0")]).await;
+    let game = rig.game_in_progress().await;
+    let (mut c, w) = rig.login(ALICE).await;
+    assert_eq!((w.minor, w.gesture_rate, w.gesture_idle_ms), (proto::MINOR, 0, 0));
+    // The three tokens of the burst: two stances and a request; the next two are over the rate.
+    let standing = c.stance(game, proto::Stance::Standing).await;
+    let side = c.stance(game, proto::Stance::SideLeft).await;
+    let leave = c.queue_leave().await;
+    c.stance(game, proto::Stance::Standing).await;
+    c.stance(game, proto::Stance::Seated).await;
+    let mut got = Vec::new();
+    while got.len() < 2 {
+        match c.next().await {
+            ServerMsg::Ack(a) => got.push(format!("Ack {}", a.r#ref)),
+            ServerMsg::Error(e) => got.push(format!("{:?} {}", e.code, e.r#ref)),
+            other => panic!("{other:?}"),
+        }
+    }
+    got.sort();
+    assert_eq!(got, [format!("Ack {leave}"), "RateLimited 5".into()], "one error for the two drops");
+    // A token later, the next stance goes: the seq of the dropped ones still counted.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let back = c.stance(game, proto::Stance::Seated).await;
+    rig.host_calls(3, |h| matches!(h, HostCall::Stance { .. })).await;
+    assert_eq!(stances(&rig), [standing, side, back].map(|f| (game, 1, f)), "byte for byte, in order");
+    assert!(
+        !rig.hosts.calls().iter().any(|h| matches!(h, HostCall::Gesture { .. } | HostCall::Client { .. }))
+    );
+    assert!(rig.anomalies.anomalies().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn drops_a_stance_silently_for_a_game_not_attached_and_from_a_session_of_minor_1() {
+    let rig = Rig::new(&[]).await;
+    let game = rig.game_in_progress().await;
+    let (mut c, _) = rig.login(ALICE).await;
+    // A game this connection is not attached to: no Error, its seq counted.
+    c.stance(rig.hosts.next_id(1), proto::Stance::Standing).await;
+    let seq = c.queue_leave().await;
+    assert_eq!((seq, ack_of(&c.next().await)), (3, Some(3)));
+    // Out of sequence: dropped with the anomaly of any message, and the next one resynchronises.
+    c.seq += 5;
+    c.stance(game, proto::Stance::Standing).await;
+    let seq = c.queue_leave().await;
+    assert_eq!(ack_of(&c.next().await), Some(seq));
+    assert_eq!(rig.anomalies.kinds(), ["bad_seq"]);
+    assert!(stances(&rig).is_empty());
+
+    // A session of minor 1, whose client should send none: no Error either, its seq counted.
+    let mut old = rig.connect();
+    old.seq = 1;
+    old.send(Hello { minor: 1, ..hello(1, ALICE) }).await;
+    assert_eq!(old.welcome().await.minor, 1);
+    rig.host_calls(2, |h| matches!(h, HostCall::Attach { .. })).await;
+    old.stance(game, proto::Stance::SideRight).await;
+    let seq = old.queue_leave().await;
+    assert_eq!((seq, ack_of(&old.next().await)), (3, Some(3)));
+    assert!(stances(&rig).is_empty());
+    assert_eq!(rig.anomalies.kinds(), ["bad_seq"]);
+
+    // The same game from a session of minor 2: relayed.
+    let (mut c, _) = rig.login(ALICE).await;
+    rig.host_calls(3, |h| matches!(h, HostCall::Attach { .. })).await;
+    let frame = c.stance(game, proto::Stance::SideRight).await;
+    rig.host_calls(1, |h| matches!(h, HostCall::Stance { .. })).await;
+    assert_eq!(stances(&rig), [(game, 1, frame)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_session_of_minor_0_or_1_never_receives_a_stance() {
+    let rig = Rig::new(&[]).await;
+    let game = rig.game_in_progress().await;
+    let stance =
+        proto::ServerStance { game, stance: proto::Stance::SideLeft }.to_bytes().expect("a valid stance");
+    let notice = |arg| crate::realtime::frames::notice(NoticeCode::RatingRestored, arg);
+    for (attached, minor) in [1u16, 0, 2].into_iter().enumerate() {
+        // Each connection replaces the previous one.
+        let mut c = rig.connect();
+        c.seq = 1;
+        c.send(Hello { minor, ..hello(1, ALICE) }).await;
+        assert_eq!(c.welcome().await.minor, minor);
+        rig.host_calls(attached + 1, |h| matches!(h, HostCall::Attach { .. })).await;
+        let ep = rig.hosts.endpoint(game, 1).expect("attached");
+        let out = ep.outbound().clone();
+        // A batch of stances alone, then a stance between two notices.
+        assert!(ep.send(stance.clone()) && ep.send(stance.clone()));
+        while out.buffered() > 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(ep.send(notice(1.0)) && ep.send(stance.clone()) && ep.send(notice(2.0)));
+        let mut got = Vec::new();
+        loop {
+            let m = c.next().await;
+            got.push(name(&m));
+            if matches!(m, ServerMsg::Notice(n) if n.arg == 2.0) {
+                break;
+            }
+        }
+        let expected: &[&str] = if minor >= proto::STANCE_MIN_MINOR {
+            &["S_Stance", "S_Stance", "Notice", "S_Stance", "Notice"]
+        } else {
+            &["Notice", "Notice"]
+        };
+        assert_eq!(got, expected, "minor {minor}");
+        // Every byte taken from the queue left it, the withheld frames included.
+        while out.buffered() > 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(out.is_open());
+    }
 }
 
 // ---- token buckets over time ----------------------------------------------------------------------
