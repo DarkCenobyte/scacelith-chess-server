@@ -51,6 +51,8 @@ pub use self::identity::{
 pub use self::oidc::{
     OidcClient, OidcEndpoints, OidcError, check_redirect_uri, decode_jwt, form_urlencode, pkce_challenge,
 };
+#[cfg(test)]
+pub(crate) use self::sessions::TouchOutcome;
 pub use self::sessions::{
     NewSessionToken, SESSION_CACHE_TTL_MS, SESSION_TOUCH_DEFER_BACKLOG, SESSION_TOUCH_EVERY_MS,
     SESSION_TOUCH_URGENT_MS, SESSION_TOUCHES_IN_FLIGHT_MAX,

@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use super::support::*;
-use crate::store::{ErrorKind, GameRecord, Store, StoreError};
+use crate::store::{ErrorKind, GameRecord, Store, StoreError, StoreOptions};
 
 /// Another process's connection holding the write lock (`BEGIN IMMEDIATE`) until released.
 struct LockHolder {
@@ -300,7 +300,9 @@ async fn a_stalled_writer_refuses_ordinary_jobs_at_its_cap_and_keeps_every_criti
     use crate::store::metrics::WRITE_REFUSED;
     use crate::store::{WRITE_CRITICAL_RESERVE, WRITE_QUEUE_MAX};
     let logs = LogCapture::start();
-    let store = memory_store().await;
+    // A logger of its own: the other tests of the binary log too.
+    let logger = crate::log::Logger::root().child("store-bounds");
+    let store = store_with(&config(), StoreOptions { logger: Some(logger), ..options(None) }).await;
     let ids: Vec<_> = futures_create(&store, &["w", "b"]).await;
     let (release, blocker) = block_writer(&store).await;
 
@@ -319,7 +321,7 @@ async fn a_stalled_writer_refuses_ordinary_jobs_at_its_cap_and_keeps_every_criti
     }
     assert!(WRITE_REFUSED.get() >= refused0 + 3, "counted in scacelith_db_write_jobs_refused_total");
     assert_eq!(store.write_backlog(), WRITE_QUEUE_MAX, "the queue did not grow");
-    let warned = logs.records("store");
+    let warned = logs.records("store-bounds");
     let warned: Vec<_> =
         warned.iter().filter(|r| r["msg"].as_str().is_some_and(|m| m.contains("queue full"))).collect();
     assert_eq!(warned.len(), 1, "one warning per episode: {warned:?}");
@@ -356,7 +358,7 @@ async fn a_stalled_writer_refuses_ordinary_jobs_at_its_cap_and_keeps_every_criti
     assert!(t0.elapsed() < Duration::from_secs(10), "drained in {:?}", t0.elapsed());
     assert_eq!(store.meta().get("order".into()).await.unwrap().as_deref(), Some("first,last,critical"));
     assert!(store.games().by_id(7001).await.unwrap().is_some(), "the game is stored");
-    let back = logs.records("store");
+    let back = logs.records("store-bounds");
     assert!(
         back.iter()
             .any(|r| r["msg"] == "store writer queue back under its busy threshold" && r["refused"] == 3),

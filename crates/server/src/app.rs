@@ -700,6 +700,12 @@ impl Instance {
         &self.store
     }
 
+    /// The game hosts (tests).
+    #[cfg(test)]
+    pub(crate) fn hosts(&self) -> &Hosts {
+        &self.hosts
+    }
+
     /// The SIGHUP reload: `RELOADING=1`, the certificate and key read again (the outcome is
     /// logged; a failure keeps the current certificate), then `READY=1` whatever the outcome.
     pub(crate) async fn reload_certificates(&self) {
