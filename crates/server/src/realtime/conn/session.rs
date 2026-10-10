@@ -529,6 +529,19 @@ impl Session {
             self.error(seq, ErrorCode::NotInGame, 0);
             return;
         }
+        if self.waits_attach(game) {
+            // Posted now, the request would bind this connection to the game at the host (a
+            // player's request binds its connection when none is), behind the attach that this
+            // session has not posted and the detach it would then never post (audit N05). A
+            // `Resync` is answered by the snapshot of the attach once it goes through (nothing
+            // when the connection closes first); any other request is refused as by a host that
+            // falls behind: `Error{RateLimited}`, no effect, sent again after that snapshot.
+            if !matches!(msg, ClientMsg::Resync(_)) {
+                self.error(seq, ErrorCode::RateLimited, game);
+            }
+            self.m.drop_attach_pending.inc();
+            return;
+        }
         let recv_at = self.info.last_recv_ms();
         if !self.ctx.hosts.client(game, self.user, msg, self.ep.clone(), recv_at) {
             self.error(seq, ErrorCode::NotInGame, game);
@@ -563,6 +576,11 @@ impl Session {
     /// Whether an attach waits for its host.
     pub(crate) fn attach_deferred(&self) -> bool {
         !self.deferred.is_empty()
+    }
+
+    /// Whether the game's attach waits for its host, the connection not attached to it yet.
+    fn waits_attach(&self, game: GameId) -> bool {
+        self.deferred.contains(&game) && !self.games.contains(&game)
     }
 
     /// Tries the deferred attaches again (every [`ATTACH_RETRY`] while one waits).

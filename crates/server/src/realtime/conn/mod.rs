@@ -11,7 +11,10 @@
 //!   connection to close), then `Welcome` (negotiated `minor` and `caps`) is written and the game
 //!   in progress attached (once its host has handled the attach and detach of the player's
 //!   previous connection, when both still wait there: tried again every 200 ms, so that a player
-//!   reconnecting over and over leaves a bounded number of messages to a host that lags behind).
+//!   reconnecting over and over leaves a bounded number of messages to a host that lags behind;
+//!   meanwhile the connection's requests for that game are not posted, since one would bind the
+//!   connection there: a `Resync` waits for the attach's snapshot, the others get
+//!   `Error{RateLimited}`).
 //!   Up to 8 messages received meanwhile are handled after the `Welcome`.
 //! * **Session** ([`session`]): per message, a token bucket (`WS_MSG_RATE`/`WS_MSG_BURST`; over it
 //!   the message is dropped with `Error{RateLimited}` at most once a second, more than

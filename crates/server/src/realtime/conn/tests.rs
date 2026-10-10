@@ -645,6 +645,68 @@ async fn a_connection_closed_before_its_deferred_attach_detaches_nothing() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn the_requests_for_a_game_whose_attach_waits_never_reach_its_host() {
+    // N05: posted, a request would bind the connection at the host (a player's request binds its
+    // connection when none is) although the connection has not attached the game. A Resync waits
+    // for the attach's snapshot; the others are refused as by a host far behind. Once the attach
+    // went through, the requests go to the host again.
+    let rig = Rig::new(&[]).await;
+    let game = rig.game_in_progress().await;
+    rig.hosts.defer_attaches(usize::MAX);
+    let (mut c, _) = rig.login(ALICE).await;
+    rig.host_calls(1, |c| matches!(c, HostCall::AttachDeferred { .. })).await;
+    let resync = c.next_seq();
+    c.send(proto::Resync { seq: resync, game }).await;
+    let resign = c.next_seq();
+    c.send(Resign { seq: resign, game }).await;
+    let offer = c.next_seq();
+    c.send(proto::DrawOffer { seq: offer, game }).await;
+    for seq in [resign, offer] {
+        let ServerMsg::Error(e) = c.next().await else { panic!("a refusal") };
+        assert_eq!((e.r#ref, e.code, e.fatal, e.game), (seq, ErrorCode::RateLimited, false, game));
+    }
+    assert!(!rig.hosts.calls().iter().any(|c| matches!(c, HostCall::Client { .. })), "nothing posted");
+    rig.hosts.defer_attaches(0);
+    rig.host_calls(1, |c| matches!(c, HostCall::Attach { .. })).await;
+    let seq = c.next_seq();
+    c.send(proto::Resync { seq, game }).await;
+    let posted = rig.host_calls(1, |c| matches!(c, HostCall::Client { .. })).await;
+    assert!(
+        matches!(posted[..], [HostCall::Client { game: g, user: 1, kind: MsgType::Resync, .. }] if g == game)
+    );
+    drop(c);
+    rig.idle().await;
+    let detaches = rig.hosts.calls().into_iter().filter(|c| matches!(c, HostCall::Detach { .. })).count();
+    assert_eq!(detaches, 1, "the attached game is detached at the close");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resync_then_a_close_before_the_attach_is_tried_again_post_nothing() {
+    // N05, the host catching up between the request and the close: the connection closes before
+    // its next attach attempt, so it never attached the game, and its Resync, which waited for
+    // that attach, binds nothing either.
+    let rig = Rig::new(&[]).await;
+    let game = rig.game_in_progress().await;
+    rig.hosts.defer_attaches(1);
+    let t0 = tokio::time::Instant::now();
+    let (mut c, _) = rig.login(ALICE).await;
+    rig.host_calls(1, |c| matches!(c, HostCall::AttachDeferred { .. })).await;
+    let seq = c.next_seq();
+    c.send(proto::Resync { seq, game }).await;
+    drop(c);
+    rig.idle().await;
+    assert!(t0.elapsed() < super::ATTACH_RETRY, "closed before the retry: {:?}", t0.elapsed());
+    let calls = rig.hosts.calls();
+    assert!(
+        !calls.iter().any(|c| matches!(
+            c,
+            HostCall::Attach { .. } | HostCall::Client { .. } | HostCall::Detach { .. }
+        )),
+        "{calls:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn replaces_an_older_connection_of_the_account() {
     let rig = Rig::new(&[]).await;
     let game = rig.game_in_progress().await;

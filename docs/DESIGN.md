@@ -355,7 +355,11 @@ admitted at its door under the budget of its class (`game::host::inbox`):
   (an earlier connection's attach and detach), a newer connection's attach is not posted but
   waits in its connection, which tries it again every 200 ms
   (`scacelith_game_attach_deferred_total`); a connection that closes before does not detach that
-  game. A player who reconnects over and over to a host that does not catch up thus leaves one
+  game. Meanwhile that connection's requests for the game are not posted either (a player's
+  request binds its connection when none is, and this one would then stay bound, never
+  detached): a `Resync` waits for the attach's `GameSnapshot`, any other request gets
+  `Error{RateLimited}` as from a host far behind
+  (`scacelith_ws_dropped_total{reason="attach_pending"}`). A player who reconnects over and over to a host that does not catch up thus leaves one
   earlier connection's messages in its inbox (and the detach of each connection still open),
   not two messages per reconnection.
 

@@ -1,16 +1,24 @@
-//! The closure test of audit A10's lifecycle residue: a whole server whose game host stops
-//! handling its inbox while a player in a game closes and opens connections over and over. The
-//! attach and detach messages of that player's game stay at one earlier connection's (they used
-//! to pile up, two per reconnection), the later connections wait for their attach, and once the
-//! host runs again the last connection gets the game back: the opponent sees the player leave
-//! and come back once per connection the host handled, and the game goes on to its result.
+//! The closure tests of audit A10's lifecycle residue and of N05: a whole server whose game host
+//! stops handling its inbox while a player in a game closes and opens connections over and over.
+//! The attach and detach messages of that player's game stay at one earlier connection's (they
+//! used to pile up, two per reconnection), the later connections wait for their attach, and once
+//! the host runs again the last connection gets the game back: the opponent sees the player leave
+//! and come back once per connection the host handled, and the game goes on to its result. A
+//! request of a connection whose attach waits (N05) never binds it at the host: a `Resync` waits
+//! for the attach's snapshot, any other request is refused with `RateLimited`, and a connection
+//! that closes before its attach, whether the host caught up before the close or after it, is
+//! never announced back.
 
 use scacelith_chess::ChessGame;
-use scacelith_protocol::{Color, EndReason, GameEventKind, GameStatus, Resign, ServerMsg};
+use scacelith_protocol::{
+    Color, EndReason, ErrorCode, GameEventKind, GameSnapshot, GameStatus, Resign, Resync, ServerMsg,
+};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::oneshot;
 
 use super::{Client, TestServer};
-use crate::game::host::LINK_PENDING_MAX;
+use crate::game::host::{HostHandle, LINK_PENDING_MAX};
+use crate::ids::{GameId, UserId};
 use crate::net::ws::tests::frame;
 
 /// Reconnections of the player while its game's host is held.
@@ -50,6 +58,119 @@ async fn white_presence(c: &mut Client, n: usize) -> Vec<bool> {
     seen
 }
 
+/// Sends `Resync` on `c`, and returns White's presence events read until the snapshot that
+/// answers it (`true` for `PlayerReconnected`), and that snapshot.
+async fn presence_to_snapshot(c: &mut Client, game: GameId) -> (Vec<bool>, GameSnapshot) {
+    let seq = c.next_seq();
+    c.send(Resync { seq, game }).await;
+    let mut seen = Vec::new();
+    loop {
+        match c.next().await {
+            ServerMsg::GameEvent(e) if e.color == Color::White => match e.kind {
+                GameEventKind::PlayerReconnected => seen.push(true),
+                GameEventKind::PlayerDisconnected => seen.push(false),
+                _ => {}
+            },
+            ServerMsg::GameSnapshot(s) if s.game == game => return (seen, s),
+            _ => {}
+        }
+    }
+}
+
+/// A held game and the third connection of its White, whose attach waits.
+struct Deferred {
+    third: Client,
+    black: Client,
+    game: GameId,
+    user: UserId,
+    token: String,
+    host: HostHandle,
+    release: oneshot::Sender<()>,
+}
+
+/// A held game (White played e2e4) whose White closed two connections, the second one attached
+/// while the host was held: the third connection waits for its attach.
+async fn third_connection_deferred(server: &TestServer) -> Deferred {
+    let (white, mut black, game) = server.pair().await;
+    let mut first = white.c;
+    let mut board = ChessGame::default();
+    first.play(game, 0, &mut board, "e2e4").await;
+    black.c.until("MoveMade").await;
+    let user = server.instance().auth().validate_token(&white.token).await.unwrap().unwrap().user_id;
+    let host = server.instance().hosts().get(game).expect("the game's host").clone();
+    let release = host.hold().await;
+    close(first).await;
+    until("the first detach", || host.links(game, user).0 == 1).await;
+    let (second, _) = server.login(&white.token).await;
+    until("the second attach", || host.links(game, user).0 == 2).await;
+    close(second).await;
+    until("the second detach", || host.links(game, user).0 == 3).await;
+    let before = host.attaches_deferred();
+    let (third, w) = server.login(&white.token).await;
+    assert_eq!(w.active_game, game);
+    until("the third attach deferred", || host.attaches_deferred() > before).await;
+    Deferred { third, black: black.c, game, user, token: white.token, host, release }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_of_a_connection_whose_attach_waits_never_binds_it() {
+    // N05, as the audit's probe: the third connection sends a Resync (and a Resign), then closes,
+    // and only then does the host run again.
+    let mut server = TestServer::start(&[("ABUSE_EXEMPT", "127.0.0.1")]).await;
+    let Deferred { mut third, mut black, game, user, token, host, release } =
+        third_connection_deferred(&server).await;
+    let resync = third.next_seq();
+    third.send(Resync { seq: resync, game }).await;
+    let resign = third.next_seq();
+    third.send(Resign { seq: resign, game }).await;
+    // The Resync waits for the attach's snapshot; the Resign is refused, as by a host far behind.
+    let ServerMsg::Error(e) = third.next().await else { panic!("the Resign's refusal first") };
+    assert_eq!((e.r#ref, e.code, e.fatal, e.game), (resign, ErrorCode::RateLimited, false, game));
+    assert_eq!(host.links(game, user).0, 3, "nothing posted for the third connection");
+    close(third).await;
+    assert_eq!(host.links(game, user).0, 3, "no detach for a game the connection never attached");
+
+    drop(release);
+    let (seen, s) = presence_to_snapshot(&mut black, game).await;
+    assert_eq!(seen, [false, true, false], "White left, came back (second connection), left");
+    assert!(!s.white_connected, "no closed connection of White is bound");
+    assert_eq!(s.status, GameStatus::Ongoing, "the refused Resign ended nothing");
+    until("nothing waits", || host.links(game, user) == (0, 0)).await;
+
+    // White comes back for good: the opponent sees it once.
+    let (mut back, _) = server.login(&token).await;
+    let ServerMsg::GameSnapshot(s) = back.until("GameSnapshot").await else { unreachable!() };
+    assert_eq!((s.game, s.you, s.moves.len()), (game, Color::White, 1));
+    let (seen, s) = presence_to_snapshot(&mut black, game).await;
+    assert_eq!(seen, [true]);
+    assert!(s.white_connected);
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_connection_whose_attach_waits_closing_after_the_host_caught_up_is_not_bound() {
+    // N05, the host running again between the Resync and the close: the connection closes as soon
+    // as the host has handled the earlier connections (its next attach retry most likely not come
+    // yet). Whether the retry came first (attached, then detached) or not (never attached), White
+    // ends away and the opponent last saw it leave.
+    let mut server = TestServer::start(&[("ABUSE_EXEMPT", "127.0.0.1")]).await;
+    let Deferred { mut third, mut black, game, user, host, release, .. } =
+        third_connection_deferred(&server).await;
+    let seq = third.next_seq();
+    third.send(Resync { seq, game }).await;
+    drop(release);
+    until("the host caught up", || host.links(game, user).0 == 0).await;
+    close(third).await;
+    let (seen, s) = presence_to_snapshot(&mut black, game).await;
+    assert!(
+        seen == [false, true, false] || seen == [false, true, false, true, false],
+        "White's presence: {seen:?}"
+    );
+    assert!(!s.white_connected, "no closed connection of White is bound");
+    until("nothing waits", || host.links(game, user) == (0, 0)).await;
+    server.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_player_reconnecting_over_and_over_to_a_held_host_leaves_its_inbox_bounded() {
     let mut server = TestServer::start(&[("ABUSE_EXEMPT", "127.0.0.1")]).await;
@@ -79,6 +200,9 @@ async fn a_player_reconnecting_over_and_over_to_a_held_host_leaves_its_inbox_bou
             // The first connection's detach and the second one's attach and detach wait: the
             // attach of this one waits in its connection.
             until("the attach deferred", || host.attaches_deferred() > before).await;
+            // Its Resync waits with its attach (N05): nothing more in the inbox, nor bound.
+            let seq = c.next_seq();
+            c.send(Resync { seq, game }).await;
         }
         let (waiting, games) = host.links(game, user);
         assert!(

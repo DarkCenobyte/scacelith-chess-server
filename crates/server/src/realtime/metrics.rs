@@ -27,6 +27,9 @@ pub(crate) struct ConnMetrics {
     pub drop_rate: Counter,
     pub drop_seq: Counter,
     pub drop_ping: Counter,
+    /// Game requests for a game whose attach waits (a `Resync` answered by its snapshot, any
+    /// other one refused with `RateLimited`).
+    pub drop_attach_pending: Counter,
     pub anomalies: CounterVec,
     pub g_drop_rate: Counter,
     pub g_drop_not_attached: Counter,
@@ -79,6 +82,7 @@ pub(crate) fn conn() -> &'static ConnMetrics {
             drop_rate: dropped.with(&["rate"]),
             drop_seq: dropped.with(&["bad_seq"]),
             drop_ping: dropped.with(&["ping_limit"]),
+            drop_attach_pending: dropped.with(&["attach_pending"]),
             anomalies: metrics::counter_vec(
                 "scacelith_ws_anomalies_total",
                 "Protocol anomalies seen by the router",
