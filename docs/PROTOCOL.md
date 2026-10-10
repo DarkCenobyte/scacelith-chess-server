@@ -445,8 +445,8 @@ more, and the server never sends one to a session of minor 0 or 1.
   but its decoding.
 * **Sending.** A client sends `Stance{seq, game, stance}` for its game when its player's stance
   changes and, while it is not `Seated`, again at least once per gesture keepalive (the clamped
-  `gestureIdleMs` of [Gesture relay](#gesture-relay): 1000 ms when `gestureRate` is 0 and
-  `gestureIdleMs` with it), on both players' turns. It goes whatever `gestureRate` says, the relay
+  `gestureIdleMs` of [Gesture relay](#gesture-relay), so 1000 ms when `gestureRate` is 0, which
+  makes `gestureIdleMs` 0), on both players' turns. It goes whatever `gestureRate` says, the relay
   of gestures off included. After a reconnection or a resume, the client sends the current stance
   again when it is not `Seated`. A `Stance` takes the next `seq` and a token of the message rate
   limit like any message, not of the gesture bucket: one per change, and one per keepalive while
@@ -454,7 +454,7 @@ more, and the server never sends one to a session of minor 0 or 1.
 * **Relay.** The server sends the opponent the S2C `Stance`: the C2S message without its `seq`,
   copied byte for byte after checking that it decodes, when the opponent's session is of minor 2
   or later. It never goes back to the sender and is never answered, stored or timed. A `Stance`
-  for a game the connection does not play, for an absent opponent, or towards a connection that
+  for another game than the connection's, for an absent opponent, or towards a connection that
   already has a backlog is dropped silently, as a gesture is; so is one from a session of minor 0
   or 1 (no `Error`: its client gets the minors wrong, and its game goes on).
 * **Receiving.** The latest stance wins. A stance other than `Seated` not repeated within 5

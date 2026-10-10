@@ -260,7 +260,7 @@ impl Session {
     /// a client should not send one; an `Error` would only add a message per keepalive to a game
     /// that goes on well without the stance, and a fatal one would end a game for a cosmetic
     /// message, so a client that gets the minors wrong keeps playing (its stance unseen).
-    fn stance(&mut self, game: GameId, frame: Bytes) {
+    fn stance(&self, game: GameId, frame: Bytes) {
         if self.minor < STANCE_MIN_MINOR || !self.games.contains(&game) {
             return;
         }
