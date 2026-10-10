@@ -450,7 +450,12 @@ published ranges; the experimental ranges are never published, and a published p
   `ChallengeAccept` and `ChallengeJoinCode` then get `Error{RateLimited}` (non-fatal) and nothing
   changes (a challenge or a code stays open), and a rematch both players asked for gets
   `Error{RematchUnavailable}`. Try again a few seconds later; games in progress are not affected.
-  The gestures of a player whose game host is that far behind may be dropped, as for a slow link.
+  The gestures and stances of a player whose game host is that far behind may be dropped, as for
+  a slow link. Further behind still, a game request (`Move`, `DrawOffer`, `Resync`, `Rematch`)
+  may get `Error{RateLimited}` (non-fatal, with its `ref` and `game`) instead of its usual answer:
+  it had no effect (a move was not played), and the client may send it again once the server
+  answers. A request that ends a game (`Resign`, `Abort`, `DrawAnswer`, `DrawClaim`) is refused
+  that way only even further behind.
 
 ## Errors and close codes
 

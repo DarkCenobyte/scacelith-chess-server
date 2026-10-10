@@ -314,14 +314,29 @@ anything, and spawns the actor. The actor handles its inbox one message at a tim
 messages and its detach stay ordered), and a 10 ms beat (`MissedTickBehavior::Delay`) fires due
 deadlines, detects stalls (6.1), starts commits and builds compaction snapshots (at most 2 per
 beat). A beat first handles the messages already in the inbox, never those that arrive meanwhile,
-so a busy inbox cannot hold the timers back. The inbox is unbounded, but what it holds is counted
-(`game::host::inbox`): a gesture, which the next one supersedes, is dropped before it when
-`GESTURE_INBOX_MAX` (8,192) gestures wait (`scacelith_gestures_dropped_total{reason="overload"}`);
-every other message (requests, attach and detach, creations, cancels, forfeits, rematch windows,
-the shutdown) is always delivered. A host with `INBOX_BUSY` (16,384) messages waiting, or
-`JOURNAL_PENDING_BUSY` (16 MiB) of journal records not handed to its I/O thread, is busy and gets
-no new game (`Hosts::pick`); the games it holds go on. Each beat exports the counts
-(`scacelith_game_inbox_messages`, `scacelith_journal_pending_bytes`).
+so a busy inbox cannot hold the timers back. The inbox is one channel, and every message is
+admitted at its door under the budget of its class (`game::host::inbox`):
+
+* a host with `INBOX_BUSY` (16,384) messages waiting, or `JOURNAL_PENDING_BUSY` (16 MiB) of
+  journal records not handed to its I/O thread, is busy and gets no new game (`Hosts::pick`); the
+  games it holds go on;
+* a cosmetic message is dropped at the door: a gesture, which the next one supersedes, when
+  `GESTURE_INBOX_MAX` (8,192) gestures wait (`scacelith_gestures_dropped_total{reason="overload"}`),
+  and any gesture, stance, round-trip measurement or rematch decline while `INBOX_MAX` (32,768)
+  messages wait;
+* a game request (`Move`, `DrawOffer`, `Resync`, `Rematch`) is refused while `INBOX_MAX` messages
+  wait: the connection answers `Error{RateLimited}` with its `seq` and `game` (never fatal), so
+  the client knows it was not played;
+* a request that ends a game (`Resign`, `Abort`, `DrawAnswer`, `DrawClaim`) also takes the
+  `INBOX_RESERVE` (16,384) messages above `INBOX_MAX`, and is refused the same way beyond them;
+* a lifecycle message (attach and detach, creations, cancels, forfeits, the stats, the shutdown)
+  is never refused: its sources are bounded by the connections and the lobby, and one beyond the
+  reserve is still delivered and counted (`scacelith_game_inbox_over_reserve_total`).
+
+A host therefore holds at most `INBOX_MAX` + `INBOX_RESERVE` messages (about 6.4 MiB at 136 bytes
+each). The refusals are counted by kind (`scacelith_game_inbox_refused_total{kind}`) and logged
+once per episode by the beat, which also exports the counts (`scacelith_game_inbox_messages`,
+`scacelith_journal_pending_bytes`).
 
 `HostHandle` is the cloneable way in: `client` (a strictly decoded game request with its read
 time), `gesture`, `attach` (binds a connection and sends it a `GameSnapshot`), `detach`, `rtt`,
@@ -418,11 +433,19 @@ embedded in the binary and recorded in `schema_migrations`.
 * **Writer.** One thread, one connection, one FIFO: a job is queued when it is submitted, and each
   runs in its own `BEGIN IMMEDIATE` transaction. Two jobs submitted one after the other run in that
   order, which the anti-cheat relies on (anomalies before the commit that reads them, a certain
-  anomaly before the ban it causes). No job is refused for the queue's length
-  (`scacelith_db_write_queue`); from `WRITE_BACKLOG_BUSY` (10,000) jobs waiting the store is
-  backlogged (`Store::writes_backlogged`): the API refuses the requests that may write (`POST`,
-  `PUT`, `PATCH`, `DELETE`: 503 `server_busy` before authentication, rates and body) and no new
-  game is created, until the writer catches up.
+  anomaly before the ban it causes). From `WRITE_BACKLOG_BUSY` (10,000) jobs waiting
+  (`scacelith_db_write_queue`) the store is backlogged (`Store::writes_backlogged`): the API
+  refuses the requests that may write (`POST`, `PUT`, `PATCH`, `DELETE`: 503 `server_busy` before
+  authentication, rates and body), no new game is created and the session renewals are deferred,
+  until the writer catches up. The queue is bounded per lane (`store::writer`): an ordinary job
+  (`Store::write`: the API's writes, the session renewals, the anti-cheat's and the lobby's
+  writes, the retention purge) is refused with a `busy` error, without running, while
+  `WRITE_QUEUE_MAX` (20,000) jobs wait (`scacelith_db_write_jobs_refused_total`, logged once per
+  episode); a critical one (`Store::write_critical` and the game commits: a finished game, the
+  anomaly batch an analysis reads, the migrations) also takes the `WRITE_CRITICAL_RESERVE`
+  (1,024) jobs above and is never refused (`scacelith_db_write_queue_critical`; one beyond the
+  reserve is still queued, counted in `scacelith_db_write_reserve_exceeded_total` and logged as an
+  error). Both lanes share the one FIFO, so the order above holds.
 * **Readers.** `query_only` connections on the blocking pool; a read started after a write job
   answered sees that write.
 * **API.** `Store::read` and `Store::write` run a closure on a `Db`, which has a typed API per
@@ -690,7 +713,11 @@ query and body validation, the handler under its timeout, and the answer with it
   half a minute, whole server).
 * **Timeouts and bodies.** The handler timeout is 30 s (the export 60 s; a GIF
   `GIF_QUEUE_TIMEOUT_MS + GIF_RENDER_TIMEOUT_MS` + 5 s). A body must arrive within 10 s (408) and
-  within its limit (413); either closes the connection.
+  within its limit (413); either closes the connection. The authentication has its own deadline,
+  `AUTH_TIMEOUT` (5 s): beyond it the request is answered 503 `server_busy`. A handler past its
+  timeout keeps running (its effects happen) as a late handler; while `LATE_HANDLERS_MAX` (1,024)
+  of them run, new requests are answered 503 `server_busy` before anything runs
+  (`scacelith_http_busy_total{reason}`, `scacelith_http_late_handlers`).
 * **Headers.** Every answer carries `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
   `Referrer-Policy: no-referrer`, a `Content-Security-Policy` (strict for HTML pages), and
   `Strict-Transport-Security` with native TLS. JSON errors are `{ "error": "<snake_case_code>",
@@ -1090,7 +1117,12 @@ checkpoint (it is truncated to 64 MiB and removed when the server stops). A back
   still the one the request's password matched, in the transaction of the change.
 * **Sessions and tokens**: session tokens and every single-use token are 32 random bytes, stored as
   SHA-256 only. Session lookups are cached 30 s (positive and negative); the API drops revoked
-  sessions from the cache at once. Single-use tokens: e-mail verification (24 h), password reset
+  sessions from the cache at once. The last use is renewed at most every 5 minutes by a write
+  queued in the background, never awaited by the request: one in flight per session (the
+  concurrent requests coalesce), `SESSION_TOUCHES_IN_FLIGHT_MAX` (1,024) in all, and deferred to a
+  later request while the writer has `SESSION_TOUCH_DEFER_BACKLOG` (1,000) jobs waiting, unless
+  the idle expiry is less than `SESSION_TOUCH_URGENT_MS` (1 hour) away
+  (`scacelith_session_touches_total{result}`). Single-use tokens: e-mail verification (24 h), password reset
   (1 h; revokes every session; works only while the account still has the address it was mailed to;
   a reset or a password change ends the account's other reset links), e-mail change (24 h, sent to
   the new address; a new request replaces it, a password change or reset cancels it), MFA login step

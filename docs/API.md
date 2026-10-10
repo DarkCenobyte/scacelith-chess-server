@@ -203,7 +203,7 @@ Errors that any endpoint can give:
 | 415 | `unsupported_media_type` | The body is not `application/json`, or its charset is not UTF-8. |
 | 429 | `rate_limited` | A rate limit (section 1.5): `retryAfter` plus a `Retry-After` header. |
 | 500 | `internal_error` | An unexpected failure. The server logs it. |
-| 503 | `server_busy` | The database stayed locked while the session token was checked (`retryAfter: 1`, section 1.4). Also, for a `POST`, `PUT`, `PATCH` or `DELETE`, the database has too many writes waiting: the request was not run, and its rate limits took nothing (`retryAfter` of 2 to 5 s). |
+| 503 | `server_busy` | The database stayed locked while the session token was checked (`retryAfter: 1`, section 1.4). Also, with a `retryAfter` of 2 to 5 s, when the server is far behind: for a `POST`, `PUT`, `PATCH` or `DELETE`, the database has too many writes waiting; for any request, too many earlier requests are still running past their timeout, or the session token could not be checked within 5 s. The request was not run, and its rate limits took nothing. |
 | 503 | `timeout` | The server did not answer within 30 s (60 s for the export, 45 s for the GIFs with the default settings). |
 
 The read endpoints (sections 10 to 12) and the export answer 503 `busy` with `retryAfter: 1`
@@ -252,11 +252,15 @@ Authorization: Bearer sct_L_8GDd7uzfQ3QQWtqrsWXDTsFWzRwIvJcwIGHhjWPS8
   token must be valid.
 - **Busy store.** When the database stays locked while a token is checked, an endpoint that
   requires or accepts a session answers 503 `server_busy` with `retryAfter: 1` (and
-  `Retry-After`). The token was not judged: keep it and send the request again.
+  `Retry-After`); when the check takes more than 5 s, it answers 503 `server_busy` with a
+  `retryAfter` of 2 to 5 s. Either way the token was not judged: keep it and send the request
+  again.
 - **Lifetime.** A session ends at the first of these:
   - `SESSION_MAX_DAYS` (90) after the sign-in: this is `expiresAt`;
   - `SESSION_IDLE_DAYS` (30) without use. Each use pushes the idle limit back; the server writes
-    the new value at most every 5 minutes.
+    the new value at most every 5 minutes, in the background. While its database has many writes
+    waiting it postpones that write to a later request, except within the last hour before the
+    idle limit, so a session in use does not expire.
 
   An account keeps at most `MAX_SESSIONS_PER_USER` (10) sessions: a new sign-in revokes the
   oldest beyond that number.
@@ -979,7 +983,7 @@ curl -sS "$API/auth/sessions" -H "Authorization: Bearer $TOKEN"
 }
 ```
 
-- `lastSeenAt` is updated at most every 5 minutes.
+- `lastSeenAt` is updated at most every 5 minutes (later while the server is far behind).
 - `expiresAt` is the absolute end; the idle limit may end the session sooner.
 - `clientLabel` is `null` when the sign-in sent none.
 - `current` marks the session making the request.
