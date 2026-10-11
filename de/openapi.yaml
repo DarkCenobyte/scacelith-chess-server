@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: HTTPS-API des Scacelith-Servers
-  version: "0.9.1"
+  version: "1.1.0"
   summary: Die HTTPS-API jedes Scacelith-Servers, des offiziellen wie der Community-Server.
   description: |-
     Jeder Scacelith-Server, der offizielle `caissa.scacelith.com` ebenso wie jeder Community-Server, beantwortet diese HTTPS-API. Das Spiel nutzt sie für alles außerhalb der eigentlichen Partie: Registrierung und Anmeldung (einschließlich Zwei-Faktor-Authentifizierung und Google), die Kontoseite, den Partieverlauf, PGN-Downloads und animierte GIFs von Partien, die angemeldeten Geräte, das Herunterladen der eigenen Daten, die Löschung des Kontos und Meldungen.
@@ -16,7 +16,7 @@ info:
     - Ein Community-Server: `https://<SERVER_PUBLIC_HOST>[:<port>]/api/v1`. `API_PORT` ist standardmäßig 443; hinter einem NAT oder einem Proxy ist der Port, den die Spieler verwenden, `PUBLIC_API_PORT`.
     - Der WebSocket des Spiels liegt standardmäßig auf demselben Port (`WS_PORT` verlegt ihn; `GET /info` teilt dem Client mit, wo er liegt).
     - HTTP/1.1 über TLS. Mit `TLS_MODE=proxy` terminiert ein Reverse Proxy vor dem Server das TLS. `TLS_MODE=off` (reines HTTP) ist nur für die lokale Entwicklung gedacht.
-    - Die HTML-Seiten, die über die Links in E-Mails geöffnet werden (`/verify-email`, `/reset-password`, `/confirm-email-change`), liegen im Wurzelpfad des Servers, außerhalb von `/api/v1`. Die Endpunkte zur Zustandsprüfung antworten sowohl im Wurzelpfad als auch unter `/api/v1`. Die Anmeldung mit Google hat keine Seite auf dem Server: Google schickt den Browser direkt zum Spiel zurück, auf `127.0.0.1`.
+    - Die HTML-Seiten, die über die Links in E-Mails geöffnet werden (`/verify-email`, `/reset-password`, `/confirm-email-change`), liegen im Wurzelpfad des Servers, außerhalb von `/api/v1`. Die Endpunkte zur Zustandsprüfung antworten sowohl im Wurzelpfad als auch unter `/api/v1`. Die Anmeldung mit Google hat keine Seite auf dem Server: Google schickt den Browser direkt zum Spiel zurück, auf `127.0.0.1`, oder zu einer Seite der Website, die die Anmeldung gestartet hat (`GOOGLE_WEB_REDIRECT_URI`).
     - Ein abschließender Schrägstrich wird ignoriert (`/api/v1/info/` ist `/api/v1/info`), und Pfadparameter werden URL-dekodiert (ein Parameter, der keine gültige URL-Kodierung ist, wird mit 400 `invalid_request` beantwortet).
 
     ## Anfragen
@@ -37,7 +37,7 @@ info:
     ## Antworten und Fehler
 
     - Antworten sind JSON in UTF-8, außer dem PGN-Download (`application/x-chess-pgn`), den animierten GIFs (`image/gif`) und den HTML-Seiten. Zeitangaben sind Millisekunden seit dem 1970-01-01 UTC. IDs sind Ganzzahlen. Partie-IDs haben bis zu 16 Stellen, bleiben aber unter 2^53, sodass eine JSON-Zahl (ein Double) sie exakt darstellt.
-    - Jede Antwort der API trägt `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Cross-Origin-Resource-Policy: same-origin` und `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` (die HTML-Seiten haben eine eigene Richtlinie). Mit `TLS_MODE=native` trägt sie außerdem `Strict-Transport-Security: max-age=31536000`.
+    - Jede Antwort der API trägt `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Cross-Origin-Resource-Policy: same-origin` und `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` (die HTML-Seiten haben eine eigene Richtlinie). Mit `TLS_MODE=native` trägt sie außerdem `Strict-Transport-Security: max-age=31536000`. Die Antworten, die der Listener selbst schreibt, noch vor der API (die auf `GET` und `HEAD` der Endpunkte zur Zustandsprüfung, das 429 der Adressebene und ein 500 `internal_error`, wenn die API schlicht fehlschlägt), tragen dieselben Header außer `Cross-Origin-Resource-Policy`, und ihr `Content-Type` ist `application/json` ohne Zeichensatz.
     - Eine Antwort muss innerhalb von 60 Sekunden ab dem Moment gelesen werden, in dem der Server sie bereithält, was nur bei großen Antworten eine Rolle spielt (ein GIF, der Datenexport, eine lange PGN). Die Zeit, die der Server zum Erstellen einer Antwort braucht, zählt weder hierfür noch für die 30 Sekunden ohne ein- oder ausgehendes Byte, nach denen eine Verbindung geschlossen wird.
 
     Fehler haben eine einheitliche Form (das Schema `Error`):
@@ -65,7 +65,7 @@ info:
     | 429 | `rate_limited` | Ein Ratenlimit (siehe unten): `retryAfter` plus ein `Retry-After`-Header. |
     | 500 | `internal_error` | Ein unerwarteter Fehler. Der Server protokolliert ihn. |
     | 503 | `timeout` | Der Server hat nicht innerhalb von 30 Sekunden geantwortet (60 Sekunden beim Export, 45 Sekunden bei den GIFs mit den Standardeinstellungen). |
-    | 503 | `server_busy` | Eine Sitzungsabfrage oder eine Kontoänderung fand die Datenbank gesperrt vor (`retryAfter` 1), oder die Passwort-Hash-Warteschlange ist voll (siehe unten). Außerdem, bei `POST`, `PUT`, `PATCH` oder `DELETE`: Die Datenbank hat zu viele wartende Schreibvorgänge; die Anfrage wurde nicht ausgeführt, und ihre Ratenlimits haben nichts verbraucht (`retryAfter` 2 bis 5). |
+    | 503 | `server_busy` | Eine Sitzungsabfrage oder eine Kontoänderung fand die Datenbank gesperrt vor (`retryAfter` 1), oder die Passwort-Hash-Warteschlange ist voll (siehe unten). Außerdem, mit einem `retryAfter` von 2 bis 5, wenn der Server stark im Rückstand ist: Bei `POST`, `PUT`, `PATCH` oder `DELETE` hat die Datenbank zu viele wartende Schreibvorgänge; bei jeder Art von Anfrage laufen noch zu viele frühere Anfragen über ihr Zeitlimit hinaus, oder das Sitzungstoken konnte nicht innerhalb von 5 Sekunden geprüft werden. Die Anfrage wurde nicht ausgeführt, und ihre Ratenlimits haben nichts verbraucht. |
 
     Die Lese-Endpunkte (Partieverlauf, Partien, Spieler, Rangliste) und der Export antworten mit 503 `busy` und `retryAfter: 1`, wenn die Datenbank gesperrt blieb.
 
@@ -89,7 +89,8 @@ info:
     - **Ein Token erhalten.** Ein Token (`sct_` gefolgt von 43 base64url-Zeichen) stammt von `POST /auth/login`, danach von `POST /auth/login/mfa`, wenn die Zwei-Faktor-Authentifizierung eingeschaltet ist, von `POST /auth/sso/google/finish` und `POST /auth/sso/google/link` (Anmeldung mit Google) sowie von `POST /auth/sso/complete`. Jeder dieser Endpunkte antwortet mit `{ token, expiresAt, user }`. Der Server speichert nur einen SHA-256-Hash des Tokens.
     - **Erforderliche Sitzung.** Ein fehlender Header wird mit 401 `unauthorized` und `WWW-Authenticate: Bearer realm="scacelith"` beantwortet. Ein ungültiges Token wird mit 401 `invalid_token` und `WWW-Authenticate: Bearer realm="scacelith", error="invalid_token"` beantwortet. Ein Client sollte ein Token, das `invalid_token` erhält, verwerfen und sich erneut anmelden.
     - **Optionale Sitzung.** Bei `GET /games/{id}`, `GET /games/{id}/pgn`, `GET /players/{username}` und `GET /players/{username}/games` ist die Sitzung optional. Ohne den Header liefern sie die öffentliche Ansicht; wird ein Header gesendet, muss sein Token gültig sein.
-    - **Lebensdauer.** Eine Sitzung endet beim früheren von zwei Zeitpunkten: `SESSION_MAX_DAYS` (90) Tage nach der Anmeldung (das ist `expiresAt`) oder nach `SESSION_IDLE_DAYS` (30) Tagen ohne Nutzung. Jede Nutzung schiebt die Inaktivitätsgrenze hinaus; der Server schreibt den neuen Wert höchstens alle 5 Minuten. Ein Konto behält höchstens `MAX_SESSIONS_PER_USER` (10) Sitzungen: Eine neue Anmeldung widerruft die ältesten über diese Anzahl hinaus.
+    - **Ausgelasteter Speicher.** Bleibt die Datenbank gesperrt, während ein Token geprüft wird, antwortet ein Endpunkt, der eine Sitzung verlangt oder akzeptiert, mit 503 `server_busy` und `retryAfter: 1` (sowie `Retry-After`); dauert die Prüfung länger als 5 Sekunden, antwortet er mit 503 `server_busy` und einem `retryAfter` von 2 bis 5. In beiden Fällen wurde das Token nicht beurteilt: Behalten Sie es und senden Sie die Anfrage erneut.
+    - **Lebensdauer.** Eine Sitzung endet beim früheren von zwei Zeitpunkten: `SESSION_MAX_DAYS` (90) Tage nach der Anmeldung (das ist `expiresAt`) oder nach `SESSION_IDLE_DAYS` (30) Tagen ohne Nutzung. Jede Nutzung schiebt die Inaktivitätsgrenze hinaus; der Server schreibt den neuen Wert höchstens alle 5 Minuten, im Hintergrund. Solange seine Datenbank viele wartende Schreibvorgänge hat, verschiebt er diesen Schreibvorgang auf eine spätere Anfrage, außer in der letzten Stunde vor der Inaktivitätsgrenze, sodass eine genutzte Sitzung nicht abläuft. Ein Konto behält höchstens `MAX_SESSIONS_PER_USER` (10) Sitzungen: Eine neue Anmeldung widerruft die ältesten über diese Anzahl hinaus.
     - **Widerruf.** Das Abmelden (`POST /auth/logout`, `POST /auth/logout-all`, `DELETE /auth/sessions/{id}`) widerruft Sitzungen; ebenso eine Passwortänderung (die anderen Sitzungen), das Zurücksetzen des Passworts und die Löschung des Kontos (alle Sitzungen) sowie ein Administrator. Ein Widerruf über die API wirkt sofort, und der mit einer widerrufenen Sitzung geöffnete WebSocket wird geschlossen. Eine Passwortänderung, ein Zurücksetzen des Passworts und die Löschung des Kontos widerrufen in derselben Transaktion wie die Änderung selbst: Schlägt einer dieser Vorgänge fehl, wurde keine Sitzung widerrufen und auch sonst nichts geändert. Der Server speichert Sitzungsabfragen 30 Sekunden lang zwischen, sodass ein Widerruf über den Admin-Befehl, einen separaten Prozess, innerhalb von 30 Sekunden wirksam wird.
     - **Geltungsbereich.** Ein Token gehört zu genau einem Server und öffnet auch dessen WebSocket. Senden Sie es nie an einen anderen Server.
 
@@ -111,7 +112,7 @@ info:
     | `auth_forgot` | `AUTH_FORGOT_PER_HOUR` (3) / Stunde, geteilt | Client, das Dreifache pro IPv6-/48-Netz | `POST /auth/password/forgot` |
     | `auth_forgot_day` | `AUTH_FORGOT_PER_DAY` (10) / 24 Stunden, geteilt | Client, das Dreifache pro IPv6-/48-Netz | `POST /auth/password/forgot` |
     | `auth_reset` | `AUTH_RESET_PER_HOUR` (10) / Stunde, geteilt | Client, das Dreifache pro IPv6-/48-Netz | `POST /auth/password/reset`, `POST /reset-password` |
-    | `reauth` | die Werte von `auth`, eigener Bucket, geteilt | Client und IPv6-/48-Netz | die Kontoänderungen, die das Passwort verlangen (siehe Erneute Authentifizierung), und `POST /account/export` |
+    | `reauth` | die Werte von `auth`, eigener Bucket, geteilt | Client und IPv6-/48-Netz | `POST /account/password`, `/account/mfa/totp/setup`, `/account/mfa/totp/enable`, `/account/mfa/totp/disable`, `/account/mfa/recovery-codes`, `/account/email`, `/account/export`, `/account/delete` |
     | `reauth_user` | `AUTH_REAUTH_PER_USER` (10) / 10 min, geteilt | Spieler | dieselben Endpunkte wie `reauth` |
     | `account` | 60 / min | Spieler | `GET /account/me`, `PUT /account/preferences` |
     | `account_games` | 60 / min | Spieler | `GET /account/games` |
@@ -122,13 +123,13 @@ info:
     | `gif_user_min`, `gif_user_hour` | `GIF_USER_RENDERS_PER_MIN` (4) / min und `GIF_USER_RENDERS_PER_HOUR` (30) / Stunde, geteilt | Spieler | dieselben beiden, nur wenn das GIF erstellt werden muss (nicht aus dem Cache) |
     | `gif_ip_min`, `gif_ip_hour` | `GIF_IP_RENDERS_PER_MIN` (12) / min und `GIF_IP_RENDERS_PER_HOUR` (120) / Stunde, geteilt | Client (alle seine Konten zusammen), das Dreifache pro IPv6-/48-Netz | dieselben, wie oben |
     | `reports` | 30 / Stunde | Spieler | `POST /reports` |
-    | `sso_start` | 30 / 10 min, geteilt | Client und 90 pro IPv6-/48-Netz | `POST /auth/sso/google/start` |
+    | `sso_start` | 30 / 10 min, geteilt | Client und 90 pro IPv6-/48-Netz | `POST /auth/sso/google/start`, `POST /auth/sso/google/web/start` (gemeinsam) |
     | `sso_finish` | 30 / min | Client | `POST /auth/sso/google/finish` |
     | `page` | 60 / min | Client | `GET /verify-email`, `/reset-password`, `/confirm-email-change` |
 
     `GET /info` und `GET /leaderboard` haben kein eigenes Limit, nur die Adressebene. Ein Endpunkt mit mehreren Limits prüft sie in der Reihenfolge, die in seiner Beschreibung angegeben ist.
 
-    Der Server bearbeitet eine Anfrage in dieser Reihenfolge: die Adressebene, dann die Endpunkte zur Zustandsprüfung; Zuordnung des Endpunkts; bei `POST`, `PUT`, `PATCH` oder `DELETE` die Prüfung der wartenden Schreibvorgänge der Datenbank (503 `server_busy`); Authentifizierung; das Kontobudget, wenn die Anfrage eine Sitzung trägt; die Limits des Endpunkts; der Body; der Endpunkt selbst (die GIF-Endpunkte verbrauchen ihre Render-Limits nur, wenn sie ein GIF erstellen müssen). Eine wegen ihres Tokens abgelehnte Anfrage verbraucht also keine Tokens des Endpunkts, eine Anfrage mit ungültigem Body dagegen schon.
+    Der Server bearbeitet eine Anfrage in dieser Reihenfolge: die Adressebene, dann die Endpunkte zur Zustandsprüfung; Zuordnung des Endpunkts; die Prüfungen, dass der Server nicht stark im Rückstand ist (503 `server_busy`): zu viele frühere Anfragen, die noch über ihr Zeitlimit hinaus laufen, und bei `POST`, `PUT`, `PATCH` oder `DELETE` die wartenden Schreibvorgänge der Datenbank; Authentifizierung, innerhalb von 5 Sekunden (darüber hinaus 503 `server_busy`); das Kontobudget, wenn die Anfrage eine Sitzung trägt; die Limits des Endpunkts; der Body; der Endpunkt selbst (die GIF-Endpunkte verbrauchen ihre Render-Limits nur, wenn sie ein GIF erstellen müssen). Eine wegen ihres Tokens abgelehnte Anfrage verbraucht also keine Tokens des Endpunkts, eine Anfrage mit ungültigem Body dagegen schon.
 
     Weitere Drosselungen, die die Endpunkte selbst beantworten:
 
@@ -213,7 +214,7 @@ tags:
   - name: google-sign-in
     x-displayName: Anmeldung mit Google
     description: |-
-      Verfügbar, wenn `GET /info` `sso.google: true` meldet; andernfalls antwortet jeder der folgenden Endpunkte mit 404 `sso_disabled`. Das Spiel meldet sich über den Systembrowser mit dem Ablauf für installierte Apps nach RFC 8252 an (ein Client vom Typ „Desktop-App“): Google schickt den Browser zu einem Listener des Spiels auf `127.0.0.1` zurück, nie zu diesem Server, und das Spiel sieht nie Google-Anmeldedaten.
+      Verfügbar, wenn `GET /info` `sso.google: true` meldet; andernfalls antwortet jeder der folgenden Endpunkte mit 404 `sso_disabled`. Eine Website meldet sich auf dieselbe Weise mit ihrem eigenen Client an, wenn `sso.googleWeb` true ist (siehe unten, **Auf einer Website**). Das Spiel meldet sich über den Systembrowser mit dem Ablauf für installierte Apps nach RFC 8252 an (ein Client vom Typ „Desktop-App“): Google schickt den Browser zu einem Listener des Spiels auf `127.0.0.1` zurück, nie zu diesem Server, und das Spiel sieht nie Google-Anmeldedaten.
 
       1. Der Client lauscht auf `127.0.0.1:0` (das System wählt den Port) und erzeugt ein PKCE-Paar: einen `codeVerifier` aus 43 bis 128 Zeichen `[A-Za-z0-9._~-]` und `codeChallenge = BASE64URL(SHA-256(codeVerifier))` mit 43 Zeichen ohne Padding.
       2. `POST /auth/sso/google/start` mit der Code-Challenge und dem Port liefert die Google-URL und den `state` des Versuchs. Der Client prüft die URL (siehe unten) und öffnet sie im Browser.
@@ -233,6 +234,15 @@ tags:
       Die Anmeldung mit Google funktioniert daher nur für Spieler, die den Server unter genau `SERVER_PUBLIC_HOST` und seinem öffentlichen API-Port hinzugefügt haben.
 
       **Was das Spiel prüft, bevor es den Browser öffnet.** Die `authUrl` beginnt mit genau `https://accounts.google.com/o/oauth2/v2/auth?`, besteht aus druckbarem ASCII mit weniger als 4096 Zeichen, und ihr Query-Teil enthält genau ein `response_type=code`, genau eine `redirect_uri`, die der URI entspricht, die das Spiel aus seinem Port und seinem Herkunfts-Tag berechnet, genau einen `state`, der dem `state` der Antwort entspricht, `code_challenge_method=S256` und eine `code_challenge` aus 43 Zeichen. Andernfalls beendet das Spiel seinen Listener und öffnet nichts. Es sendet `finish` und `link` nur an den Server, der auf `start` geantwortet hat.
+
+      **Auf einer Website.** Eine Website (die offizielle: <https://scacelith.com/>) meldet sich mit einem Client vom Typ „Webanwendung“ desselben Google-Projekts an (`GOOGLE_WEB_CLIENT_ID`). Google schickt den Browser zu einer vom Betreiber konfigurierten Seite der Website zurück (`GOOGLE_WEB_REDIRECT_URI`, eingetragen unter „Autorisierte Weiterleitungs-URIs“ des Clients), und diese Seite sendet den Code an `finish`; auch hier übernimmt der Server keine Weiterleitungs-URI vom Client.
+
+      1. Die Seite erzeugt wie oben ein PKCE-Paar, behält den Verifier im Tab (`sessionStorage`) und sendet `POST /auth/sso/google/web/start` mit der Challenge.
+      2. Sie prüft die `authUrl` wie das Spiel, nur dass der Parameter `redirect_uri` auf eine Seite ihres eigenen Ursprungs verweisen muss, und navigiert dann dorthin. Es wird kein Skript von Google geladen.
+      3. Google schickt den Browser zu `GOOGLE_WEB_REDIRECT_URI?code=...&state=...`. Die Seite akzeptiert nur den `state` aus der Antwort auf die Start-Anfrage und sendet nach einer Weiterleitung mit `error=` nichts.
+      4. `finish`, `link` und `complete` folgen wie beim Spiel. Der Versuch merkt sich, dass eine Website ihn gestartet hat: Der Code wird über den Client und die Seite der Website eingetauscht, und das ID-Token muss diesen Client nennen (ein Code oder ID-Token des Spiel-Clients schlägt mit 502 `sso_failed` fehl, und umgekehrt).
+
+      Ein Google-Konto führt aus dem Spiel und von der Website zum selben Scacelith-Konto: Die Verknüpfung speichert die Subject-Kennung von Google (`sub`), die das Google-Konto unabhängig vom Client identifiziert. Der Ursprung der Website muss in `CORS_ORIGINS` stehen (andernfalls warnt `check-config`).
 
       **Welches Konto die Anmeldung mit Google erreicht:** das bereits mit diesem Google-Konto verknüpfte Konto; andernfalls ein aktives Konto mit der von Google bestätigten Adresse (hat es ein Passwort, antwortet `finish` mit `needsPassword`, und die Verknüpfung wird erst gespeichert, wenn sein Passwort und danach, falls eingeschaltet, sein zweiter Faktor bestanden sind; ohne Passwort 409 `sso_account_exists`); andernfalls ein neues Konto (`needsUsername`). Ein Google-Konto wird nie allein anhand seiner Adresse mit einem bestehenden Konto verknüpft. Die Adresse des Kontos erhält eine E-Mail, wenn die Anmeldung mit Google ein Konto erstellt und wenn sie einem bestehenden Konto hinzugefügt wird.
   - name: sessions
@@ -379,7 +389,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`timeout`.'
+          description: '`timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /auth/register:
     post:
       operationId: registerAccount
@@ -475,7 +485,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` (die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /auth/login:
     post:
       operationId: logIn
@@ -558,7 +568,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` (die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /auth/login/mfa:
     post:
       operationId: logInWithSecondFactor
@@ -615,7 +625,7 @@ paths:
           description: '`sso_already_linked`: nur nach dem Passwortschritt einer Google-Verknüpfung; das Google-Konto wurde inzwischen mit einem anderen Konto verknüpft.'
         '410':
           $ref: '#/components/responses/Gone'
-          description: '`sso_expired`: nur nach dem Passwortschritt einer Google-Verknüpfung; das Konto hat sich inzwischen geändert. Beginnen Sie im Spiel von vorn.'
+          description: '`sso_expired`: nur nach dem Passwortschritt einer Google-Verknüpfung; das Konto hat sich inzwischen geändert. Beginnen Sie die Anmeldung von vorn.'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '414':
@@ -629,7 +639,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` mit `retryAfter: 1`: Die Datenbank blieb gesperrt (nach einem Schritt einer Google-Verknüpfung wurde nichts verknüpft: Beginnen Sie im Spiel von vorn). `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` mit `retryAfter: 1`: Die Datenbank blieb gesperrt (nach einem Schritt einer Google-Verknüpfung wurde nichts verknüpft: Beginnen Sie die Anmeldung von vorn). `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /auth/logout:
     post:
       operationId: logOut
@@ -674,7 +684,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /auth/logout-all:
     post:
       operationId: logOutEverywhere
@@ -719,7 +729,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /auth/verify-email/resend:
     post:
       operationId: resendVerificationEmail
@@ -770,7 +780,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` mit `retryAfter: 1`: Die Datenbank blieb beim Nachschlagen des Kontos gesperrt (die Verlängerung einer wartenden Registrierung erfolgt nach bestem Bemühen und lässt die Anfrage nie scheitern). `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` mit `retryAfter: 1`: Die Datenbank blieb beim Nachschlagen des Kontos oder beim Speichern des Links eines unbestätigten Kontos gesperrt (die Verlängerung einer wartenden Registrierung erfolgt nach bestem Bemühen und lässt die Anfrage nie scheitern); die 5 Minuten der Adresse beginnen trotzdem, sodass eine neue Anfrage innerhalb dieser Zeit nichts bewirkt. `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /auth/password/forgot:
     post:
       operationId: requestPasswordReset
@@ -821,7 +831,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` mit `retryAfter: 1`: Die Datenbank blieb gesperrt. `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` mit `retryAfter: 1`: Die Datenbank blieb beim Nachschlagen des Kontos oder beim Speichern des Links gesperrt; die 5 Minuten der Adresse beginnen trotzdem, sodass eine neue Anfrage innerhalb dieser Zeit keinen Link sendet. `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /auth/password/reset:
     post:
       operationId: resetPassword
@@ -879,7 +889,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`: die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt (`retryAfter: 1`, nichts geändert). `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy`: die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt (`retryAfter: 1`, nichts geändert). `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /auth/sso/google/start:
     post:
       operationId: startGoogleSignIn
@@ -937,7 +947,65 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
+  /auth/sso/google/web/start:
+    post:
+      operationId: startGoogleWebSignIn
+      tags:
+        - google-sign-in
+      summary: Anmeldung mit Google auf einer Website starten
+      description: |-
+        Startet für eine Website einen Versuch der Anmeldung mit Google zur PKCE-Challenge ihrer Seite. Die Antwort ist dieselbe wie für das Spiel: die Google-URL, zu der navigiert werden soll, und der `state` des Versuchs; der Versuch ist 10 Minuten lang gültig. Verfügbar, wenn `GET /info` `sso.googleWeb: true` meldet.
+
+        `authUrl` enthält die `client_id` der Website und `redirect_uri=GOOGLE_WEB_REDIRECT_URI`, mit denselben übrigen Parametern wie für das Spiel. Die Seite prüft die URL, bevor sie dorthin navigiert (siehe **Auf einer Website** in der Beschreibung des Tags).
+
+        **Limit:** `sso_start`, geteilt mit der Start-Anfrage des Spiels.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoWebStartRequest'
+            example:
+              codeChallenge: 6e7diXEYxG7OTYw7STfNOltEeLxAilPthC_txzaE0xA
+      responses:
+        '200':
+          description: Der Versuch.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoStartAnswer'
+              example:
+                attemptId: sso_ogvVEL75n7q90NIFsh-4zXVt-izc3WRbghsd6HDOtNQ
+                authUrl: https://accounts.google.com/o/oauth2/v2/auth?client_id=1234567890-web.apps.googleusercontent.com&redirect_uri=https%3A%2F%2Fscacelith.com%2Faccount%2Fgoogle%2F&response_type=code&scope=openid%20email%20profile&state=yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ&nonce=gYIKKhwnz1AqWfFxOC3R-ZvCACw06q74fEMtGEOJQWU&code_challenge=ZfEI6iZjePTHbnbevupaD9O7GjBCzcL-GJu2XGOdFGc&code_challenge_method=S256&prompt=select_account
+                state: yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ
+                expiresIn: 600
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_request`: ein fehlendes oder fehlerhaftes `codeChallenge` oder ein beliebiges anderes Feld (einschließlich `redirectPort`).'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`sso_disabled`: Die Anmeldung mit Google wird auf diesem Server nicht angeboten oder nicht für Websites.'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`: das Limit `sso_start` (geteilt mit der Start-Anfrage des Spiels).'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /auth/sso/google/finish:
     post:
       operationId: finishGoogleSignIn
@@ -945,7 +1013,7 @@ paths:
         - google-sign-in
       summary: Die Antwort von Google an den Server übergeben
       description: |-
-        Übergibt dem Server den `code` und den `state`, die Google an den Listener des Spiels gesendet hat, zusammen mit der ID des Versuchs und dem PKCE-Verifier. Eine Versuchs-ID ist ohne den Verifier nutzlos, und der Code ist ohne den eigenen PKCE-Verifier und den Clientschlüssel des Servers nutzlos.
+        Übergibt dem Server den `code` und den `state`, die Google an den Listener des Spiels oder an die Seite der Website gesendet hat, zusammen mit der ID des Versuchs und dem PKCE-Verifier. Eine Versuchs-ID ist ohne den Verifier nutzlos, und der Code ist ohne den eigenen PKCE-Verifier und den Clientschlüssel des Servers nutzlos.
 
         Der Server prüft den Versuch (unbekannt, verwendet oder abgelaufen: 410), dann den Verifier (ein falscher lässt den Versuch verwendbar), verbraucht dann den Versuch, prüft `state` und `iss`, tauscht den Code bei Google ein und verifiziert das ID-Token. Die Antwort (200) ist eine der folgenden:
 
@@ -1047,7 +1115,7 @@ paths:
           $ref: '#/components/responses/BadGateway'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /auth/sso/google/link:
     post:
       operationId: linkGoogleAccount
@@ -1099,7 +1167,7 @@ paths:
           description: '`sso_already_linked`: Das Google-Konto wurde inzwischen mit einem anderen Konto verknüpft.'
         '410':
           $ref: '#/components/responses/Gone'
-          description: '`sso_expired`: ein unbekanntes, bereits verwendetes oder abgelaufenes Ticket, das 5. falsche Passwort, ein Konto, dessen Status oder Adresse sich seit `finish` geändert hat, oder eines, dessen Status, Adresse, Passwort oder Zwei-Faktor-Authentifizierung sich geändert hat, während die Verknüpfung gespeichert wurde. Beginnen Sie im Spiel von vorn.'
+          description: '`sso_expired`: ein unbekanntes, bereits verwendetes oder abgelaufenes Ticket, das 5. falsche Passwort, ein Konto, dessen Status oder Adresse sich seit `finish` geändert hat, oder eines, dessen Status, Adresse, Passwort oder Zwei-Faktor-Authentifizierung sich geändert hat, während die Verknüpfung gespeichert wurde. Beginnen Sie die Anmeldung von vorn.'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '414':
@@ -1115,7 +1183,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`: die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt (`retryAfter: 1`, nichts wurde verknüpft). `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy`: die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt (`retryAfter: 1`, nichts wurde verknüpft). `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /auth/sso/complete:
     post:
       operationId: completeGoogleSignUp
@@ -1177,7 +1245,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /auth/sessions:
     get:
       operationId: listSessions
@@ -1185,7 +1253,7 @@ paths:
         - sessions
       summary: Angemeldete Geräte auflisten
       description: |-
-        Die aktiven Sitzungen des Kontos (angemeldete Geräte), die zuletzt verwendete zuerst. `current` kennzeichnet die Sitzung, die die Anfrage stellt. `lastSeenAt` wird höchstens alle 5 Minuten aktualisiert; `expiresAt` ist das absolute Ende, und die Inaktivitätsgrenze kann die Sitzung früher beenden.
+        Die aktiven Sitzungen des Kontos (angemeldete Geräte), die zuletzt verwendete zuerst. `current` kennzeichnet die Sitzung, die die Anfrage stellt. `lastSeenAt` wird höchstens alle 5 Minuten aktualisiert (später, solange der Server stark im Rückstand ist); `expiresAt` ist das absolute Ende, und die Inaktivitätsgrenze kann die Sitzung früher beenden.
 
         **Limit:** `sessions`.
       security:
@@ -1225,7 +1293,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`.'
+          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /auth/sessions/{id}:
     delete:
       operationId: revokeSession
@@ -1280,7 +1348,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /account/me:
     get:
       operationId: getAccount
@@ -1339,7 +1407,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`.'
+          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /account/preferences:
     put:
       operationId: updatePreferences
@@ -1397,7 +1465,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /account/password:
     post:
       operationId: changePassword
@@ -1461,7 +1529,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`: die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt (`retryAfter: 1`, nichts geändert). `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy`: die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt (`retryAfter: 1`, nichts geändert). `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /account/mfa/totp/setup:
     post:
       operationId: startTotpSetup
@@ -1524,7 +1592,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` (die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /account/mfa/totp/enable:
     post:
       operationId: enableTotp
@@ -1602,7 +1670,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` (die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /account/mfa/totp/disable:
     post:
       operationId: disableTotp
@@ -1667,7 +1735,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` (die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /account/mfa/recovery-codes:
     post:
       operationId: regenerateRecoveryCodes
@@ -1742,7 +1810,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` (die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /account/email:
     post:
       operationId: changeEmail
@@ -1831,7 +1899,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`: die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt (`retryAfter: 1`: nichts geändert, und dieselbe Anfrage kann erneut gesendet werden). `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy`: die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt (`retryAfter: 1`: nichts geändert, und dieselbe Anfrage kann erneut gesendet werden). `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /account/export:
     post:
       operationId: exportAccountData
@@ -1985,7 +2053,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (die Datenbank blieb gesperrt, mit einem Header `Retry-After: 1`), `server_busy` (die Passwort-Hash-Warteschlange), `timeout` (60 Sekunden). Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`busy` (die Datenbank blieb gesperrt, mit einem Header `Retry-After: 1`), `server_busy` (die Passwort-Hash-Warteschlange), `timeout` (60 Sekunden). Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /account/delete:
     post:
       operationId: deleteAccount
@@ -2052,7 +2120,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` (die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /account/games:
     get:
       operationId: listAccountGames
@@ -2150,7 +2218,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (die Datenbank blieb gesperrt; `retryAfter: 1` im Body, kein `Retry-After`-Header), `server_busy` (die Sitzungsabfrage fand die Datenbank gesperrt vor), `timeout`.'
+          description: '`busy` (die Datenbank blieb gesperrt; `retryAfter: 1` im Body, kein `Retry-After`-Header), `server_busy` (die Sitzungsabfrage fand die Datenbank gesperrt vor), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /games/{id}:
     get:
       operationId: getGame
@@ -2242,7 +2310,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (die Datenbank blieb gesperrt; `retryAfter: 1` im Body, kein `Retry-After`-Header), `server_busy` (die Sitzungsabfrage fand die Datenbank gesperrt vor), `timeout`.'
+          description: '`busy` (die Datenbank blieb gesperrt; `retryAfter: 1` im Body, kein `Retry-After`-Header), `server_busy` (die Sitzungsabfrage fand die Datenbank gesperrt vor), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /games/{id}/pgn:
     get:
       operationId: getGamePgn
@@ -2319,7 +2387,7 @@ paths:
           description: '`internal_error`: unter anderem, wenn sich die gespeicherten Züge nicht bis zum gespeicherten Ende nachspielen lassen (der Server protokolliert es).'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (die Datenbank blieb gesperrt; `retryAfter: 1` im Body, kein `Retry-After`-Header), `server_busy` (die Sitzungsabfrage fand die Datenbank gesperrt vor), `timeout`.'
+          description: '`busy` (die Datenbank blieb gesperrt; `retryAfter: 1` im Body, kein `Retry-After`-Header), `server_busy` (die Sitzungsabfrage fand die Datenbank gesperrt vor), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /games/{id}/gif:
     get:
       operationId: getGameGif
@@ -2399,7 +2467,7 @@ paths:
           description: '`render_failed`: Das GIF konnte nicht erstellt werden (der Server protokolliert den Grund). `internal_error`.'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` mit `retryAfter` (3 bis 10 Sekunden) und `Retry-After`: Die Render-Warteschlange ist voll, oder das GIF hat `GIF_QUEUE_TIMEOUT_MS` (10 Sekunden) auf einen freien Thread gewartet; jedes Limit-Token, das die Anfrage verbraucht hat, wird zurückgegeben. `busy`: Die Datenbank blieb gesperrt (`retryAfter: 1` nur im Body). `timeout`.'
+          description: '`server_busy` mit `retryAfter` (3 bis 10 Sekunden) und `Retry-After`: Die Render-Warteschlange ist voll, oder das GIF hat `GIF_QUEUE_TIMEOUT_MS` (10 Sekunden) auf einen freien Thread gewartet; jedes Limit-Token, das die Anfrage verbraucht hat, wird zurückgegeben. `busy`: Die Datenbank blieb gesperrt (`retryAfter: 1` nur im Body). `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /gif:
     post:
       operationId: renderPgnGif
@@ -2473,7 +2541,7 @@ paths:
           description: '`render_failed`: Das GIF konnte nicht erstellt werden (der Server protokolliert den Grund). `internal_error`.'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` mit `retryAfter` (3 bis 10 Sekunden) und `Retry-After`: Die Render-Warteschlange ist voll, oder das GIF hat zu lange auf einen freien Thread gewartet; jedes Limit-Token, das die Anfrage verbraucht hat, wird zurückgegeben. `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` mit `retryAfter` (3 bis 10 Sekunden) und `Retry-After`: Die Render-Warteschlange ist voll, oder das GIF hat zu lange auf einen freien Thread gewartet; jedes Limit-Token, das die Anfrage verbraucht hat, wird zurückgegeben. `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /players/{username}:
     get:
       operationId: getPlayer
@@ -2535,7 +2603,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (die Datenbank blieb gesperrt; `retryAfter: 1` im Body, kein `Retry-After`-Header), `server_busy` (die Sitzungsabfrage fand die Datenbank gesperrt vor), `timeout`.'
+          description: '`busy` (die Datenbank blieb gesperrt; `retryAfter: 1` im Body, kein `Retry-After`-Header), `server_busy` (die Sitzungsabfrage fand die Datenbank gesperrt vor), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /players/{username}/games:
     get:
       operationId: listPlayerGames
@@ -2607,7 +2675,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (die Datenbank blieb gesperrt; `retryAfter: 1` im Body, kein `Retry-After`-Header), `server_busy` (die Sitzungsabfrage fand die Datenbank gesperrt vor), `timeout`.'
+          description: '`busy` (die Datenbank blieb gesperrt; `retryAfter: 1` im Body, kein `Retry-After`-Header), `server_busy` (die Sitzungsabfrage fand die Datenbank gesperrt vor), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /leaderboard:
     get:
       operationId: getLeaderboard
@@ -2672,7 +2740,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (die Datenbank blieb gesperrt; `retryAfter: 1` im Body, kein `Retry-After`-Header), `timeout`.'
+          description: '`busy` (die Datenbank blieb gesperrt; `retryAfter: 1` im Body, kein `Retry-After`-Header), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /reports:
     post:
       operationId: reportPlayer
@@ -2740,7 +2808,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (die Sitzungsabfrage fand die Datenbank gesperrt vor), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5: Die Datenbank hat zu viele wartende Schreibvorgänge, und die Anfrage wurde nicht ausgeführt.'
+          description: '`server_busy` (die Sitzungsabfrage fand die Datenbank gesperrt vor), `timeout`. Außerdem `server_busy` mit `retryAfter` 2 bis 5, wenn der Server stark im Rückstand ist (siehe die Einleitung): Die Anfrage wurde nicht ausgeführt.'
   /verify-email:
     servers:
       - url: https://caissa.scacelith.com
@@ -2830,7 +2898,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'Die Datenbank blieb gesperrt (`Retry-After: 1`) oder hat zu viele wartende Schreibvorgänge (`Retry-After` 2 bis 5): Nichts wurde geändert, und der Link funktioniert weiterhin. Ebenso bei einer Zeitüberschreitung des Handlers.'
+          description: 'Die Datenbank blieb gesperrt (`Retry-After: 1`), oder der Server ist stark im Rückstand (`Retry-After` 2 bis 5, siehe die Einleitung): Nichts wurde geändert, und der Link funktioniert weiterhin. Ebenso bei einer Zeitüberschreitung des Handlers.'
   /reset-password:
     servers:
       - url: https://caissa.scacelith.com
@@ -2923,7 +2991,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'Erneut das Formular mit `Retry-After`, wenn der Server ausgelastet ist (die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt); der Link bleibt gültig. Hat die Datenbank zu viele wartende Schreibvorgänge, stattdessen eine Seite „Server error“ (Serverfehler) mit `Retry-After` (2 bis 5): Nichts wurde ausgeführt, und der Link bleibt gültig. Ebenso bei einer Zeitüberschreitung des Handlers.'
+          description: 'Erneut das Formular mit `Retry-After`, wenn der Server ausgelastet ist (die Passwort-Hash-Warteschlange, oder die Datenbank blieb gesperrt); der Link bleibt gültig. Ist der Server stark im Rückstand (siehe die Einleitung), stattdessen eine Seite „Server error“ (Serverfehler) mit `Retry-After` (2 bis 5): Nichts wurde ausgeführt, und der Link bleibt gültig. Ebenso bei einer Zeitüberschreitung des Handlers.'
   /confirm-email-change:
     servers:
       - url: https://caissa.scacelith.com
@@ -3013,7 +3081,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'Die Datenbank blieb gesperrt (`Retry-After: 1`) oder hat zu viele wartende Schreibvorgänge (`Retry-After` 2 bis 5): Nichts wurde geändert, und der Link funktioniert weiterhin. Ebenso bei einer Zeitüberschreitung des Handlers.'
+          description: 'Die Datenbank blieb gesperrt (`Retry-After: 1`), oder der Server ist stark im Rückstand (`Retry-After` 2 bis 5, siehe die Einleitung): Nichts wurde geändert, und der Link funktioniert weiterhin. Ebenso bei einer Zeitüberschreitung des Handlers.'
   /healthz:
     servers:
       - url: https://caissa.scacelith.com
@@ -3348,7 +3416,7 @@ components:
             error: username_taken
             message: This username is already taken.
     Gone:
-      description: '`sso_expired`: Der Versuch oder das Ticket der Anmeldung mit Google ist unbekannt, verwendet oder abgelaufen; beginnen Sie im Spiel von vorn.'
+      description: '`sso_expired`: Der Versuch oder das Ticket der Anmeldung mit Google ist unbekannt, verwendet oder abgelaufen; beginnen Sie die Anmeldung von vorn.'
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3463,7 +3531,7 @@ components:
             error: internal_error
             message: Internal server error.
     BadGateway:
-      description: '`sso_failed`: ein falscher `state` oder `iss`, oder Google hat den Code abgelehnt oder ein ID-Token gesendet, das sich nicht verifizieren lässt. Die Antwort enthält nie den Text von Google.'
+      description: '`sso_failed`: ein falscher `state` oder `iss`, oder Google hat den Code abgelehnt oder ein ID-Token gesendet, das sich nicht verifizieren lässt (auch ein Code oder ID-Token des jeweils anderen Clients, des Spiels oder der Website). Die Antwort enthält nie den Text von Google.'
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3603,7 +3671,7 @@ components:
           schema:
             $ref: '#/components/schemas/HtmlDocument'
     HtmlServiceUnavailable:
-      description: Der Server ist ausgelastet (die Datenbank blieb gesperrt, mit `Retry-After`) oder hat zu lange gebraucht, jeweils als HTML-Seite mit dem Titel „Server error“ (Serverfehler).
+      description: Der Server ist ausgelastet (die Datenbank blieb gesperrt, oder der Server ist stark im Rückstand; mit `Retry-After`) oder hat zu lange gebraucht, jeweils als HTML-Seite mit dem Titel „Server error“ (Serverfehler).
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3761,7 +3829,7 @@ components:
               format: int64
               minimum: 0
               maximum: 4294967295
-              description: Der Fingerabdruck des Protokollschemas (die ersten 4 Bytes des SHA-256 seiner kanonischen Form, als vorzeichenlose Ganzzahl); nur zur Information.
+              description: 'Der Fingerabdruck des Protokollschemas (die ersten 4 Bytes des SHA-256 seiner kanonischen Form, als vorzeichenlose Ganzzahl: `0xc649140f`, 3326678031, für die Nebenversion 2 des Protokolls); nur zur Information, wird nie verglichen.'
             subprotocol:
               type: string
               description: Das Token des WebSocket-Subprotokolls (`Sec-WebSocket-Protocol`).
@@ -3787,10 +3855,14 @@ components:
           type: object
           required:
             - google
+            - googleWeb
           properties:
             google:
               type: boolean
-              description: Ob die Anmeldung mit Google angeboten wird.
+              description: Ob die Anmeldung mit Google für das Spiel angeboten wird.
+            googleWeb:
+              type: boolean
+              description: Ob die Anmeldung mit Google auch für eine Website angeboten wird (`POST /auth/sso/google/web/start`).
         mfa:
           type: boolean
           const: true
@@ -3854,7 +3926,7 @@ components:
         protocol:
           min: 1
           max: 1
-          schema: 1852590473
+          schema: 3326678031
           subprotocol: scacelith.rt1
         wsPort: 443
         wsPath: /ws
@@ -3862,6 +3934,7 @@ components:
         emailVerification: true
         sso:
           google: false
+          googleWeb: false
         mfa: true
         pow:
           register: 18
@@ -4225,6 +4298,16 @@ components:
           minimum: 1024
           maximum: 65535
           description: Der Port des Listeners des Clients auf `127.0.0.1`.
+    SsoWebStartRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - codeChallenge
+      properties:
+        codeChallenge:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: Die S256-PKCE-Challenge des `codeVerifier` der Seite (`BASE64URL(SHA-256(codeVerifier))`).
     SsoFinishRequest:
       type: object
       additionalProperties: false
@@ -4332,7 +4415,7 @@ components:
         lastSeenAt:
           type: integer
           format: int64
-          description: Die letzte Nutzung (Epoch-Millisekunden), höchstens alle 5 Minuten aktualisiert.
+          description: Die letzte Nutzung (Epoch-Millisekunden), höchstens alle 5 Minuten aktualisiert (später, solange der Server stark im Rückstand ist).
         expiresAt:
           type: integer
           format: int64

@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: API HTTPS du serveur Scacelith
-  version: "0.9.1"
+  version: "1.1.0"
   summary: L’API HTTPS de tout serveur Scacelith, le serveur officiel comme les serveurs communautaires.
   description: |-
     Tout serveur Scacelith, qu’il s’agisse du serveur officiel `caissa.scacelith.com` ou d’un serveur communautaire, répond à cette API HTTPS. Le jeu s’en sert pour tout ce qui se passe en dehors des parties elles-mêmes : l’inscription et la connexion (double authentification et connexion Google comprises), la page du compte, l’historique des parties, les téléchargements PGN et les GIF animés des parties, les appareils connectés, le téléchargement des données, la suppression du compte et les signalements.
@@ -16,7 +16,7 @@ info:
     - Serveur communautaire : `https://<SERVER_PUBLIC_HOST>[:<port>]/api/v1`. `API_PORT` vaut 443 par défaut ; derrière un NAT ou un proxy, le port qu’utilisent les joueurs est `PUBLIC_API_PORT`.
     - Le WebSocket du jeu est sur le même port par défaut (`WS_PORT` le déplace ; `GET /info` indique au client où il se trouve).
     - HTTP/1.1 sur TLS. Avec `TLS_MODE=proxy`, un proxy inverse placé devant le serveur se charge de TLS. `TLS_MODE=off` (HTTP en clair) est réservé au développement local.
-    - Les pages HTML ouvertes depuis les liens des e-mails (`/verify-email`, `/reset-password`, `/confirm-email-change`) se trouvent à la racine du serveur, hors de `/api/v1`. Les points de terminaison de santé répondent à la fois à la racine et sous `/api/v1`. La connexion Google n’a aucune page sur le serveur : Google renvoie le navigateur vers le jeu lui-même, sur `127.0.0.1`.
+    - Les pages HTML ouvertes depuis les liens des e-mails (`/verify-email`, `/reset-password`, `/confirm-email-change`) se trouvent à la racine du serveur, hors de `/api/v1`. Les points de terminaison de santé répondent à la fois à la racine et sous `/api/v1`. La connexion Google n’a aucune page sur le serveur : Google renvoie le navigateur vers le jeu lui-même, sur `127.0.0.1`, ou vers une page du site web qui l’a lancée (`GOOGLE_WEB_REDIRECT_URI`).
     - Une barre oblique finale est ignorée (`/api/v1/info/` équivaut à `/api/v1/info`), et les paramètres de chemin sont décodés (un paramètre dont l’encodage URL n’est pas valide reçoit 400 `invalid_request`).
 
     ## Requêtes
@@ -37,7 +37,7 @@ info:
     ## Réponses et erreurs
 
     - Les réponses sont en JSON encodé en UTF-8, sauf le téléchargement PGN (`application/x-chess-pgn`), les GIF animés (`image/gif`) et les pages HTML. Les instants sont exprimés en millisecondes depuis le 1970-01-01 UTC. Les identifiants sont des entiers. Les identifiants de partie ont jusqu’à 16 chiffres mais restent inférieurs à 2^53 : un nombre JSON (un double) les représente donc exactement.
-    - Toute réponse de l’API porte `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Cross-Origin-Resource-Policy: same-origin` et `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` (les pages HTML ont leur propre politique). Avec `TLS_MODE=native`, elle porte aussi `Strict-Transport-Security: max-age=31536000`.
+    - Toute réponse de l’API porte `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Cross-Origin-Resource-Policy: same-origin` et `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` (les pages HTML ont leur propre politique). Avec `TLS_MODE=native`, elle porte aussi `Strict-Transport-Security: max-age=31536000`. Les réponses que l’écouteur écrit lui-même, avant l’API (celles aux `GET` et `HEAD` des points de terminaison de santé, le 429 de la couche par adresse, et un 500 `internal_error` quand l’API échoue purement et simplement), portent les mêmes en-têtes sauf `Cross-Origin-Resource-Policy`, et leur `Content-Type` est `application/json` sans jeu de caractères.
     - Une réponse doit être lue dans les 60 secondes qui suivent le moment où le serveur l’a prête, ce qui ne compte que pour les grosses réponses (un GIF, l’export des données, un long PGN). Le temps que met le serveur à préparer une réponse ne compte ni dans ce délai, ni dans les 30 secondes sans aucun octet entrant ou sortant au bout desquelles une connexion est fermée.
 
     Les erreurs ont toutes la même forme (le schéma `Error`) :
@@ -65,7 +65,7 @@ info:
     | 429 | `rate_limited` | Une limite de débit (voir plus bas) : `retryAfter` plus un en-tête `Retry-After`. |
     | 500 | `internal_error` | Une défaillance inattendue. Le serveur la journalise. |
     | 503 | `timeout` | Le serveur n’a pas répondu dans les 30 secondes (60 secondes pour l’export, 45 secondes pour les GIF avec les réglages par défaut). |
-    | 503 | `server_busy` | Une recherche de session ou une modification du compte a trouvé la base de données verrouillée (`retryAfter` 1), ou la file de hachage des mots de passe est pleine (voir plus bas). Aussi, pour un `POST`, `PUT`, `PATCH` ou `DELETE`, la base de données a trop d’écritures en attente : la requête n’a pas été exécutée et ses limites de débit n’ont rien pris (`retryAfter` de 2 à 5). |
+    | 503 | `server_busy` | Une recherche de session ou une modification du compte a trouvé la base de données verrouillée (`retryAfter` 1), ou la file de hachage des mots de passe est pleine (voir plus bas). Aussi, avec un `retryAfter` de 2 à 5, quand le serveur est très en retard : pour un `POST`, `PUT`, `PATCH` ou `DELETE`, la base de données a trop d’écritures en attente ; pour toute requête, trop de requêtes antérieures sont encore en cours au-delà de leur délai, ou le jeton de session n’a pas pu être vérifié en 5 secondes. La requête n’a pas été exécutée et ses limites de débit n’ont rien pris. |
 
     Les points de terminaison de lecture (historique des parties, parties, joueurs, classement général) et l’export répondent 503 `busy` avec `retryAfter: 1` quand la base de données est restée verrouillée.
 
@@ -89,7 +89,8 @@ info:
     - **Obtenir un jeton.** Un jeton (`sct_` suivi de 43 caractères base64url) est délivré par `POST /auth/login`, puis `POST /auth/login/mfa` quand la double authentification est activée, par `POST /auth/sso/google/finish` et `POST /auth/sso/google/link` (connexion Google), et par `POST /auth/sso/complete`. Chacun d’eux répond `{ token, expiresAt, user }`. Le serveur ne conserve qu’une empreinte SHA-256 du jeton.
     - **Session obligatoire.** Un en-tête absent donne 401 `unauthorized` avec `WWW-Authenticate: Bearer realm="scacelith"`. Un jeton invalide donne 401 `invalid_token` avec `WWW-Authenticate: Bearer realm="scacelith", error="invalid_token"`. Un client doit oublier un jeton qui reçoit `invalid_token` et se reconnecter.
     - **Session facultative.** Sur `GET /games/{id}`, `GET /games/{id}/pgn`, `GET /players/{username}` et `GET /players/{username}/games`, la session est facultative. Sans l’en-tête, ces points de terminaison renvoient la vue publique ; si un en-tête est envoyé, son jeton doit être valide.
-    - **Durée de vie.** Une session prend fin au premier de ces deux termes : `SESSION_MAX_DAYS` (90) jours après la connexion (c’est `expiresAt`), ou `SESSION_IDLE_DAYS` (30) jours sans utilisation. Chaque utilisation repousse la limite d’inactivité ; le serveur enregistre la nouvelle valeur au plus toutes les 5 minutes. Un compte conserve au plus `MAX_SESSIONS_PER_USER` (10) sessions : au-delà, une nouvelle connexion révoque la plus ancienne.
+    - **Stockage occupé.** Quand la base de données reste verrouillée pendant la vérification d’un jeton, un point de terminaison qui exige ou accepte une session répond 503 `server_busy` avec `retryAfter: 1` (et `Retry-After`) ; quand la vérification prend plus de 5 secondes, il répond 503 `server_busy` avec un `retryAfter` de 2 à 5. Dans les deux cas, le jeton n’a pas été évalué : gardez-le et renvoyez la requête.
+    - **Durée de vie.** Une session prend fin au premier de ces deux termes : `SESSION_MAX_DAYS` (90) jours après la connexion (c’est `expiresAt`), ou `SESSION_IDLE_DAYS` (30) jours sans utilisation. Chaque utilisation repousse la limite d’inactivité ; le serveur enregistre la nouvelle valeur au plus toutes les 5 minutes, en arrière-plan. Tant que sa base de données a beaucoup d’écritures en attente, il reporte cette écriture à une requête ultérieure, sauf dans la dernière heure avant la limite d’inactivité, de sorte qu’une session utilisée n’expire pas. Un compte conserve au plus `MAX_SESSIONS_PER_USER` (10) sessions : au-delà, une nouvelle connexion révoque la plus ancienne.
     - **Révocation.** La déconnexion (`POST /auth/logout`, `POST /auth/logout-all`, `DELETE /auth/sessions/{id}`) révoque des sessions ; c’est aussi le cas d’un changement de mot de passe (les autres sessions), d’une réinitialisation du mot de passe et de la suppression du compte (toutes les sessions), ainsi que d’un administrateur. Une révocation faite par l’API prend effet immédiatement, et le WebSocket ouvert avec une session révoquée est fermé. Un changement ou une réinitialisation du mot de passe et la suppression du compte révoquent dans la même transaction que la modification elle-même : si l’une d’elles échoue, aucune session n’a été révoquée et rien d’autre n’a changé non plus. Le serveur garde en cache les recherches de session pendant 30 secondes : une révocation par la commande d’administration, qui est un processus distinct, prend donc effet dans les 30 secondes.
     - **Portée.** Un jeton appartient à un seul serveur et ouvre aussi son WebSocket. Ne l’envoyez jamais à un autre serveur.
 
@@ -111,7 +112,7 @@ info:
     | `auth_forgot` | `AUTH_FORGOT_PER_HOUR` (3) / heure, partagée | client, 3 fois plus par /48 IPv6 | `POST /auth/password/forgot` |
     | `auth_forgot_day` | `AUTH_FORGOT_PER_DAY` (10) / 24 heures, partagée | client, 3 fois plus par /48 IPv6 | `POST /auth/password/forgot` |
     | `auth_reset` | `AUTH_RESET_PER_HOUR` (10) / heure, partagée | client, 3 fois plus par /48 IPv6 | `POST /auth/password/reset`, `POST /reset-password` |
-    | `reauth` | les valeurs de `auth`, dans un seau distinct, partagée | client et /48 IPv6 | les modifications du compte qui demandent le mot de passe (voir Réauthentification), et `POST /account/export` |
+    | `reauth` | les valeurs de `auth`, dans un seau distinct, partagée | client et /48 IPv6 | `POST /account/password`, `/account/mfa/totp/setup`, `/account/mfa/totp/enable`, `/account/mfa/totp/disable`, `/account/mfa/recovery-codes`, `/account/email`, `/account/export`, `/account/delete` |
     | `reauth_user` | `AUTH_REAUTH_PER_USER` (10) / 10 min, partagée | joueur | les mêmes points de terminaison que `reauth` |
     | `account` | 60 / min | joueur | `GET /account/me`, `PUT /account/preferences` |
     | `account_games` | 60 / min | joueur | `GET /account/games` |
@@ -122,13 +123,13 @@ info:
     | `gif_user_min`, `gif_user_hour` | `GIF_USER_RENDERS_PER_MIN` (4) / min et `GIF_USER_RENDERS_PER_HOUR` (30) / heure, partagées | joueur | les deux mêmes, seulement quand le GIF doit être fabriqué (pas pris dans le cache) |
     | `gif_ip_min`, `gif_ip_hour` | `GIF_IP_RENDERS_PER_MIN` (12) / min et `GIF_IP_RENDERS_PER_HOUR` (120) / heure, partagées | client (tous ses comptes ensemble), 3 fois plus par /48 IPv6 | les mêmes, dans les mêmes conditions |
     | `reports` | 30 / heure | joueur | `POST /reports` |
-    | `sso_start` | 30 / 10 min, partagée | client, et 90 par /48 IPv6 | `POST /auth/sso/google/start` |
+    | `sso_start` | 30 / 10 min, partagée | client, et 90 par /48 IPv6 | `POST /auth/sso/google/start`, `POST /auth/sso/google/web/start` (en commun) |
     | `sso_finish` | 30 / min | client | `POST /auth/sso/google/finish` |
     | `page` | 60 / min | client | `GET /verify-email`, `/reset-password`, `/confirm-email-change` |
 
     `GET /info` et `GET /leaderboard` n’ont pas de limite propre : seulement la couche par adresse. Un point de terminaison qui a plusieurs limites les vérifie dans l’ordre donné dans sa description.
 
-    Le serveur traite une requête dans cet ordre : la couche par adresse, puis les points de terminaison de santé ; la recherche du point de terminaison ; pour un `POST`, `PUT`, `PATCH` ou `DELETE`, la vérification des écritures en attente dans la base de données (503 `server_busy`) ; l’authentification ; le budget du compte, quand la requête porte une session ; les limites du point de terminaison ; le corps ; le point de terminaison lui-même (les points de terminaison GIF ne prennent leurs limites de rendu que lorsqu’ils ont un GIF à fabriquer). Ainsi, une requête refusée à cause de son jeton ne dépense aucun jeton du point de terminaison, alors qu’une requête dont le corps est invalide les dépense.
+    Le serveur traite une requête dans cet ordre : la couche par adresse, puis les points de terminaison de santé ; la recherche du point de terminaison ; les vérifications que le serveur n’est pas très en retard (503 `server_busy`) : trop de requêtes antérieures encore en cours au-delà de leur délai et, pour un `POST`, `PUT`, `PATCH` ou `DELETE`, les écritures en attente dans la base de données ; l’authentification, en 5 secondes au plus (503 `server_busy` au-delà) ; le budget du compte, quand la requête porte une session ; les limites du point de terminaison ; le corps ; le point de terminaison lui-même (les points de terminaison GIF ne prennent leurs limites de rendu que lorsqu’ils ont un GIF à fabriquer). Ainsi, une requête refusée à cause de son jeton ne dépense aucun jeton du point de terminaison, alors qu’une requête dont le corps est invalide les dépense.
 
     Autres freins, appliqués par les points de terminaison eux-mêmes :
 
@@ -213,7 +214,7 @@ tags:
   - name: google-sign-in
     x-displayName: Connexion Google
     description: |-
-      Proposée quand `GET /info` indique `sso.google: true` ; sinon, chacun des points de terminaison ci-dessous répond 404 `sso_disabled`. Le jeu se connecte par le navigateur du système selon le flux des applications installées de la RFC 8252 (un client de type « Application de bureau ») : Google renvoie le navigateur vers un écouteur du jeu sur `127.0.0.1`, jamais vers ce serveur, et le jeu ne voit jamais d’identifiants Google.
+      Proposée quand `GET /info` indique `sso.google: true` ; sinon, chacun des points de terminaison ci-dessous répond 404 `sso_disabled`. Un site web se connecte de la même façon avec son propre client quand `sso.googleWeb` vaut true (ci-dessous, **Sur un site web**). Le jeu se connecte par le navigateur du système selon le flux des applications installées de la RFC 8252 (un client de type « Application de bureau ») : Google renvoie le navigateur vers un écouteur du jeu sur `127.0.0.1`, jamais vers ce serveur, et le jeu ne voit jamais d’identifiants Google.
 
       1. Le client écoute sur `127.0.0.1:0` (le système choisit le port) et crée une paire PKCE : un `codeVerifier` de 43 à 128 caractères `[A-Za-z0-9._~-]` et `codeChallenge = BASE64URL(SHA-256(codeVerifier))`, qui compte 43 caractères, sans remplissage.
       2. `POST /auth/sso/google/start`, avec le défi PKCE et le port, renvoie l’URL Google et le `state` de la tentative. Le client vérifie l’URL (voir plus bas) et l’ouvre dans le navigateur.
@@ -233,6 +234,15 @@ tags:
       La connexion Google ne fonctionne donc que pour les joueurs qui ont ajouté le serveur exactement sous `SERVER_PUBLIC_HOST` et son port public d’API.
 
       **Ce que le jeu vérifie avant d’ouvrir le navigateur.** L’`authUrl` commence exactement par `https://accounts.google.com/o/oauth2/v2/auth?`, ne contient que de l’ASCII imprimable et fait moins de 4096 caractères, et sa chaîne de requête contient exactement un `response_type=code`, exactement un `redirect_uri` égal à l’URI que le jeu calcule à partir de son port et de son étiquette d’origine, exactement un `state` égal au `state` de la réponse, `code_challenge_method=S256` et un `code_challenge` de 43 caractères. Sinon, le jeu arrête son écouteur et n’ouvre rien. Il n’envoie `finish` et `link` qu’au serveur qui a répondu à `start`.
+
+      **Sur un site web.** Un site web (le site officiel : <https://scacelith.com/>) se connecte avec un client de type « Application Web » du même projet Google (`GOOGLE_WEB_CLIENT_ID`). Google renvoie le navigateur vers une page du site configurée par l’opérateur (`GOOGLE_WEB_REDIRECT_URI`, inscrite dans les « URI de redirection autorisés » du client), et cette page envoie le code à `finish` ; ici non plus, le serveur n’accepte aucun URI de redirection venant du client.
+
+      1. La page crée une paire PKCE comme ci-dessus, conserve le vérificateur dans l’onglet (`sessionStorage`) et envoie `POST /auth/sso/google/web/start` avec le défi.
+      2. Elle vérifie `authUrl` comme le fait le jeu, sauf que le `redirect_uri` doit être une page de sa propre origine, puis navigue vers cette URL. Aucun script Google n’est chargé.
+      3. Google envoie le navigateur vers `GOOGLE_WEB_REDIRECT_URI?code=...&state=...`. La page n’accepte que le `state` de la réponse à la requête de démarrage et n’envoie rien après une redirection avec `error=`.
+      4. `finish`, `link` et `complete` se déroulent ensuite comme pour le jeu. La tentative retient qu’un site web l’a lancée : le code est échangé au moyen du client et de la page du site web, et le jeton d’identité doit désigner ce client (un code ou un jeton d’identité du client du jeu échoue avec 502 `sso_failed`, et inversement).
+
+      Un compte Google mène au même compte Scacelith depuis le jeu et depuis le site web : l’association conserve l’identifiant de sujet de Google (`sub`), qui désigne le compte Google quel que soit le client. L’origine du site web doit figurer dans `CORS_ORIGINS` (sinon, `check-config` émet un avertissement).
 
       **Le compte auquel mène la connexion Google :** le compte déjà associé à ce compte Google ; sinon, un compte actif ayant l’adresse confirmée par Google (s’il a un mot de passe, `finish` répond `needsPassword` et l’association n’est enregistrée qu’une fois son mot de passe validé, puis son second facteur s’il est activé ; s’il n’en a pas, 409 `sso_account_exists`) ; sinon, un nouveau compte (`needsUsername`). Un compte Google n’est jamais associé à un compte existant sur la seule foi de son adresse. L’adresse du compte reçoit un e-mail quand la connexion Google crée un compte et quand elle est ajoutée à un compte existant.
   - name: sessions
@@ -379,7 +389,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`timeout`.'
+          description: '`timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/register:
     post:
       operationId: registerAccount
@@ -475,7 +485,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/login:
     post:
       operationId: logIn
@@ -558,7 +568,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/login/mfa:
     post:
       operationId: logInWithSecondFactor
@@ -615,7 +625,7 @@ paths:
           description: '`sso_already_linked` : seulement après l’étape du mot de passe d’une association Google ; le compte Google a été associé à un autre compte entre-temps.'
         '410':
           $ref: '#/components/responses/Gone'
-          description: '`sso_expired` : seulement après l’étape du mot de passe d’une association Google ; le compte a changé entre-temps, recommencez depuis le jeu.'
+          description: '`sso_expired` : seulement après l’étape du mot de passe d’une association Google ; le compte a changé entre-temps, recommencez la connexion.'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '414':
@@ -629,7 +639,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` avec `retryAfter: 1` : la base de données est restée verrouillée (après une étape d’association Google, rien n’a été associé : recommencez depuis le jeu). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` avec `retryAfter: 1` : la base de données est restée verrouillée (après une étape d’association Google, rien n’a été associé : recommencez la connexion). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/logout:
     post:
       operationId: logOut
@@ -674,7 +684,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/logout-all:
     post:
       operationId: logOutEverywhere
@@ -719,7 +729,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/verify-email/resend:
     post:
       operationId: resendVerificationEmail
@@ -770,7 +780,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` avec `retryAfter: 1` : la base de données est restée verrouillée pendant la recherche du compte (le renouvellement d’une inscription en attente se fait au mieux et ne fait jamais échouer la requête). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` avec `retryAfter: 1` : la base de données est restée verrouillée pendant la recherche du compte ou l’enregistrement du lien d’un compte non confirmé (le renouvellement d’une inscription en attente se fait au mieux et ne fait jamais échouer la requête) ; les 5 minutes de l’adresse commencent tout de même, si bien qu’une nouvelle requête pendant ce délai ne fait rien. `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/password/forgot:
     post:
       operationId: requestPasswordReset
@@ -821,7 +831,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` avec `retryAfter: 1` : la base de données est restée verrouillée. `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` avec `retryAfter: 1` : la base de données est restée verrouillée pendant la recherche du compte ou l’enregistrement du lien ; les 5 minutes de l’adresse commencent tout de même, si bien qu’une nouvelle requête pendant ce délai n’envoie aucun lien. `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/password/reset:
     post:
       operationId: resetPassword
@@ -879,7 +889,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1`, rien n’a changé). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1`, rien n’a changé). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/sso/google/start:
     post:
       operationId: startGoogleSignIn
@@ -937,7 +947,65 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
+  /auth/sso/google/web/start:
+    post:
+      operationId: startGoogleWebSignIn
+      tags:
+        - google-sign-in
+      summary: Démarrer une connexion Google sur un site web
+      description: |-
+        Démarre, pour un site web, une tentative de connexion Google liée au défi PKCE de sa page. La réponse est la même que pour le jeu : l’URL Google vers laquelle naviguer, et le `state` de la tentative ; la tentative est valable 10 minutes. Proposé quand `GET /info` indique `sso.googleWeb: true`.
+
+        `authUrl` contient le `client_id` du site web et `redirect_uri=GOOGLE_WEB_REDIRECT_URI`, avec les mêmes autres paramètres que pour le jeu. La page vérifie cette URL avant d’y naviguer (voir **Sur un site web** dans la description du tag).
+
+        **Limite :** `sso_start`, partagée avec la requête de démarrage du jeu.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoWebStartRequest'
+            example:
+              codeChallenge: 6e7diXEYxG7OTYw7STfNOltEeLxAilPthC_txzaE0xA
+      responses:
+        '200':
+          description: La tentative.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoStartAnswer'
+              example:
+                attemptId: sso_ogvVEL75n7q90NIFsh-4zXVt-izc3WRbghsd6HDOtNQ
+                authUrl: https://accounts.google.com/o/oauth2/v2/auth?client_id=1234567890-web.apps.googleusercontent.com&redirect_uri=https%3A%2F%2Fscacelith.com%2Faccount%2Fgoogle%2F&response_type=code&scope=openid%20email%20profile&state=yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ&nonce=gYIKKhwnz1AqWfFxOC3R-ZvCACw06q74fEMtGEOJQWU&code_challenge=ZfEI6iZjePTHbnbevupaD9O7GjBCzcL-GJu2XGOdFGc&code_challenge_method=S256&prompt=select_account
+                state: yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ
+                expiresIn: 600
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_request` : un `codeChallenge` manquant ou mal formé, ou tout autre champ (y compris `redirectPort`).'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`sso_disabled` : la connexion Google n’est pas proposée sur ce serveur, ou pas aux sites web.'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited` : la limite `sso_start` (partagée avec la requête de démarrage du jeu).'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/sso/google/finish:
     post:
       operationId: finishGoogleSignIn
@@ -945,7 +1013,7 @@ paths:
         - google-sign-in
       summary: Transmettre la réponse de Google au serveur
       description: |-
-        Transmet au serveur le `code` et le `state` que Google a envoyés à l’écouteur du jeu, avec l’identifiant de la tentative et le vérificateur PKCE. Un identifiant de tentative ne sert à rien sans le vérificateur, et le code ne sert à rien sans le vérificateur PKCE propre au serveur et son secret client.
+        Transmet au serveur le `code` et le `state` que Google a envoyés à l’écouteur du jeu ou à la page du site web, avec l’identifiant de la tentative et le vérificateur PKCE. Un identifiant de tentative ne sert à rien sans le vérificateur, et le code ne sert à rien sans le vérificateur PKCE propre au serveur et son secret client.
 
         Le serveur vérifie la tentative (inconnue, déjà utilisée ou expirée : 410), puis le vérificateur (un vérificateur erroné laisse la tentative utilisable), puis consomme la tentative, vérifie `state` et `iss`, échange le code auprès de Google et vérifie le jeton d’identité. La réponse (200) est l’une des suivantes :
 
@@ -1047,7 +1115,7 @@ paths:
           $ref: '#/components/responses/BadGateway'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/sso/google/link:
     post:
       operationId: linkGoogleAccount
@@ -1099,7 +1167,7 @@ paths:
           description: '`sso_already_linked` : le compte Google a été associé à un autre compte entre-temps.'
         '410':
           $ref: '#/components/responses/Gone'
-          description: '`sso_expired` : un ticket inconnu, déjà utilisé ou expiré, le 5e mot de passe erroné, un compte dont le statut ou l’adresse a changé depuis `finish`, ou dont le statut, l’adresse, le mot de passe ou la double authentification a changé pendant l’enregistrement de l’association. Recommencez depuis le jeu.'
+          description: '`sso_expired` : un ticket inconnu, déjà utilisé ou expiré, le 5e mot de passe erroné, un compte dont le statut ou l’adresse a changé depuis `finish`, ou dont le statut, l’adresse, le mot de passe ou la double authentification a changé pendant l’enregistrement de l’association. Recommencez la connexion.'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '414':
@@ -1115,7 +1183,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1`, rien n’a été associé). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1`, rien n’a été associé). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/sso/complete:
     post:
       operationId: completeGoogleSignUp
@@ -1177,7 +1245,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/sessions:
     get:
       operationId: listSessions
@@ -1185,7 +1253,7 @@ paths:
         - sessions
       summary: Lister les appareils connectés
       description: |-
-        Les sessions actives du compte (appareils connectés), de la plus récemment utilisée à la plus ancienne. `current` marque la session qui fait la requête. `lastSeenAt` est mis à jour au plus toutes les 5 minutes ; `expiresAt` est la fin absolue, et la limite d’inactivité peut mettre fin à la session plus tôt.
+        Les sessions actives du compte (appareils connectés), de la plus récemment utilisée à la plus ancienne. `current` marque la session qui fait la requête. `lastSeenAt` est mis à jour au plus toutes les 5 minutes (plus tard tant que le serveur est très en retard) ; `expiresAt` est la fin absolue, et la limite d’inactivité peut mettre fin à la session plus tôt.
 
         **Limite :** `sessions`.
       security:
@@ -1225,7 +1293,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/sessions/{id}:
     delete:
       operationId: revokeSession
@@ -1280,7 +1348,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/me:
     get:
       operationId: getAccount
@@ -1339,7 +1407,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/preferences:
     put:
       operationId: updatePreferences
@@ -1397,7 +1465,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/password:
     post:
       operationId: changePassword
@@ -1461,7 +1529,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1`, rien n’a changé). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1`, rien n’a changé). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/mfa/totp/setup:
     post:
       operationId: startTotpSetup
@@ -1524,7 +1592,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/mfa/totp/enable:
     post:
       operationId: enableTotp
@@ -1602,7 +1670,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/mfa/totp/disable:
     post:
       operationId: disableTotp
@@ -1667,7 +1735,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/mfa/recovery-codes:
     post:
       operationId: regenerateRecoveryCodes
@@ -1742,7 +1810,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/email:
     post:
       operationId: changeEmail
@@ -1831,7 +1899,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1` : rien n’a changé, et la même requête peut être renvoyée). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1` : rien n’a changé, et la même requête peut être renvoyée). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/export:
     post:
       operationId: exportAccountData
@@ -1985,7 +2053,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (la base de données est restée verrouillée, avec un en-tête `Retry-After: 1`), `server_busy` (la file de hachage des mots de passe), `timeout` (60 secondes). Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`busy` (la base de données est restée verrouillée, avec un en-tête `Retry-After: 1`), `server_busy` (la file de hachage des mots de passe), `timeout` (60 secondes). Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/delete:
     post:
       operationId: deleteAccount
@@ -2052,7 +2120,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/games:
     get:
       operationId: listAccountGames
@@ -2150,7 +2218,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`.'
+          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /games/{id}:
     get:
       operationId: getGame
@@ -2242,7 +2310,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`.'
+          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /games/{id}/pgn:
     get:
       operationId: getGamePgn
@@ -2319,7 +2387,7 @@ paths:
           description: '`internal_error` : entre autres, les coups enregistrés ne peuvent pas être rejoués jusqu’à la fin enregistrée (le serveur le journalise).'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`.'
+          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /games/{id}/gif:
     get:
       operationId: getGameGif
@@ -2399,7 +2467,7 @@ paths:
           description: '`render_failed` : le GIF n’a pas pu être fabriqué (le serveur journalise la cause). `internal_error`.'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` avec `retryAfter` (3 à 10 secondes) et `Retry-After` : la file de rendu est pleine, ou le GIF a attendu `GIF_QUEUE_TIMEOUT_MS` (10 secondes) un fil d’exécution libre ; tous les jetons de limite pris par la requête sont restitués. `busy` : la base de données est restée verrouillée (`retryAfter: 1` dans le corps seulement). `timeout`.'
+          description: '`server_busy` avec `retryAfter` (3 à 10 secondes) et `Retry-After` : la file de rendu est pleine, ou le GIF a attendu `GIF_QUEUE_TIMEOUT_MS` (10 secondes) un fil d’exécution libre ; tous les jetons de limite pris par la requête sont restitués. `busy` : la base de données est restée verrouillée (`retryAfter: 1` dans le corps seulement). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /gif:
     post:
       operationId: renderPgnGif
@@ -2473,7 +2541,7 @@ paths:
           description: '`render_failed` : le GIF n’a pas pu être fabriqué (le serveur journalise la cause). `internal_error`.'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` avec `retryAfter` (3 à 10 secondes) et `Retry-After` : la file de rendu est pleine, ou le GIF a attendu trop longtemps un fil d’exécution libre ; tous les jetons de limite pris par la requête sont restitués. `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` avec `retryAfter` (3 à 10 secondes) et `Retry-After` : la file de rendu est pleine, ou le GIF a attendu trop longtemps un fil d’exécution libre ; tous les jetons de limite pris par la requête sont restitués. `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /players/{username}:
     get:
       operationId: getPlayer
@@ -2535,7 +2603,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`.'
+          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /players/{username}/games:
     get:
       operationId: listPlayerGames
@@ -2607,7 +2675,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`.'
+          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /leaderboard:
     get:
       operationId: getLeaderboard
@@ -2672,7 +2740,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `timeout`.'
+          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /reports:
     post:
       operationId: reportPlayer
@@ -2740,7 +2808,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /verify-email:
     servers:
       - url: https://caissa.scacelith.com
@@ -2830,7 +2898,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'La base de données est restée verrouillée (`Retry-After: 1`) ou a trop d’écritures en attente (`Retry-After` de 2 à 5) : rien n’a changé et le lien fonctionne toujours. Également en cas de dépassement du délai de traitement.'
+          description: 'La base de données est restée verrouillée (`Retry-After: 1`), ou le serveur est très en retard (`Retry-After` de 2 à 5, voir l’introduction) : rien n’a changé et le lien fonctionne toujours. Également en cas de dépassement du délai de traitement.'
   /reset-password:
     servers:
       - url: https://caissa.scacelith.com
@@ -2923,7 +2991,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'Le formulaire de nouveau avec `Retry-After` quand le serveur est occupé (la file de hachage des mots de passe, ou la base de données est restée verrouillée) ; le lien reste valide. Quand la base de données a trop d’écritures en attente, une page "Server error" (erreur du serveur) avec `Retry-After` (de 2 à 5) à la place : rien n’a été exécuté et le lien reste valide. Également en cas de dépassement du délai de traitement.'
+          description: 'Le formulaire de nouveau avec `Retry-After` quand le serveur est occupé (la file de hachage des mots de passe, ou la base de données est restée verrouillée) ; le lien reste valide. Quand le serveur est très en retard (voir l’introduction), une page "Server error" (erreur du serveur) avec `Retry-After` (de 2 à 5) à la place : rien n’a été exécuté et le lien reste valide. Également en cas de dépassement du délai de traitement.'
   /confirm-email-change:
     servers:
       - url: https://caissa.scacelith.com
@@ -3013,7 +3081,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'La base de données est restée verrouillée (`Retry-After: 1`) ou a trop d’écritures en attente (`Retry-After` de 2 à 5) : rien n’a changé et le lien fonctionne toujours. Également en cas de dépassement du délai de traitement.'
+          description: 'La base de données est restée verrouillée (`Retry-After: 1`), ou le serveur est très en retard (`Retry-After` de 2 à 5, voir l’introduction) : rien n’a changé et le lien fonctionne toujours. Également en cas de dépassement du délai de traitement.'
   /healthz:
     servers:
       - url: https://caissa.scacelith.com
@@ -3348,7 +3416,7 @@ components:
             error: username_taken
             message: This username is already taken.
     Gone:
-      description: '`sso_expired` : la tentative ou le ticket de connexion Google est inconnu, déjà utilisé ou expiré ; recommencez depuis le jeu.'
+      description: '`sso_expired` : la tentative ou le ticket de connexion Google est inconnu, déjà utilisé ou expiré ; recommencez la connexion.'
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3463,7 +3531,7 @@ components:
             error: internal_error
             message: Internal server error.
     BadGateway:
-      description: '`sso_failed` : un `state` ou un `iss` erroné, ou Google a refusé le code ou envoyé un jeton d’identité dont la vérification échoue. L’erreur ne reprend jamais le texte de Google.'
+      description: '`sso_failed` : un `state` ou un `iss` erroné, ou Google a refusé le code ou envoyé un jeton d’identité dont la vérification échoue (y compris un code ou un jeton d’identité de l’autre client, celui du jeu ou celui du site web). L’erreur ne reprend jamais le texte de Google.'
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3603,7 +3671,7 @@ components:
           schema:
             $ref: '#/components/schemas/HtmlDocument'
     HtmlServiceUnavailable:
-      description: Le serveur est occupé (la base de données est restée verrouillée, avec `Retry-After`) ou a mis trop de temps ; la réponse est une page HTML intitulée "Server error" (erreur du serveur).
+      description: Le serveur est occupé (la base de données est restée verrouillée, ou le serveur est très en retard ; avec `Retry-After`) ou a mis trop de temps ; la réponse est une page HTML intitulée "Server error" (erreur du serveur).
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3761,7 +3829,7 @@ components:
               format: int64
               minimum: 0
               maximum: 4294967295
-              description: L’empreinte du schéma du protocole (les 4 premiers octets du SHA-256 de sa forme canonique, sous forme d’entier non signé) ; à titre indicatif.
+              description: 'L’empreinte du schéma du protocole (les 4 premiers octets du SHA-256 de sa forme canonique, sous forme d’entier non signé : `0xc649140f`, 3326678031, pour la version mineure 2 du protocole) ; à titre indicatif, jamais comparée.'
             subprotocol:
               type: string
               description: Le jeton de sous-protocole WebSocket (`Sec-WebSocket-Protocol`).
@@ -3787,10 +3855,14 @@ components:
           type: object
           required:
             - google
+            - googleWeb
           properties:
             google:
               type: boolean
-              description: Indique si la connexion Google est proposée.
+              description: Indique si la connexion Google est proposée au jeu.
+            googleWeb:
+              type: boolean
+              description: Indique si la connexion Google est aussi proposée à un site web (`POST /auth/sso/google/web/start`).
         mfa:
           type: boolean
           const: true
@@ -3854,7 +3926,7 @@ components:
         protocol:
           min: 1
           max: 1
-          schema: 1852590473
+          schema: 3326678031
           subprotocol: scacelith.rt1
         wsPort: 443
         wsPath: /ws
@@ -3862,6 +3934,7 @@ components:
         emailVerification: true
         sso:
           google: false
+          googleWeb: false
         mfa: true
         pow:
           register: 18
@@ -4225,6 +4298,16 @@ components:
           minimum: 1024
           maximum: 65535
           description: Le port de l’écouteur du client sur `127.0.0.1`.
+    SsoWebStartRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - codeChallenge
+      properties:
+        codeChallenge:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: Le défi PKCE S256 du `codeVerifier` de la page (`BASE64URL(SHA-256(codeVerifier))`).
     SsoFinishRequest:
       type: object
       additionalProperties: false
@@ -4332,7 +4415,7 @@ components:
         lastSeenAt:
           type: integer
           format: int64
-          description: La dernière utilisation (instant en ms), mise à jour au plus toutes les 5 minutes.
+          description: La dernière utilisation (instant en ms), mise à jour au plus toutes les 5 minutes (plus tard tant que le serveur est très en retard).
         expiresAt:
           type: integer
           format: int64

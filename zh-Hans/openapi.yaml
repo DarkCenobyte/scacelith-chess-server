@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: Scacelith 服务器 HTTPS API
-  version: "0.9.1"
+  version: "1.1.0"
   summary: 所有 Scacelith 服务器（官方服务器和社区服务器）共用的 HTTPS API。
   description: |-
     每台 Scacelith 服务器，无论是官方的 `caissa.scacelith.com` 还是任何社区服务器，都提供此 HTTPS API。游戏用它处理对局本身以外的一切：注册和登录（包括双重验证和 Google 登录）、账号页面、对局记录、PGN 下载和对局的 GIF 动图、已登录的设备、数据下载、删除账号以及举报。
@@ -16,7 +16,7 @@ info:
     - 社区服务器：`https://<SERVER_PUBLIC_HOST>[:<port>]/api/v1`。`API_PORT` 默认为 443；位于 NAT 或代理之后时，棋手使用的端口是 `PUBLIC_API_PORT`。
     - 游戏的 WebSocket 默认使用同一端口（可用 `WS_PORT` 更改；`GET /info` 会告诉客户端它在哪个端口）。
     - 基于 TLS 的 HTTP/1.1。使用 `TLS_MODE=proxy` 时，由服务器前面的反向代理终止 TLS。`TLS_MODE=off`（明文 HTTP）仅用于本地开发。
-    - 从邮件链接打开的 HTML 页面（`/verify-email`、`/reset-password`、`/confirm-email-change`）位于服务器根路径下，不在 `/api/v1` 中。健康检查端点在根路径和 `/api/v1` 下都会响应。Google 登录在服务器上没有页面：Google 会把浏览器送回游戏本身，地址为 `127.0.0.1`。
+    - 从邮件链接打开的 HTML 页面（`/verify-email`、`/reset-password`、`/confirm-email-change`）位于服务器根路径下，不在 `/api/v1` 中。健康检查端点在根路径和 `/api/v1` 下都会响应。Google 登录在服务器上没有页面：Google 会把浏览器送回游戏本身，地址为 `127.0.0.1`，或者送回发起登录的网站上的某个页面（`GOOGLE_WEB_REDIRECT_URI`）。
     - 末尾的斜杠会被忽略（`/api/v1/info/` 等同于 `/api/v1/info`），路径参数会经过 URL 解码（不是有效 URL 编码的参数返回 400 `invalid_request`）。
 
     ## 请求
@@ -37,7 +37,7 @@ info:
     ## 响应和错误
 
     - 响应为 UTF-8 编码的 JSON，但 PGN 下载（`application/x-chess-pgn`）、GIF 动图（`image/gif`）和 HTML 页面除外。时间为自 1970-01-01 UTC 起的毫秒数。ID 均为整数。对局 ID 最多 16 位数字，但始终小于 2^53，因此 JSON 数字（双精度浮点数）可以精确表示。
-    - API 的每个响应都带有 `Cache-Control: no-store`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`X-Frame-Options: DENY`、`Cross-Origin-Resource-Policy: same-origin` 和 `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`（HTML 页面有自己的策略）。使用 `TLS_MODE=native` 时，还带有 `Strict-Transport-Security: max-age=31536000`。
+    - API 的每个响应都带有 `Cache-Control: no-store`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`X-Frame-Options: DENY`、`Cross-Origin-Resource-Policy: same-origin` 和 `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`（HTML 页面有自己的策略）。使用 `TLS_MODE=native` 时，还带有 `Strict-Transport-Security: max-age=31536000`。监听器在 API 之前自行写出的响应（健康检查端点的 `GET` 和 `HEAD`、按地址限制层的 429，以及 API 彻底失败时的 500 `internal_error`）带有除 `Cross-Origin-Resource-Policy` 以外的相同标头，其 `Content-Type` 为不带字符集的 `application/json`。
     - 从服务器准备好响应的那一刻起，响应必须在 60 秒内被读完，这只对大型响应（GIF、数据导出、很长的 PGN）有影响。服务器准备响应所花的时间既不计入这 60 秒，也不计入“30 秒内没有任何字节收发即关闭连接”的那 30 秒。
 
     错误只有一种格式（`Error` 结构）：
@@ -65,7 +65,7 @@ info:
     | 429 | `rate_limited` | 触发了速率限制（见下文）：带有 `retryAfter` 和 `Retry-After` 标头。 |
     | 500 | `internal_error` | 意外故障。服务器会将其记入日志。 |
     | 503 | `timeout` | 服务器未在 30 秒内响应（默认设置下，导出为 60 秒，GIF 为 45 秒）。 |
-    | 503 | `server_busy` | 查询会话或更改账号时发现数据库被锁定（`retryAfter` 为 1），或密码哈希队列已满（见下文）。此外，对于 `POST`、`PUT`、`PATCH` 或 `DELETE`，数据库等待中的写入过多：请求未被执行，也未占用其速率限制（`retryAfter` 为 2 到 5）。 |
+    | 503 | `server_busy` | 查询会话或更改账号时发现数据库被锁定（`retryAfter` 为 1），或密码哈希队列已满（见下文）。此外，服务器处理严重滞后时（`retryAfter` 为 2 到 5）：对于 `POST`、`PUT`、`PATCH` 或 `DELETE`，数据库等待中的写入过多；对于任何请求，已超时却仍在运行的先前请求过多，或无法在 5 秒内检查会话令牌。请求未被执行，也未占用其速率限制。 |
 
     读取类端点（对局记录、对局、棋手、排行榜）和导出在数据库持续被锁定时返回 503 `busy`，并带有 `retryAfter: 1`。
 
@@ -89,7 +89,8 @@ info:
     - **获取令牌。** 令牌（`sct_` 后跟 43 个 base64url 字符）来自 `POST /auth/login`（开启双重验证时，随后还需调用 `POST /auth/login/mfa`）、`POST /auth/sso/google/finish` 和 `POST /auth/sso/google/link`（Google 登录），以及 `POST /auth/sso/complete`。它们都返回 `{ token, expiresAt, user }`。服务器只存储令牌的 SHA-256 哈希值。
     - **必需会话。** 缺少该标头时返回 401 `unauthorized`，并带有 `WWW-Authenticate: Bearer realm="scacelith"`。令牌无效时返回 401 `invalid_token`，并带有 `WWW-Authenticate: Bearer realm="scacelith", error="invalid_token"`。客户端收到 `invalid_token` 时，应丢弃该令牌并重新登录。
     - **可选会话。** 在 `GET /games/{id}`、`GET /games/{id}/pgn`、`GET /players/{username}` 和 `GET /players/{username}/games` 上，会话是可选的。不带该标头时，它们返回公开视图；如果发送了该标头，其中的令牌必须有效。
-    - **有效期。** 会话在以下两者中先到者结束：登录后满 `SESSION_MAX_DAYS`（90）天（即 `expiresAt`），或连续 `SESSION_IDLE_DAYS`（30）天未使用。每次使用都会推迟空闲期限；服务器最多每 5 分钟写入一次新值。一个账号最多保留 `MAX_SESSIONS_PER_USER`（10）个会话：超出此数量时，新的登录会吊销最旧的会话。
+    - **存储繁忙。** 检查令牌时若数据库持续被锁定，需要或接受会话的端点会返回 503 `server_busy`，并带有 `retryAfter: 1`（以及 `Retry-After`）；若检查耗时超过 5 秒，则返回 503 `server_busy`，并带有值为 2 到 5 的 `retryAfter`。无论哪种情况，令牌都未被判定是否有效：请保留该令牌并重新发送请求。
+    - **有效期。** 会话在以下两者中先到者结束：登录后满 `SESSION_MAX_DAYS`（90）天（即 `expiresAt`），或连续 `SESSION_IDLE_DAYS`（30）天未使用。每次使用都会推迟空闲期限；服务器最多每 5 分钟写入一次新值，且在后台进行。数据库等待中的写入较多时，服务器会将这次写入推迟到之后的请求，但在空闲期限前的最后一小时内除外，因此正在使用的会话不会过期。一个账号最多保留 `MAX_SESSIONS_PER_USER`（10）个会话：超出此数量时，新的登录会吊销最旧的会话。
     - **吊销。** 退出登录（`POST /auth/logout`、`POST /auth/logout-all`、`DELETE /auth/sessions/{id}`）会吊销会话；修改密码（吊销其他会话）、重置密码和删除账号（吊销所有会话）以及管理员也会吊销会话。通过 API 进行的吊销立即生效，用已吊销会话打开的 WebSocket 会被关闭。修改或重置密码以及删除账号时，吊销与更改本身在同一个事务中进行：其中任何一项失败时，没有任何会话被吊销，其他内容也都没有更改。服务器会将会话查询结果缓存 30 秒，因此通过管理命令（一个独立的进程）进行的吊销会在 30 秒内生效。
     - **作用范围。** 令牌只属于一台服务器，也用于打开该服务器的 WebSocket。切勿将其发送到其他服务器。
 
@@ -111,7 +112,7 @@ info:
     | `auth_forgot` | `AUTH_FORGOT_PER_HOUR`（3）/ 小时，共享 | 客户端；每个 IPv6 /48 为其 3 倍 | `POST /auth/password/forgot` |
     | `auth_forgot_day` | `AUTH_FORGOT_PER_DAY`（10）/ 24 小时，共享 | 客户端；每个 IPv6 /48 为其 3 倍 | `POST /auth/password/forgot` |
     | `auth_reset` | `AUTH_RESET_PER_HOUR`（10）/ 小时，共享 | 客户端；每个 IPv6 /48 为其 3 倍 | `POST /auth/password/reset`、`POST /reset-password` |
-    | `reauth` | 数值同 `auth`，但使用独立的令牌桶，共享 | 客户端和 IPv6 /48 | 需要输入密码的账号更改（见“重新验证身份”），以及 `POST /account/export` |
+    | `reauth` | 数值同 `auth`，但使用独立的令牌桶，共享 | 客户端和 IPv6 /48 | `POST /account/password`、`/account/mfa/totp/setup`、`/account/mfa/totp/enable`、`/account/mfa/totp/disable`、`/account/mfa/recovery-codes`、`/account/email`、`/account/export`、`/account/delete` |
     | `reauth_user` | `AUTH_REAUTH_PER_USER`（10）/ 10 分钟，共享 | 棋手 | 与 `reauth` 相同的端点 |
     | `account` | 60 / 分钟 | 棋手 | `GET /account/me`、`PUT /account/preferences` |
     | `account_games` | 60 / 分钟 | 棋手 | `GET /account/games` |
@@ -122,13 +123,13 @@ info:
     | `gif_user_min`、`gif_user_hour` | `GIF_USER_RENDERS_PER_MIN`（4）/ 分钟和 `GIF_USER_RENDERS_PER_HOUR`（30）/ 小时，共享 | 棋手 | 同样这两个端点，仅在需要生成 GIF 时（而非取自缓存） |
     | `gif_ip_min`、`gif_ip_hour` | `GIF_IP_RENDERS_PER_MIN`（12）/ 分钟和 `GIF_IP_RENDERS_PER_HOUR`（120）/ 小时，共享 | 客户端（其所有账号合计）；每个 IPv6 /48 为其 3 倍 | 同上，条件相同 |
     | `reports` | 30 / 小时 | 棋手 | `POST /reports` |
-    | `sso_start` | 30 / 10 分钟，共享 | 客户端；每个 IPv6 /48 为 90 | `POST /auth/sso/google/start` |
+    | `sso_start` | 30 / 10 分钟，共享 | 客户端；每个 IPv6 /48 为 90 | `POST /auth/sso/google/start`、`POST /auth/sso/google/web/start`（合并计数） |
     | `sso_finish` | 30 / 分钟 | 客户端 | `POST /auth/sso/google/finish` |
     | `page` | 60 / 分钟 | 客户端 | `GET /verify-email`、`/reset-password`、`/confirm-email-change` |
 
     `GET /info` 和 `GET /leaderboard` 没有自己的限制，只受按地址限制层约束。有多个限制的端点按其说明中给出的顺序检查这些限制。
 
-    服务器按以下顺序处理请求：按地址限制层，然后是健康检查端点；端点匹配；对于 `POST`、`PUT`、`PATCH` 或 `DELETE`，检查数据库等待中的写入（503 `server_busy`）；身份验证；账号额度（请求携带会话时）；端点的限制；请求体；端点本身（GIF 端点仅在确实需要生成 GIF 时才占用其渲染限制）。因此，因令牌问题被拒绝的请求不会消耗端点的任何令牌，而请求体无效的请求则会消耗。
+    服务器按以下顺序处理请求：按地址限制层，然后是健康检查端点；端点匹配；检查服务器处理是否严重滞后（503 `server_busy`）：已超时却仍在运行的先前请求是否过多，以及对于 `POST`、`PUT`、`PATCH` 或 `DELETE`，数据库等待中的写入；身份验证，须在 5 秒内完成（超过则返回 503 `server_busy`）；账号额度（请求携带会话时）；端点的限制；请求体；端点本身（GIF 端点仅在确实需要生成 GIF 时才占用其渲染限制）。因此，因令牌问题被拒绝的请求不会消耗端点的任何令牌，而请求体无效的请求则会消耗。
 
     其他限流，由端点自身返回：
 
@@ -213,7 +214,7 @@ tags:
   - name: google-sign-in
     x-displayName: Google 登录
     description: |-
-      仅当 `GET /info` 给出 `sso.google: true` 时提供；否则下列所有端点都返回 404 `sso_disabled`。游戏通过系统浏览器，按 RFC 8252 的已安装应用流程（“桌面应用”类型的客户端）登录：Google 把浏览器送回游戏在 `127.0.0.1` 上的监听器，而从不送到本服务器，游戏也从不接触任何 Google 凭据。
+      仅当 `GET /info` 给出 `sso.google: true` 时提供；否则下列所有端点都返回 404 `sso_disabled`。当 `sso.googleWeb` 为 true 时，网站也会使用自己的客户端，以同样的方式登录（见下文的**在网站上登录**）。游戏通过系统浏览器，按 RFC 8252 的已安装应用流程（“桌面应用”类型的客户端）登录：Google 把浏览器送回游戏在 `127.0.0.1` 上的监听器，而从不送到本服务器，游戏也从不接触任何 Google 凭据。
 
       1. 客户端在 `127.0.0.1:0` 上监听（由系统选择端口），并生成一对 PKCE 值：由 43 到 128 个 `[A-Za-z0-9._~-]` 字符组成的 `codeVerifier`，以及 `codeChallenge = BASE64URL(SHA-256(codeVerifier))`，后者为 43 个字符，不带填充。
       2. 带上质询值和端口调用 `POST /auth/sso/google/start`，返回 Google URL 和本次尝试的 `state`。客户端检查该 URL（见下文），然后在浏览器中打开它。
@@ -233,6 +234,15 @@ tags:
       因此，只有以与 `SERVER_PUBLIC_HOST` 及其公开 API 端口完全一致的地址添加服务器的棋手，才能使用 Google 登录。
 
       **游戏在打开浏览器之前检查的内容。** `authUrl` 必须恰好以 `https://accounts.google.com/o/oauth2/v2/auth?` 开头，由可打印 ASCII 字符组成且少于 4096 个字符；其查询部分必须恰好有一个 `response_type=code`，恰好有一个 `redirect_uri` 且等于游戏根据其端口和来源标记算出的 URI，恰好有一个 `state` 且等于响应中的 `state`，还必须有 `code_challenge_method=S256` 和一个 43 个字符的 `code_challenge`。否则，游戏会停止监听器，不打开任何页面。游戏只向响应了 `start` 的那台服务器发送 `finish` 和 `link` 请求。
+
+      **在网站上登录。** 网站（官方网站：<https://scacelith.com/>）使用同一 Google 项目中“Web 应用”类型的客户端（`GOOGLE_WEB_CLIENT_ID`）登录。Google 会把浏览器送回网站上由运营者配置的某个页面（`GOOGLE_WEB_REDIRECT_URI`，已列入该客户端的“已获授权的重定向 URI”），再由该页面把授权码提交给 `finish`；在这里，服务器同样不接受客户端提供的重定向 URI。
+
+      1. 页面按上文所述生成一对 PKCE 值，把验证值保存在标签页中（`sessionStorage`），并携带质询值调用 `POST /auth/sso/google/web/start`。
+      2. 页面像游戏那样检查 `authUrl`，只是其中的 `redirect_uri` 必须是与该页面同源的页面，然后跳转到该地址。不会加载任何 Google 脚本。
+      3. Google 把浏览器送到 `GOOGLE_WEB_REDIRECT_URI?code=...&state=...`。页面只接受发起登录时响应中的 `state`；若重定向带有 `error=`，则不发送任何内容。
+      4. 之后的 `finish`、`link` 和 `complete` 与游戏的流程相同。尝试会记住它是由网站发起的：授权码将使用网站的客户端和页面来兑换，且 ID 令牌必须指明该客户端（游戏客户端的授权码或 ID 令牌会以 502 `sso_failed` 失败，反之亦然）。
+
+      无论从游戏还是从网站登录，同一个 Google 账号都会对应到同一个 Scacelith 账号：关联中保存的是 Google 的主体标识（`sub`），无论使用哪个客户端，它标识的都是同一个 Google 账号。网站的源必须列在 `CORS_ORIGINS` 中（否则 `check-config` 会发出警告）。
 
       **Google 登录会进入哪个账号：** 已关联该 Google 账号的账号；否则为使用 Google 已确认邮箱地址的有效账号（若该账号设有密码，`finish` 返回 `needsPassword`，只有在其密码以及（若已开启）第二重验证都通过后才会保存关联；若没有密码，则返回 409 `sso_account_exists`）；否则为新账号（`needsUsername`）。Google 账号绝不会仅凭邮箱地址就关联到现有账号。当 Google 登录创建了账号，或被添加到现有账号时，该账号的邮箱地址都会收到一封邮件。
   - name: sessions
@@ -379,7 +389,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`timeout`。'
+          description: '`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /auth/register:
     post:
       operationId: registerAccount
@@ -475,7 +485,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（密码哈希队列，或数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`（密码哈希队列，或数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /auth/login:
     post:
       operationId: logIn
@@ -558,7 +568,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（密码哈希队列，或数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`（密码哈希队列，或数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /auth/login/mfa:
     post:
       operationId: logInWithSecondFactor
@@ -615,7 +625,7 @@ paths:
           description: '`sso_already_linked`：仅在 Google 关联的密码步骤之后出现，表示该 Google 账号在此期间已被关联到另一个账号。'
         '410':
           $ref: '#/components/responses/Gone'
-          description: '`sso_expired`：仅在 Google 关联的密码步骤之后出现，表示账号在此期间发生了变化；请从游戏中重新开始。'
+          description: '`sso_expired`：仅在 Google 关联的密码步骤之后出现，表示账号在此期间发生了变化；请重新开始登录。'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '414':
@@ -629,7 +639,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '带有 `retryAfter: 1` 的 `server_busy`：数据库持续被锁定（若发生在 Google 关联步骤之后，则未进行任何关联：请从游戏中重新开始）。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '带有 `retryAfter: 1` 的 `server_busy`：数据库持续被锁定（若发生在 Google 关联步骤之后，则未进行任何关联：请重新开始登录）。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /auth/logout:
     post:
       operationId: logOut
@@ -674,7 +684,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /auth/logout-all:
     post:
       operationId: logOutEverywhere
@@ -719,7 +729,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /auth/verify-email/resend:
     post:
       operationId: resendVerificationEmail
@@ -770,7 +780,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '带有 `retryAfter: 1` 的 `server_busy`：查询账号时数据库持续被锁定（为等待中的注册申请续期只是尽力而为，从不导致请求失败）。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '带有 `retryAfter: 1` 的 `server_busy`：查询账号或保存尚未确认账号的链接时数据库持续被锁定（为等待中的注册申请续期只是尽力而为，从不导致请求失败）；该地址的 5 分钟间隔仍会照常开始，因此在此期间的新请求不会起任何作用。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /auth/password/forgot:
     post:
       operationId: requestPasswordReset
@@ -821,7 +831,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '带有 `retryAfter: 1` 的 `server_busy`：数据库持续被锁定。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '带有 `retryAfter: 1` 的 `server_busy`：查询账号或保存链接时数据库持续被锁定；该地址的 5 分钟间隔仍会照常开始，因此在此期间的新请求不会发送链接。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /auth/password/reset:
     post:
       operationId: resetPassword
@@ -879,7 +889,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`：密码哈希队列，或数据库持续被锁定（`retryAfter: 1`，未做任何更改）。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`：密码哈希队列，或数据库持续被锁定（`retryAfter: 1`，未做任何更改）。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /auth/sso/google/start:
     post:
       operationId: startGoogleSignIn
@@ -937,7 +947,65 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
+  /auth/sso/google/web/start:
+    post:
+      operationId: startGoogleWebSignIn
+      tags:
+        - google-sign-in
+      summary: 在网站上发起 Google 登录
+      description: |-
+        为网站页面的 PKCE 质询值发起该网站的一次 Google 登录尝试。响应与游戏的相同：要跳转到的 Google URL，以及该尝试的 `state`；尝试在 10 分钟内有效。仅当 `GET /info` 给出 `sso.googleWeb: true` 时提供。
+
+        `authUrl` 包含网站的 `client_id` 和 `redirect_uri=GOOGLE_WEB_REDIRECT_URI`，其他参数与游戏的相同。页面在跳转之前会先检查它（见标签说明中的**在网站上登录**）。
+
+        **限制：** `sso_start`，与游戏端的发起请求共享。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoWebStartRequest'
+            example:
+              codeChallenge: 6e7diXEYxG7OTYw7STfNOltEeLxAilPthC_txzaE0xA
+      responses:
+        '200':
+          description: 该尝试。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoStartAnswer'
+              example:
+                attemptId: sso_ogvVEL75n7q90NIFsh-4zXVt-izc3WRbghsd6HDOtNQ
+                authUrl: https://accounts.google.com/o/oauth2/v2/auth?client_id=1234567890-web.apps.googleusercontent.com&redirect_uri=https%3A%2F%2Fscacelith.com%2Faccount%2Fgoogle%2F&response_type=code&scope=openid%20email%20profile&state=yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ&nonce=gYIKKhwnz1AqWfFxOC3R-ZvCACw06q74fEMtGEOJQWU&code_challenge=ZfEI6iZjePTHbnbevupaD9O7GjBCzcL-GJu2XGOdFGc&code_challenge_method=S256&prompt=select_account
+                state: yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ
+                expiresIn: 600
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_request`：缺少 `codeChallenge` 或其格式错误，或者包含任何其他字段（包括 `redirectPort`）。'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`sso_disabled`：本服务器未提供 Google 登录，或未向网站提供。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`sso_start` 限制（与游戏端的发起请求共享）。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /auth/sso/google/finish:
     post:
       operationId: finishGoogleSignIn
@@ -945,7 +1013,7 @@ paths:
         - google-sign-in
       summary: 将 Google 的响应交给服务器
       description: |-
-        把 Google 发送到游戏监听器的 `code` 和 `state`，连同尝试 ID 和 PKCE 验证值一起交给服务器。没有验证值，尝试 ID 毫无用处；没有服务器自己的 PKCE 验证值和客户端密钥，授权码也毫无用处。
+        把 Google 发送到游戏监听器或网站页面的 `code` 和 `state`，连同尝试 ID 和 PKCE 验证值一起交给服务器。没有验证值，尝试 ID 毫无用处；没有服务器自己的 PKCE 验证值和客户端密钥，授权码也毫无用处。
 
         服务器先检查尝试（未知、已使用或已过期：410），然后检查验证值（错误的验证值不会使尝试失效），随后使用该尝试（仅一次），检查 `state` 和 `iss`，向 Google 兑换授权码并验证 ID 令牌。响应（200）为以下之一：
 
@@ -1047,7 +1115,7 @@ paths:
           $ref: '#/components/responses/BadGateway'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /auth/sso/google/link:
     post:
       operationId: linkGoogleAccount
@@ -1099,7 +1167,7 @@ paths:
           description: '`sso_already_linked`：该 Google 账号在此期间已被关联到另一个账号。'
         '410':
           $ref: '#/components/responses/Gone'
-          description: '`sso_expired`：票据未知、已使用或已过期；第 5 次密码错误；账号的状态或地址自 `finish` 以来已发生变化；或者在保存关联期间，账号的状态、地址、密码或双重验证发生了变化。请从游戏中重新开始。'
+          description: '`sso_expired`：票据未知、已使用或已过期；第 5 次密码错误；账号的状态或地址自 `finish` 以来已发生变化；或者在保存关联期间，账号的状态、地址、密码或双重验证发生了变化。请重新开始登录。'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '414':
@@ -1115,7 +1183,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`：密码哈希队列，或数据库持续被锁定（`retryAfter: 1`，未进行任何关联）。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`：密码哈希队列，或数据库持续被锁定（`retryAfter: 1`，未进行任何关联）。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /auth/sso/complete:
     post:
       operationId: completeGoogleSignUp
@@ -1177,7 +1245,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /auth/sessions:
     get:
       operationId: listSessions
@@ -1185,7 +1253,7 @@ paths:
         - sessions
       summary: 列出已登录的设备
       description: |-
-        账号的有效会话（已登录的设备），最近使用的排在最前。`current` 标记发出此请求的会话。`lastSeenAt` 最多每 5 分钟更新一次；`expiresAt` 是绝对截止时间，空闲期限可能使会话更早结束。
+        账号的有效会话（已登录的设备），最近使用的排在最前。`current` 标记发出此请求的会话。`lastSeenAt` 最多每 5 分钟更新一次（服务器处理严重滞后期间会更晚）；`expiresAt` 是绝对截止时间，空闲期限可能使会话更早结束。
 
         **限制：** `sessions`。
       security:
@@ -1225,7 +1293,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（数据库持续被锁定）、`timeout`。'
+          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /auth/sessions/{id}:
     delete:
       operationId: revokeSession
@@ -1280,7 +1348,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /account/me:
     get:
       operationId: getAccount
@@ -1339,7 +1407,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（数据库持续被锁定）、`timeout`。'
+          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /account/preferences:
     put:
       operationId: updatePreferences
@@ -1397,7 +1465,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /account/password:
     post:
       operationId: changePassword
@@ -1461,7 +1529,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`：密码哈希队列，或数据库持续被锁定（`retryAfter: 1`，未做任何更改）。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`：密码哈希队列，或数据库持续被锁定（`retryAfter: 1`，未做任何更改）。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /account/mfa/totp/setup:
     post:
       operationId: startTotpSetup
@@ -1524,7 +1592,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（密码哈希队列，或数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`（密码哈希队列，或数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /account/mfa/totp/enable:
     post:
       operationId: enableTotp
@@ -1602,7 +1670,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`（数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /account/mfa/totp/disable:
     post:
       operationId: disableTotp
@@ -1667,7 +1735,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（密码哈希队列，或数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`（密码哈希队列，或数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /account/mfa/recovery-codes:
     post:
       operationId: regenerateRecoveryCodes
@@ -1742,7 +1810,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（密码哈希队列，或数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`（密码哈希队列，或数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /account/email:
     post:
       operationId: changeEmail
@@ -1831,7 +1899,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`：密码哈希队列，或数据库持续被锁定（`retryAfter: 1`：未做任何更改，可以再次发送相同的请求）。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`：密码哈希队列，或数据库持续被锁定（`retryAfter: 1`：未做任何更改，可以再次发送相同的请求）。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /account/export:
     post:
       operationId: exportAccountData
@@ -1985,7 +2053,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy`（数据库持续被锁定，带有 `Retry-After: 1` 标头）、`server_busy`（密码哈希队列）、`timeout`（60 秒）。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`busy`（数据库持续被锁定，带有 `Retry-After: 1` 标头）、`server_busy`（密码哈希队列）、`timeout`（60 秒）。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /account/delete:
     post:
       operationId: deleteAccount
@@ -2052,7 +2120,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（密码哈希队列，或数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`（密码哈希队列，或数据库持续被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /account/games:
     get:
       operationId: listAccountGames
@@ -2150,7 +2218,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy`（数据库持续被锁定；响应体中带有 `retryAfter: 1`，但没有 `Retry-After` 标头）、`server_busy`（查询会话时发现数据库被锁定）、`timeout`。'
+          description: '`busy`（数据库持续被锁定；响应体中带有 `retryAfter: 1`，但没有 `Retry-After` 标头）、`server_busy`（查询会话时发现数据库被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /games/{id}:
     get:
       operationId: getGame
@@ -2242,7 +2310,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy`（数据库持续被锁定；响应体中带有 `retryAfter: 1`，但没有 `Retry-After` 标头）、`server_busy`（查询会话时发现数据库被锁定）、`timeout`。'
+          description: '`busy`（数据库持续被锁定；响应体中带有 `retryAfter: 1`，但没有 `Retry-After` 标头）、`server_busy`（查询会话时发现数据库被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /games/{id}/pgn:
     get:
       operationId: getGamePgn
@@ -2319,7 +2387,7 @@ paths:
           description: '`internal_error`：原因之一是已存储的着法无法重放到已存储的结局（服务器会记入日志）。'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy`（数据库持续被锁定；响应体中带有 `retryAfter: 1`，但没有 `Retry-After` 标头）、`server_busy`（查询会话时发现数据库被锁定）、`timeout`。'
+          description: '`busy`（数据库持续被锁定；响应体中带有 `retryAfter: 1`，但没有 `Retry-After` 标头）、`server_busy`（查询会话时发现数据库被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /games/{id}/gif:
     get:
       operationId: getGameGif
@@ -2399,7 +2467,7 @@ paths:
           description: '`render_failed`：无法生成 GIF（服务器会在日志中记录原因）。`internal_error`。'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '带有 `retryAfter`（3 到 10 秒）和 `Retry-After` 的 `server_busy`：渲染队列已满，或 GIF 等待空闲线程已达 `GIF_QUEUE_TIMEOUT_MS`（10 秒）；该请求占用的所有限制令牌都会被退还。`busy`：数据库持续被锁定（仅在响应体中带有 `retryAfter: 1`）。`timeout`。'
+          description: '带有 `retryAfter`（3 到 10 秒）和 `Retry-After` 的 `server_busy`：渲染队列已满，或 GIF 等待空闲线程已达 `GIF_QUEUE_TIMEOUT_MS`（10 秒）；该请求占用的所有限制令牌都会被退还。`busy`：数据库持续被锁定（仅在响应体中带有 `retryAfter: 1`）。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /gif:
     post:
       operationId: renderPgnGif
@@ -2473,7 +2541,7 @@ paths:
           description: '`render_failed`：无法生成 GIF（服务器会在日志中记录原因）。`internal_error`。'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '带有 `retryAfter`（3 到 10 秒）和 `Retry-After` 的 `server_busy`：渲染队列已满，或 GIF 等待空闲线程的时间过长；该请求占用的所有限制令牌都会被退还。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '带有 `retryAfter`（3 到 10 秒）和 `Retry-After` 的 `server_busy`：渲染队列已满，或 GIF 等待空闲线程的时间过长；该请求占用的所有限制令牌都会被退还。`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /players/{username}:
     get:
       operationId: getPlayer
@@ -2535,7 +2603,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy`（数据库持续被锁定；响应体中带有 `retryAfter: 1`，但没有 `Retry-After` 标头）、`server_busy`（查询会话时发现数据库被锁定）、`timeout`。'
+          description: '`busy`（数据库持续被锁定；响应体中带有 `retryAfter: 1`，但没有 `Retry-After` 标头）、`server_busy`（查询会话时发现数据库被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /players/{username}/games:
     get:
       operationId: listPlayerGames
@@ -2607,7 +2675,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy`（数据库持续被锁定；响应体中带有 `retryAfter: 1`，但没有 `Retry-After` 标头）、`server_busy`（查询会话时发现数据库被锁定）、`timeout`。'
+          description: '`busy`（数据库持续被锁定；响应体中带有 `retryAfter: 1`，但没有 `Retry-After` 标头）、`server_busy`（查询会话时发现数据库被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /leaderboard:
     get:
       operationId: getLeaderboard
@@ -2672,7 +2740,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy`（数据库持续被锁定；响应体中带有 `retryAfter: 1`，但没有 `Retry-After` 标头）、`timeout`。'
+          description: '`busy`（数据库持续被锁定；响应体中带有 `retryAfter: 1`，但没有 `Retry-After` 标头）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /reports:
     post:
       operationId: reportPlayer
@@ -2740,7 +2808,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（查询会话时发现数据库被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：数据库等待中的写入过多，请求未被执行。'
+          description: '`server_busy`（查询会话时发现数据库被锁定）、`timeout`。此外，带有 `retryAfter`（2 到 5）的 `server_busy`：服务器处理严重滞后（见简介），请求未被执行。'
   /verify-email:
     servers:
       - url: https://caissa.scacelith.com
@@ -2830,7 +2898,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: '数据库持续被锁定（`Retry-After: 1`）或等待中的写入过多（`Retry-After` 为 2 到 5）：未做任何更改，链接仍然有效。处理程序超时时也返回此状态码。'
+          description: '数据库持续被锁定（`Retry-After: 1`），或服务器处理严重滞后（`Retry-After` 为 2 到 5，见简介）：未做任何更改，链接仍然有效。处理程序超时时也返回此状态码。'
   /reset-password:
     servers:
       - url: https://caissa.scacelith.com
@@ -2923,7 +2991,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: '服务器繁忙时（密码哈希队列，或数据库持续被锁定），重新返回带有 `Retry-After` 的表单；链接仍然有效。数据库等待中的写入过多时，则改为返回带有 `Retry-After`（2 到 5）的“Server error”（服务器错误）页面：未执行任何操作，链接仍然有效。处理程序超时时也返回此状态码。'
+          description: '服务器繁忙时（密码哈希队列，或数据库持续被锁定），重新返回带有 `Retry-After` 的表单；链接仍然有效。服务器处理严重滞后时（见简介），则改为返回带有 `Retry-After`（2 到 5）的“Server error”（服务器错误）页面：未执行任何操作，链接仍然有效。处理程序超时时也返回此状态码。'
   /confirm-email-change:
     servers:
       - url: https://caissa.scacelith.com
@@ -3013,7 +3081,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: '数据库持续被锁定（`Retry-After: 1`）或等待中的写入过多（`Retry-After` 为 2 到 5）：未做任何更改，链接仍然有效。处理程序超时时也返回此状态码。'
+          description: '数据库持续被锁定（`Retry-After: 1`），或服务器处理严重滞后（`Retry-After` 为 2 到 5，见简介）：未做任何更改，链接仍然有效。处理程序超时时也返回此状态码。'
   /healthz:
     servers:
       - url: https://caissa.scacelith.com
@@ -3348,7 +3416,7 @@ components:
             error: username_taken
             message: This username is already taken.
     Gone:
-      description: '`sso_expired`：Google 登录尝试或票据未知、已使用或已过期；请从游戏中重新开始。'
+      description: '`sso_expired`：Google 登录尝试或票据未知、已使用或已过期；请重新开始登录。'
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3463,7 +3531,7 @@ components:
             error: internal_error
             message: Internal server error.
     BadGateway:
-      description: '`sso_failed`：`state` 或 `iss` 错误，或者 Google 拒绝了授权码，或发送了无法通过验证的 ID 令牌。此错误绝不包含 Google 返回的文字。'
+      description: '`sso_failed`：`state` 或 `iss` 错误，或者 Google 拒绝了授权码，或发送了无法通过验证的 ID 令牌（包括游戏与网站两个客户端中另一方的授权码或 ID 令牌）。此错误绝不包含 Google 返回的文字。'
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3603,7 +3671,7 @@ components:
           schema:
             $ref: '#/components/schemas/HtmlDocument'
     HtmlServiceUnavailable:
-      description: 服务器繁忙（数据库持续被锁定，带有 `Retry-After`）或处理超时（HTML 页面，标题为“Server error”，即“服务器错误”）。
+      description: 服务器繁忙（数据库持续被锁定，或服务器处理严重滞后；带有 `Retry-After`）或处理超时（HTML 页面，标题为“Server error”，即“服务器错误”）。
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3761,7 +3829,7 @@ components:
               format: int64
               minimum: 0
               maximum: 4294967295
-              description: 协议结构定义的指纹（其规范形式的 SHA-256 的前 4 个字节，表示为无符号整数）；仅供参考。
+              description: '协议结构定义的指纹（其规范形式的 SHA-256 的前 4 个字节，表示为无符号整数：协议次版本 2 为 `0xc649140f`，即 3326678031）；仅供参考，从不用于比较。'
             subprotocol:
               type: string
               description: WebSocket 子协议标识（`Sec-WebSocket-Protocol`）。
@@ -3787,10 +3855,14 @@ components:
           type: object
           required:
             - google
+            - googleWeb
           properties:
             google:
               type: boolean
-              description: 是否提供 Google 登录。
+              description: 是否向游戏提供 Google 登录。
+            googleWeb:
+              type: boolean
+              description: 是否也向网站提供 Google 登录（`POST /auth/sso/google/web/start`）。
         mfa:
           type: boolean
           const: true
@@ -3854,7 +3926,7 @@ components:
         protocol:
           min: 1
           max: 1
-          schema: 1852590473
+          schema: 3326678031
           subprotocol: scacelith.rt1
         wsPort: 443
         wsPath: /ws
@@ -3862,6 +3934,7 @@ components:
         emailVerification: true
         sso:
           google: false
+          googleWeb: false
         mfa: true
         pow:
           register: 18
@@ -4225,6 +4298,16 @@ components:
           minimum: 1024
           maximum: 65535
           description: 客户端在 `127.0.0.1` 上的监听端口。
+    SsoWebStartRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - codeChallenge
+      properties:
+        codeChallenge:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: 由页面的 `codeVerifier` 得出的 S256 PKCE 质询值（`BASE64URL(SHA-256(codeVerifier))`）。
     SsoFinishRequest:
       type: object
       additionalProperties: false
@@ -4332,7 +4415,7 @@ components:
         lastSeenAt:
           type: integer
           format: int64
-          description: 最后使用时间（Unix 毫秒时间戳），最多每 5 分钟更新一次。
+          description: 最后使用时间（Unix 毫秒时间戳），最多每 5 分钟更新一次（服务器处理严重滞后期间会更晚）。
         expiresAt:
           type: integer
           format: int64

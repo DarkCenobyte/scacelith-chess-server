@@ -1,9 +1,9 @@
 # Scacelith server API reference (gh-pages)
 
 This branch is the website of the HTTPS API reference of the Scacelith server, in the ten languages
-of the game, published by GitHub Pages at
-<https://darkcenobyte.github.io/scacelith-chess-server/>. The server itself, its documentation
-(`docs/API.md` is the reference this site describes) and the realtime protocol are on the
+of the game, published by GitHub Pages at <https://docs.scacelith.com/> (the game's website links
+there). The server itself, its documentation (`docs/API.md` is the reference this site describes)
+and the realtime protocol are on the
 [master branch](https://github.com/DarkCenobyte/scacelith-chess-server/tree/master).
 
 | Path | Content |
@@ -16,6 +16,7 @@ of the game, published by GitHub Pages at
 | `i18n/ui.json` | Per language: its name, direction, and the strings of the page itself (Redoc's labels and the few strings `assets/site.js` replaces) |
 | `assets/` | The page's script and style, and Redoc 2.5.4 (`assets/redoc/`, MIT licence) |
 | `tools/build.py` | Generates the files above from `en/openapi.yaml` and `i18n/`, and checks them |
+| `CNAME` | The custom domain of the site, `docs.scacelith.com` |
 
 Only the prose is translated. The examples (with the server's English error messages), field
 names, error codes, settings and everything in backticks are the same in every language, and the
@@ -42,10 +43,12 @@ Do not edit the generated files by hand. The `.todo.json` files are not committe
 ## Publishing
 
 GitHub Pages serves this branch as it is (Settings > Pages: "Deploy from a branch", `gh-pages`,
-`/ (root)`); `.nojekyll` turns Jekyll off. The pages load nothing from other sites: Redoc is in
-`assets/redoc/` (from the `redoc` 2.5.4 npm package, `bundles/redoc.standalone.js`, SHA-256
-`dcaf76612bc4a3fbcc923a8966dee2f6146a5f32e5ce1b6f02dd60cbbf89500b`), and a Content Security
-Policy keeps it that way.
+`/ (root)`); `.nojekyll` turns Jekyll off. `CNAME` holds the custom domain, `docs.scacelith.com`
+(Settings > Pages > Custom domain); GitHub redirects the former address,
+`darkcenobyte.github.io/scacelith-chess-server/`, there. The pages load nothing from other sites:
+Redoc is in `assets/redoc/` (from the `redoc` 2.5.4 npm package, `bundles/redoc.standalone.js`,
+SHA-256 `dcaf76612bc4a3fbcc923a8966dee2f6146a5f32e5ce1b6f02dd60cbbf89500b`), and a Content
+Security Policy keeps it that way.
 
 The translations were written with an AI model (Claude) from the English and checked by the build;
 corrections from native speakers are welcome, through `i18n/<lang>.json`.
