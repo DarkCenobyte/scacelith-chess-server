@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: HTTPS API сервера Scacelith
-  version: "0.9.1"
+  version: "1.0.0"
   summary: HTTPS API любого сервера Scacelith — как официального, так и серверов сообщества.
   description: |-
     Этот HTTPS API предоставляет каждый сервер Scacelith — и официальный `caissa.scacelith.com`, и любой сервер сообщества. Игра использует его для всего, что происходит вне самой партии: регистрации и входа (включая двухфакторную аутентификацию и вход через Google), страницы аккаунта, истории партий, скачивания PGN и анимированных GIF партий, активных сеансов, скачивания данных, удаления аккаунта и жалоб.
@@ -37,7 +37,7 @@ info:
     ## Ответы и ошибки
 
     - Ответы — JSON в UTF-8, кроме скачивания PGN (`application/x-chess-pgn`), анимированных GIF (`image/gif`) и HTML-страниц. Время указывается в миллисекундах с 1970-01-01 UTC. Идентификаторы — целые числа. Идентификаторы партий содержат до 16 цифр, но остаются меньше 2^53, поэтому число JSON (double) хранит их точно.
-    - Каждый ответ API содержит `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Cross-Origin-Resource-Policy: same-origin` и `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` (у HTML-страниц своя политика). При `TLS_MODE=native` он также содержит `Strict-Transport-Security: max-age=31536000`.
+    - Каждый ответ API содержит `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Cross-Origin-Resource-Policy: same-origin` и `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` (у HTML-страниц своя политика). При `TLS_MODE=native` он также содержит `Strict-Transport-Security: max-age=31536000`. Ответы, которые слушающий сокет формирует сам, ещё до API (`GET` и `HEAD` эндпоинтов проверки состояния, 429 поадресного уровня и 500 `internal_error`, когда API полностью отказывает), содержат те же заголовки, кроме `Cross-Origin-Resource-Policy`, а их `Content-Type` — `application/json` без параметра charset.
     - Ответ должен быть прочитан в течение 60 секунд с момента, когда сервер его подготовил; это важно только для больших ответов (GIF, экспорт данных, длинный PGN). Время, которое сервер тратит на подготовку ответа, не учитывается ни здесь, ни в тех 30 секундах без единого входящего или исходящего байта, после которых соединение закрывается.
 
     У всех ошибок один формат (схема `Error`):
@@ -65,7 +65,7 @@ info:
     | 429 | `rate_limited` | Сработал лимит частоты запросов (см. ниже): `retryAfter` и заголовок `Retry-After`. |
     | 500 | `internal_error` | Непредвиденный сбой. Сервер записывает его в журнал. |
     | 503 | `timeout` | Сервер не ответил в течение 30 секунд (60 секунд для экспорта, 45 секунд для GIF при настройках по умолчанию). |
-    | 503 | `server_busy` | Поиск сеанса или изменение аккаунта натолкнулись на заблокированную базу данных (`retryAfter` 1), или очередь хеширования паролей заполнена (см. ниже). Также для `POST`, `PUT`, `PATCH` или `DELETE`: в базе данных слишком много операций записи в очереди; запрос не выполнен, и его лимиты ничего не израсходовали (`retryAfter` от 2 до 5). |
+    | 503 | `server_busy` | Поиск сеанса или изменение аккаунта натолкнулись на заблокированную базу данных (`retryAfter` 1), или очередь хеширования паролей заполнена (см. ниже). Также, с `retryAfter` от 2 до 5, когда сервер сильно отстаёт: для `POST`, `PUT`, `PATCH` или `DELETE` — в базе данных слишком много операций записи в очереди; для любого запроса — слишком много предыдущих запросов всё ещё выполняется после истечения отведённого им времени, или токен сеанса не удалось проверить за 5 секунд. Запрос не выполнен, и его лимиты ничего не израсходовали. |
 
     Эндпоинты чтения (история партий, партии, игроки, таблица лидеров) и экспорт отвечают 503 `busy` с `retryAfter: 1`, если база данных так и осталась заблокированной.
 
@@ -89,7 +89,8 @@ info:
     - **Получение токена.** Токен (`sct_` и 43 символа base64url) выдают `POST /auth/login` (а затем `POST /auth/login/mfa`, если включена двухфакторная аутентификация), `POST /auth/sso/google/finish` и `POST /auth/sso/google/link` (вход через Google), а также `POST /auth/sso/complete`. Каждый из них отвечает `{ token, expiresAt, user }`. Сервер хранит только SHA-256 токена.
     - **Обязательный сеанс.** При отсутствии заголовка ответ — 401 `unauthorized` с `WWW-Authenticate: Bearer realm="scacelith"`. При недействительном токене ответ — 401 `invalid_token` с `WWW-Authenticate: Bearer realm="scacelith", error="invalid_token"`. Получив `invalid_token`, клиент должен забыть токен и войти снова.
     - **Необязательный сеанс.** Для `GET /games/{id}`, `GET /games/{id}/pgn`, `GET /players/{username}` и `GET /players/{username}/games` сеанс необязателен. Без заголовка они возвращают общедоступное представление; если заголовок отправлен, его токен должен быть действительным.
-    - **Срок действия.** Сеанс завершается при наступлении первого из двух сроков: через `SESSION_MAX_DAYS` (90) дней после входа (это `expiresAt`) или после `SESSION_IDLE_DAYS` (30) дней без использования. Каждое использование отодвигает срок бездействия; сервер записывает новое значение не чаще чем раз в 5 минут. У аккаунта может быть не более `MAX_SESSIONS_PER_USER` (10) сеансов: новый вход отзывает самые старые сверх этого числа.
+    - **Занятое хранилище.** Если при проверке токена база данных остаётся заблокированной, эндпоинт, который требует или принимает сеанс, отвечает 503 `server_busy` с `retryAfter: 1` (и `Retry-After`); если проверка занимает больше 5 секунд, он отвечает 503 `server_busy` с `retryAfter` от 2 до 5. В обоих случаях сервер не вынес решения о токене: сохраните его и отправьте запрос ещё раз.
+    - **Срок действия.** Сеанс завершается при наступлении первого из двух сроков: через `SESSION_MAX_DAYS` (90) дней после входа (это `expiresAt`) или после `SESSION_IDLE_DAYS` (30) дней без использования. Каждое использование отодвигает срок бездействия; сервер записывает новое значение не чаще чем раз в 5 минут, в фоновом режиме. Пока в его базе данных много операций записи в очереди, он откладывает эту запись до одного из следующих запросов, кроме последнего часа перед сроком бездействия, поэтому используемый сеанс не истекает. У аккаунта может быть не более `MAX_SESSIONS_PER_USER` (10) сеансов: новый вход отзывает самые старые сверх этого числа.
     - **Отзыв.** Выход (`POST /auth/logout`, `POST /auth/logout-all`, `DELETE /auth/sessions/{id}`) отзывает сеансы; то же делают смена пароля (остальные сеансы), сброс пароля и удаление аккаунта (все сеансы), а также администратор. Отзыв через API действует сразу, и WebSocket, открытый с отозванным сеансом, закрывается. Смена или сброс пароля и удаление аккаунта отзывают сеансы в той же транзакции, что и само изменение: если одно из этих действий не удаётся, ни один сеанс не отозван и ничего другого тоже не изменено. Сервер кеширует результаты поиска сеансов на 30 секунд, поэтому отзыв административной командой, которая работает в отдельном процессе, вступает в силу в течение 30 секунд.
     - **Область действия.** Токен принадлежит одному серверу и открывает также его WebSocket. Никогда не отправляйте его другому серверу.
 
@@ -111,7 +112,7 @@ info:
     | `auth_forgot` | `AUTH_FORGOT_PER_HOUR` (3) / час, общий | клиенту, втрое больше на IPv6 /48 | `POST /auth/password/forgot` |
     | `auth_forgot_day` | `AUTH_FORGOT_PER_DAY` (10) / 24 часа, общий | клиенту, втрое больше на IPv6 /48 | `POST /auth/password/forgot` |
     | `auth_reset` | `AUTH_RESET_PER_HOUR` (10) / час, общий | клиенту, втрое больше на IPv6 /48 | `POST /auth/password/reset`, `POST /reset-password` |
-    | `reauth` | значения `auth`, собственная корзина, общий | клиенту и IPv6 /48 | изменения аккаунта, требующие пароль (см. «Повторная аутентификация»), и `POST /account/export` |
+    | `reauth` | значения `auth`, собственная корзина, общий | клиенту и IPv6 /48 | `POST /account/password`, `/account/mfa/totp/setup`, `/account/mfa/totp/enable`, `/account/mfa/totp/disable`, `/account/mfa/recovery-codes`, `/account/email`, `/account/export`, `/account/delete` |
     | `reauth_user` | `AUTH_REAUTH_PER_USER` (10) / 10 мин, общий | игроку | те же эндпоинты, что и у `reauth` |
     | `account` | 60 / мин | игроку | `GET /account/me`, `PUT /account/preferences` |
     | `account_games` | 60 / мин | игроку | `GET /account/games` |
@@ -128,7 +129,7 @@ info:
 
     У `GET /info` и `GET /leaderboard` нет собственных лимитов: действует только поадресный уровень. Эндпоинт с несколькими лимитами проверяет их в порядке, указанном в его описании.
 
-    Сервер обрабатывает запрос в таком порядке: поадресный уровень, затем эндпоинты проверки состояния; сопоставление с эндпоинтом; для `POST`, `PUT`, `PATCH` или `DELETE` — проверка очереди операций записи базы данных (503 `server_busy`); аутентификация; бюджет аккаунта, если запрос несёт сеанс; лимиты эндпоинта; тело; сам эндпоинт (эндпоинты GIF расходуют свои лимиты на рендеринг, только когда им действительно нужно создать GIF). Поэтому запрос, отклонённый из-за токена, не тратит ни одного токена эндпоинта, а запрос с недопустимым телом их тратит.
+    Сервер обрабатывает запрос в таком порядке: поадресный уровень, затем эндпоинты проверки состояния; сопоставление с эндпоинтом; проверки того, что сервер не слишком отстаёт (503 `server_busy`): число предыдущих запросов, которые всё ещё выполняются после истечения отведённого им времени, и, для `POST`, `PUT`, `PATCH` или `DELETE`, очередь операций записи базы данных; аутентификация, не дольше 5 секунд (дольше — 503 `server_busy`); бюджет аккаунта, если запрос несёт сеанс; лимиты эндпоинта; тело; сам эндпоинт (эндпоинты GIF расходуют свои лимиты на рендеринг, только когда им действительно нужно создать GIF). Поэтому запрос, отклонённый из-за токена, не тратит ни одного токена эндпоинта, а запрос с недопустимым телом их тратит.
 
     Другие ограничения, о которых сообщают сами эндпоинты:
 
@@ -379,7 +380,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`timeout`.'
+          description: '`timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /auth/register:
     post:
       operationId: registerAccount
@@ -475,7 +476,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (очередь хеширования паролей, или база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` (очередь хеширования паролей, или база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /auth/login:
     post:
       operationId: logIn
@@ -558,7 +559,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (очередь хеширования паролей, или база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` (очередь хеширования паролей, или база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /auth/login/mfa:
     post:
       operationId: logInWithSecondFactor
@@ -629,7 +630,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` с `retryAfter: 1`: база данных так и осталась заблокированной (если это шаг привязки Google, ничего не привязано: начните заново из игры). `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` с `retryAfter: 1`: база данных так и осталась заблокированной (если это шаг привязки Google, ничего не привязано: начните заново из игры). `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /auth/logout:
     post:
       operationId: logOut
@@ -674,7 +675,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /auth/logout-all:
     post:
       operationId: logOutEverywhere
@@ -719,7 +720,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /auth/verify-email/resend:
     post:
       operationId: resendVerificationEmail
@@ -770,7 +771,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` с `retryAfter: 1`: база данных так и осталась заблокированной при поиске аккаунта (продление ожидающей заявки выполняется по мере возможности и никогда не приводит к ошибке запроса). `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` с `retryAfter: 1`: база данных так и осталась заблокированной при поиске аккаунта или при сохранении ссылки для неподтверждённого аккаунта (продление ожидающей заявки выполняется по мере возможности и никогда не приводит к ошибке запроса); 5 минут для адреса всё равно начинают отсчитываться, поэтому новый запрос в течение них ничего не делает. `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /auth/password/forgot:
     post:
       operationId: requestPasswordReset
@@ -821,7 +822,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` с `retryAfter: 1`: база данных так и осталась заблокированной. `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` с `retryAfter: 1`: база данных так и осталась заблокированной при поиске аккаунта или при сохранении ссылки; 5 минут для адреса всё равно начинают отсчитываться, поэтому новый запрос в течение них не отправляет ссылку. `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /auth/password/reset:
     post:
       operationId: resetPassword
@@ -879,7 +880,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`: очередь хеширования паролей, или база данных так и осталась заблокированной (`retryAfter: 1`, ничего не изменено). `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy`: очередь хеширования паролей, или база данных так и осталась заблокированной (`retryAfter: 1`, ничего не изменено). `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /auth/sso/google/start:
     post:
       operationId: startGoogleSignIn
@@ -937,7 +938,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /auth/sso/google/finish:
     post:
       operationId: finishGoogleSignIn
@@ -1047,7 +1048,7 @@ paths:
           $ref: '#/components/responses/BadGateway'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /auth/sso/google/link:
     post:
       operationId: linkGoogleAccount
@@ -1115,7 +1116,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`: очередь хеширования паролей, или база данных так и осталась заблокированной (`retryAfter: 1`, ничего не привязано). `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy`: очередь хеширования паролей, или база данных так и осталась заблокированной (`retryAfter: 1`, ничего не привязано). `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /auth/sso/complete:
     post:
       operationId: completeGoogleSignUp
@@ -1177,7 +1178,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /auth/sessions:
     get:
       operationId: listSessions
@@ -1185,7 +1186,7 @@ paths:
         - sessions
       summary: Список активных сеансов
       description: |-
-        Активные сеансы аккаунта (устройства, на которых выполнен вход), начиная с последнего использованного. `current` отмечает сеанс, от которого пришёл запрос. `lastSeenAt` обновляется не чаще раза в 5 минут; `expiresAt` — абсолютный срок окончания, а лимит бездействия может завершить сеанс раньше.
+        Активные сеансы аккаунта (устройства, на которых выполнен вход), начиная с последнего использованного. `current` отмечает сеанс, от которого пришёл запрос. `lastSeenAt` обновляется не чаще раза в 5 минут (позже, пока сервер сильно отстаёт); `expiresAt` — абсолютный срок окончания, а лимит бездействия может завершить сеанс раньше.
 
         **Лимит:** `sessions`.
       security:
@@ -1225,7 +1226,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`.'
+          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /auth/sessions/{id}:
     delete:
       operationId: revokeSession
@@ -1280,7 +1281,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /account/me:
     get:
       operationId: getAccount
@@ -1339,7 +1340,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`.'
+          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /account/preferences:
     put:
       operationId: updatePreferences
@@ -1397,7 +1398,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /account/password:
     post:
       operationId: changePassword
@@ -1461,7 +1462,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`: очередь хеширования паролей, или база данных так и осталась заблокированной (`retryAfter: 1`, ничего не изменено). `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy`: очередь хеширования паролей, или база данных так и осталась заблокированной (`retryAfter: 1`, ничего не изменено). `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /account/mfa/totp/setup:
     post:
       operationId: startTotpSetup
@@ -1524,7 +1525,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (очередь хеширования паролей, или база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` (очередь хеширования паролей, или база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /account/mfa/totp/enable:
     post:
       operationId: enableTotp
@@ -1602,7 +1603,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` (база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /account/mfa/totp/disable:
     post:
       operationId: disableTotp
@@ -1667,7 +1668,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (очередь хеширования паролей, или база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` (очередь хеширования паролей, или база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /account/mfa/recovery-codes:
     post:
       operationId: regenerateRecoveryCodes
@@ -1742,7 +1743,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (очередь хеширования паролей, или база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` (очередь хеширования паролей, или база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /account/email:
     post:
       operationId: changeEmail
@@ -1831,7 +1832,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`: очередь хеширования паролей, или база данных так и осталась заблокированной (`retryAfter: 1`: ничего не изменено, и тот же запрос можно отправить снова). `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy`: очередь хеширования паролей, или база данных так и осталась заблокированной (`retryAfter: 1`: ничего не изменено, и тот же запрос можно отправить снова). `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /account/export:
     post:
       operationId: exportAccountData
@@ -1985,7 +1986,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (база данных так и осталась заблокированной; с заголовком `Retry-After: 1`), `server_busy` (очередь хеширования паролей), `timeout` (60 секунд). Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`busy` (база данных так и осталась заблокированной; с заголовком `Retry-After: 1`), `server_busy` (очередь хеширования паролей), `timeout` (60 секунд). Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /account/delete:
     post:
       operationId: deleteAccount
@@ -2052,7 +2053,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (очередь хеширования паролей, или база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` (очередь хеширования паролей, или база данных так и осталась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /account/games:
     get:
       operationId: listAccountGames
@@ -2150,7 +2151,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (база данных так и осталась заблокированной; `retryAfter: 1` в теле, без заголовка `Retry-After`), `server_busy` (при поиске сеанса база данных оказалась заблокированной), `timeout`.'
+          description: '`busy` (база данных так и осталась заблокированной; `retryAfter: 1` в теле, без заголовка `Retry-After`), `server_busy` (при поиске сеанса база данных оказалась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /games/{id}:
     get:
       operationId: getGame
@@ -2242,7 +2243,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (база данных так и осталась заблокированной; `retryAfter: 1` в теле, без заголовка `Retry-After`), `server_busy` (при поиске сеанса база данных оказалась заблокированной), `timeout`.'
+          description: '`busy` (база данных так и осталась заблокированной; `retryAfter: 1` в теле, без заголовка `Retry-After`), `server_busy` (при поиске сеанса база данных оказалась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /games/{id}/pgn:
     get:
       operationId: getGamePgn
@@ -2319,7 +2320,7 @@ paths:
           description: '`internal_error`: в частности, если сохранённые ходы не удаётся воспроизвести до сохранённого окончания партии (сервер записывает это в журнал).'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (база данных так и осталась заблокированной; `retryAfter: 1` в теле, без заголовка `Retry-After`), `server_busy` (при поиске сеанса база данных оказалась заблокированной), `timeout`.'
+          description: '`busy` (база данных так и осталась заблокированной; `retryAfter: 1` в теле, без заголовка `Retry-After`), `server_busy` (при поиске сеанса база данных оказалась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /games/{id}/gif:
     get:
       operationId: getGameGif
@@ -2399,7 +2400,7 @@ paths:
           description: '`render_failed`: не удалось создать GIF (причину сервер записывает в журнал). `internal_error`.'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` с `retryAfter` (от 3 до 10 секунд) и `Retry-After`: очередь рендеринга заполнена, или GIF прождал свободного потока `GIF_QUEUE_TIMEOUT_MS` (10 секунд); все токены лимитов, взятые запросом, возвращаются. `busy`: база данных так и осталась заблокированной (`retryAfter: 1` только в теле). `timeout`.'
+          description: '`server_busy` с `retryAfter` (от 3 до 10 секунд) и `Retry-After`: очередь рендеринга заполнена, или GIF прождал свободного потока `GIF_QUEUE_TIMEOUT_MS` (10 секунд); все токены лимитов, взятые запросом, возвращаются. `busy`: база данных так и осталась заблокированной (`retryAfter: 1` только в теле). `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /gif:
     post:
       operationId: renderPgnGif
@@ -2473,7 +2474,7 @@ paths:
           description: '`render_failed`: не удалось создать GIF (причину сервер записывает в журнал). `internal_error`.'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` с `retryAfter` (от 3 до 10 секунд) и `Retry-After`: очередь рендеринга заполнена, или GIF слишком долго ждал свободного потока; все токены лимитов, взятые запросом, возвращаются. `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` с `retryAfter` (от 3 до 10 секунд) и `Retry-After`: очередь рендеринга заполнена, или GIF слишком долго ждал свободного потока; все токены лимитов, взятые запросом, возвращаются. `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /players/{username}:
     get:
       operationId: getPlayer
@@ -2535,7 +2536,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (база данных так и осталась заблокированной; `retryAfter: 1` в теле, без заголовка `Retry-After`), `server_busy` (при поиске сеанса база данных оказалась заблокированной), `timeout`.'
+          description: '`busy` (база данных так и осталась заблокированной; `retryAfter: 1` в теле, без заголовка `Retry-After`), `server_busy` (при поиске сеанса база данных оказалась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /players/{username}/games:
     get:
       operationId: listPlayerGames
@@ -2607,7 +2608,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (база данных так и осталась заблокированной; `retryAfter: 1` в теле, без заголовка `Retry-After`), `server_busy` (при поиске сеанса база данных оказалась заблокированной), `timeout`.'
+          description: '`busy` (база данных так и осталась заблокированной; `retryAfter: 1` в теле, без заголовка `Retry-After`), `server_busy` (при поиске сеанса база данных оказалась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /leaderboard:
     get:
       operationId: getLeaderboard
@@ -2672,7 +2673,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (база данных так и осталась заблокированной; `retryAfter: 1` в теле, без заголовка `Retry-After`), `timeout`.'
+          description: '`busy` (база данных так и осталась заблокированной; `retryAfter: 1` в теле, без заголовка `Retry-After`), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /reports:
     post:
       operationId: reportPlayer
@@ -2740,7 +2741,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (при поиске сеанса база данных оказалась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5: в базе данных слишком много операций записи в очереди, и запрос не выполнен.'
+          description: '`server_busy` (при поиске сеанса база данных оказалась заблокированной), `timeout`. Также `server_busy` с `retryAfter` от 2 до 5, когда сервер сильно отстаёт (см. введение): запрос не выполнен.'
   /verify-email:
     servers:
       - url: https://caissa.scacelith.com
@@ -2830,7 +2831,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'База данных так и осталась заблокированной (`Retry-After: 1`) или в ней слишком много операций записи в очереди (`Retry-After` от 2 до 5): ничего не изменено, и ссылка по-прежнему работает. Также истечение времени обработчика.'
+          description: 'База данных так и осталась заблокированной (`Retry-After: 1`), или сервер сильно отстаёт (`Retry-After` от 2 до 5, см. введение): ничего не изменено, и ссылка по-прежнему работает. Также истечение времени обработчика.'
   /reset-password:
     servers:
       - url: https://caissa.scacelith.com
@@ -2923,7 +2924,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'Снова форма с `Retry-After`, если сервер занят (очередь хеширования паролей или база данных так и осталась заблокированной); ссылка остаётся действительной. Если в базе данных слишком много операций записи в очереди, вместо этого страница "Server error" (ошибка сервера) с `Retry-After` (от 2 до 5): ничего не выполнено, и ссылка остаётся действительной. Также истечение времени обработчика.'
+          description: 'Снова форма с `Retry-After`, если сервер занят (очередь хеширования паролей или база данных так и осталась заблокированной); ссылка остаётся действительной. Если сервер сильно отстаёт (см. введение), вместо этого страница "Server error" (ошибка сервера) с `Retry-After` (от 2 до 5): ничего не выполнено, и ссылка остаётся действительной. Также истечение времени обработчика.'
   /confirm-email-change:
     servers:
       - url: https://caissa.scacelith.com
@@ -3013,7 +3014,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'База данных так и осталась заблокированной (`Retry-After: 1`) или в ней слишком много операций записи в очереди (`Retry-After` от 2 до 5): ничего не изменено, и ссылка по-прежнему работает. Также истечение времени обработчика.'
+          description: 'База данных так и осталась заблокированной (`Retry-After: 1`), или сервер сильно отстаёт (`Retry-After` от 2 до 5, см. введение): ничего не изменено, и ссылка по-прежнему работает. Также истечение времени обработчика.'
   /healthz:
     servers:
       - url: https://caissa.scacelith.com
@@ -3603,7 +3604,7 @@ components:
           schema:
             $ref: '#/components/schemas/HtmlDocument'
     HtmlServiceUnavailable:
-      description: Сервер занят (база данных так и осталась заблокированной, с `Retry-After`) или отвечал слишком долго (HTML-страница с заголовком "Server error" (ошибка сервера)).
+      description: Сервер занят (база данных так и осталась заблокированной или сервер сильно отстаёт; с `Retry-After`) или отвечал слишком долго (HTML-страница с заголовком "Server error" (ошибка сервера)).
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3761,7 +3762,7 @@ components:
               format: int64
               minimum: 0
               maximum: 4294967295
-              description: Отпечаток схемы протокола (первые 4 байта SHA-256 её канонической формы как беззнаковое целое); справочное значение.
+              description: 'Отпечаток схемы протокола (первые 4 байта SHA-256 её канонической формы как беззнаковое целое: `0xc649140f`, 3326678031, для минорной версии 2 протокола); справочное значение, никогда не сравнивается.'
             subprotocol:
               type: string
               description: Токен подпротокола WebSocket (`Sec-WebSocket-Protocol`).
@@ -3854,7 +3855,7 @@ components:
         protocol:
           min: 1
           max: 1
-          schema: 1852590473
+          schema: 3326678031
           subprotocol: scacelith.rt1
         wsPort: 443
         wsPath: /ws
@@ -4332,7 +4333,7 @@ components:
         lastSeenAt:
           type: integer
           format: int64
-          description: Последнее использование (мс от начала эпохи); обновляется не чаще раза в 5 минут.
+          description: Последнее использование (мс от начала эпохи); обновляется не чаще раза в 5 минут (позже, пока сервер сильно отстаёт).
         expiresAt:
           type: integer
           format: int64

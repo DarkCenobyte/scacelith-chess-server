@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: API HTTPS du serveur Scacelith
-  version: "0.9.1"
+  version: "1.0.0"
   summary: L’API HTTPS de tout serveur Scacelith, le serveur officiel comme les serveurs communautaires.
   description: |-
     Tout serveur Scacelith, qu’il s’agisse du serveur officiel `caissa.scacelith.com` ou d’un serveur communautaire, répond à cette API HTTPS. Le jeu s’en sert pour tout ce qui se passe en dehors des parties elles-mêmes : l’inscription et la connexion (double authentification et connexion Google comprises), la page du compte, l’historique des parties, les téléchargements PGN et les GIF animés des parties, les appareils connectés, le téléchargement des données, la suppression du compte et les signalements.
@@ -37,7 +37,7 @@ info:
     ## Réponses et erreurs
 
     - Les réponses sont en JSON encodé en UTF-8, sauf le téléchargement PGN (`application/x-chess-pgn`), les GIF animés (`image/gif`) et les pages HTML. Les instants sont exprimés en millisecondes depuis le 1970-01-01 UTC. Les identifiants sont des entiers. Les identifiants de partie ont jusqu’à 16 chiffres mais restent inférieurs à 2^53 : un nombre JSON (un double) les représente donc exactement.
-    - Toute réponse de l’API porte `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Cross-Origin-Resource-Policy: same-origin` et `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` (les pages HTML ont leur propre politique). Avec `TLS_MODE=native`, elle porte aussi `Strict-Transport-Security: max-age=31536000`.
+    - Toute réponse de l’API porte `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Cross-Origin-Resource-Policy: same-origin` et `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` (les pages HTML ont leur propre politique). Avec `TLS_MODE=native`, elle porte aussi `Strict-Transport-Security: max-age=31536000`. Les réponses que l’écouteur écrit lui-même, avant l’API (celles aux `GET` et `HEAD` des points de terminaison de santé, le 429 de la couche par adresse, et un 500 `internal_error` quand l’API échoue purement et simplement), portent les mêmes en-têtes sauf `Cross-Origin-Resource-Policy`, et leur `Content-Type` est `application/json` sans jeu de caractères.
     - Une réponse doit être lue dans les 60 secondes qui suivent le moment où le serveur l’a prête, ce qui ne compte que pour les grosses réponses (un GIF, l’export des données, un long PGN). Le temps que met le serveur à préparer une réponse ne compte ni dans ce délai, ni dans les 30 secondes sans aucun octet entrant ou sortant au bout desquelles une connexion est fermée.
 
     Les erreurs ont toutes la même forme (le schéma `Error`) :
@@ -65,7 +65,7 @@ info:
     | 429 | `rate_limited` | Une limite de débit (voir plus bas) : `retryAfter` plus un en-tête `Retry-After`. |
     | 500 | `internal_error` | Une défaillance inattendue. Le serveur la journalise. |
     | 503 | `timeout` | Le serveur n’a pas répondu dans les 30 secondes (60 secondes pour l’export, 45 secondes pour les GIF avec les réglages par défaut). |
-    | 503 | `server_busy` | Une recherche de session ou une modification du compte a trouvé la base de données verrouillée (`retryAfter` 1), ou la file de hachage des mots de passe est pleine (voir plus bas). Aussi, pour un `POST`, `PUT`, `PATCH` ou `DELETE`, la base de données a trop d’écritures en attente : la requête n’a pas été exécutée et ses limites de débit n’ont rien pris (`retryAfter` de 2 à 5). |
+    | 503 | `server_busy` | Une recherche de session ou une modification du compte a trouvé la base de données verrouillée (`retryAfter` 1), ou la file de hachage des mots de passe est pleine (voir plus bas). Aussi, avec un `retryAfter` de 2 à 5, quand le serveur est très en retard : pour un `POST`, `PUT`, `PATCH` ou `DELETE`, la base de données a trop d’écritures en attente ; pour toute requête, trop de requêtes antérieures sont encore en cours au-delà de leur délai, ou le jeton de session n’a pas pu être vérifié en 5 secondes. La requête n’a pas été exécutée et ses limites de débit n’ont rien pris. |
 
     Les points de terminaison de lecture (historique des parties, parties, joueurs, classement général) et l’export répondent 503 `busy` avec `retryAfter: 1` quand la base de données est restée verrouillée.
 
@@ -89,7 +89,8 @@ info:
     - **Obtenir un jeton.** Un jeton (`sct_` suivi de 43 caractères base64url) est délivré par `POST /auth/login`, puis `POST /auth/login/mfa` quand la double authentification est activée, par `POST /auth/sso/google/finish` et `POST /auth/sso/google/link` (connexion Google), et par `POST /auth/sso/complete`. Chacun d’eux répond `{ token, expiresAt, user }`. Le serveur ne conserve qu’une empreinte SHA-256 du jeton.
     - **Session obligatoire.** Un en-tête absent donne 401 `unauthorized` avec `WWW-Authenticate: Bearer realm="scacelith"`. Un jeton invalide donne 401 `invalid_token` avec `WWW-Authenticate: Bearer realm="scacelith", error="invalid_token"`. Un client doit oublier un jeton qui reçoit `invalid_token` et se reconnecter.
     - **Session facultative.** Sur `GET /games/{id}`, `GET /games/{id}/pgn`, `GET /players/{username}` et `GET /players/{username}/games`, la session est facultative. Sans l’en-tête, ces points de terminaison renvoient la vue publique ; si un en-tête est envoyé, son jeton doit être valide.
-    - **Durée de vie.** Une session prend fin au premier de ces deux termes : `SESSION_MAX_DAYS` (90) jours après la connexion (c’est `expiresAt`), ou `SESSION_IDLE_DAYS` (30) jours sans utilisation. Chaque utilisation repousse la limite d’inactivité ; le serveur enregistre la nouvelle valeur au plus toutes les 5 minutes. Un compte conserve au plus `MAX_SESSIONS_PER_USER` (10) sessions : au-delà, une nouvelle connexion révoque la plus ancienne.
+    - **Stockage occupé.** Quand la base de données reste verrouillée pendant la vérification d’un jeton, un point de terminaison qui exige ou accepte une session répond 503 `server_busy` avec `retryAfter: 1` (et `Retry-After`) ; quand la vérification prend plus de 5 secondes, il répond 503 `server_busy` avec un `retryAfter` de 2 à 5. Dans les deux cas, le jeton n’a pas été évalué : gardez-le et renvoyez la requête.
+    - **Durée de vie.** Une session prend fin au premier de ces deux termes : `SESSION_MAX_DAYS` (90) jours après la connexion (c’est `expiresAt`), ou `SESSION_IDLE_DAYS` (30) jours sans utilisation. Chaque utilisation repousse la limite d’inactivité ; le serveur enregistre la nouvelle valeur au plus toutes les 5 minutes, en arrière-plan. Tant que sa base de données a beaucoup d’écritures en attente, il reporte cette écriture à une requête ultérieure, sauf dans la dernière heure avant la limite d’inactivité, de sorte qu’une session utilisée n’expire pas. Un compte conserve au plus `MAX_SESSIONS_PER_USER` (10) sessions : au-delà, une nouvelle connexion révoque la plus ancienne.
     - **Révocation.** La déconnexion (`POST /auth/logout`, `POST /auth/logout-all`, `DELETE /auth/sessions/{id}`) révoque des sessions ; c’est aussi le cas d’un changement de mot de passe (les autres sessions), d’une réinitialisation du mot de passe et de la suppression du compte (toutes les sessions), ainsi que d’un administrateur. Une révocation faite par l’API prend effet immédiatement, et le WebSocket ouvert avec une session révoquée est fermé. Un changement ou une réinitialisation du mot de passe et la suppression du compte révoquent dans la même transaction que la modification elle-même : si l’une d’elles échoue, aucune session n’a été révoquée et rien d’autre n’a changé non plus. Le serveur garde en cache les recherches de session pendant 30 secondes : une révocation par la commande d’administration, qui est un processus distinct, prend donc effet dans les 30 secondes.
     - **Portée.** Un jeton appartient à un seul serveur et ouvre aussi son WebSocket. Ne l’envoyez jamais à un autre serveur.
 
@@ -111,7 +112,7 @@ info:
     | `auth_forgot` | `AUTH_FORGOT_PER_HOUR` (3) / heure, partagée | client, 3 fois plus par /48 IPv6 | `POST /auth/password/forgot` |
     | `auth_forgot_day` | `AUTH_FORGOT_PER_DAY` (10) / 24 heures, partagée | client, 3 fois plus par /48 IPv6 | `POST /auth/password/forgot` |
     | `auth_reset` | `AUTH_RESET_PER_HOUR` (10) / heure, partagée | client, 3 fois plus par /48 IPv6 | `POST /auth/password/reset`, `POST /reset-password` |
-    | `reauth` | les valeurs de `auth`, dans un seau distinct, partagée | client et /48 IPv6 | les modifications du compte qui demandent le mot de passe (voir Réauthentification), et `POST /account/export` |
+    | `reauth` | les valeurs de `auth`, dans un seau distinct, partagée | client et /48 IPv6 | `POST /account/password`, `/account/mfa/totp/setup`, `/account/mfa/totp/enable`, `/account/mfa/totp/disable`, `/account/mfa/recovery-codes`, `/account/email`, `/account/export`, `/account/delete` |
     | `reauth_user` | `AUTH_REAUTH_PER_USER` (10) / 10 min, partagée | joueur | les mêmes points de terminaison que `reauth` |
     | `account` | 60 / min | joueur | `GET /account/me`, `PUT /account/preferences` |
     | `account_games` | 60 / min | joueur | `GET /account/games` |
@@ -128,7 +129,7 @@ info:
 
     `GET /info` et `GET /leaderboard` n’ont pas de limite propre : seulement la couche par adresse. Un point de terminaison qui a plusieurs limites les vérifie dans l’ordre donné dans sa description.
 
-    Le serveur traite une requête dans cet ordre : la couche par adresse, puis les points de terminaison de santé ; la recherche du point de terminaison ; pour un `POST`, `PUT`, `PATCH` ou `DELETE`, la vérification des écritures en attente dans la base de données (503 `server_busy`) ; l’authentification ; le budget du compte, quand la requête porte une session ; les limites du point de terminaison ; le corps ; le point de terminaison lui-même (les points de terminaison GIF ne prennent leurs limites de rendu que lorsqu’ils ont un GIF à fabriquer). Ainsi, une requête refusée à cause de son jeton ne dépense aucun jeton du point de terminaison, alors qu’une requête dont le corps est invalide les dépense.
+    Le serveur traite une requête dans cet ordre : la couche par adresse, puis les points de terminaison de santé ; la recherche du point de terminaison ; les vérifications que le serveur n’est pas très en retard (503 `server_busy`) : trop de requêtes antérieures encore en cours au-delà de leur délai et, pour un `POST`, `PUT`, `PATCH` ou `DELETE`, les écritures en attente dans la base de données ; l’authentification, en 5 secondes au plus (503 `server_busy` au-delà) ; le budget du compte, quand la requête porte une session ; les limites du point de terminaison ; le corps ; le point de terminaison lui-même (les points de terminaison GIF ne prennent leurs limites de rendu que lorsqu’ils ont un GIF à fabriquer). Ainsi, une requête refusée à cause de son jeton ne dépense aucun jeton du point de terminaison, alors qu’une requête dont le corps est invalide les dépense.
 
     Autres freins, appliqués par les points de terminaison eux-mêmes :
 
@@ -379,7 +380,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`timeout`.'
+          description: '`timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/register:
     post:
       operationId: registerAccount
@@ -475,7 +476,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/login:
     post:
       operationId: logIn
@@ -558,7 +559,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/login/mfa:
     post:
       operationId: logInWithSecondFactor
@@ -629,7 +630,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` avec `retryAfter: 1` : la base de données est restée verrouillée (après une étape d’association Google, rien n’a été associé : recommencez depuis le jeu). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` avec `retryAfter: 1` : la base de données est restée verrouillée (après une étape d’association Google, rien n’a été associé : recommencez depuis le jeu). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/logout:
     post:
       operationId: logOut
@@ -674,7 +675,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/logout-all:
     post:
       operationId: logOutEverywhere
@@ -719,7 +720,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/verify-email/resend:
     post:
       operationId: resendVerificationEmail
@@ -770,7 +771,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` avec `retryAfter: 1` : la base de données est restée verrouillée pendant la recherche du compte (le renouvellement d’une inscription en attente se fait au mieux et ne fait jamais échouer la requête). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` avec `retryAfter: 1` : la base de données est restée verrouillée pendant la recherche du compte ou l’enregistrement du lien d’un compte non confirmé (le renouvellement d’une inscription en attente se fait au mieux et ne fait jamais échouer la requête) ; les 5 minutes de l’adresse commencent tout de même, si bien qu’une nouvelle requête pendant ce délai ne fait rien. `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/password/forgot:
     post:
       operationId: requestPasswordReset
@@ -821,7 +822,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` avec `retryAfter: 1` : la base de données est restée verrouillée. `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` avec `retryAfter: 1` : la base de données est restée verrouillée pendant la recherche du compte ou l’enregistrement du lien ; les 5 minutes de l’adresse commencent tout de même, si bien qu’une nouvelle requête pendant ce délai n’envoie aucun lien. `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/password/reset:
     post:
       operationId: resetPassword
@@ -879,7 +880,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1`, rien n’a changé). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1`, rien n’a changé). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/sso/google/start:
     post:
       operationId: startGoogleSignIn
@@ -937,7 +938,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/sso/google/finish:
     post:
       operationId: finishGoogleSignIn
@@ -1047,7 +1048,7 @@ paths:
           $ref: '#/components/responses/BadGateway'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/sso/google/link:
     post:
       operationId: linkGoogleAccount
@@ -1115,7 +1116,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1`, rien n’a été associé). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1`, rien n’a été associé). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/sso/complete:
     post:
       operationId: completeGoogleSignUp
@@ -1177,7 +1178,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/sessions:
     get:
       operationId: listSessions
@@ -1185,7 +1186,7 @@ paths:
         - sessions
       summary: Lister les appareils connectés
       description: |-
-        Les sessions actives du compte (appareils connectés), de la plus récemment utilisée à la plus ancienne. `current` marque la session qui fait la requête. `lastSeenAt` est mis à jour au plus toutes les 5 minutes ; `expiresAt` est la fin absolue, et la limite d’inactivité peut mettre fin à la session plus tôt.
+        Les sessions actives du compte (appareils connectés), de la plus récemment utilisée à la plus ancienne. `current` marque la session qui fait la requête. `lastSeenAt` est mis à jour au plus toutes les 5 minutes (plus tard tant que le serveur est très en retard) ; `expiresAt` est la fin absolue, et la limite d’inactivité peut mettre fin à la session plus tôt.
 
         **Limite :** `sessions`.
       security:
@@ -1225,7 +1226,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/sessions/{id}:
     delete:
       operationId: revokeSession
@@ -1280,7 +1281,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/me:
     get:
       operationId: getAccount
@@ -1339,7 +1340,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/preferences:
     put:
       operationId: updatePreferences
@@ -1397,7 +1398,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/password:
     post:
       operationId: changePassword
@@ -1461,7 +1462,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1`, rien n’a changé). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1`, rien n’a changé). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/mfa/totp/setup:
     post:
       operationId: startTotpSetup
@@ -1524,7 +1525,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/mfa/totp/enable:
     post:
       operationId: enableTotp
@@ -1602,7 +1603,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/mfa/totp/disable:
     post:
       operationId: disableTotp
@@ -1667,7 +1668,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/mfa/recovery-codes:
     post:
       operationId: regenerateRecoveryCodes
@@ -1742,7 +1743,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/email:
     post:
       operationId: changeEmail
@@ -1831,7 +1832,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1` : rien n’a changé, et la même requête peut être renvoyée). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` : la file de hachage des mots de passe, ou la base de données est restée verrouillée (`retryAfter: 1` : rien n’a changé, et la même requête peut être renvoyée). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/export:
     post:
       operationId: exportAccountData
@@ -1985,7 +1986,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (la base de données est restée verrouillée, avec un en-tête `Retry-After: 1`), `server_busy` (la file de hachage des mots de passe), `timeout` (60 secondes). Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`busy` (la base de données est restée verrouillée, avec un en-tête `Retry-After: 1`), `server_busy` (la file de hachage des mots de passe), `timeout` (60 secondes). Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/delete:
     post:
       operationId: deleteAccount
@@ -2052,7 +2053,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la file de hachage des mots de passe, ou la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /account/games:
     get:
       operationId: listAccountGames
@@ -2150,7 +2151,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`.'
+          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /games/{id}:
     get:
       operationId: getGame
@@ -2242,7 +2243,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`.'
+          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /games/{id}/pgn:
     get:
       operationId: getGamePgn
@@ -2319,7 +2320,7 @@ paths:
           description: '`internal_error` : entre autres, les coups enregistrés ne peuvent pas être rejoués jusqu’à la fin enregistrée (le serveur le journalise).'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`.'
+          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /games/{id}/gif:
     get:
       operationId: getGameGif
@@ -2399,7 +2400,7 @@ paths:
           description: '`render_failed` : le GIF n’a pas pu être fabriqué (le serveur journalise la cause). `internal_error`.'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` avec `retryAfter` (3 à 10 secondes) et `Retry-After` : la file de rendu est pleine, ou le GIF a attendu `GIF_QUEUE_TIMEOUT_MS` (10 secondes) un fil d’exécution libre ; tous les jetons de limite pris par la requête sont restitués. `busy` : la base de données est restée verrouillée (`retryAfter: 1` dans le corps seulement). `timeout`.'
+          description: '`server_busy` avec `retryAfter` (3 à 10 secondes) et `Retry-After` : la file de rendu est pleine, ou le GIF a attendu `GIF_QUEUE_TIMEOUT_MS` (10 secondes) un fil d’exécution libre ; tous les jetons de limite pris par la requête sont restitués. `busy` : la base de données est restée verrouillée (`retryAfter: 1` dans le corps seulement). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /gif:
     post:
       operationId: renderPgnGif
@@ -2473,7 +2474,7 @@ paths:
           description: '`render_failed` : le GIF n’a pas pu être fabriqué (le serveur journalise la cause). `internal_error`.'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` avec `retryAfter` (3 à 10 secondes) et `Retry-After` : la file de rendu est pleine, ou le GIF a attendu trop longtemps un fil d’exécution libre ; tous les jetons de limite pris par la requête sont restitués. `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` avec `retryAfter` (3 à 10 secondes) et `Retry-After` : la file de rendu est pleine, ou le GIF a attendu trop longtemps un fil d’exécution libre ; tous les jetons de limite pris par la requête sont restitués. `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /players/{username}:
     get:
       operationId: getPlayer
@@ -2535,7 +2536,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`.'
+          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /players/{username}/games:
     get:
       operationId: listPlayerGames
@@ -2607,7 +2608,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`.'
+          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /leaderboard:
     get:
       operationId: getLeaderboard
@@ -2672,7 +2673,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `timeout`.'
+          description: '`busy` (la base de données est restée verrouillée ; `retryAfter: 1` dans le corps, pas d’en-tête `Retry-After`), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /reports:
     post:
       operationId: reportPlayer
@@ -2740,7 +2741,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 : la base de données a trop d’écritures en attente, et la requête n’a pas été exécutée.'
+          description: '`server_busy` (la recherche de session a trouvé la base de données verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /verify-email:
     servers:
       - url: https://caissa.scacelith.com
@@ -2830,7 +2831,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'La base de données est restée verrouillée (`Retry-After: 1`) ou a trop d’écritures en attente (`Retry-After` de 2 à 5) : rien n’a changé et le lien fonctionne toujours. Également en cas de dépassement du délai de traitement.'
+          description: 'La base de données est restée verrouillée (`Retry-After: 1`), ou le serveur est très en retard (`Retry-After` de 2 à 5, voir l’introduction) : rien n’a changé et le lien fonctionne toujours. Également en cas de dépassement du délai de traitement.'
   /reset-password:
     servers:
       - url: https://caissa.scacelith.com
@@ -2923,7 +2924,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'Le formulaire de nouveau avec `Retry-After` quand le serveur est occupé (la file de hachage des mots de passe, ou la base de données est restée verrouillée) ; le lien reste valide. Quand la base de données a trop d’écritures en attente, une page "Server error" (erreur du serveur) avec `Retry-After` (de 2 à 5) à la place : rien n’a été exécuté et le lien reste valide. Également en cas de dépassement du délai de traitement.'
+          description: 'Le formulaire de nouveau avec `Retry-After` quand le serveur est occupé (la file de hachage des mots de passe, ou la base de données est restée verrouillée) ; le lien reste valide. Quand le serveur est très en retard (voir l’introduction), une page "Server error" (erreur du serveur) avec `Retry-After` (de 2 à 5) à la place : rien n’a été exécuté et le lien reste valide. Également en cas de dépassement du délai de traitement.'
   /confirm-email-change:
     servers:
       - url: https://caissa.scacelith.com
@@ -3013,7 +3014,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'La base de données est restée verrouillée (`Retry-After: 1`) ou a trop d’écritures en attente (`Retry-After` de 2 à 5) : rien n’a changé et le lien fonctionne toujours. Également en cas de dépassement du délai de traitement.'
+          description: 'La base de données est restée verrouillée (`Retry-After: 1`), ou le serveur est très en retard (`Retry-After` de 2 à 5, voir l’introduction) : rien n’a changé et le lien fonctionne toujours. Également en cas de dépassement du délai de traitement.'
   /healthz:
     servers:
       - url: https://caissa.scacelith.com
@@ -3603,7 +3604,7 @@ components:
           schema:
             $ref: '#/components/schemas/HtmlDocument'
     HtmlServiceUnavailable:
-      description: Le serveur est occupé (la base de données est restée verrouillée, avec `Retry-After`) ou a mis trop de temps ; la réponse est une page HTML intitulée "Server error" (erreur du serveur).
+      description: Le serveur est occupé (la base de données est restée verrouillée, ou le serveur est très en retard ; avec `Retry-After`) ou a mis trop de temps ; la réponse est une page HTML intitulée "Server error" (erreur du serveur).
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3761,7 +3762,7 @@ components:
               format: int64
               minimum: 0
               maximum: 4294967295
-              description: L’empreinte du schéma du protocole (les 4 premiers octets du SHA-256 de sa forme canonique, sous forme d’entier non signé) ; à titre indicatif.
+              description: 'L’empreinte du schéma du protocole (les 4 premiers octets du SHA-256 de sa forme canonique, sous forme d’entier non signé : `0xc649140f`, 3326678031, pour la version mineure 2 du protocole) ; à titre indicatif, jamais comparée.'
             subprotocol:
               type: string
               description: Le jeton de sous-protocole WebSocket (`Sec-WebSocket-Protocol`).
@@ -3854,7 +3855,7 @@ components:
         protocol:
           min: 1
           max: 1
-          schema: 1852590473
+          schema: 3326678031
           subprotocol: scacelith.rt1
         wsPort: 443
         wsPath: /ws
@@ -4332,7 +4333,7 @@ components:
         lastSeenAt:
           type: integer
           format: int64
-          description: La dernière utilisation (instant en ms), mise à jour au plus toutes les 5 minutes.
+          description: La dernière utilisation (instant en ms), mise à jour au plus toutes les 5 minutes (plus tard tant que le serveur est très en retard).
         expiresAt:
           type: integer
           format: int64

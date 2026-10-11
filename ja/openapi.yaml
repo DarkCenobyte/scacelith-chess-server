@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: ScacelithサーバーのHTTPS API
-  version: "0.9.1"
+  version: "1.0.0"
   summary: 公式サーバーとコミュニティサーバーを含む、すべてのScacelithサーバーに共通のHTTPS API。
   description: |-
     公式の`caissa.scacelith.com`からコミュニティサーバーまで、すべてのScacelithサーバーがこのHTTPS APIを提供します。ゲームは、対局そのもの以外のすべてにこのAPIを使います。アカウント作成とログイン（二要素認証とGoogleログインを含む）、アカウントページ、対局履歴、PGNのダウンロードと対局のアニメーションGIF、ログイン中のデバイス、データのダウンロード、アカウントの削除、そして報告です。
@@ -37,7 +37,7 @@ info:
     ## レスポンスとエラー
 
     - レスポンスはUTF-8のJSONです。ただし、PGNのダウンロード（`application/x-chess-pgn`）、アニメーションGIF（`image/gif`）、HTMLページは除きます。時刻は1970-01-01 UTCからのミリ秒です。IDは整数です。対局IDは最大16桁ですが2^53未満に収まるため、JSONの数値（倍精度浮動小数点数）で正確に表せます。
-    - APIのすべてのレスポンスには、`Cache-Control: no-store`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`X-Frame-Options: DENY`、`Cross-Origin-Resource-Policy: same-origin`、`Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`が付きます（HTMLページには独自のポリシーがあります）。`TLS_MODE=native`では、`Strict-Transport-Security: max-age=31536000`も付きます。
+    - APIのすべてのレスポンスには、`Cache-Control: no-store`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`X-Frame-Options: DENY`、`Cross-Origin-Resource-Policy: same-origin`、`Content-Security-Policy: default-src 'none'; frame-ancestors 'none'`が付きます（HTMLページには独自のポリシーがあります）。`TLS_MODE=native`では、`Strict-Transport-Security: max-age=31536000`も付きます。APIより前にリスナー自身が書き込むレスポンス（ヘルスチェックのエンドポイントの`GET`と`HEAD`、アドレス単位の層の429、およびAPIが完全に失敗した場合の500 `internal_error`）には、`Cross-Origin-Resource-Policy`を除いて同じヘッダーが付き、その`Content-Type`は文字セットなしの`application/json`です。
     - レスポンスは、サーバーが準備を終えた時点から60秒以内に読み取る必要があります。これが問題になるのは大きなレスポンス（GIF、データのエクスポート、長いPGN）だけです。サーバーがレスポンスの準備にかけた時間は、この60秒にも、送受信が1バイトもないまま30秒たつと接続が閉じられる制限にも数えられません。
 
     エラーの形式は1つだけです（`Error`スキーマ）：
@@ -65,7 +65,7 @@ info:
     | 429 | `rate_limited` | レート制限（後述）。`retryAfter`と`Retry-After`ヘッダーが付きます。 |
     | 500 | `internal_error` | 予期しない障害。サーバーがログに記録します。 |
     | 503 | `timeout` | サーバーが30秒以内に応答しなかった（既定の設定では、エクスポートは60秒、GIFは45秒）。 |
-    | 503 | `server_busy` | セッションの照会またはアカウントの変更でデータベースがロックされていた（`retryAfter` 1）、またはパスワードハッシュのキューが満杯（後述）。また、`POST`、`PUT`、`PATCH`、`DELETE`の場合：データベースの書き込み待ちが多すぎる。リクエストは実行されず、レート制限も何も消費していない（`retryAfter` 2～5）。 |
+    | 503 | `server_busy` | セッションの照会またはアカウントの変更でデータベースがロックされていた（`retryAfter` 1）、またはパスワードハッシュのキューが満杯（後述）。また、サーバーの処理が大幅に遅れている場合（`retryAfter` 2～5）：`POST`、`PUT`、`PATCH`、`DELETE`では、データベースの書き込み待ちが多すぎる。どのリクエストでも、タイムアウトを過ぎてもまだ実行中の先行リクエストが多すぎる、またはセッショントークンを5秒以内に確認できなかった。リクエストは実行されず、レート制限も何も消費していない。 |
 
     読み取り系のエンドポイント（対局履歴、対局、プレイヤー、ランキング）とエクスポートは、データベースのロックが解除されなかった場合に`retryAfter: 1`付きで503 `busy`を返します。
 
@@ -89,7 +89,8 @@ info:
     - **トークンの取得**。トークン（`sct_`に続く43文字のbase64url）は、`POST /auth/login`（二要素認証がオンの場合はその後の`POST /auth/login/mfa`）、`POST /auth/sso/google/finish`と`POST /auth/sso/google/link`（Googleログイン）、および`POST /auth/sso/complete`から得られます。いずれも`{ token, expiresAt, user }`を返します。サーバーはトークンのSHA-256しか保存しません。
     - **必須のセッション**。ヘッダーがない場合は、`WWW-Authenticate: Bearer realm="scacelith"`付きで401 `unauthorized`が返ります。無効なトークンには、`WWW-Authenticate: Bearer realm="scacelith", error="invalid_token"`付きで401 `invalid_token`が返ります。クライアントは`invalid_token`を受け取ったトークンを破棄し、ログインし直してください。
     - **任意のセッション**。`GET /games/{id}`、`GET /games/{id}/pgn`、`GET /players/{username}`、`GET /players/{username}/games`では、セッションは任意です。ヘッダーがなければ公開ビューを返します。ヘッダーを送る場合、そのトークンは有効でなければなりません。
-    - **有効期間**。セッションは、ログインから`SESSION_MAX_DAYS`（90）日後（これが`expiresAt`です）と、`SESSION_IDLE_DAYS`（30）日間使われなかった時点の、どちらか早いほうで終了します。使うたびにアイドル期限は延長されますが、サーバーが新しい値を書き込むのは最大で5分に1回です。1つのアカウントが保持できるセッションは最大`MAX_SESSIONS_PER_USER`（10）個で、新たなログインでこの数を超えると、最も古いセッションが失効します。
+    - **ストアの混雑**。トークンの確認中にデータベースのロックが解除されなかった場合、セッションを必須とする、または受け付けるエンドポイントは、`retryAfter: 1`（と`Retry-After`）付きで503 `server_busy`を返します。確認に5秒より長くかかった場合は、`retryAfter`（2～5）付きで503 `server_busy`を返します。いずれの場合もトークンの有効性は判定されていません：トークンを保持したまま、リクエストを再送してください。
+    - **有効期間**。セッションは、ログインから`SESSION_MAX_DAYS`（90）日後（これが`expiresAt`です）と、`SESSION_IDLE_DAYS`（30）日間使われなかった時点の、どちらか早いほうで終了します。使うたびにアイドル期限は延長されますが、サーバーが新しい値を書き込むのは最大で5分に1回で、書き込みはバックグラウンドで行われます。データベースの書き込み待ちが多い間は、その書き込みを後のリクエストまで先送りします。ただし、アイドル期限前の最後の1時間は先送りしないため、使用中のセッションが期限切れになることはありません。1つのアカウントが保持できるセッションは最大`MAX_SESSIONS_PER_USER`（10）個で、新たなログインでこの数を超えると、最も古いセッションが失効します。
     - **失効**。ログアウト（`POST /auth/logout`、`POST /auth/logout-all`、`DELETE /auth/sessions/{id}`）はセッションを失効させます。パスワードの変更（ほかのセッション）、パスワードのリセットとアカウントの削除（すべてのセッション）、そして管理者によっても失効します。APIからの失効はただちに有効になり、失効したセッションで開かれたWebSocketは閉じられます。パスワードの変更やリセット、アカウントの削除では、変更そのものと同じトランザクションで失効が行われます：そのいずれかが失敗した場合、どのセッションも失効しておらず、ほかにも何も変更されていません。サーバーはセッションの照会結果を30秒間キャッシュするため、別プロセスである管理コマンドによる失効は30秒以内に有効になります。
     - **スコープ**。トークンは1つのサーバーに属し、そのサーバーのWebSocketを開くのにも使えます。ほかのサーバーには決して送らないでください。
 
@@ -111,7 +112,7 @@ info:
     | `auth_forgot` | `AUTH_FORGOT_PER_HOUR`（3）/ 1時間、共有 | クライアント。IPv6の/48ごとにその3倍 | `POST /auth/password/forgot` |
     | `auth_forgot_day` | `AUTH_FORGOT_PER_DAY`（10）/ 24時間、共有 | クライアント。IPv6の/48ごとにその3倍 | `POST /auth/password/forgot` |
     | `auth_reset` | `AUTH_RESET_PER_HOUR`（10）/ 1時間、共有 | クライアント。IPv6の/48ごとにその3倍 | `POST /auth/password/reset`、`POST /reset-password` |
-    | `reauth` | `auth`と同じ数値、独自のバケット、共有 | クライアントとIPv6の/48 | パスワードを求めるアカウント変更（「再認証」を参照）と`POST /account/export` |
+    | `reauth` | `auth`と同じ数値、独自のバケット、共有 | クライアントとIPv6の/48 | `POST /account/password`、`/account/mfa/totp/setup`、`/account/mfa/totp/enable`、`/account/mfa/totp/disable`、`/account/mfa/recovery-codes`、`/account/email`、`/account/export`、`/account/delete` |
     | `reauth_user` | `AUTH_REAUTH_PER_USER`（10）/ 10分、共有 | プレイヤー | `reauth`と同じエンドポイント |
     | `account` | 60 / 分 | プレイヤー | `GET /account/me`、`PUT /account/preferences` |
     | `account_games` | 60 / 分 | プレイヤー | `GET /account/games` |
@@ -128,7 +129,7 @@ info:
 
     `GET /info`と`GET /leaderboard`には独自の制限はなく、アドレス単位の層だけが適用されます。複数の制限を持つエンドポイントは、その説明に記載された順に制限を検査します。
 
-    サーバーはリクエストを次の順に処理します：アドレス単位の層、次にヘルスチェックのエンドポイント、エンドポイントの照合、`POST`・`PUT`・`PATCH`・`DELETE`の場合はデータベースの書き込み待ちの確認（503 `server_busy`）、認証、リクエストがセッションを持つ場合はアカウント単位の割り当て、エンドポイントの制限、ボディ、エンドポイント本体（GIFのエンドポイントは、作成すべきGIFがある場合にのみ描画の制限を消費します）。したがって、トークンが原因で拒否されたリクエストはエンドポイントのトークンを消費しませんが、ボディが無効なリクエストは消費します。
+    サーバーはリクエストを次の順に処理します：アドレス単位の層、次にヘルスチェックのエンドポイント、エンドポイントの照合、サーバーの処理が大幅に遅れていないかの確認（503 `server_busy`。タイムアウトを過ぎてもまだ実行中の先行リクエストが多すぎないか、および`POST`・`PUT`・`PATCH`・`DELETE`の場合はデータベースの書き込み待ち）、認証（5秒以内。超えた場合は503 `server_busy`）、リクエストがセッションを持つ場合はアカウント単位の割り当て、エンドポイントの制限、ボディ、エンドポイント本体（GIFのエンドポイントは、作成すべきGIFがある場合にのみ描画の制限を消費します）。したがって、トークンが原因で拒否されたリクエストはエンドポイントのトークンを消費しませんが、ボディが無効なリクエストは消費します。
 
     エンドポイント自体が応答するその他の制限：
 
@@ -379,7 +380,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`timeout`。'
+          description: '`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/register:
     post:
       operationId: registerAccount
@@ -475,7 +476,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（パスワードハッシュのキュー、またはデータベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`（パスワードハッシュのキュー、またはデータベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/login:
     post:
       operationId: logIn
@@ -558,7 +559,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（パスワードハッシュのキュー、またはデータベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`（パスワードハッシュのキュー、またはデータベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/login/mfa:
     post:
       operationId: logInWithSecondFactor
@@ -629,7 +630,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`retryAfter: 1`付きの`server_busy`：データベースのロックが解除されなかった（Googleアカウント連携の段階の後であれば、何も連携されていません。ゲームから最初からやり直してください）。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`retryAfter: 1`付きの`server_busy`：データベースのロックが解除されなかった（Googleアカウント連携の段階の後であれば、何も連携されていません。ゲームから最初からやり直してください）。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/logout:
     post:
       operationId: logOut
@@ -674,7 +675,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/logout-all:
     post:
       operationId: logOutEverywhere
@@ -719,7 +720,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/verify-email/resend:
     post:
       operationId: resendVerificationEmail
@@ -770,7 +771,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`retryAfter: 1`付きの`server_busy`：アカウントの照会中にデータベースのロックが解除されなかった（確認待ちの仮登録の更新はベストエフォートで、リクエストを失敗させることはありません）。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`retryAfter: 1`付きの`server_busy`：アカウントの照会中、または未確認のアカウントのリンクの保存中にデータベースのロックが解除されなかった（確認待ちの仮登録の更新はベストエフォートで、リクエストを失敗させることはありません）。それでもそのアドレスの5分間の間隔は開始されるため、その間に新しいリクエストを送っても何も行われません。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/password/forgot:
     post:
       operationId: requestPasswordReset
@@ -821,7 +822,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`retryAfter: 1`付きの`server_busy`：データベースのロックが解除されなかった。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`retryAfter: 1`付きの`server_busy`：アカウントの照会中、またはリンクの保存中にデータベースのロックが解除されなかった。それでもそのアドレスの5分間の間隔は開始されるため、その間に新しいリクエストを送ってもリンクは送られません。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/password/reset:
     post:
       operationId: resetPassword
@@ -879,7 +880,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`：パスワードハッシュのキュー、またはデータベースのロックが解除されなかった（`retryAfter: 1`。何も変更されていません）。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`：パスワードハッシュのキュー、またはデータベースのロックが解除されなかった（`retryAfter: 1`。何も変更されていません）。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/sso/google/start:
     post:
       operationId: startGoogleSignIn
@@ -937,7 +938,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/sso/google/finish:
     post:
       operationId: finishGoogleSignIn
@@ -1047,7 +1048,7 @@ paths:
           $ref: '#/components/responses/BadGateway'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/sso/google/link:
     post:
       operationId: linkGoogleAccount
@@ -1115,7 +1116,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`：パスワードハッシュのキュー、またはデータベースのロックが解除されなかった（`retryAfter: 1`。何も連携されていません）。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`：パスワードハッシュのキュー、またはデータベースのロックが解除されなかった（`retryAfter: 1`。何も連携されていません）。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/sso/complete:
     post:
       operationId: completeGoogleSignUp
@@ -1177,7 +1178,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/sessions:
     get:
       operationId: listSessions
@@ -1185,7 +1186,7 @@ paths:
         - sessions
       summary: ログイン中のデバイスを一覧表示
       description: |-
-        アカウントの有効なセッション（ログイン中のデバイス）を、最近使われた順に返します。`current`は、リクエストを行っているセッションを示します。`lastSeenAt`の更新は最大で5分に1回です。`expiresAt`は絶対的な終了時刻で、アイドル期限によってそれより早くセッションが終了することもあります。
+        アカウントの有効なセッション（ログイン中のデバイス）を、最近使われた順に返します。`current`は、リクエストを行っているセッションを示します。`lastSeenAt`の更新は最大で5分に1回です（サーバーの処理が大幅に遅れている間はそれより遅くなります）。`expiresAt`は絶対的な終了時刻で、アイドル期限によってそれより早くセッションが終了することもあります。
 
         **制限**：`sessions`。
       security:
@@ -1225,7 +1226,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。'
+          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/sessions/{id}:
     delete:
       operationId: revokeSession
@@ -1280,7 +1281,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /account/me:
     get:
       operationId: getAccount
@@ -1339,7 +1340,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。'
+          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /account/preferences:
     put:
       operationId: updatePreferences
@@ -1397,7 +1398,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /account/password:
     post:
       operationId: changePassword
@@ -1461,7 +1462,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`：パスワードハッシュのキュー、またはデータベースのロックが解除されなかった（`retryAfter: 1`。何も変更されていません）。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`：パスワードハッシュのキュー、またはデータベースのロックが解除されなかった（`retryAfter: 1`。何も変更されていません）。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /account/mfa/totp/setup:
     post:
       operationId: startTotpSetup
@@ -1524,7 +1525,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（パスワードハッシュのキュー、またはデータベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`（パスワードハッシュのキュー、またはデータベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /account/mfa/totp/enable:
     post:
       operationId: enableTotp
@@ -1602,7 +1603,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /account/mfa/totp/disable:
     post:
       operationId: disableTotp
@@ -1667,7 +1668,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（パスワードハッシュのキュー、またはデータベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`（パスワードハッシュのキュー、またはデータベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /account/mfa/recovery-codes:
     post:
       operationId: regenerateRecoveryCodes
@@ -1742,7 +1743,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（パスワードハッシュのキュー、またはデータベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`（パスワードハッシュのキュー、またはデータベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /account/email:
     post:
       operationId: changeEmail
@@ -1831,7 +1832,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`：パスワードハッシュのキュー、またはデータベースのロックが解除されなかった（`retryAfter: 1`。何も変更されておらず、同じリクエストを再送できます）。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`：パスワードハッシュのキュー、またはデータベースのロックが解除されなかった（`retryAfter: 1`。何も変更されておらず、同じリクエストを再送できます）。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /account/export:
     post:
       operationId: exportAccountData
@@ -1985,7 +1986,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy`（データベースのロックが解除されなかった。`Retry-After: 1`ヘッダー付き）、`server_busy`（パスワードハッシュのキュー）、`timeout`（60秒）。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`busy`（データベースのロックが解除されなかった。`Retry-After: 1`ヘッダー付き）、`server_busy`（パスワードハッシュのキュー）、`timeout`（60秒）。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /account/delete:
     post:
       operationId: deleteAccount
@@ -2052,7 +2053,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（パスワードハッシュのキュー、またはデータベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`（パスワードハッシュのキュー、またはデータベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /account/games:
     get:
       operationId: listAccountGames
@@ -2150,7 +2151,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy`（データベースのロックが解除されなかった。ボディに`retryAfter: 1`があり、`Retry-After`ヘッダーはありません）、`server_busy`（セッションの照会でデータベースがロックされていた）、`timeout`。'
+          description: '`busy`（データベースのロックが解除されなかった。ボディに`retryAfter: 1`があり、`Retry-After`ヘッダーはありません）、`server_busy`（セッションの照会でデータベースがロックされていた）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /games/{id}:
     get:
       operationId: getGame
@@ -2242,7 +2243,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy`（データベースのロックが解除されなかった。ボディに`retryAfter: 1`があり、`Retry-After`ヘッダーはありません）、`server_busy`（セッションの照会でデータベースがロックされていた）、`timeout`。'
+          description: '`busy`（データベースのロックが解除されなかった。ボディに`retryAfter: 1`があり、`Retry-After`ヘッダーはありません）、`server_busy`（セッションの照会でデータベースがロックされていた）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /games/{id}/pgn:
     get:
       operationId: getGamePgn
@@ -2319,7 +2320,7 @@ paths:
           description: '`internal_error`：たとえば、保存された指し手を再生しても保存された終局に到達できない場合（サーバーがログに記録します）。'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy`（データベースのロックが解除されなかった。ボディに`retryAfter: 1`があり、`Retry-After`ヘッダーはありません）、`server_busy`（セッションの照会でデータベースがロックされていた）、`timeout`。'
+          description: '`busy`（データベースのロックが解除されなかった。ボディに`retryAfter: 1`があり、`Retry-After`ヘッダーはありません）、`server_busy`（セッションの照会でデータベースがロックされていた）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /games/{id}/gif:
     get:
       operationId: getGameGif
@@ -2399,7 +2400,7 @@ paths:
           description: '`render_failed`：GIFを作成できなかった（理由はサーバーがログに記録します）。`internal_error`。'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`retryAfter`（3～10秒）と`Retry-After`付きの`server_busy`：描画キューが満杯、またはGIFが空きスレッドを`GIF_QUEUE_TIMEOUT_MS`（10秒）待った。リクエストが消費した制限のトークンはすべて返却されます。`busy`：データベースのロックが解除されなかった（`retryAfter: 1`はボディのみ）。`timeout`。'
+          description: '`retryAfter`（3～10秒）と`Retry-After`付きの`server_busy`：描画キューが満杯、またはGIFが空きスレッドを`GIF_QUEUE_TIMEOUT_MS`（10秒）待った。リクエストが消費した制限のトークンはすべて返却されます。`busy`：データベースのロックが解除されなかった（`retryAfter: 1`はボディのみ）。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /gif:
     post:
       operationId: renderPgnGif
@@ -2473,7 +2474,7 @@ paths:
           description: '`render_failed`：GIFを作成できなかった（理由はサーバーがログに記録します）。`internal_error`。'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`retryAfter`（3～10秒）と`Retry-After`付きの`server_busy`：描画キューが満杯、またはGIFが空きスレッドを長く待ちすぎた。リクエストが消費した制限のトークンはすべて返却されます。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`retryAfter`（3～10秒）と`Retry-After`付きの`server_busy`：描画キューが満杯、またはGIFが空きスレッドを長く待ちすぎた。リクエストが消費した制限のトークンはすべて返却されます。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /players/{username}:
     get:
       operationId: getPlayer
@@ -2535,7 +2536,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy`（データベースのロックが解除されなかった。ボディに`retryAfter: 1`があり、`Retry-After`ヘッダーはありません）、`server_busy`（セッションの照会でデータベースがロックされていた）、`timeout`。'
+          description: '`busy`（データベースのロックが解除されなかった。ボディに`retryAfter: 1`があり、`Retry-After`ヘッダーはありません）、`server_busy`（セッションの照会でデータベースがロックされていた）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /players/{username}/games:
     get:
       operationId: listPlayerGames
@@ -2607,7 +2608,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy`（データベースのロックが解除されなかった。ボディに`retryAfter: 1`があり、`Retry-After`ヘッダーはありません）、`server_busy`（セッションの照会でデータベースがロックされていた）、`timeout`。'
+          description: '`busy`（データベースのロックが解除されなかった。ボディに`retryAfter: 1`があり、`Retry-After`ヘッダーはありません）、`server_busy`（セッションの照会でデータベースがロックされていた）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /leaderboard:
     get:
       operationId: getLeaderboard
@@ -2672,7 +2673,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy`（データベースのロックが解除されなかった。ボディに`retryAfter: 1`があり、`Retry-After`ヘッダーはありません）、`timeout`。'
+          description: '`busy`（データベースのロックが解除されなかった。ボディに`retryAfter: 1`があり、`Retry-After`ヘッダーはありません）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /reports:
     post:
       operationId: reportPlayer
@@ -2740,7 +2741,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`（セッションの照会でデータベースがロックされていた）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：データベースの書き込み待ちが多すぎるため、リクエストは実行されていません。'
+          description: '`server_busy`（セッションの照会でデータベースがロックされていた）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /verify-email:
     servers:
       - url: https://caissa.scacelith.com
@@ -2830,7 +2831,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'データベースのロックが解除されなかった（`Retry-After: 1`）か、書き込み待ちが多すぎる（`Retry-After` 2～5）。何も変更されておらず、リンクは引き続き使えます。ハンドラーのタイムアウトの場合もこのステータスです。'
+          description: 'データベースのロックが解除されなかった（`Retry-After: 1`）か、サーバーの処理が大幅に遅れている（`Retry-After` 2～5。冒頭の説明を参照）。何も変更されておらず、リンクは引き続き使えます。ハンドラーのタイムアウトの場合もこのステータスです。'
   /reset-password:
     servers:
       - url: https://caissa.scacelith.com
@@ -2923,7 +2924,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'サーバーが混雑している場合（パスワードハッシュのキュー、またはデータベースのロックが解除されなかった）に`Retry-After`付きで再表示されたフォーム。リンクは有効なままです。データベースの書き込み待ちが多すぎる場合は、代わりに`Retry-After`（2～5）付きの"Server error"（サーバーエラー）ページになります：何も実行されておらず、リンクは有効なままです。ハンドラーのタイムアウトの場合もこのステータスです。'
+          description: 'サーバーが混雑している場合（パスワードハッシュのキュー、またはデータベースのロックが解除されなかった）に`Retry-After`付きで再表示されたフォーム。リンクは有効なままです。サーバーの処理が大幅に遅れている場合（冒頭の説明を参照）は、代わりに`Retry-After`（2～5）付きの"Server error"（サーバーエラー）ページになります：何も実行されておらず、リンクは有効なままです。ハンドラーのタイムアウトの場合もこのステータスです。'
   /confirm-email-change:
     servers:
       - url: https://caissa.scacelith.com
@@ -3013,7 +3014,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'データベースのロックが解除されなかった（`Retry-After: 1`）か、書き込み待ちが多すぎる（`Retry-After` 2～5）。何も変更されておらず、リンクは引き続き使えます。ハンドラーのタイムアウトの場合もこのステータスです。'
+          description: 'データベースのロックが解除されなかった（`Retry-After: 1`）か、サーバーの処理が大幅に遅れている（`Retry-After` 2～5。冒頭の説明を参照）。何も変更されておらず、リンクは引き続き使えます。ハンドラーのタイムアウトの場合もこのステータスです。'
   /healthz:
     servers:
       - url: https://caissa.scacelith.com
@@ -3603,7 +3604,7 @@ components:
           schema:
             $ref: '#/components/schemas/HtmlDocument'
     HtmlServiceUnavailable:
-      description: サーバーが混雑している（データベースのロックが解除されなかった。`Retry-After`付き）、または処理に時間がかかりすぎた。タイトルが"Server error"（サーバーエラー）のHTMLページです。
+      description: サーバーが混雑している（データベースのロックが解除されなかった、またはサーバーの処理が大幅に遅れている。`Retry-After`付き）、または処理に時間がかかりすぎた。タイトルが"Server error"（サーバーエラー）のHTMLページです。
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3761,7 +3762,7 @@ components:
               format: int64
               minimum: 0
               maximum: 4294967295
-              description: プロトコルスキーマのフィンガープリント（正規形のSHA-256の先頭4バイトを符号なし整数にしたもの）。参考情報です。
+              description: 'プロトコルスキーマのフィンガープリント（正規形のSHA-256の先頭4バイトを符号なし整数にしたもの。プロトコルのマイナーバージョン2では`0xc649140f`、つまり3326678031）。参考情報で、比較されることはありません。'
             subprotocol:
               type: string
               description: WebSocketのサブプロトコルのトークン（`Sec-WebSocket-Protocol`）。
@@ -3854,7 +3855,7 @@ components:
         protocol:
           min: 1
           max: 1
-          schema: 1852590473
+          schema: 3326678031
           subprotocol: scacelith.rt1
         wsPort: 443
         wsPath: /ws
@@ -4332,7 +4333,7 @@ components:
         lastSeenAt:
           type: integer
           format: int64
-          description: 最後に使われた日時（エポックからのミリ秒）。更新は最大で5分に1回です。
+          description: 最後に使われた日時（エポックからのミリ秒）。更新は最大で5分に1回です（サーバーの処理が大幅に遅れている間はそれより遅くなります）。
         expiresAt:
           type: integer
           format: int64
