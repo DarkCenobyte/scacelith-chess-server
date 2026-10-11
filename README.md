@@ -1,26 +1,23 @@
 # Scacelith dedicated server
 
-[![CI](https://img.shields.io/github/actions/workflow/status/DarkCenobyte/scacelith-chess-server/ci.yml?branch=master&event=push&label=CI&logo=githubactions&logoColor=white)](https://github.com/DarkCenobyte/scacelith-chess-server/actions/workflows/ci.yml)
-[![Release build](https://img.shields.io/github/actions/workflow/status/DarkCenobyte/scacelith-chess-server/release.yml?event=push&label=release%20build&logo=githubactions&logoColor=white)](https://github.com/DarkCenobyte/scacelith-chess-server/actions/workflows/release.yml)
-[![CodeQL](https://img.shields.io/github/actions/workflow/status/DarkCenobyte/scacelith-chess-server/codeql.yml?branch=master&event=push&label=CodeQL&logo=github)](https://github.com/DarkCenobyte/scacelith-chess-server/actions/workflows/codeql.yml)
-[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDarkCenobyte%2Fscacelith-chess-server%2Fbadges%2Fcoverage.json)](https://github.com/DarkCenobyte/scacelith-chess-server/actions/workflows/coverage.yml)
-[![Latest release](https://img.shields.io/github/v/release/DarkCenobyte/scacelith-chess-server?sort=semver&display_name=tag&logo=github)](https://github.com/DarkCenobyte/scacelith-chess-server/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/DarkCenobyte/scacelith-chess-server/total?logo=github)](https://github.com/DarkCenobyte/scacelith-chess-server/releases)
-[![Licence](https://img.shields.io/github/license/DarkCenobyte/scacelith-chess-server?color=blue)](LICENSE)
-[![Last commit](https://img.shields.io/github/last-commit/DarkCenobyte/scacelith-chess-server/master)](https://github.com/DarkCenobyte/scacelith-chess-server/commits/master)
+[![CI](https://github.com/DarkCenobyte/scacelith-chess-server/actions/workflows/ci.yml/badge.svg?branch=master&event=push)](https://github.com/DarkCenobyte/scacelith-chess-server/actions/workflows/ci.yml)
+[![Release build](https://github.com/DarkCenobyte/scacelith-chess-server/actions/workflows/release.yml/badge.svg?event=push)](https://github.com/DarkCenobyte/scacelith-chess-server/actions/workflows/release.yml)
+[![CodeQL](https://github.com/DarkCenobyte/scacelith-chess-server/actions/workflows/codeql.yml/badge.svg?branch=master&event=push)](https://github.com/DarkCenobyte/scacelith-chess-server/actions/workflows/codeql.yml)
+[![Coverage](https://raw.githubusercontent.com/DarkCenobyte/scacelith-chess-server/badges/coverage.svg)](https://github.com/DarkCenobyte/scacelith-chess-server/actions/workflows/coverage.yml)
+[![Latest release](https://img.shields.io/github/v/release/DarkCenobyte/scacelith-chess-server?sort=semver&display_name=tag&logo=github&cacheSeconds=3600)](https://github.com/DarkCenobyte/scacelith-chess-server/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/DarkCenobyte/scacelith-chess-server/total?logo=github&cacheSeconds=3600)](https://github.com/DarkCenobyte/scacelith-chess-server/releases)
+[![Licence](docs/badges/license.svg)](LICENSE)
 
-[![Top language](https://img.shields.io/github/languages/top/DarkCenobyte/scacelith-chess-server?logo=rust)](https://github.com/DarkCenobyte/scacelith-chess-server)
-[![Languages](https://img.shields.io/github/languages/count/DarkCenobyte/scacelith-chess-server)](https://github.com/DarkCenobyte/scacelith-chess-server)
-[![Rust toolchain](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FDarkCenobyte%2Fscacelith-chess-server%2Fmaster%2Frust-toolchain.toml&query=%24.toolchain.channel&label=Rust&logo=rust&color=B7410E)](rust-toolchain.toml)
-[![Online protocol](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FDarkCenobyte%2Fscacelith-chess-server%2Fmaster%2Fprotocol%2Fscacelith-v1.json&query=%24.minor&prefix=v1.&label=online%20protocol&color=6E4C9E)](docs/PROTOCOL.md)
-![Linux x86-64 (static, musl)](https://img.shields.io/badge/Linux-x86--64%20%28static%2C%20musl%29-FCC624?logo=linux&logoColor=black)
-![SQLite](https://img.shields.io/badge/database-SQLite-003B57?logo=sqlite&logoColor=white)
+[![Rust toolchain](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FDarkCenobyte%2Fscacelith-chess-server%2Fmaster%2Frust-toolchain.toml&query=%24.toolchain.channel&label=Rust&logo=rust&color=B7410E&cacheSeconds=3600)](rust-toolchain.toml)
+[![Online protocol](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FDarkCenobyte%2Fscacelith-chess-server%2Fmaster%2Fprotocol%2Fscacelith-v1.json&query=%24.minor&prefix=v1.&label=online%20protocol&color=6E4C9E&cacheSeconds=3600)](docs/PROTOCOL.md)
+![Linux x86-64 (static, musl)](docs/badges/linux.svg)
+![SQLite](docs/badges/sqlite.svg)
 
 [![Website](https://img.shields.io/website?url=https%3A%2F%2Fscacelith.com&label=scacelith.com&up_message=online&down_message=offline)](https://scacelith.com)
 [![Official server](https://img.shields.io/website?url=https%3A%2F%2Fcaissa.scacelith.com%2Freadyz&label=official%20server&up_message=online&down_message=offline)](https://scacelith.com)
-[![API reference](https://img.shields.io/website?url=https%3A%2F%2Fdarkcenobyte.github.io%2Fscacelith-chess-server%2F&label=API%20reference&up_message=OpenAPI%203.1&down_message=offline&up_color=6BA539&logo=openapiinitiative&logoColor=white)](https://darkcenobyte.github.io/scacelith-chess-server/)
-[![Game client](https://img.shields.io/github/v/release/DarkCenobyte/scacelith-chess?sort=semver&display_name=tag&label=game%20client)](https://github.com/DarkCenobyte/scacelith-chess)
-[![Built with Claude Code](https://img.shields.io/badge/built%20with-Claude%20Code-D97757?logo=claude&logoColor=white)](https://claude.com/claude-code)
+[![API reference](docs/badges/api-reference.svg)](https://darkcenobyte.github.io/scacelith-chess-server/)
+[![Game client](https://img.shields.io/github/v/release/DarkCenobyte/scacelith-chess?sort=semver&display_name=tag&label=game%20client&cacheSeconds=3600)](https://github.com/DarkCenobyte/scacelith-chess)
+[![Built with Claude Code](docs/badges/claude-code.svg)](https://claude.com/claude-code)
 
 The online multiplayer server of [Scacelith](https://github.com/DarkCenobyte/scacelith-chess), a
 photorealistic chess game played in first person: accounts, rated matchmaking, challenges and private

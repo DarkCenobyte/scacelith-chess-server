@@ -1,8 +1,9 @@
 # Test coverage of the crates (crates/, not the test tools of tools/): the tests of the CI's test
 # job (the real-engine anti-cheat tests included, with Ubuntu's Stockfish) instrumented by
 # cargo-llvm-cov. The run's summary shows the line, function and region coverage; on master, the
-# line coverage also goes to coverage.json on the badges branch, which the README's coverage badge
-# reads (a shields.io endpoint badge). Not one of the checks master requires.
+# line coverage also goes to the badges branch, as coverage.svg (the README's coverage badge, drawn
+# like a shields.io badge) and coverage.json (the same as a shields.io endpoint badge). Not one of
+# the checks master requires.
 name: Coverage
 
 on:
@@ -65,8 +66,8 @@ jobs:
           path: coverage/
           retention-days: 14
 
-  # The badge's figure on the badges branch: one commit holding coverage.json, replaced at each
-  # push to master (the only job of these workflows that writes to the repository).
+  # The badge on the badges branch: one commit holding coverage.svg and coverage.json, replaced at
+  # each push to master (the only job of these workflows that writes to the repository).
   badge:
     name: Coverage badge
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
@@ -81,13 +82,13 @@ jobs:
           name: coverage
           path: coverage
 
-      - name: Publish coverage.json on the badges branch
+      - name: Publish the badge on the badges branch
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           git init -q -b badges badges
-          cp coverage/coverage.json badges/
-          git -C badges add coverage.json
+          cp coverage/coverage.svg coverage/coverage.json badges/
+          git -C badges add coverage.svg coverage.json
           git -C badges -c user.name="github-actions[bot]" \
             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -q -m "Test coverage of $GITHUB_SHA"
