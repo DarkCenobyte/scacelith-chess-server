@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: Scacelith server HTTPS API
-  version: "0.9.1"
+  version: "1.0.0"
   summary: The HTTPS API of every Scacelith server, the official one and community servers.
   description: |-
     Every Scacelith server, the official `caissa.scacelith.com` and any community server, answers this HTTPS API. The game uses it for everything outside a game itself: sign-up and sign-in (two-step verification and Google included), the account page, game history, PGN downloads and animated GIFs of games, signed-in devices, the data download, the deletion of the account, and reports.
@@ -37,7 +37,7 @@ info:
     ## Answers and errors
 
     - Answers are JSON in UTF-8, except the PGN download (`application/x-chess-pgn`), the animated GIFs (`image/gif`) and the HTML pages. Times are milliseconds since 1970-01-01 UTC. Ids are integers. Game ids have up to 16 digits but stay below 2^53, so a JSON number (a double) holds them exactly.
-    - Every answer of the API carries `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Cross-Origin-Resource-Policy: same-origin` and `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` (the HTML pages have a policy of their own). With `TLS_MODE=native` it also carries `Strict-Transport-Security: max-age=31536000`.
+    - Every answer of the API carries `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `Cross-Origin-Resource-Policy: same-origin` and `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` (the HTML pages have a policy of their own). With `TLS_MODE=native` it also carries `Strict-Transport-Security: max-age=31536000`. The answers that the listener writes itself, before the API (the `GET` and `HEAD` of the health endpoints, the 429 of the per-address layer, and a 500 `internal_error` when the API fails outright), carry the same headers except `Cross-Origin-Resource-Policy`, and their `Content-Type` is `application/json` without a charset.
     - An answer must be read within 60 seconds of the moment the server has it ready, which only matters for the large ones (a GIF, the data export, a long PGN). The time the server takes to prepare an answer counts neither toward this nor toward the 30 seconds without a byte in or out after which a connection is closed.
 
     Errors have one shape (the `Error` schema):
@@ -65,7 +65,7 @@ info:
     | 429 | `rate_limited` | A rate limit (see below): `retryAfter` plus a `Retry-After` header. |
     | 500 | `internal_error` | An unexpected failure. The server logs it. |
     | 503 | `timeout` | The server did not answer within 30 seconds (60 seconds for the export, 45 seconds for the GIFs with the default settings). |
-    | 503 | `server_busy` | A session lookup or an account change found the database locked (`retryAfter` 1), or the password hash queue is full (see below). Also, for a `POST`, `PUT`, `PATCH` or `DELETE`, the database has too many writes waiting: the request was not run, and its rate limits took nothing (`retryAfter` 2 to 5). |
+    | 503 | `server_busy` | A session lookup or an account change found the database locked (`retryAfter` 1), or the password hash queue is full (see below). Also, with a `retryAfter` of 2 to 5, when the server is far behind: for a `POST`, `PUT`, `PATCH` or `DELETE`, the database has too many writes waiting; for any request, too many earlier requests are still running past their timeout, or the session token could not be checked within 5 seconds. The request was not run, and its rate limits took nothing. |
 
     The read endpoints (game history, games, players, leaderboard) and the export answer 503 `busy` with `retryAfter: 1` when the database stayed locked.
 
@@ -89,7 +89,8 @@ info:
     - **Getting a token.** A token (`sct_` followed by 43 base64url characters) comes from `POST /auth/login`, then `POST /auth/login/mfa` when two-step verification is on, from `POST /auth/sso/google/finish` and `POST /auth/sso/google/link` (Google sign-in), and from `POST /auth/sso/complete`. Every one of them answers `{ token, expiresAt, user }`. The server stores only a SHA-256 of the token.
     - **Required session.** A missing header answers 401 `unauthorized` with `WWW-Authenticate: Bearer realm="scacelith"`. An invalid token answers 401 `invalid_token` with `WWW-Authenticate: Bearer realm="scacelith", error="invalid_token"`. A client should forget a token that gets `invalid_token` and sign in again.
     - **Optional session.** On `GET /games/{id}`, `GET /games/{id}/pgn`, `GET /players/{username}` and `GET /players/{username}/games` the session is optional. Without the header they answer the public view; if a header is sent, its token must be valid.
-    - **Lifetime.** A session ends at the first of `SESSION_MAX_DAYS` (90) after the sign-in (this is `expiresAt`) and `SESSION_IDLE_DAYS` (30) without use. Each use pushes the idle limit back; the server writes the new value at most every 5 minutes. An account keeps at most `MAX_SESSIONS_PER_USER` (10) sessions: a new sign-in revokes the oldest beyond that number.
+    - **Busy store.** When the database stays locked while a token is checked, an endpoint that requires or accepts a session answers 503 `server_busy` with `retryAfter: 1` (and `Retry-After`); when the check takes more than 5 seconds, it answers 503 `server_busy` with a `retryAfter` of 2 to 5. Either way the token was not judged: keep it and send the request again.
+    - **Lifetime.** A session ends at the first of `SESSION_MAX_DAYS` (90) after the sign-in (this is `expiresAt`) and `SESSION_IDLE_DAYS` (30) without use. Each use pushes the idle limit back; the server writes the new value at most every 5 minutes, in the background. While its database has many writes waiting it postpones that write to a later request, except within the last hour before the idle limit, so a session in use does not expire. An account keeps at most `MAX_SESSIONS_PER_USER` (10) sessions: a new sign-in revokes the oldest beyond that number.
     - **Revocation.** Signing out (`POST /auth/logout`, `POST /auth/logout-all`, `DELETE /auth/sessions/{id}`) revokes sessions; so do a password change (the other sessions), a password reset and the deletion of the account (every session), and an administrator. A revocation from the API takes effect at once, and the WebSocket opened with a revoked session is closed. A password change or reset and the deletion of the account revoke in the same transaction as the change itself: when one of them fails, no session was revoked and nothing else changed either. The server caches session lookups for 30 seconds, so a revocation by the admin command, a separate process, takes effect within 30 seconds.
     - **Scope.** A token belongs to one server and opens its WebSocket too. Never send it to another server.
 
@@ -111,7 +112,7 @@ info:
     | `auth_forgot` | `AUTH_FORGOT_PER_HOUR` (3) / hour, shared | client, 3 times that per IPv6 /48 | `POST /auth/password/forgot` |
     | `auth_forgot_day` | `AUTH_FORGOT_PER_DAY` (10) / 24 hours, shared | client, 3 times that per IPv6 /48 | `POST /auth/password/forgot` |
     | `auth_reset` | `AUTH_RESET_PER_HOUR` (10) / hour, shared | client, 3 times that per IPv6 /48 | `POST /auth/password/reset`, `POST /reset-password` |
-    | `reauth` | the numbers of `auth`, a bucket of its own, shared | client and IPv6 /48 | the account changes that ask for the password (see Re-authentication), and `POST /account/export` |
+    | `reauth` | the numbers of `auth`, a bucket of its own, shared | client and IPv6 /48 | `POST /account/password`, `/account/mfa/totp/setup`, `/account/mfa/totp/enable`, `/account/mfa/totp/disable`, `/account/mfa/recovery-codes`, `/account/email`, `/account/export`, `/account/delete` |
     | `reauth_user` | `AUTH_REAUTH_PER_USER` (10) / 10 min, shared | player | the same endpoints as `reauth` |
     | `account` | 60 / min | player | `GET /account/me`, `PUT /account/preferences` |
     | `account_games` | 60 / min | player | `GET /account/games` |
@@ -128,7 +129,7 @@ info:
 
     `GET /info` and `GET /leaderboard` have no limit of their own: only the per-address layer. An endpoint with several limits checks them in the order given in its description.
 
-    The server handles a request in this order: the per-address layer, then the health endpoints; endpoint match; for a `POST`, `PUT`, `PATCH` or `DELETE`, the check of the database's write backlog (503 `server_busy`); authentication; the account budget, when the request carries a session; the endpoint's limits; the body; the endpoint itself (the GIF endpoints take their render limits only when they have a GIF to make). So a request refused for its token spends none of the endpoint's tokens, and a request with an invalid body does spend them.
+    The server handles a request in this order: the per-address layer, then the health endpoints; endpoint match; the checks that the server is not far behind (503 `server_busy`): too many earlier requests still running past their timeout and, for a `POST`, `PUT`, `PATCH` or `DELETE`, the database's write backlog; authentication, within 5 seconds (503 `server_busy` beyond); the account budget, when the request carries a session; the endpoint's limits; the body; the endpoint itself (the GIF endpoints take their render limits only when they have a GIF to make). So a request refused for its token spends none of the endpoint's tokens, and a request with an invalid body does spend them.
 
     Other throttles, answered by the endpoints themselves:
 
@@ -379,7 +380,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`timeout`.'
+          description: '`timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /auth/register:
     post:
       operationId: registerAccount
@@ -475,7 +476,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the password hash queue, or the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` (the password hash queue, or the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /auth/login:
     post:
       operationId: logIn
@@ -558,7 +559,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the password hash queue, or the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` (the password hash queue, or the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /auth/login/mfa:
     post:
       operationId: logInWithSecondFactor
@@ -629,7 +630,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` with `retryAfter: 1`: the database stayed locked (after a Google link step, nothing was linked: start again from the game). `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` with `retryAfter: 1`: the database stayed locked (after a Google link step, nothing was linked: start again from the game). `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /auth/logout:
     post:
       operationId: logOut
@@ -674,7 +675,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /auth/logout-all:
     post:
       operationId: logOutEverywhere
@@ -719,7 +720,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /auth/verify-email/resend:
     post:
       operationId: resendVerificationEmail
@@ -770,7 +771,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` with `retryAfter: 1`: the database stayed locked while the account was looked up (the renewal of a waiting signup is best effort and never fails the request). `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` with `retryAfter: 1`: the database stayed locked while the account was looked up or the link of an unconfirmed account was stored (the renewal of a waiting signup is best effort and never fails the request); the address''s 5 minutes start all the same, so a new request within them does nothing. `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /auth/password/forgot:
     post:
       operationId: requestPasswordReset
@@ -821,7 +822,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` with `retryAfter: 1`: the database stayed locked. `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` with `retryAfter: 1`: the database stayed locked while the account was looked up or the link was stored; the address''s 5 minutes start all the same, so a new request within them sends no link. `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /auth/password/reset:
     post:
       operationId: resetPassword
@@ -879,7 +880,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`: the password hash queue, or the database stayed locked (`retryAfter: 1`, nothing changed). `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy`: the password hash queue, or the database stayed locked (`retryAfter: 1`, nothing changed). `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /auth/sso/google/start:
     post:
       operationId: startGoogleSignIn
@@ -937,7 +938,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /auth/sso/google/finish:
     post:
       operationId: finishGoogleSignIn
@@ -1047,7 +1048,7 @@ paths:
           $ref: '#/components/responses/BadGateway'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /auth/sso/google/link:
     post:
       operationId: linkGoogleAccount
@@ -1115,7 +1116,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`: the password hash queue, or the database stayed locked (`retryAfter: 1`, nothing was linked). `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy`: the password hash queue, or the database stayed locked (`retryAfter: 1`, nothing was linked). `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /auth/sso/complete:
     post:
       operationId: completeGoogleSignUp
@@ -1177,7 +1178,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /auth/sessions:
     get:
       operationId: listSessions
@@ -1185,7 +1186,7 @@ paths:
         - sessions
       summary: List the signed-in devices
       description: |-
-        The account's active sessions (signed-in devices), the most recently used first. `current` marks the session making the request. `lastSeenAt` is updated at most every 5 minutes; `expiresAt` is the absolute end, and the idle limit may end the session sooner.
+        The account's active sessions (signed-in devices), the most recently used first. `current` marks the session making the request. `lastSeenAt` is updated at most every 5 minutes (later while the server is far behind); `expiresAt` is the absolute end, and the idle limit may end the session sooner.
 
         **Limit:** `sessions`.
       security:
@@ -1225,7 +1226,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the database stayed locked), `timeout`.'
+          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /auth/sessions/{id}:
     delete:
       operationId: revokeSession
@@ -1280,7 +1281,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /account/me:
     get:
       operationId: getAccount
@@ -1339,7 +1340,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the database stayed locked), `timeout`.'
+          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /account/preferences:
     put:
       operationId: updatePreferences
@@ -1397,7 +1398,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /account/password:
     post:
       operationId: changePassword
@@ -1461,7 +1462,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`: the password hash queue, or the database stayed locked (`retryAfter: 1`, nothing changed). `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy`: the password hash queue, or the database stayed locked (`retryAfter: 1`, nothing changed). `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /account/mfa/totp/setup:
     post:
       operationId: startTotpSetup
@@ -1524,7 +1525,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the password hash queue, or the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` (the password hash queue, or the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /account/mfa/totp/enable:
     post:
       operationId: enableTotp
@@ -1602,7 +1603,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` (the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /account/mfa/totp/disable:
     post:
       operationId: disableTotp
@@ -1667,7 +1668,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the password hash queue, or the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` (the password hash queue, or the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /account/mfa/recovery-codes:
     post:
       operationId: regenerateRecoveryCodes
@@ -1742,7 +1743,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the password hash queue, or the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` (the password hash queue, or the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /account/email:
     post:
       operationId: changeEmail
@@ -1831,7 +1832,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy`: the password hash queue, or the database stayed locked (`retryAfter: 1`: nothing changed, and the same request can be sent again). `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy`: the password hash queue, or the database stayed locked (`retryAfter: 1`: nothing changed, and the same request can be sent again). `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /account/export:
     post:
       operationId: exportAccountData
@@ -1985,7 +1986,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (the database stayed locked, with a `Retry-After: 1` header), `server_busy` (the password hash queue), `timeout` (60 seconds). Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`busy` (the database stayed locked, with a `Retry-After: 1` header), `server_busy` (the password hash queue), `timeout` (60 seconds). Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /account/delete:
     post:
       operationId: deleteAccount
@@ -2052,7 +2053,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the password hash queue, or the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` (the password hash queue, or the database stayed locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /account/games:
     get:
       operationId: listAccountGames
@@ -2150,7 +2151,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (the database stayed locked; `retryAfter: 1` in the body, no `Retry-After` header), `server_busy` (the session lookup found the database locked), `timeout`.'
+          description: '`busy` (the database stayed locked; `retryAfter: 1` in the body, no `Retry-After` header), `server_busy` (the session lookup found the database locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /games/{id}:
     get:
       operationId: getGame
@@ -2242,7 +2243,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (the database stayed locked; `retryAfter: 1` in the body, no `Retry-After` header), `server_busy` (the session lookup found the database locked), `timeout`.'
+          description: '`busy` (the database stayed locked; `retryAfter: 1` in the body, no `Retry-After` header), `server_busy` (the session lookup found the database locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /games/{id}/pgn:
     get:
       operationId: getGamePgn
@@ -2319,7 +2320,7 @@ paths:
           description: '`internal_error`: among others, the stored moves cannot be replayed to the stored ending (the server logs it).'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (the database stayed locked; `retryAfter: 1` in the body, no `Retry-After` header), `server_busy` (the session lookup found the database locked), `timeout`.'
+          description: '`busy` (the database stayed locked; `retryAfter: 1` in the body, no `Retry-After` header), `server_busy` (the session lookup found the database locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /games/{id}/gif:
     get:
       operationId: getGameGif
@@ -2399,7 +2400,7 @@ paths:
           description: '`render_failed`: the GIF could not be made (the server logs why). `internal_error`.'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` with `retryAfter` (3 to 10 seconds) and `Retry-After`: the rendering queue is full, or the GIF waited `GIF_QUEUE_TIMEOUT_MS` (10 seconds) for a free thread; every limit token the request took is given back. `busy`: the database stayed locked (`retryAfter: 1` in the body only). `timeout`.'
+          description: '`server_busy` with `retryAfter` (3 to 10 seconds) and `Retry-After`: the rendering queue is full, or the GIF waited `GIF_QUEUE_TIMEOUT_MS` (10 seconds) for a free thread; every limit token the request took is given back. `busy`: the database stayed locked (`retryAfter: 1` in the body only). `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /gif:
     post:
       operationId: renderPgnGif
@@ -2473,7 +2474,7 @@ paths:
           description: '`render_failed`: the GIF could not be made (the server logs why). `internal_error`.'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` with `retryAfter` (3 to 10 seconds) and `Retry-After`: the rendering queue is full, or the GIF waited too long for a free thread; every limit token the request took is given back. `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` with `retryAfter` (3 to 10 seconds) and `Retry-After`: the rendering queue is full, or the GIF waited too long for a free thread; every limit token the request took is given back. `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /players/{username}:
     get:
       operationId: getPlayer
@@ -2535,7 +2536,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (the database stayed locked; `retryAfter: 1` in the body, no `Retry-After` header), `server_busy` (the session lookup found the database locked), `timeout`.'
+          description: '`busy` (the database stayed locked; `retryAfter: 1` in the body, no `Retry-After` header), `server_busy` (the session lookup found the database locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /players/{username}/games:
     get:
       operationId: listPlayerGames
@@ -2607,7 +2608,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (the database stayed locked; `retryAfter: 1` in the body, no `Retry-After` header), `server_busy` (the session lookup found the database locked), `timeout`.'
+          description: '`busy` (the database stayed locked; `retryAfter: 1` in the body, no `Retry-After` header), `server_busy` (the session lookup found the database locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /leaderboard:
     get:
       operationId: getLeaderboard
@@ -2672,7 +2673,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`busy` (the database stayed locked; `retryAfter: 1` in the body, no `Retry-After` header), `timeout`.'
+          description: '`busy` (the database stayed locked; `retryAfter: 1` in the body, no `Retry-After` header), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /reports:
     post:
       operationId: reportPlayer
@@ -2740,7 +2741,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` (the session lookup found the database locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5: the database has too many writes waiting, and the request was not run.'
+          description: '`server_busy` (the session lookup found the database locked), `timeout`. Also `server_busy` with `retryAfter` 2 to 5 when the server is far behind (see the introduction): the request was not run.'
   /verify-email:
     servers:
       - url: https://caissa.scacelith.com
@@ -2830,7 +2831,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'The database stayed locked (`Retry-After: 1`) or has too many writes waiting (`Retry-After` 2 to 5): nothing changed and the link still works. Also the handler timeout.'
+          description: 'The database stayed locked (`Retry-After: 1`), or the server is far behind (`Retry-After` 2 to 5, see the introduction): nothing changed and the link still works. Also the handler timeout.'
   /reset-password:
     servers:
       - url: https://caissa.scacelith.com
@@ -2923,7 +2924,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'The form again with `Retry-After` when the server is busy (the password hash queue, or the database stayed locked); the link stays valid. When the database has too many writes waiting, a "Server error" page with `Retry-After` (2 to 5) instead: nothing was run and the link stays valid. Also the handler timeout.'
+          description: 'The form again with `Retry-After` when the server is busy (the password hash queue, or the database stayed locked); the link stays valid. When the server is far behind (see the introduction), a "Server error" page with `Retry-After` (2 to 5) instead: nothing was run and the link stays valid. Also the handler timeout.'
   /confirm-email-change:
     servers:
       - url: https://caissa.scacelith.com
@@ -3013,7 +3014,7 @@ paths:
           $ref: '#/components/responses/HtmlInternalError'
         '503':
           $ref: '#/components/responses/HtmlServiceUnavailable'
-          description: 'The database stayed locked (`Retry-After: 1`) or has too many writes waiting (`Retry-After` 2 to 5): nothing changed and the link still works. Also the handler timeout.'
+          description: 'The database stayed locked (`Retry-After: 1`), or the server is far behind (`Retry-After` 2 to 5, see the introduction): nothing changed and the link still works. Also the handler timeout.'
   /healthz:
     servers:
       - url: https://caissa.scacelith.com
@@ -3603,7 +3604,7 @@ components:
           schema:
             $ref: '#/components/schemas/HtmlDocument'
     HtmlServiceUnavailable:
-      description: The server is busy (the database stayed locked, with `Retry-After`) or took too long (an HTML page titled "Server error").
+      description: The server is busy (the database stayed locked, or the server is far behind; with `Retry-After`) or took too long (an HTML page titled "Server error").
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3761,7 +3762,7 @@ components:
               format: int64
               minimum: 0
               maximum: 4294967295
-              description: The fingerprint of the protocol schema (first 4 bytes of the SHA-256 of its canonical form, as an unsigned integer); informational.
+              description: 'The fingerprint of the protocol schema (first 4 bytes of the SHA-256 of its canonical form, as an unsigned integer: `0xc649140f`, 3326678031, for protocol minor 2); informational, never compared.'
             subprotocol:
               type: string
               description: The WebSocket subprotocol token (`Sec-WebSocket-Protocol`).
@@ -3854,7 +3855,7 @@ components:
         protocol:
           min: 1
           max: 1
-          schema: 1852590473
+          schema: 3326678031
           subprotocol: scacelith.rt1
         wsPort: 443
         wsPath: /ws
@@ -4332,7 +4333,7 @@ components:
         lastSeenAt:
           type: integer
           format: int64
-          description: The last use (epoch ms), updated at most every 5 minutes.
+          description: The last use (epoch ms), updated at most every 5 minutes (later while the server is far behind).
         expiresAt:
           type: integer
           format: int64
