@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use super::fake_oidc::{FakeOidc, ISSUER, Redirect, Signing};
 use super::{CountingHasher, Harness, START_MS, Setup, link_in, pw, token_of};
-use crate::auth::oidc::{OidcClient, form_urlencode, pkce_challenge};
+use crate::auth::oidc::{OidcClient, RedirectPolicy, form_urlencode, pkce_challenge};
 use crate::clock::{ManualClock, SharedClock};
 use crate::config::{sso_origin_tag, test_config};
 use crate::http::testing::TestResponse;
@@ -1446,4 +1446,173 @@ async fn notices_an_smtp_failure_never_fails_the_google_sign_in_and_with_no_tran
         }
     }
     dropper.abort();
+}
+
+// ---- Google sign-in on a website ("Web application" client) -----------------------------------
+
+const WEB_CLIENT_ID: &str = "5678-web.apps.googleusercontent.com";
+const WEB_CLIENT_SECRET: &str = "GOCSPX-web-secret";
+const WEB_PAGE: &str = "https://chess.example.org/account/google/";
+const WEB_START: &str = "/api/v1/auth/sso/google/web/start";
+
+impl Sso {
+    /// A server that offers Google sign-in to its website too, with that client at the provider.
+    async fn web() -> Sso {
+        let x = Sso::new(&[
+            ("GOOGLE_WEB_CLIENT_ID", WEB_CLIENT_ID),
+            ("GOOGLE_WEB_CLIENT_SECRET", WEB_CLIENT_SECRET),
+            ("GOOGLE_WEB_REDIRECT_URI", WEB_PAGE),
+            ("CORS_ORIGINS", "https://chess.example.org"),
+        ])
+        .await;
+        x.idp.add_web_client(WEB_CLIENT_ID, WEB_CLIENT_SECRET, WEB_PAGE);
+        x
+    }
+
+    /// The website's start.
+    async fn web_start(&self) -> Attempt {
+        let p = pkce();
+        let r = self.post(WEB_START, json!({ "codeChallenge": p.challenge })).await;
+        assert_eq!(r.status, 200, "{}", r.text());
+        let b = r.json();
+        let text = |k: &str| b[k].as_str().unwrap().to_owned();
+        Attempt {
+            verifier: p.verifier,
+            attempt_id: text("attemptId"),
+            auth_url: text("authUrl"),
+            state: text("state"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_website_start_is_off_without_its_client_and_validates_its_body() {
+    let h = Harness::new().await;
+    let off = h.post(WEB_START, json!({ "codeChallenge": "a".repeat(43) })).await;
+    assert_eq!((off.status, off.json()["error"].clone()), (404, json!("sso_disabled")), "Google sign-in off");
+    let game_only = Sso::new(&[]).await;
+    let r = game_only.post(WEB_START, json!({ "codeChallenge": pkce().challenge })).await;
+    assert_eq!((r.status, r.json()["error"].clone()), (404, json!("sso_disabled")), "no web client");
+
+    let x = Sso::web().await;
+    let challenge = pkce().challenge;
+    for bad in [
+        json!({}),
+        json!({ "codeChallenge": "short" }),
+        json!({ "codeChallenge": challenge, "redirectPort": PORT }),
+        json!({ "codeChallenge": challenge, "redirectUri": "https://evil.example/" }),
+    ] {
+        let r = x.post(WEB_START, bad.clone()).await;
+        assert_eq!((r.status, r.json()["error"].clone()), (400, json!("invalid_request")), "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn the_website_signs_in_with_its_own_client_and_page_and_finds_the_account_the_game_made() {
+    let x = Sso::web().await;
+    let h = &x.h;
+    let p = pkce();
+    let r = x.post(WEB_START, json!({ "codeChallenge": p.challenge })).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let b = r.json();
+    assert_eq!(sorted_keys(&b), ["attemptId", "authUrl", "expiresIn", "state"]);
+    assert_eq!(b["expiresIn"], 600);
+    let url = b["authUrl"].as_str().unwrap();
+    assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"), "{url}");
+    let pairs = query_of(url);
+    let q: HashMap<&str, &str> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    assert_eq!((q["client_id"], q["redirect_uri"]), (WEB_CLIENT_ID, WEB_PAGE));
+    assert_eq!((q["state"], q["code_challenge_method"]), (b["state"].as_str().unwrap(), "S256"));
+    assert_ne!(q["code_challenge"], p.challenge, "the server uses its own PKCE pair with Google");
+    let started = events_of(h, "sso_started").await;
+    assert_eq!(started.last().unwrap().detail, Some(json!({ "provider": "google", "client": "web" })));
+
+    // A first sign-in made in the game: the Desktop app client, the game's listener.
+    let game = x.sign_in(claims(json!({}))).await.json();
+    let ticket = game["ssoTicket"].as_str().unwrap();
+    let c = x.post(COMPLETE, json!({ "ssoTicket": ticket, "username": "Magnus" })).await;
+    assert_eq!(c.status, 200, "{}", c.text());
+    let id = google_link(h, "1098765").await.expect("linked");
+    assert_eq!(
+        events_of(h, "sso_started").await.last().unwrap().detail,
+        Some(json!({ "provider": "google" })),
+        "the game's attempts name no client"
+    );
+
+    // The website: same Google account, so the same Scacelith account, signed in at once.
+    let a = x.web_start().await;
+    let q = x.idp.authorize(&a.auth_url, claims(json!({})));
+    let r = x.finish(&a, &q, json!({ "clientLabel": "Website (Firefox, Linux)" })).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    let b = r.json();
+    assert_eq!(b["user"]["username"], "Magnus");
+    assert!(b["token"].as_str().is_some_and(|t| !t.is_empty()), "a session");
+    assert_eq!(live_sessions(h, id).await, 2);
+    let call = x.idp.token_calls().last().unwrap().clone();
+    assert_eq!(
+        (call["client_id"].as_str(), call["client_secret"].as_str(), call["redirect_uri"].as_str()),
+        (WEB_CLIENT_ID, WEB_CLIENT_SECRET, WEB_PAGE),
+        "the website's client exchanges the code, with its page"
+    );
+    assert_ne!(call["code_verifier"], a.verifier, "the server's own verifier");
+    assert_eq!(x.finish(&a, &q, json!({})).await.status, 410, "an attempt finishes once");
+}
+
+#[tokio::test]
+async fn a_website_attempt_takes_only_codes_and_id_tokens_of_the_website_client() {
+    let x = Sso::web().await;
+    // A code Google gave the game's client does not pass through a website attempt.
+    let game = x.start().await;
+    let code_of_game = x.idp.authorize(&game.auth_url, claims(json!({})));
+    let web = x.web_start().await;
+    let r = x.finish(&web, &Redirect { state: web.state.clone(), ..code_of_game }, json!({})).await;
+    assert_eq!((r.status, r.json()["error"].clone()), (502, json!("sso_failed")));
+    // An ID token for the game's client is refused for a website attempt, and the reverse.
+    for (a, aud) in [(x.web_start().await, CLIENT_ID), (x.start().await, WEB_CLIENT_ID)] {
+        x.idp.tamper(Some(Box::new(move |s: &mut Signing| {
+            s.claims.insert("aud".into(), aud.into());
+            s.claims.insert("azp".into(), aud.into());
+        })));
+        let q = x.idp.authorize(&a.auth_url, claims(json!({})));
+        let r = x.finish(&a, &q, json!({})).await;
+        assert_eq!((r.status, r.json()["error"].clone()), (502, json!("sso_failed")), "aud {aud}");
+    }
+    x.idp.tamper(None);
+    let a = x.web_start().await;
+    let q = x.idp.authorize(&a.auth_url, claims(json!({})));
+    assert_eq!(x.finish(&a, &q, json!({})).await.json()["needsUsername"], true);
+}
+
+#[tokio::test]
+async fn the_website_start_shares_the_start_limit_of_the_game() {
+    let x = Sso::web().await;
+    for _ in 0..30 {
+        x.start().await;
+    }
+    let r = x.post(WEB_START, json!({ "codeChallenge": pkce().challenge })).await;
+    assert_eq!((r.status, r.json()["error"].clone()), (429, json!("rate_limited")));
+}
+
+#[tokio::test]
+async fn the_website_client_takes_its_page_only_byte_for_byte() {
+    let clock = ManualClock::new(1_000_000.0, START_MS);
+    let idp = FakeOidc::start(CLIENT_ID, CLIENT_SECRET, clock.clone()).await;
+    let shared: SharedClock = clock;
+    let oidc = OidcClient::new(WEB_CLIENT_ID, WEB_CLIENT_SECRET, idp.endpoints(), shared, true)
+        .with_redirect(RedirectPolicy::Page(WEB_PAGE.into()));
+    let url = |uri: &str| oidc.authorization_url(&"s".repeat(43), &"n".repeat(43), &"c".repeat(43), uri);
+    assert!(url(WEB_PAGE).unwrap().contains(&form_urlencode(&[("redirect_uri", WEB_PAGE)])));
+    for bad in [
+        redirect_uri(PORT),
+        "https://chess.example.org/account/google".to_owned(),
+        "https://chess.example.org/account/google/?x=1".to_owned(),
+        "https://Chess.example.org/account/google/".to_owned(),
+        "https://evil.example/account/google/".to_owned(),
+        String::new(),
+    ] {
+        assert_eq!(url(&bad).unwrap_err().reason, "bad_redirect_uri", "{bad}");
+        let exchange = oidc.exchange_code("code", &"v".repeat(43), &bad).await;
+        assert_eq!(exchange.unwrap_err().reason, "bad_redirect_uri", "{bad}");
+    }
+    assert!(idp.token_calls().is_empty(), "nothing sent to Google");
 }

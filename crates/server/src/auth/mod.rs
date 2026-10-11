@@ -49,7 +49,8 @@ pub use self::identity::{
     normalize_email, suggest_username,
 };
 pub use self::oidc::{
-    OidcClient, OidcEndpoints, OidcError, check_redirect_uri, decode_jwt, form_urlencode, pkce_challenge,
+    OidcClient, OidcEndpoints, OidcError, RedirectPolicy, check_redirect_uri, decode_jwt, form_urlencode,
+    pkce_challenge,
 };
 #[cfg(test)]
 pub(crate) use self::sessions::TouchOutcome;
@@ -62,6 +63,7 @@ pub use self::tokens::{is_link_token, is_prefixed_token};
 use self::accounts::FactorRule;
 use self::mfa::SecondFactor;
 use self::sessions::{SESSION_CACHE_SIZE, Sessions};
+use self::sso::SsoClient;
 use crate::clock::{self, SharedClock};
 use crate::config::{Config, TlsMode};
 use crate::events::SessionEvents;
@@ -343,6 +345,8 @@ pub(crate) struct Inner {
     reauth_failures: FailureCounter,
     login_pow: LoginPowDetector,
     oidc: Option<OidcClient>,
+    /// The "Web application" client of Google sign-in on a website (`GOOGLE_WEB_CLIENT_ID`).
+    oidc_web: Option<OidcClient>,
     base_url: String,
     usernames: UsernameRules,
 }
@@ -393,6 +397,17 @@ impl Auth {
         let threshold = |v: i64| u32::try_from(v.max(1)).unwrap_or(u32::MAX);
         let failures_of =
             |n: u32| FailureCounter::new(FailureCounterConfig::with_threshold(n), clock.clone());
+        let oidc_web = config.google_web_sign_in().then(|| {
+            let secret = config.google_web_client_secret.as_ref().map_or("", |s| s.as_str());
+            OidcClient::new(
+                &config.google_web_client_id,
+                secret,
+                oidc.endpoints.clone(),
+                clock.clone(),
+                oidc.allow_http,
+            )
+            .with_redirect(RedirectPolicy::Page(config.google_web_redirect_uri.clone()))
+        });
         let oidc = (config.sso_google_enabled && !config.google_client_id.is_empty()).then(|| {
             let secret = config.google_client_secret.as_ref().map_or("", |s| s.as_str());
             OidcClient::new(&config.google_client_id, secret, oidc.endpoints, clock.clone(), oidc.allow_http)
@@ -416,6 +431,7 @@ impl Auth {
             base_url: public_base_url(&config),
             usernames: UsernameRules::from_config(&config),
             oidc,
+            oidc_web,
             keys,
             control,
             hasher,
@@ -703,7 +719,13 @@ impl Auth {
         redirect_port: u16,
         ip: Option<&str>,
     ) -> AuthResult<Value> {
-        self.inner.sso_start(code_challenge, redirect_port, ip).await
+        self.inner.sso_start(code_challenge, SsoClient::Game { redirect_port }, ip).await
+    }
+
+    /// `POST /auth/sso/google/web/start`: `{attemptId, authUrl, state, expiresIn}`, Google sending
+    /// the browser back to the website's page (`GOOGLE_WEB_REDIRECT_URI`).
+    pub async fn sso_web_start(&self, code_challenge: &str, ip: Option<&str>) -> AuthResult<Value> {
+        self.inner.sso_start(code_challenge, SsoClient::Web, ip).await
     }
 
     /// `POST /auth/sso/google/finish`: a login answer, `{needsUsername, ssoTicket,

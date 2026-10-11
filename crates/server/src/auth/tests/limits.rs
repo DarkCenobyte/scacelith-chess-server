@@ -99,6 +99,10 @@ async fn the_rates_of_the_auth_family_keys_windows_48_ceilings_shared_and_refusa
     sso::register(&mut sso_router, deps.clone());
     let rates = rates_of(&sso_router);
     assert_eq!(rates["POST /api/v1/auth/sso/google/start"], ["sso_start:30/600000,48:90,shared"]);
+    assert_eq!(
+        rates["POST /api/v1/auth/sso/google/web/start"], rates["POST /api/v1/auth/sso/google/start"],
+        "the website's start counts with the game's"
+    );
     assert_eq!(rates["POST /api/v1/auth/sso/google/finish"], ["sso_finish:30/60000"]);
     assert_eq!(rates["POST /api/v1/auth/sso/google/link"], [auth_rate], "the password step: the auth bucket");
     assert_eq!(rates["POST /api/v1/auth/sso/complete"], [auth_rate], "the auth bucket, its /48 included");
@@ -108,7 +112,8 @@ async fn the_rates_of_the_auth_family_keys_windows_48_ceilings_shared_and_refusa
             "POST /api/v1/auth/sso/complete",
             "POST /api/v1/auth/sso/google/finish",
             "POST /api/v1/auth/sso/google/link",
-            "POST /api/v1/auth/sso/google/start"
+            "POST /api/v1/auth/sso/google/start",
+            "POST /api/v1/auth/sso/google/web/start"
         ],
         "no poll route, no callback page"
     );

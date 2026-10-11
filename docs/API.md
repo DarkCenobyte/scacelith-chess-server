@@ -346,7 +346,7 @@ through the history, is about one request per second.
 | `gif_user_min`, `gif_user_hour` | `GIF_USER_RENDERS_PER_MIN` (4) / min and `GIF_USER_RENDERS_PER_HOUR` (30) / hour, shared | player | The same two, only when the GIF has to be made (not from the cache, section 11) |
 | `gif_ip_min`, `gif_ip_hour` | `GIF_IP_RENDERS_PER_MIN` (12) / min and `GIF_IP_RENDERS_PER_HOUR` (120) / hour, shared | client (all its accounts together), and 3 times that per IPv6 /48 | The same, as above |
 | `reports` | 30 / hour | player | `POST /reports` |
-| `sso_start` | 30 / 10 min, shared | client, and 90 per IPv6 /48 | `POST /auth/sso/google/start` |
+| `sso_start` | 30 / 10 min, shared | client, and 90 per IPv6 /48 | `POST /auth/sso/google/start`, `POST /auth/sso/google/web/start` (together) |
 | `sso_finish` | 30 / min | client | `POST /auth/sso/google/finish` |
 | `page` | 60 / min | client | `GET /verify-email`, `/reset-password`, `/confirm-email-change` |
 
@@ -474,7 +474,8 @@ Auth column:
 | `POST /auth/verify-email/resend` | none | `auth`, `auth_mail` | Send the confirmation link again |
 | `POST /auth/password/forgot` | none | `auth`, `auth_forgot`, `auth_forgot_day` | Send a password reset link |
 | `POST /auth/password/reset` | none | `auth`, `auth_reset` | Set a new password with a reset link's token |
-| `POST /auth/sso/google/start` | none | `sso_start` | Start a Google sign-in |
+| `POST /auth/sso/google/start` | none | `sso_start` | Start a Google sign-in (the game) |
+| `POST /auth/sso/google/web/start` | none | `sso_start` | Start a Google sign-in (a website) |
 | `POST /auth/sso/google/finish` | none | `sso_finish` | Hand Google's answer to the server |
 | `POST /auth/sso/google/link` | none | `auth` | Link Google to an existing account with its password |
 | `POST /auth/sso/complete` | none | `auth` | Create the account of a first Google sign-in |
@@ -524,7 +525,7 @@ curl -sS "$API/info"
   "wsPath": "/ws",
   "registration": "open",
   "emailVerification": true,
-  "sso": { "google": false },
+  "sso": { "google": false, "googleWeb": false },
   "mfa": true,
   "pow": { "register": 18 },
   "categories": [ { "id": "1+0", "baseSec": 60, "incSec": 0 }, { "id": "3+2", "baseSec": 180, "incSec": 2 } ],
@@ -547,7 +548,8 @@ curl -sS "$API/info"
   `PUBLIC_API_PORT`.
 - `registration`: `open` or `closed`. `emailVerification`: whether new accounts confirm their
   address (`REQUIRE_EMAIL_VERIFICATION`).
-- `sso.google`: whether Google sign-in is offered. `pow.register`: the proof-of-work bits that
+- `sso.google`: whether Google sign-in is offered to the game. `sso.googleWeb`: whether it is
+  offered to a website too (`POST /auth/sso/google/web/start`). `pow.register`: the proof-of-work bits that
   registration needs (0: none).
 - `categories`: the official (rated) time controls (`RATED_CATEGORIES`, all of them; the example
   shortens the list). Any other time control is `custom`.
@@ -764,7 +766,8 @@ or a 500, nothing changed: the old password and the sessions stay, and the link 
 ### Google sign-in
 
 Offered when `GET /info` says `sso.google: true`; otherwise every endpoint below answers 404
-`sso_disabled`. The game signs in through the system browser with the installed-app flow of
+`sso_disabled`. A website signs in the same way with its own client when `sso.googleWeb` is true
+(below, "On a website"). The game signs in through the system browser with the installed-app flow of
 RFC 8252 (a "Desktop app" client): Google sends the browser back to a listener of the game on
 127.0.0.1, never to this server, and the game never sees a Google credential.
 
@@ -862,6 +865,42 @@ Answer:
 `scope=openid email profile`, `state`, `nonce`, `code_challenge` (S256 of the server's own
 verifier for Google) with `code_challenge_method=S256`, and `prompt=select_account`. `state` is
 43 characters `[A-Za-z0-9_-]`. Errors: 400 `invalid_request`, 429 `rate_limited`.
+
+#### On a website
+
+A website (the official one: <https://scacelith.com/>) signs in with a "Web application" client of
+the same Google project (`GOOGLE_WEB_CLIENT_ID`). Google sends the browser back to one page of
+the site that the operator configured (`GOOGLE_WEB_REDIRECT_URI`, listed in the client's
+"Authorized redirect URIs"), and that page posts the code to `finish`; the server takes no
+redirect URI from the client here either. The steps:
+
+1. The page makes a PKCE pair as above, keeps the verifier in the tab (`sessionStorage`), and
+   sends `POST /auth/sso/google/web/start` with the challenge.
+2. It checks the `authUrl` as the game does, except that its `redirect_uri` must be a page of its
+   own origin, then navigates to it. No Google script is loaded.
+3. Google sends the browser to `GOOGLE_WEB_REDIRECT_URI?code=...&state=...`. The page accepts
+   only the `state` of the start answer and sends nothing after an `error=` redirect.
+4. `finish`, `link` and `complete` follow as for the game. The attempt remembers that a website
+   started it: the code is exchanged with the website's client and page, and the ID token must
+   name that client (a code or ID token of the game's client fails with 502 `sso_failed`, and
+   the reverse).
+
+A Google account reaches the same Scacelith account from the game and from the website: the link
+holds Google's subject (`sub`), which identifies the Google account whatever the client. The website's origin must be in
+`CORS_ORIGINS` (`check-config` warns otherwise).
+
+#### POST /auth/sso/google/web/start
+
+**Auth** none. **Limit** `sso_start` (shared with the game's start).
+
+| Field | Type | Notes |
+|---|---|---|
+| `codeChallenge` | string, exactly 43 `[A-Za-z0-9_-]` | S256 of the page's `codeVerifier`. |
+
+Answer: as `POST /auth/sso/google/start`, with the website's `client_id` and
+`redirect_uri=GOOGLE_WEB_REDIRECT_URI` in `authUrl`. Errors: 400 `invalid_request` (any other
+field, `redirectPort` included), 404 `sso_disabled` (Google sign-in off, or no website client),
+429 `rate_limited`.
 
 #### POST /auth/sso/google/finish
 

@@ -202,6 +202,31 @@ fn check_host(host: &str) -> Result<(), String> {
     if host.split('.').all(label_ok) { Ok(()) } else { Err(host_error()) }
 }
 
+/// The origin and the path of a web page address (`https://host/path`): `None` without a path.
+pub fn split_page_uri(text: &str) -> Option<(&str, &str)> {
+    let authority_at = text.find("://").map_or(0, |i| i + 3);
+    let cut = authority_at + text[authority_at..].find('/')?;
+    Some(text.split_at(cut))
+}
+
+/// Checks the address of a page that an OAuth provider sends the browser back to
+/// (`GOOGLE_WEB_REDIRECT_URI`): an origin as [`check_web_origin`] accepts it, then a path of
+/// printable ASCII starting with `/`, without a query or a fragment. The error is the reason,
+/// written as those of [`check_web_origin`].
+pub fn check_web_page_uri(text: &str) -> Result<(), String> {
+    let Some((origin, path)) = split_page_uri(text) else {
+        return Err("must have a path, at least \"/\" (https://host/path)".to_string());
+    };
+    check_web_origin(origin)?;
+    if path.contains(['?', '#']) {
+        return Err("must have no query or fragment".to_string());
+    }
+    if !path.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+        return Err("must hold printable ASCII only, without spaces (percent-encode the rest)".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,6 +382,49 @@ mod tests {
             let reason = check_web_origin(bad).expect_err(bad);
             let fixed = suggestion(&reason).unwrap_or_else(|| panic!("{bad}: {reason}"));
             assert_eq!(check_web_origin(fixed), Ok(()), "{bad} -> {fixed}");
+        }
+    }
+
+    #[test]
+    fn pages_an_oauth_provider_sends_the_browser_back_to() {
+        for good in [
+            "https://scacelith.com/account/google/",
+            "https://scacelith.com/",
+            "https://play.example.org:8443/sso/google.html",
+            "http://localhost:8000/account/google/",
+            "https://scacelith.com/a%20b/",
+        ] {
+            assert_eq!(check_web_page_uri(good), Ok(()), "{good}");
+        }
+        assert_eq!(
+            split_page_uri("https://scacelith.com/account/google/"),
+            Some(("https://scacelith.com", "/account/google/"))
+        );
+        for (bad, reason) in [
+            ("https://scacelith.com", "must have a path, at least \"/\" (https://host/path)"),
+            ("scacelith.com", "must have a path, at least \"/\" (https://host/path)"),
+            ("https://scacelith.com/account/?lang=fr", "must have no query or fragment"),
+            ("https://scacelith.com/account/#google", "must have no query or fragment"),
+            (
+                "https://scacelith.com/a b/",
+                "must hold printable ASCII only, without spaces (percent-encode the rest)",
+            ),
+            (
+                "https://scacelith.com/é/",
+                "must hold printable ASCII only, without spaces (percent-encode the rest)",
+            ),
+            (
+                "http://scacelith.com/account/google/",
+                "uses http://, which is accepted for localhost, 127.0.0.1 and [::1] only (local development): use \
+                 https://",
+            ),
+            ("https://user@scacelith.com/", "must not hold a user name or password"),
+            (
+                "https://Scacelith.com/",
+                "must be in lower case, as browsers send it; write \"https://scacelith.com\"",
+            ),
+        ] {
+            assert_eq!(check_web_page_uri(bad), Err(reason.to_string()), "{bad}");
         }
     }
 }

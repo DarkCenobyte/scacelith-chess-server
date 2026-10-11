@@ -2,7 +2,9 @@
 //! code, PKCE S256, client secret, and the redirect URI of the code's authorization request byte
 //! for byte), the JWKS endpoint with a `Cache-Control`, RS256 ID tokens signed with fixed test
 //! keys. The browser step is [`FakeOidc::authorize`]: it reads the authorization URL the server
-//! built and returns the query Google would send the browser back with.
+//! built and returns the query Google would send the browser back with. It knows a "Desktop app"
+//! client (loopback redirects) and, when added, a "Web application" client (its one page); a code
+//! is exchanged only by the client it was issued to, and its ID token names that client.
 
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
@@ -133,15 +135,23 @@ pub(crate) struct Redirect {
 }
 
 struct Code {
+    client_id: String,
     nonce: String,
     challenge: String,
     redirect_uri: String,
     claims: Map<String, Value>,
 }
 
+/// A client of the provider: `page` is the redirect URI of a "Web application" client, `None`
+/// for a "Desktop app" one (any loopback redirect).
+struct Client {
+    id: String,
+    secret: String,
+    page: Option<String>,
+}
+
 struct State {
-    client_id: String,
-    client_secret: String,
+    clients: Vec<Client>,
     clock: Arc<ManualClock>,
     key: usize,
     kid: String,
@@ -168,8 +178,7 @@ impl FakeOidc {
     /// A provider of the client `client_id` that signs with `clock`'s time.
     pub(crate) async fn start(client_id: &str, client_secret: &str, clock: Arc<ManualClock>) -> FakeOidc {
         let state = Arc::new(Mutex::new(State {
-            client_id: client_id.to_owned(),
-            client_secret: client_secret.to_owned(),
+            clients: vec![Client { id: client_id.to_owned(), secret: client_secret.to_owned(), page: None }],
             clock,
             key: 0,
             kid: "k1".into(),
@@ -196,6 +205,15 @@ impl FakeOidc {
         FakeOidc { state, base, server }
     }
 
+    /// Registers a "Web application" client whose redirect URI is `page`.
+    pub(crate) fn add_web_client(&self, client_id: &str, client_secret: &str, page: &str) {
+        self.state.lock().clients.push(Client {
+            id: client_id.to_owned(),
+            secret: client_secret.to_owned(),
+            page: Some(page.to_owned()),
+        });
+    }
+
     /// The provider's endpoints: Google's consent page (never fetched), the local token and key
     /// endpoints.
     pub(crate) fn endpoints(&self) -> OidcEndpoints {
@@ -219,9 +237,15 @@ impl FakeOidc {
             parse_urlencoded(auth_url.split_once('?').map_or("", |(_, q)| q)).into_iter().collect();
         let get = |k: &str| query.get(k).map(String::as_str).unwrap_or("");
         let mut st = self.state.lock();
+        let redirect_ok = st.clients.iter().any(|c| {
+            c.id == get("client_id")
+                && c.page.as_deref().map_or_else(
+                    || check_redirect_uri(get("redirect_uri")).is_ok(),
+                    |p| p == get("redirect_uri"),
+                )
+        });
         assert!(
-            get("client_id") == st.client_id
-                && check_redirect_uri(get("redirect_uri")).is_ok()
+            redirect_ok
                 && get("response_type") == "code"
                 && get("code_challenge_method") == "S256"
                 && !get("state").is_empty(),
@@ -232,6 +256,7 @@ impl FakeOidc {
         st.codes.insert(
             code.clone(),
             Code {
+                client_id: get("client_id").to_owned(),
                 nonce: get("nonce").to_owned(),
                 challenge: get("code_challenge").to_owned(),
                 redirect_uri: get("redirect_uri").to_owned(),
@@ -306,7 +331,7 @@ fn token(state: &Mutex<State>, form: &str) -> Response<Full<Bytes>> {
     let mut st = state.lock();
     st.token_calls.push(f.clone());
     let refuse = |status: StatusCode, error: &str| json_answer(status, &json!({ "error": error }), None);
-    if get("client_id") != st.client_id || get("client_secret") != st.client_secret {
+    if !st.clients.iter().any(|c| c.id == get("client_id") && c.secret == get("client_secret")) {
         return refuse(StatusCode::UNAUTHORIZED, "invalid_client");
     }
     if get("grant_type") != "authorization_code" {
@@ -315,13 +340,17 @@ fn token(state: &Mutex<State>, form: &str) -> Response<Full<Bytes>> {
     let Some(code) = st.codes.remove(get("code")) else {
         return refuse(StatusCode::BAD_REQUEST, "invalid_grant");
     };
-    // As Google: the redirect URI of the code's authorization request (RFC 6749 section 4.1.3).
-    if get("redirect_uri") != code.redirect_uri || pkce_challenge(get("code_verifier")) != code.challenge {
+    // As Google: the client and the redirect URI of the code's authorization request (RFC 6749
+    // section 4.1.3).
+    if get("client_id") != code.client_id
+        || get("redirect_uri") != code.redirect_uri
+        || pkce_challenge(get("code_verifier")) != code.challenge
+    {
         return refuse(StatusCode::BAD_REQUEST, "invalid_grant");
     }
     let t = st.clock.wall_ms() / 1000;
     let mut claims = json!({
-        "iss": ISSUER, "azp": st.client_id, "aud": st.client_id, "iat": t, "exp": t + 3600, "nonce": code.nonce,
+        "iss": ISSUER, "azp": code.client_id, "aud": code.client_id, "iat": t, "exp": t + 3600, "nonce": code.nonce,
     })
     .as_object()
     .cloned()
