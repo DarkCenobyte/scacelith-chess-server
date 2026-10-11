@@ -316,8 +316,8 @@ limits counts 5; limits counted per player never count), connections refused bef
 malformed requests. A blocked client's requests on connections already open get 429
 `rate_limited` with the time left and `Connection: close`, and its new connections are closed
 before TLS (`TLS_MODE=native`); its WebSocket connections already open are kept. Addresses in
-`ABUSE_EXEMPT` skip this layer, but not the account budget or the endpoint limits. Details: the
-README, "Protection against abuse".
+`ABUSE_EXEMPT` skip this layer, but not the account budget or the endpoint limits. Details:
+[ADMINISTRATION.md](ADMINISTRATION.md#protection-against-abuse).
 
 **Account budget.** Every request that carries a valid session token (on the endpoints marked
 **session** or **optional** in section 2) also counts against its account: `USER_RATE_PER_MIN`

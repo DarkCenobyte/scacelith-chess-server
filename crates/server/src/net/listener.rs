@@ -68,7 +68,7 @@ pub fn listen_hint(code: Option<&str>, port: u16, exe: &str) -> Option<String> {
     Some(format!(
         "Cannot listen on port {port} ({code}): ports below 1024 need the CAP_NET_BIND_SERVICE capability. Either \
          run the server with systemd and give the unit AmbientCapabilities=CAP_NET_BIND_SERVICE and \
-         CapabilityBoundingSet=CAP_NET_BIND_SERVICE (README, \"Running as a service\"); or give the server binary the \
+         CapabilityBoundingSet=CAP_NET_BIND_SERVICE (docs/ADMINISTRATION.md, \"Running as a service\"); or give the server binary the \
          capability: sudo setcap cap_net_bind_service=+ep {exe} (again after each upgrade of the binary); or let \
          unprivileged processes bind it: sysctl -w net.ipv4.ip_unprivileged_port_start={port} (and in /etc/sysctl.d/ \
          to keep it); or choose a port of 1024 or above with API_PORT (and PUBLIC_API_PORT behind a port mapping)."

@@ -21,8 +21,8 @@ This guide installs the server as a systemd service on a Linux host, from the ex
 
 Requirements: x86-64 Linux with systemd 253 or later (Debian 13, Ubuntu 24.04, Fedora 38 and
 later); for systemd 252 (Debian 12, RHEL 9) see [Older systemd](#older-systemd). Optional: the
-Stockfish 19 binary for the anti-cheat analysis (see the [README](../README.md) and
-[ANTICHEAT.md](ANTICHEAT.md)) and an SMTP account for e-mail.
+Stockfish 19 binary for the anti-cheat analysis (see
+[ADMINISTRATION.md](ADMINISTRATION.md#moderation-and-anti-cheat) and [ANTICHEAT.md](ANTICHEAT.md)) and an SMTP account for e-mail.
 
 ## 1. Build and install the binary
 
@@ -31,7 +31,7 @@ built below, alone and in an archive with these docs, `.env.example` and the `de
 files; check a download before installing it (GitHub CLI):
 
 ```sh
-gh attestation verify scacelith-server-0.9.1-x86_64-linux-musl --repo DarkCenobyte/scacelith-chess-server
+gh attestation verify scacelith-server-1.0.0-x86_64-linux-musl --repo DarkCenobyte/scacelith-chess-server
 sha256sum -c SHA256SUMS --ignore-missing
 ```
 
@@ -122,7 +122,7 @@ service through its group. The server re-reads them on `systemctl reload`, and a
 files every 10 seconds and reloads them after a change. A certificate it cannot load (unreadable
 file, bad PEM, a key that does not match) is refused and logged at error level, and the current
 one stays in use. For a server among friends with a self-signed certificate, or behind a reverse
-proxy (`TLS_MODE=proxy`), see the TLS section of the [README](../README.md).
+proxy (`TLS_MODE=proxy`), see [ADMINISTRATION.md](ADMINISTRATION.md#tls-certificates).
 
 With Let's Encrypt and certbot (`--standalone` needs port 80 free and open during issuance and
 renewals; `--webroot` or a DNS challenge avoid that):
