@@ -21,12 +21,17 @@
 //!   a player can still end a game on a host far behind;
 //! * a lifecycle message (a connection attached or detached, a game created or cancelled, a
 //!   sanction's forfeit, the stats, the shutdown) is never refused: losing it would leave a
-//!   player bound to a closed connection or lose a game. Its sources are bounded (each
-//!   connection attaches and detaches at most a few games, under `MAX_CONNECTIONS` and the TLS
-//!   gate; the lobby creates games only on hosts that are not busy, with its own requests in
-//!   flight bounded per connection; one stats or shutdown request per caller at a time), and the
-//!   reserve is sized for them. One beyond [`INBOX_MAX`] + [`INBOX_RESERVE`] is still delivered,
-//!   and counted (`scacelith_game_inbox_over_reserve_total`).
+//!   player bound to a closed connection or lose a game. Its sources are bounded: the lobby
+//!   creates games only on hosts that are not busy, with its own requests in flight bounded per
+//!   connection; one stats or shutdown request per caller at a time; and the attaches and
+//!   detaches are counted per player and game, not per connection: while [`LINK_PENDING_MAX`]
+//!   of them wait for one player's game (an earlier connection's attach and detach), a newer
+//!   attach is not posted but waits in its connection, which tries it again
+//!   (`HostHandle::attach`). A player who reconnects over and over to a host that does not catch
+//!   up therefore adds nothing to its inbox: what waits for a player's game is at most
+//!   [`LINK_PENDING_MAX`] messages and the detach of each of the player's connections still
+//!   attached to it, whatever the number of reconnections. One beyond [`INBOX_MAX`] +
+//!   [`INBOX_RESERVE`] is still delivered, and counted (`scacelith_game_inbox_over_reserve_total`).
 //!
 //! The inbox therefore holds at most [`INBOX_MAX`] cosmetic messages and requests, and
 //! [`INBOX_MAX`] + [`INBOX_RESERVE`] messages while the lifecycle sources keep their bounds. The
@@ -35,9 +40,13 @@
 //! host's beat. The counts are exported every beat (`scacelith_game_inbox_messages` and
 //! `scacelith_journal_pending_bytes`, per shard).
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use parking_lot::Mutex;
+
 use super::metrics;
+use crate::ids::{GameId, UserId};
 
 /// Gestures that may wait in a host's inbox: about 170 ms of the gestures of 6,000 games whose
 /// players all move all the time (4 per second each). A host that far behind drops the stale ones
@@ -56,6 +65,13 @@ pub const INBOX_MAX: usize = 2 * INBOX_BUSY;
 /// Messages above [`INBOX_MAX`] that only the requests ending a game and the lifecycle messages
 /// may take (see the module documentation): the attach and detach of 8,192 reconnecting players.
 pub const INBOX_RESERVE: usize = INBOX_BUSY;
+
+/// Attach and detach messages of one player's game that may wait in a host's inbox before a newer
+/// attach of that player's game waits in its connection instead (see the module documentation):
+/// those of one earlier connection, its attach and its detach. A player who comes back while the
+/// host lags behind is attached at once; one who comes back again before the host handled the
+/// first return waits for it.
+pub const LINK_PENDING_MAX: usize = 2;
 
 /// Journal bytes not handed to the I/O thread from which a host takes no new game: minutes of
 /// records of a busy shard whose disk does not answer.
@@ -134,6 +150,11 @@ pub(super) struct Backlog {
     /// Lifecycle messages admitted beyond [`INBOX_MAX`] + [`INBOX_RESERVE`] since the host
     /// started.
     over_reserve: AtomicU64,
+    /// Attach and detach messages waiting, by player's game (an entry only while one waits).
+    links: Mutex<HashMap<(GameId, UserId), usize>>,
+    /// Attaches not posted since the host started: [`LINK_PENDING_MAX`] messages of the same
+    /// player's game were waiting.
+    attaches_deferred: AtomicU64,
     /// Journal bytes not handed to the I/O thread, as of the latest beat.
     journal_pending: AtomicUsize,
 }
@@ -178,12 +199,60 @@ impl Backlog {
         }
     }
 
+    /// An attach of `user` to `game` is about to be posted: false (nothing counted) while
+    /// [`LINK_PENDING_MAX`] attach and detach messages of that player's game wait (counted as
+    /// deferred: the connection tries again).
+    pub(super) fn admit_attach(&self, game: GameId, user: UserId) -> bool {
+        let mut links = self.links.lock();
+        let waiting = links.entry((game, user)).or_insert(0);
+        if *waiting >= LINK_PENDING_MAX {
+            drop(links);
+            self.attaches_deferred.fetch_add(1, Ordering::Relaxed);
+            metrics::attach_deferred();
+            return false;
+        }
+        *waiting += 1;
+        true
+    }
+
+    /// A detach of `user` from `game` is about to be posted (never refused).
+    pub(super) fn admit_detach(&self, game: GameId, user: UserId) {
+        *self.links.lock().entry((game, user)).or_insert(0) += 1;
+    }
+
     /// A message left the inbox: taken by the actor, or never posted (the host is gone).
-    pub(super) fn taken(&self, gesture: bool) {
+    /// `link`: the player's game of an attach or a detach.
+    pub(super) fn taken(&self, gesture: bool, link: Option<(GameId, UserId)>) {
         self.messages.fetch_sub(1, Ordering::Relaxed);
         if gesture {
             self.gestures.fetch_sub(1, Ordering::Relaxed);
         }
+        if let Some(key) = link {
+            let mut links = self.links.lock();
+            if let Some(waiting) = links.get_mut(&key) {
+                *waiting = waiting.saturating_sub(1);
+                if *waiting == 0 {
+                    links.remove(&key);
+                }
+            }
+        }
+    }
+
+    /// Attach and detach messages of `user`'s `game` waiting.
+    #[cfg(test)]
+    pub(super) fn links(&self, game: GameId, user: UserId) -> usize {
+        self.links.lock().get(&(game, user)).copied().unwrap_or(0)
+    }
+
+    /// Player's games with an attach or a detach waiting.
+    #[cfg(test)]
+    pub(super) fn linked_games(&self) -> usize {
+        self.links.lock().len()
+    }
+
+    /// Attaches not posted since the host started (their connections tried them again).
+    pub(super) fn attaches_deferred(&self) -> u64 {
+        self.attaches_deferred.load(Ordering::Relaxed)
     }
 
     /// Messages waiting.

@@ -131,8 +131,8 @@ jobs:
             --target "$TARGET" --override-filename sbom
           jq -e '.bomFormat == "CycloneDX" and .serialNumber and .specVersion' crates/server/sbom.json
 
-      # The archive holds the server, its licence, the README and what docs/DEPLOY.md installs it
-      # with (the configuration template and reference, the systemd files).
+      # The archive holds the server, its licence, the README, docs/ADMINISTRATION.md and what
+      # docs/DEPLOY.md installs it with (the configuration template and reference, the systemd files).
       - name: Package
         env:
           COMMIT: ${{ github.sha }}
@@ -144,7 +144,7 @@ jobs:
           dir="$stage/$name"
           mkdir -p "$dir/docs" dist
           cp "target/$TARGET/release/scacelith-server" LICENSE README.md .env.example "$dir/"
-          cp docs/DEPLOY.md docs/CONFIG.md "$dir/docs/"
+          cp docs/DEPLOY.md docs/ADMINISTRATION.md docs/CONFIG.md "$dir/docs/"
           cp -r deploy "$dir/"
           cat > "$dir/BUILD.txt" <<EOF
           scacelith-server $VERSION, static x86-64 Linux build ($TARGET)
@@ -229,8 +229,8 @@ jobs:
           cat > notes.md <<EOF
           A static x86-64 Linux build of the server, which runs on any distribution (see
           [docs/DEPLOY.md](https://github.com/$GH_REPO/blob/$TAG/docs/DEPLOY.md)).
-          \`$name.tar.gz\` holds the binary with its licence, the README, the deployment and
-          configuration docs, \`.env.example\` and the systemd files; \`$name\` is the binary alone, and
+          \`$name.tar.gz\` holds the binary with its licence, the README, the deployment,
+          administration and configuration docs, \`.env.example\` and the systemd files; \`$name\` is the binary alone, and
           \`scacelith-server-$VERSION.cdx.json\` its software bill of materials (CycloneDX).
 
           Every file is built by the release workflow from tag \`$TAG\`; the build provenance of the

@@ -9,7 +9,13 @@
 //!   ban read, then the lobby's presence claim decides (banned, server full, admitted with the
 //!   game in progress); the token is validated again (a revocation during the claim found no
 //!   connection to close), then `Welcome` (negotiated `minor` and `caps`) is written and the game
-//!   in progress attached. Up to 8 messages received meanwhile are handled after the `Welcome`.
+//!   in progress attached (once its host has handled the attach and detach of the player's
+//!   previous connection, when both still wait there: tried again every 200 ms, so that a player
+//!   reconnecting over and over leaves a bounded number of messages to a host that lags behind;
+//!   meanwhile the connection's requests for that game are not posted, since one would bind the
+//!   connection there: a `Resync` waits for the attach's snapshot, the others get
+//!   `Error{RateLimited}`).
+//!   Up to 8 messages received meanwhile are handled after the `Welcome`.
 //! * **Session** ([`session`]): per message, a token bucket (`WS_MSG_RATE`/`WS_MSG_BURST`; over it
 //!   the message is dropped with `Error{RateLimited}` at most once a second, more than
 //!   max(10, burst) drops in 10 s is a flood), a type byte of the server's range (0x80-0xFF) is a
@@ -64,6 +70,9 @@ use scacelith_protocol::ErrorCode;
 pub(crate) const MAX_PENDING_HELLO: usize = 8;
 /// Games a connection is attached to at most (the oldest is detached).
 pub(crate) const MAX_GAMES_PER_CONN: usize = 8;
+/// How often a connection tries again an attach its game's host deferred (`GameHosts::attach`:
+/// the host had not handled the player's earlier connection to the game yet).
+pub(crate) const ATTACH_RETRY: Duration = Duration::from_millis(200);
 /// Cap of a round-trip sample and of the average (ms).
 pub(crate) const RTT_CAP_MS: f64 = 2000.0;
 /// Least gap between two answered client pings (ms).

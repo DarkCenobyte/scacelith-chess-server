@@ -314,7 +314,7 @@ pub static KEYS: &[KeySpec] = &[
         Int,
         "Length of the kernel queue of new connections not yet accepted (listen backlog), which absorbs \
          reconnection bursts. The kernel caps it at net.core.somaxconn (Linux), so raise that sysctl as well \
-         (README, kernel settings).",
+         (docs/ADMINISTRATION.md, kernel settings).",
     )
     .default("2048")
     .range(128, 65_535),

@@ -115,6 +115,9 @@ pub struct Counters {
     pub inbox_refused: BTreeMap<&'static str, u64>,
     /// Lifecycle messages delivered beyond the inbox's reserve.
     pub inbox_over_reserve: u64,
+    /// Attaches a connection tried again later: the inbox held an earlier connection's attach and
+    /// detach of the same player's game.
+    pub attaches_deferred: u64,
     /// Game requests refused, by error code name.
     pub rejects: BTreeMap<&'static str, u64>,
     /// Games ended, by end reason name.
@@ -149,6 +152,7 @@ struct Global {
     inbox: GaugeVec,
     inbox_refused: [Counter; 6],
     inbox_over_reserve: Counter,
+    attaches_deferred: Counter,
 }
 
 static GLOBAL: LazyLock<Global> = LazyLock::new(|| {
@@ -242,6 +246,11 @@ static GLOBAL: LazyLock<Global> = LazyLock::new(|| {
             "Lifecycle messages (attach, detach, create, cancel, forfeit, stats, shutdown) delivered to a game \
              host whose inbox already held INBOX_MAX + INBOX_RESERVE messages (never refused)",
         ),
+        attaches_deferred: metrics::counter(
+            "scacelith_game_attach_deferred_total",
+            "Attaches of a player's game not posted to its game host while an earlier connection's attach and \
+             detach of that game still waited in its inbox (LINK_PENDING_MAX): the connection tries again",
+        ),
     }
 });
 
@@ -267,6 +276,12 @@ pub(super) fn inbox_refused(kind: Refusal) {
 /// A lifecycle message delivered beyond the inbox's reserve.
 pub(super) fn inbox_over_reserve() {
     GLOBAL.inbox_over_reserve.inc();
+}
+
+/// An attach deferred to its connection (counted by the host's `Backlog`, which the host's
+/// [`Counters`] include).
+pub(super) fn attach_deferred() {
+    GLOBAL.attaches_deferred.inc();
 }
 
 /// A game request refused at the door of a host's inbox, as the host would count a refusal

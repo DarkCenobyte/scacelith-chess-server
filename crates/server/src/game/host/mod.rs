@@ -22,7 +22,9 @@
 //! [`INBOX_MAX`], are dropped before it; a game request beyond [`INBOX_MAX`] (one that ends a game
 //! beyond [`INBOX_MAX`] + [`INBOX_RESERVE`]) is answered `Error{RateLimited}` at once; the
 //! lifecycle messages (attach, detach, create, cancel, forfeit, stats, shutdown) are always
-//! delivered.
+//! delivered, but an attach is not posted while [`LINK_PENDING_MAX`] attach and detach messages
+//! of the same player's game wait ([`HostHandle::attach`]: its connection tries again), so that a
+//! player's reconnections cannot pile up in the inbox of a host that does not catch up.
 //!
 //! [`HostHandle`] is the cheap, cloneable way in: every method posts to the inbox and returns
 //! (only [`HostHandle::create`] waits for the game id). The realtime connection tasks call
@@ -59,7 +61,7 @@ use tokio::time::MissedTickBehavior;
 
 pub use self::commit::{CommitFuture, GameStore, JOURNAL_GATE_TRIES, LookupFuture, MAX_BACKOFF_MS, Stored};
 pub use self::inbox::{
-    GESTURE_INBOX_MAX, INBOX_BUSY, INBOX_MAX, INBOX_RESERVE, JOURNAL_PENDING_BUSY, Refusal,
+    GESTURE_INBOX_MAX, INBOX_BUSY, INBOX_MAX, INBOX_RESERVE, JOURNAL_PENDING_BUSY, LINK_PENDING_MAX, Refusal,
 };
 pub use self::metrics::{Counters, GestureDrop, RecoveryDrop};
 pub use self::shard::{Recovery, RulesFactory, SLOT_MS, Shard, ShardDeps, ShardSettings};
@@ -182,6 +184,7 @@ impl HostStats {
             }
         }
         counters.inbox_over_reserve = backlog.over_reserve();
+        counters.attaches_deferred = backlog.attaches_deferred();
         HostStats {
             shard: shard.shard,
             games: shard.games(),
@@ -197,23 +200,76 @@ impl HostStats {
 
 /// A message of a host's inbox.
 enum Msg {
-    Client { user: UserId, msg: ClientMsg, ep: Endpoint, recv_at: f64 },
-    Gesture { game: GameId, user: UserId, frame: Bytes },
-    Stance { game: GameId, user: UserId, frame: Bytes },
-    Attach { game: GameId, user: UserId, ep: Endpoint },
-    Detach { game: GameId, user: UserId, conn: ConnId },
-    Rtt { game: GameId, user: UserId, rtt_ms: u32 },
-    ForfeitUser { user: UserId },
-    DeclineRematch { game: GameId, user: UserId },
-    Create { game: NewGame, reply: oneshot::Sender<Result<GameId, ErrorCode>> },
-    Cancel { game: GameId },
-    Stats { reply: oneshot::Sender<HostStats> },
-    Shutdown { reply: oneshot::Sender<()> },
+    Client {
+        user: UserId,
+        msg: ClientMsg,
+        ep: Endpoint,
+        recv_at: f64,
+    },
+    Gesture {
+        game: GameId,
+        user: UserId,
+        frame: Bytes,
+    },
+    Stance {
+        game: GameId,
+        user: UserId,
+        frame: Bytes,
+    },
+    Attach {
+        game: GameId,
+        user: UserId,
+        ep: Endpoint,
+    },
+    Detach {
+        game: GameId,
+        user: UserId,
+        conn: ConnId,
+    },
+    Rtt {
+        game: GameId,
+        user: UserId,
+        rtt_ms: u32,
+    },
+    ForfeitUser {
+        user: UserId,
+    },
+    DeclineRematch {
+        game: GameId,
+        user: UserId,
+    },
+    Create {
+        game: NewGame,
+        reply: oneshot::Sender<Result<GameId, ErrorCode>>,
+    },
+    Cancel {
+        game: GameId,
+    },
+    Stats {
+        reply: oneshot::Sender<HostStats>,
+    },
+    Shutdown {
+        reply: oneshot::Sender<()>,
+    },
+    /// The actor says it entered, then waits for `release` (tests: a host that does not catch up).
+    #[cfg(test)]
+    Hold {
+        entered: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    },
 }
 
 impl Msg {
     fn is_gesture(&self) -> bool {
         matches!(self, Msg::Gesture { .. })
+    }
+
+    /// The player's game of an attach or a detach (counted per player's game: `inbox`).
+    fn link(&self) -> Option<(GameId, UserId)> {
+        match self {
+            Msg::Attach { game, user, .. } | Msg::Detach { game, user, .. } => Some((*game, *user)),
+            _ => None,
+        }
     }
 
     /// The budget of the message at the inbox's door (`inbox`).
@@ -237,6 +293,8 @@ impl Msg {
             | Msg::Cancel { .. }
             | Msg::Stats { .. }
             | Msg::Shutdown { .. } => Class::Lifecycle,
+            #[cfg(test)]
+            Msg::Hold { .. } => Class::Lifecycle,
         }
     }
 }
@@ -291,7 +349,7 @@ impl HostHandle {
     fn send(&self, msg: Msg) {
         // The host is gone only after the shutdown: nothing to do then.
         if let Err(mpsc::error::SendError(msg)) = self.tx.send(msg) {
-            self.shared.backlog.taken(msg.is_gesture());
+            self.shared.backlog.taken(msg.is_gesture(), msg.link());
         }
     }
 
@@ -327,14 +385,48 @@ impl HostHandle {
     }
 
     /// Binds the player's connection to the game and sends it a `GameSnapshot`
-    /// (`Error{NotInGame}` when the game is not here or the user does not play it).
-    pub fn attach(&self, game: GameId, user: UserId, ep: Endpoint) {
+    /// (`Error{NotInGame}` when the game is not here or the user does not play it). Returns
+    /// false, posting nothing, while [`LINK_PENDING_MAX`] attach and detach messages of this
+    /// player's game wait for the host (an earlier connection's attach and detach): the
+    /// connection tries again later, and does not detach a game it did not attach.
+    pub fn attach(&self, game: GameId, user: UserId, ep: Endpoint) -> bool {
+        if !self.shared.backlog.admit_attach(game, user) {
+            return false;
+        }
         self.post(Msg::Attach { game, user, ep });
+        true
     }
 
     /// The player's connection `conn` closed (ignored when another connection replaced it).
     pub fn detach(&self, game: GameId, user: UserId, conn: ConnId) {
+        self.shared.backlog.admit_detach(game, user);
         self.post(Msg::Detach { game, user, conn });
+    }
+
+    /// Attach and detach messages of `user`'s `game` waiting in the inbox, and the player's games
+    /// with one waiting (tests).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn links(&self, game: GameId, user: UserId) -> (usize, usize) {
+        (self.shared.backlog.links(game, user), self.shared.backlog.linked_games())
+    }
+
+    /// Attaches deferred to their connections since the host started (tests; also in the stats).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn attaches_deferred(&self) -> u64 {
+        self.shared.backlog.attaches_deferred()
+    }
+
+    /// Stops the actor until the returned sender is used or dropped (tests: a host that does not
+    /// catch up). Returns once the actor waits.
+    #[cfg(test)]
+    pub(crate) async fn hold(&self) -> oneshot::Sender<()> {
+        let (entered, waits) = oneshot::channel();
+        let (release, held) = oneshot::channel();
+        self.post(Msg::Hold { entered, release: held });
+        waits.await.expect("the host runs");
+        release
     }
 
     /// A round-trip measurement of the player (dropped while [`INBOX_MAX`] messages wait: the
@@ -742,6 +834,8 @@ fn handle(shard: &mut Shard, msg: Msg) -> Option<oneshot::Sender<()>> {
             let _ = reply.send(HostStats::of(shard));
         }
         Msg::Shutdown { reply } => return Some(reply),
+        #[cfg(test)]
+        Msg::Hold { .. } => {}
     }
     None
 }
@@ -759,6 +853,15 @@ fn shielded<R>(shard: &mut Shard, what: &str, f: impl FnOnce(&mut Shard) -> R) -
 
 /// Handles one message; `Break` once the host shut down.
 async fn step(shard: &mut Shard, msg: Msg) -> ControlFlow<()> {
+    #[cfg(test)]
+    let msg = match msg {
+        Msg::Hold { entered, release } => {
+            let _ = entered.send(());
+            let _ = release.await;
+            return ControlFlow::Continue(());
+        }
+        msg => msg,
+    };
     let Some(Some(reply)) = shielded(shard, "game host message failed", |s| handle(s, msg)) else {
         return ControlFlow::Continue(());
     };
@@ -775,7 +878,7 @@ struct Inbox {
 
 impl Inbox {
     fn taken(&self, msg: Msg) -> Msg {
-        self.shared.backlog.taken(msg.is_gesture());
+        self.shared.backlog.taken(msg.is_gesture(), msg.link());
         msg
     }
 
