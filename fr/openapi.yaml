@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: API HTTPS du serveur Scacelith
-  version: "1.0.0"
+  version: "1.1.0"
   summary: L’API HTTPS de tout serveur Scacelith, le serveur officiel comme les serveurs communautaires.
   description: |-
     Tout serveur Scacelith, qu’il s’agisse du serveur officiel `caissa.scacelith.com` ou d’un serveur communautaire, répond à cette API HTTPS. Le jeu s’en sert pour tout ce qui se passe en dehors des parties elles-mêmes : l’inscription et la connexion (double authentification et connexion Google comprises), la page du compte, l’historique des parties, les téléchargements PGN et les GIF animés des parties, les appareils connectés, le téléchargement des données, la suppression du compte et les signalements.
@@ -16,7 +16,7 @@ info:
     - Serveur communautaire : `https://<SERVER_PUBLIC_HOST>[:<port>]/api/v1`. `API_PORT` vaut 443 par défaut ; derrière un NAT ou un proxy, le port qu’utilisent les joueurs est `PUBLIC_API_PORT`.
     - Le WebSocket du jeu est sur le même port par défaut (`WS_PORT` le déplace ; `GET /info` indique au client où il se trouve).
     - HTTP/1.1 sur TLS. Avec `TLS_MODE=proxy`, un proxy inverse placé devant le serveur se charge de TLS. `TLS_MODE=off` (HTTP en clair) est réservé au développement local.
-    - Les pages HTML ouvertes depuis les liens des e-mails (`/verify-email`, `/reset-password`, `/confirm-email-change`) se trouvent à la racine du serveur, hors de `/api/v1`. Les points de terminaison de santé répondent à la fois à la racine et sous `/api/v1`. La connexion Google n’a aucune page sur le serveur : Google renvoie le navigateur vers le jeu lui-même, sur `127.0.0.1`.
+    - Les pages HTML ouvertes depuis les liens des e-mails (`/verify-email`, `/reset-password`, `/confirm-email-change`) se trouvent à la racine du serveur, hors de `/api/v1`. Les points de terminaison de santé répondent à la fois à la racine et sous `/api/v1`. La connexion Google n’a aucune page sur le serveur : Google renvoie le navigateur vers le jeu lui-même, sur `127.0.0.1`, ou vers une page du site web qui l’a lancée (`GOOGLE_WEB_REDIRECT_URI`).
     - Une barre oblique finale est ignorée (`/api/v1/info/` équivaut à `/api/v1/info`), et les paramètres de chemin sont décodés (un paramètre dont l’encodage URL n’est pas valide reçoit 400 `invalid_request`).
 
     ## Requêtes
@@ -123,7 +123,7 @@ info:
     | `gif_user_min`, `gif_user_hour` | `GIF_USER_RENDERS_PER_MIN` (4) / min et `GIF_USER_RENDERS_PER_HOUR` (30) / heure, partagées | joueur | les deux mêmes, seulement quand le GIF doit être fabriqué (pas pris dans le cache) |
     | `gif_ip_min`, `gif_ip_hour` | `GIF_IP_RENDERS_PER_MIN` (12) / min et `GIF_IP_RENDERS_PER_HOUR` (120) / heure, partagées | client (tous ses comptes ensemble), 3 fois plus par /48 IPv6 | les mêmes, dans les mêmes conditions |
     | `reports` | 30 / heure | joueur | `POST /reports` |
-    | `sso_start` | 30 / 10 min, partagée | client, et 90 par /48 IPv6 | `POST /auth/sso/google/start` |
+    | `sso_start` | 30 / 10 min, partagée | client, et 90 par /48 IPv6 | `POST /auth/sso/google/start`, `POST /auth/sso/google/web/start` (en commun) |
     | `sso_finish` | 30 / min | client | `POST /auth/sso/google/finish` |
     | `page` | 60 / min | client | `GET /verify-email`, `/reset-password`, `/confirm-email-change` |
 
@@ -214,7 +214,7 @@ tags:
   - name: google-sign-in
     x-displayName: Connexion Google
     description: |-
-      Proposée quand `GET /info` indique `sso.google: true` ; sinon, chacun des points de terminaison ci-dessous répond 404 `sso_disabled`. Le jeu se connecte par le navigateur du système selon le flux des applications installées de la RFC 8252 (un client de type « Application de bureau ») : Google renvoie le navigateur vers un écouteur du jeu sur `127.0.0.1`, jamais vers ce serveur, et le jeu ne voit jamais d’identifiants Google.
+      Proposée quand `GET /info` indique `sso.google: true` ; sinon, chacun des points de terminaison ci-dessous répond 404 `sso_disabled`. Un site web se connecte de la même façon avec son propre client quand `sso.googleWeb` vaut true (ci-dessous, **Sur un site web**). Le jeu se connecte par le navigateur du système selon le flux des applications installées de la RFC 8252 (un client de type « Application de bureau ») : Google renvoie le navigateur vers un écouteur du jeu sur `127.0.0.1`, jamais vers ce serveur, et le jeu ne voit jamais d’identifiants Google.
 
       1. Le client écoute sur `127.0.0.1:0` (le système choisit le port) et crée une paire PKCE : un `codeVerifier` de 43 à 128 caractères `[A-Za-z0-9._~-]` et `codeChallenge = BASE64URL(SHA-256(codeVerifier))`, qui compte 43 caractères, sans remplissage.
       2. `POST /auth/sso/google/start`, avec le défi PKCE et le port, renvoie l’URL Google et le `state` de la tentative. Le client vérifie l’URL (voir plus bas) et l’ouvre dans le navigateur.
@@ -234,6 +234,15 @@ tags:
       La connexion Google ne fonctionne donc que pour les joueurs qui ont ajouté le serveur exactement sous `SERVER_PUBLIC_HOST` et son port public d’API.
 
       **Ce que le jeu vérifie avant d’ouvrir le navigateur.** L’`authUrl` commence exactement par `https://accounts.google.com/o/oauth2/v2/auth?`, ne contient que de l’ASCII imprimable et fait moins de 4096 caractères, et sa chaîne de requête contient exactement un `response_type=code`, exactement un `redirect_uri` égal à l’URI que le jeu calcule à partir de son port et de son étiquette d’origine, exactement un `state` égal au `state` de la réponse, `code_challenge_method=S256` et un `code_challenge` de 43 caractères. Sinon, le jeu arrête son écouteur et n’ouvre rien. Il n’envoie `finish` et `link` qu’au serveur qui a répondu à `start`.
+
+      **Sur un site web.** Un site web (le site officiel : <https://scacelith.com/>) se connecte avec un client de type « Application Web » du même projet Google (`GOOGLE_WEB_CLIENT_ID`). Google renvoie le navigateur vers une page du site configurée par l’opérateur (`GOOGLE_WEB_REDIRECT_URI`, inscrite dans les « URI de redirection autorisés » du client), et cette page envoie le code à `finish` ; ici non plus, le serveur n’accepte aucun URI de redirection venant du client.
+
+      1. La page crée une paire PKCE comme ci-dessus, conserve le vérificateur dans l’onglet (`sessionStorage`) et envoie `POST /auth/sso/google/web/start` avec le défi.
+      2. Elle vérifie `authUrl` comme le fait le jeu, sauf que le `redirect_uri` doit être une page de sa propre origine, puis navigue vers cette URL. Aucun script Google n’est chargé.
+      3. Google envoie le navigateur vers `GOOGLE_WEB_REDIRECT_URI?code=...&state=...`. La page n’accepte que le `state` de la réponse à la requête de démarrage et n’envoie rien après une redirection avec `error=`.
+      4. `finish`, `link` et `complete` se déroulent ensuite comme pour le jeu. La tentative retient qu’un site web l’a lancée : le code est échangé au moyen du client et de la page du site web, et le jeton d’identité doit désigner ce client (un code ou un jeton d’identité du client du jeu échoue avec 502 `sso_failed`, et inversement).
+
+      Un compte Google mène au même compte Scacelith depuis le jeu et depuis le site web : l’association conserve l’identifiant de sujet de Google (`sub`), qui désigne le compte Google quel que soit le client. L’origine du site web doit figurer dans `CORS_ORIGINS` (sinon, `check-config` émet un avertissement).
 
       **Le compte auquel mène la connexion Google :** le compte déjà associé à ce compte Google ; sinon, un compte actif ayant l’adresse confirmée par Google (s’il a un mot de passe, `finish` répond `needsPassword` et l’association n’est enregistrée qu’une fois son mot de passe validé, puis son second facteur s’il est activé ; s’il n’en a pas, 409 `sso_account_exists`) ; sinon, un nouveau compte (`needsUsername`). Un compte Google n’est jamais associé à un compte existant sur la seule foi de son adresse. L’adresse du compte reçoit un e-mail quand la connexion Google crée un compte et quand elle est ajoutée à un compte existant.
   - name: sessions
@@ -616,7 +625,7 @@ paths:
           description: '`sso_already_linked` : seulement après l’étape du mot de passe d’une association Google ; le compte Google a été associé à un autre compte entre-temps.'
         '410':
           $ref: '#/components/responses/Gone'
-          description: '`sso_expired` : seulement après l’étape du mot de passe d’une association Google ; le compte a changé entre-temps, recommencez depuis le jeu.'
+          description: '`sso_expired` : seulement après l’étape du mot de passe d’une association Google ; le compte a changé entre-temps, recommencez la connexion.'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '414':
@@ -630,7 +639,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` avec `retryAfter: 1` : la base de données est restée verrouillée (après une étape d’association Google, rien n’a été associé : recommencez depuis le jeu). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
+          description: '`server_busy` avec `retryAfter: 1` : la base de données est restée verrouillée (après une étape d’association Google, rien n’a été associé : recommencez la connexion). `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/logout:
     post:
       operationId: logOut
@@ -939,6 +948,64 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
           description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
+  /auth/sso/google/web/start:
+    post:
+      operationId: startGoogleWebSignIn
+      tags:
+        - google-sign-in
+      summary: Démarrer une connexion Google sur un site web
+      description: |-
+        Démarre, pour un site web, une tentative de connexion Google liée au défi PKCE de sa page. La réponse est la même que pour le jeu : l’URL Google vers laquelle naviguer, et le `state` de la tentative ; la tentative est valable 10 minutes. Proposé quand `GET /info` indique `sso.googleWeb: true`.
+
+        `authUrl` contient le `client_id` du site web et `redirect_uri=GOOGLE_WEB_REDIRECT_URI`, avec les mêmes autres paramètres que pour le jeu. La page vérifie cette URL avant d’y naviguer (voir **Sur un site web** dans la description du tag).
+
+        **Limite :** `sso_start`, partagée avec la requête de démarrage du jeu.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoWebStartRequest'
+            example:
+              codeChallenge: 6e7diXEYxG7OTYw7STfNOltEeLxAilPthC_txzaE0xA
+      responses:
+        '200':
+          description: La tentative.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoStartAnswer'
+              example:
+                attemptId: sso_ogvVEL75n7q90NIFsh-4zXVt-izc3WRbghsd6HDOtNQ
+                authUrl: https://accounts.google.com/o/oauth2/v2/auth?client_id=1234567890-web.apps.googleusercontent.com&redirect_uri=https%3A%2F%2Fscacelith.com%2Faccount%2Fgoogle%2F&response_type=code&scope=openid%20email%20profile&state=yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ&nonce=gYIKKhwnz1AqWfFxOC3R-ZvCACw06q74fEMtGEOJQWU&code_challenge=ZfEI6iZjePTHbnbevupaD9O7GjBCzcL-GJu2XGOdFGc&code_challenge_method=S256&prompt=select_account
+                state: yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ
+                expiresIn: 600
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_request` : un `codeChallenge` manquant ou mal formé, ou tout autre champ (y compris `redirectPort`).'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`sso_disabled` : la connexion Google n’est pas proposée sur ce serveur, ou pas aux sites web.'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited` : la limite `sso_start` (partagée avec la requête de démarrage du jeu).'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy` (la base de données est restée verrouillée), `timeout`. Aussi `server_busy` avec `retryAfter` de 2 à 5 quand le serveur est très en retard (voir l’introduction) : la requête n’a pas été exécutée.'
   /auth/sso/google/finish:
     post:
       operationId: finishGoogleSignIn
@@ -946,7 +1013,7 @@ paths:
         - google-sign-in
       summary: Transmettre la réponse de Google au serveur
       description: |-
-        Transmet au serveur le `code` et le `state` que Google a envoyés à l’écouteur du jeu, avec l’identifiant de la tentative et le vérificateur PKCE. Un identifiant de tentative ne sert à rien sans le vérificateur, et le code ne sert à rien sans le vérificateur PKCE propre au serveur et son secret client.
+        Transmet au serveur le `code` et le `state` que Google a envoyés à l’écouteur du jeu ou à la page du site web, avec l’identifiant de la tentative et le vérificateur PKCE. Un identifiant de tentative ne sert à rien sans le vérificateur, et le code ne sert à rien sans le vérificateur PKCE propre au serveur et son secret client.
 
         Le serveur vérifie la tentative (inconnue, déjà utilisée ou expirée : 410), puis le vérificateur (un vérificateur erroné laisse la tentative utilisable), puis consomme la tentative, vérifie `state` et `iss`, échange le code auprès de Google et vérifie le jeton d’identité. La réponse (200) est l’une des suivantes :
 
@@ -1100,7 +1167,7 @@ paths:
           description: '`sso_already_linked` : le compte Google a été associé à un autre compte entre-temps.'
         '410':
           $ref: '#/components/responses/Gone'
-          description: '`sso_expired` : un ticket inconnu, déjà utilisé ou expiré, le 5e mot de passe erroné, un compte dont le statut ou l’adresse a changé depuis `finish`, ou dont le statut, l’adresse, le mot de passe ou la double authentification a changé pendant l’enregistrement de l’association. Recommencez depuis le jeu.'
+          description: '`sso_expired` : un ticket inconnu, déjà utilisé ou expiré, le 5e mot de passe erroné, un compte dont le statut ou l’adresse a changé depuis `finish`, ou dont le statut, l’adresse, le mot de passe ou la double authentification a changé pendant l’enregistrement de l’association. Recommencez la connexion.'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '414':
@@ -3349,7 +3416,7 @@ components:
             error: username_taken
             message: This username is already taken.
     Gone:
-      description: '`sso_expired` : la tentative ou le ticket de connexion Google est inconnu, déjà utilisé ou expiré ; recommencez depuis le jeu.'
+      description: '`sso_expired` : la tentative ou le ticket de connexion Google est inconnu, déjà utilisé ou expiré ; recommencez la connexion.'
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3464,7 +3531,7 @@ components:
             error: internal_error
             message: Internal server error.
     BadGateway:
-      description: '`sso_failed` : un `state` ou un `iss` erroné, ou Google a refusé le code ou envoyé un jeton d’identité dont la vérification échoue. L’erreur ne reprend jamais le texte de Google.'
+      description: '`sso_failed` : un `state` ou un `iss` erroné, ou Google a refusé le code ou envoyé un jeton d’identité dont la vérification échoue (y compris un code ou un jeton d’identité de l’autre client, celui du jeu ou celui du site web). L’erreur ne reprend jamais le texte de Google.'
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3788,10 +3855,14 @@ components:
           type: object
           required:
             - google
+            - googleWeb
           properties:
             google:
               type: boolean
-              description: Indique si la connexion Google est proposée.
+              description: Indique si la connexion Google est proposée au jeu.
+            googleWeb:
+              type: boolean
+              description: Indique si la connexion Google est aussi proposée à un site web (`POST /auth/sso/google/web/start`).
         mfa:
           type: boolean
           const: true
@@ -3863,6 +3934,7 @@ components:
         emailVerification: true
         sso:
           google: false
+          googleWeb: false
         mfa: true
         pow:
           register: 18
@@ -4226,6 +4298,16 @@ components:
           minimum: 1024
           maximum: 65535
           description: Le port de l’écouteur du client sur `127.0.0.1`.
+    SsoWebStartRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - codeChallenge
+      properties:
+        codeChallenge:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: Le défi PKCE S256 du `codeVerifier` de la page (`BASE64URL(SHA-256(codeVerifier))`).
     SsoFinishRequest:
       type: object
       additionalProperties: false

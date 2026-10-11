@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: واجهة HTTPS API لخادم Scacelith
-  version: "1.0.0"
+  version: "1.1.0"
   summary: 'واجهة HTTPS API المشتركة بين كل خوادم Scacelith: الخادم الرسمي والخوادم المجتمعية.'
   description: |-
     يستجيب لواجهة HTTPS API هذه كلُّ خادم Scacelith، سواء الخادم الرسمي `caissa.scacelith.com` أو أي خادم مجتمعي. وتستخدمها اللعبة في كل ما يقع خارج المباراة نفسها: إنشاء الحساب وتسجيل الدخول (بما في ذلك المصادقة الثنائية وGoogle)، وصفحة الحساب، وسجل المباريات، وتنزيل ملفات PGN وصور GIF المتحركة للمباريات، والأجهزة المسجَّل الدخول منها، وتنزيل البيانات، وحذف الحساب، والبلاغات.
@@ -16,7 +16,7 @@ info:
     - خادم مجتمعي: `https://<SERVER_PUBLIC_HOST>[:<port>]/api/v1`. قيمة `API_PORT` الافتراضية 443؛ وخلف NAT أو خادم وكيل، يكون المنفذ الذي يستخدمه اللاعبون هو `PUBLIC_API_PORT`.
     - يقع WebSocket الخاص باللعبة على المنفذ نفسه افتراضيًا (ينقله `WS_PORT` إلى منفذ آخر؛ ويُعلم `GET /info` العميلَ بمكانه).
     - HTTP/1.1 عبر TLS. مع `TLS_MODE=proxy` يُنهي خادمٌ وكيل عكسي اتصالَ TLS أمام الخادم. أما `TLS_MODE=off` (HTTP غير مشفَّر) فهو للتطوير المحلي فقط.
-    - صفحات HTML التي تُفتح من روابط رسائل البريد الإلكتروني (`/verify-email` و`/reset-password` و`/confirm-email-change`) موجودة في جذر الخادم، خارج `/api/v1`. وتستجيب نقاط نهاية فحص السلامة في الجذر وتحت `/api/v1` كليهما. وليست لتسجيل الدخول عبر Google صفحة على الخادم: يعيد Google المتصفح إلى اللعبة نفسها، على `127.0.0.1`.
+    - صفحات HTML التي تُفتح من روابط رسائل البريد الإلكتروني (`/verify-email` و`/reset-password` و`/confirm-email-change`) موجودة في جذر الخادم، خارج `/api/v1`. وتستجيب نقاط نهاية فحص السلامة في الجذر وتحت `/api/v1` كليهما. وليست لتسجيل الدخول عبر Google صفحة على الخادم: يعيد Google المتصفح إلى اللعبة نفسها، على `127.0.0.1`، أو إلى صفحة من موقع الويب الذي بدأه (`GOOGLE_WEB_REDIRECT_URI`).
     - تُتجاهَل الشرطة المائلة في آخر المسار (`/api/v1/info/` هو `/api/v1/info`)، ويُفكّ ترميز URL في معاملات المسار (والمعامل الذي ليس ترميز URL صالحًا يكون الرد عليه 400 `invalid_request`).
 
     ## الطلبات
@@ -123,7 +123,7 @@ info:
     | `gif_user_min`، `gif_user_hour` | `GIF_USER_RENDERS_PER_MIN` (4) / دقيقة و`GIF_USER_RENDERS_PER_HOUR` (30) / ساعة، مشترك | لاعب | نقطتا النهاية نفسهما، فقط حين يجب رسم صورة GIF (لا أخذها من ذاكرة التخزين المؤقت) |
     | `gif_ip_min`، `gif_ip_hour` | `GIF_IP_RENDERS_PER_MIN` (12) / دقيقة و`GIF_IP_RENDERS_PER_HOUR` (120) / ساعة، مشترك | عميل (كل حساباته مجتمعة)، و3 أضعاف ذلك لكل IPv6 /48 | نقطتا النهاية نفسهما، كما سبق |
     | `reports` | 30 / ساعة | لاعب | `POST /reports` |
-    | `sso_start` | 30 / 10 دقائق، مشترك | عميل، و90 لكل IPv6 /48 | `POST /auth/sso/google/start` |
+    | `sso_start` | 30 / 10 دقائق، مشترك | عميل، و90 لكل IPv6 /48 | `POST /auth/sso/google/start` و`POST /auth/sso/google/web/start` (معًا) |
     | `sso_finish` | 30 / دقيقة | عميل | `POST /auth/sso/google/finish` |
     | `page` | 60 / دقيقة | عميل | `GET /verify-email`، `/reset-password`، `/confirm-email-change` |
 
@@ -214,7 +214,7 @@ tags:
   - name: google-sign-in
     x-displayName: تسجيل الدخول عبر Google
     description: |-
-      يُتاح عندما يذكر `GET /info` القيمة `sso.google: true`؛ وإلا فإن كل نقطة نهاية أدناه تردّ بـ 404 `sso_disabled`. تسجّل اللعبة الدخول عبر متصفح النظام بتدفق التطبيقات المثبّتة الموصوف في RFC 8252 (عميل من نوع «تطبيق سطح المكتب»): يعيد Google المتصفح إلى مستمعٍ تابع للعبة على `127.0.0.1`، لا إلى هذا الخادم أبدًا، ولا ترى اللعبة أبدًا أي بيانات اعتماد لـ Google.
+      يُتاح عندما يذكر `GET /info` القيمة `sso.google: true`؛ وإلا فإن كل نقطة نهاية أدناه تردّ بـ 404 `sso_disabled`. ويسجّل موقع الويب الدخول بالطريقة نفسها بعميله الخاص عندما تكون قيمة `sso.googleWeb` هي true (أدناه، **على موقع ويب**). تسجّل اللعبة الدخول عبر متصفح النظام بتدفق التطبيقات المثبّتة الموصوف في RFC 8252 (عميل من نوع «تطبيق سطح المكتب»): يعيد Google المتصفح إلى مستمعٍ تابع للعبة على `127.0.0.1`، لا إلى هذا الخادم أبدًا، ولا ترى اللعبة أبدًا أي بيانات اعتماد لـ Google.
 
       1. يستمع العميل على `127.0.0.1:0` (يختار النظام المنفذ) وينشئ زوج PKCE: قيمة `codeVerifier` من 43 إلى 128 محرفًا من `[A-Za-z0-9._~-]`، و`codeChallenge = BASE64URL(SHA-256(codeVerifier))`، المكوّنة من 43 محرفًا بلا حشو.
       2. يعيد `POST /auth/sso/google/start`، مع التحدي والمنفذ، عنوان URL الخاص بـ Google وقيمة `state` الخاصة بالمحاولة. ويتحقق العميل من عنوان URL (انظر أدناه) ويفتحه في المتصفح.
@@ -234,6 +234,15 @@ tags:
       ولذلك لا يعمل تسجيل الدخول عبر Google إلا للاعبين الذين أضافوا الخادم باسم `SERVER_PUBLIC_HOST` ومنفذ API العام الخاص به بالضبط.
 
       **ما تتحقق منه اللعبة قبل فتح المتصفح.** يبدأ `authUrl` بـ `https://accounts.google.com/o/oauth2/v2/auth?` بالضبط، ويتكوّن من محارف ASCII قابلة للطباعة بطول أقل من 4096 محرفًا، ويحتوي استعلامه على `response_type=code` واحد بالضبط، و`redirect_uri` واحد بالضبط يساوي عنوان URI الذي تحسبه اللعبة من منفذها ووسم أصلها، و`state` واحد بالضبط يساوي قيمة `state` في الرد، و`code_challenge_method=S256`، و`code_challenge` من 43 محرفًا. وإلا فإن اللعبة توقف مستمعها ولا تفتح شيئًا. ولا ترسل `finish` و`link` إلا إلى الخادم الذي ردّ على `start`.
+
+      **على موقع ويب.** يسجّل موقع الويب (الرسمي: <https://scacelith.com/>) الدخول بعميل من نوع «تطبيق ويب» تابع لمشروع Google نفسه (`GOOGLE_WEB_CLIENT_ID`). ويعيد Google المتصفح إلى صفحة واحدة من الموقع ضبطها مشغّل الخادم (`GOOGLE_WEB_REDIRECT_URI`، المُدرَجة ضمن «معرّفات URI المعتمَدة لإعادة التوجيه» للعميل)، وترسل تلك الصفحة رمز التفويض إلى `finish`؛ ولا يأخذ الخادم هنا أيضًا أي معرّف URI لإعادة التوجيه من العميل.
+
+      1. تُنشئ الصفحة زوج PKCE كما سبق، وتحتفظ بالمُحقِّق في علامة التبويب (`sessionStorage`)، وترسل `POST /auth/sso/google/web/start` مع قيمة التحدّي.
+      2. تتحقق من `authUrl` كما تفعل اللعبة، إلا أن `redirect_uri` فيه يجب أن يشير إلى صفحة من أصلها (origin) نفسه، ثم تنتقل إليه. ولا يُحمَّل أي برنامج نصي من Google.
+      3. يعيد Google المتصفح إلى `GOOGLE_WEB_REDIRECT_URI?code=...&state=...`. ولا تقبل الصفحة إلا قيمة `state` الواردة في ردّ طلب البدء، ولا ترسل شيئًا بعد إعادة توجيه تحمل `error=`.
+      4. تأتي بعد ذلك `finish` و`link` و`complete` كما في حالة اللعبة. وتتذكّر المحاولة أن موقع ويب هو الذي بدأها: فيُستبدَل رمز التفويض باستخدام عميل الموقع وصفحته، ويجب أن يذكر الرمز المميَّز للهوية ذلك العميل (يفشل رمز التفويض أو الرمز المميَّز للهوية الخاص بعميل اللعبة بالخطأ 502 `sso_failed`، والعكس صحيح).
+
+      يصل حساب Google إلى حساب Scacelith نفسه من اللعبة ومن موقع الويب: فالربط يحفظ معرّف Google للمستخدم (`sub`)، الذي يحدّد حساب Google أيًّا كان العميل. ويجب أن يكون أصل (origin) موقع الويب ضمن `CORS_ORIGINS` (وإلا يُصدر `check-config` تحذيرًا).
 
       **الحساب الذي يصل إليه تسجيل الدخول عبر Google:** الحساب المرتبط بالفعل بحساب Google هذا؛ وإلا فحساب نشط يحمل العنوان الذي أكّده Google (إن كانت له كلمة مرور، يردّ `finish` بـ `needsPassword` ولا يُخزَّن الربط إلا بعد اجتياز كلمة مروره، ثم عامله الثاني إن كان مفعّلًا؛ وإن لم تكن له كلمة مرور، فالرد 409 `sso_account_exists`)؛ وإلا فحساب جديد (`needsUsername`). ولا يُربط حساب Google أبدًا بحساب موجود بناءً على عنوانه وحده. ويتلقى عنوان الحساب رسالة عندما ينشئ تسجيل الدخول عبر Google حسابًا، وعندما يُضاف إلى حساب موجود.
   - name: sessions
@@ -616,7 +625,7 @@ paths:
           description: '`sso_already_linked`: بعد خطوة كلمة المرور في ربط حساب Google فقط، رُبط حساب Google بحساب آخر في الأثناء.'
         '410':
           $ref: '#/components/responses/Gone'
-          description: '`sso_expired`: بعد خطوة كلمة المرور في ربط حساب Google فقط، تغيّر الحساب في الأثناء؛ ابدأ من جديد من اللعبة.'
+          description: '`sso_expired`: بعد خطوة كلمة المرور في ربط حساب Google فقط، تغيّر الحساب في الأثناء؛ ابدأ تسجيل الدخول من جديد.'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '414':
@@ -630,7 +639,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` مع `retryAfter: 1`: بقيت قاعدة البيانات مقفلة (بعد خطوة ربط حساب Google، لم يُربط شيء: ابدأ من جديد من اللعبة). `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5 حين يكون الخادم متأخرًا كثيرًا في عمله (انظر المقدمة): لم يُنفَّذ الطلب.'
+          description: '`server_busy` مع `retryAfter: 1`: بقيت قاعدة البيانات مقفلة (بعد خطوة ربط حساب Google، لم يُربط شيء: ابدأ تسجيل الدخول من جديد). `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5 حين يكون الخادم متأخرًا كثيرًا في عمله (انظر المقدمة): لم يُنفَّذ الطلب.'
   /auth/logout:
     post:
       operationId: logOut
@@ -939,6 +948,64 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
           description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، `timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5 حين يكون الخادم متأخرًا كثيرًا في عمله (انظر المقدمة): لم يُنفَّذ الطلب.'
+  /auth/sso/google/web/start:
+    post:
+      operationId: startGoogleWebSignIn
+      tags:
+        - google-sign-in
+      summary: بدء تسجيل الدخول عبر Google على موقع ويب
+      description: |-
+        يبدأ محاولة تسجيل دخول عبر Google لموقع ويب، مقرونة بقيمة تحدّي PKCE التي أنشأتها صفحته. والرد هو نفسه كما في اللعبة: عنوان URL في Google الذي يجب الانتقال إليه، وقيمة `state` الخاصة بالمحاولة؛ وتبقى المحاولة صالحة لمدة 10 دقائق. يُتاح عندما يذكر `GET /info` القيمة `sso.googleWeb: true`.
+
+        يحمل `authUrl` قيمة `client_id` الخاصة بموقع الويب و`redirect_uri=GOOGLE_WEB_REDIRECT_URI`، مع المعاملات الأخرى نفسها كما في اللعبة. وتتحقق الصفحة منه قبل أن تنتقل إليه (انظر **على موقع ويب** في وصف الوسم).
+
+        **الحدّ:** `sso_start`، مشترك مع بدء تسجيل الدخول من اللعبة.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoWebStartRequest'
+            example:
+              codeChallenge: 6e7diXEYxG7OTYw7STfNOltEeLxAilPthC_txzaE0xA
+      responses:
+        '200':
+          description: المحاولة.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoStartAnswer'
+              example:
+                attemptId: sso_ogvVEL75n7q90NIFsh-4zXVt-izc3WRbghsd6HDOtNQ
+                authUrl: https://accounts.google.com/o/oauth2/v2/auth?client_id=1234567890-web.apps.googleusercontent.com&redirect_uri=https%3A%2F%2Fscacelith.com%2Faccount%2Fgoogle%2F&response_type=code&scope=openid%20email%20profile&state=yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ&nonce=gYIKKhwnz1AqWfFxOC3R-ZvCACw06q74fEMtGEOJQWU&code_challenge=ZfEI6iZjePTHbnbevupaD9O7GjBCzcL-GJu2XGOdFGc&code_challenge_method=S256&prompt=select_account
+                state: yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ
+                expiresIn: 600
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_request`: قيمة `codeChallenge` مفقودة أو غير صحيحة الصيغة، أو وجود أي حقل آخر (بما في ذلك `redirectPort`).'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`sso_disabled`: تسجيل الدخول عبر Google غير مُتاح على هذا الخادم، أو غير مُتاح لمواقع الويب.'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`: الحدّ `sso_start` (المشترك مع بدء تسجيل الدخول من اللعبة).'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy` (بقيت قاعدة البيانات مقفلة)، و`timeout`. وكذلك `server_busy` مع `retryAfter` من 2 إلى 5 حين يكون الخادم متأخرًا كثيرًا في عمله (انظر المقدمة): لم يُنفَّذ الطلب.'
   /auth/sso/google/finish:
     post:
       operationId: finishGoogleSignIn
@@ -946,7 +1013,7 @@ paths:
         - google-sign-in
       summary: تسليم رد Google إلى الخادم
       description: |-
-        يسلّم إلى الخادم قيمتي `code` و`state` اللتين أرسلهما Google إلى مستمع اللعبة، مع معرّف المحاولة ومُحقِّق PKCE. ولا فائدة من معرّف المحاولة من دون المُحقِّق، ولا فائدة من رمز التفويض من دون مُحقِّق PKCE الخاص بالخادم وسرّ العميل.
+        يسلّم إلى الخادم قيمتي `code` و`state` اللتين أرسلهما Google إلى مستمع اللعبة أو إلى صفحة موقع الويب، مع معرّف المحاولة ومُحقِّق PKCE. ولا فائدة من معرّف المحاولة من دون المُحقِّق، ولا فائدة من رمز التفويض من دون مُحقِّق PKCE الخاص بالخادم وسرّ العميل.
 
         يتحقق الخادم من المحاولة (غير معروفة أو مستخدَمة أو منتهية الصلاحية: 410)، ثم من المُحقِّق (المُحقِّق الخاطئ يُبقي المحاولة صالحة للاستخدام)، ثم يستخدم المحاولة مرة واحدة، ويتحقق من `state` و`iss`، ويستبدل رمز التفويض لدى Google، ويتحقق من الرمز المميَّز للهوية. والرد (200) واحد مما يلي:
 
@@ -1100,7 +1167,7 @@ paths:
           description: '`sso_already_linked`: رُبط حساب Google بحساب آخر في الأثناء.'
         '410':
           $ref: '#/components/responses/Gone'
-          description: '`sso_expired`: تذكرة غير معروفة أو مستخدَمة أو منتهية الصلاحية، أو كلمة المرور الخاطئة رقم 5، أو حساب تغيّرت حالته أو عنوانه منذ `finish`، أو حساب تغيّرت حالته أو عنوانه أو كلمة مروره أو مصادقته الثنائية أثناء تخزين الربط. ابدأ من جديد من اللعبة.'
+          description: '`sso_expired`: تذكرة غير معروفة أو مستخدَمة أو منتهية الصلاحية، أو كلمة المرور الخاطئة رقم 5، أو حساب تغيّرت حالته أو عنوانه منذ `finish`، أو حساب تغيّرت حالته أو عنوانه أو كلمة مروره أو مصادقته الثنائية أثناء تخزين الربط. ابدأ تسجيل الدخول من جديد.'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '414':
@@ -3349,7 +3416,7 @@ components:
             error: username_taken
             message: This username is already taken.
     Gone:
-      description: '`sso_expired`: محاولة تسجيل الدخول عبر Google أو تذكرتها غير معروفة أو مستخدَمة أو منتهية الصلاحية؛ ابدأ من جديد من اللعبة.'
+      description: '`sso_expired`: محاولة تسجيل الدخول عبر Google أو تذكرتها غير معروفة أو مستخدَمة أو منتهية الصلاحية؛ ابدأ تسجيل الدخول من جديد.'
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3464,7 +3531,7 @@ components:
             error: internal_error
             message: Internal server error.
     BadGateway:
-      description: '`sso_failed`: قيمة `state` أو `iss` خاطئة، أو رفض Google رمز التفويض أو أرسل رمزًا مميَّزًا للهوية لا يجتاز التحقق. ولا يحمل الرد أبدًا نص Google.'
+      description: '`sso_failed`: قيمة `state` أو `iss` خاطئة، أو رفض Google رمز التفويض أو أرسل رمزًا مميَّزًا للهوية لا يجتاز التحقق (بما في ذلك رمز التفويض أو الرمز المميَّز للهوية الخاص بالعميل الآخر، عميل اللعبة أو عميل موقع الويب). ولا يحمل الرد أبدًا نص Google.'
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3788,10 +3855,14 @@ components:
           type: object
           required:
             - google
+            - googleWeb
           properties:
             google:
               type: boolean
-              description: هل يُتاح تسجيل الدخول عبر Google.
+              description: هل يُتاح تسجيل الدخول عبر Google للعبة.
+            googleWeb:
+              type: boolean
+              description: هل يُتاح تسجيل الدخول عبر Google لموقع ويب أيضًا (`POST /auth/sso/google/web/start`).
         mfa:
           type: boolean
           const: true
@@ -3863,6 +3934,7 @@ components:
         emailVerification: true
         sso:
           google: false
+          googleWeb: false
         mfa: true
         pow:
           register: 18
@@ -4226,6 +4298,16 @@ components:
           minimum: 1024
           maximum: 65535
           description: منفذ مستمع العميل على `127.0.0.1`.
+    SsoWebStartRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - codeChallenge
+      properties:
+        codeChallenge:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: قيمة تحدّي PKCE بطريقة S256 لـ `codeVerifier` الخاص بالصفحة (`BASE64URL(SHA-256(codeVerifier))`).
     SsoFinishRequest:
       type: object
       additionalProperties: false

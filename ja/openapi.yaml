@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: ScacelithサーバーのHTTPS API
-  version: "1.0.0"
+  version: "1.1.0"
   summary: 公式サーバーとコミュニティサーバーを含む、すべてのScacelithサーバーに共通のHTTPS API。
   description: |-
     公式の`caissa.scacelith.com`からコミュニティサーバーまで、すべてのScacelithサーバーがこのHTTPS APIを提供します。ゲームは、対局そのもの以外のすべてにこのAPIを使います。アカウント作成とログイン（二要素認証とGoogleログインを含む）、アカウントページ、対局履歴、PGNのダウンロードと対局のアニメーションGIF、ログイン中のデバイス、データのダウンロード、アカウントの削除、そして報告です。
@@ -16,7 +16,7 @@ info:
     - コミュニティサーバー：`https://<SERVER_PUBLIC_HOST>[:<port>]/api/v1`。`API_PORT`の既定値は443です。NATやプロキシの背後では、プレイヤーが使うポートは`PUBLIC_API_PORT`です。
     - ゲームのWebSocketは、既定ではAPIと同じポートにあります（`WS_PORT`で変更できます。その場所は`GET /info`がクライアントに伝えます）。
     - TLS上のHTTP/1.1を使います。`TLS_MODE=proxy`では、サーバーの前段にあるリバースプロキシがTLSを終端します。`TLS_MODE=off`（平文のHTTP）はローカル開発専用です。
-    - メールのリンクから開くHTMLページ（`/verify-email`、`/reset-password`、`/confirm-email-change`）は、`/api/v1`の外、サーバーのルートにあります。ヘルスチェックのエンドポイントは、ルートと`/api/v1`の下の両方で応答します。Googleログインにはサーバー上のページがありません。Googleはブラウザーをゲーム自体（`127.0.0.1`）に戻します。
+    - メールのリンクから開くHTMLページ（`/verify-email`、`/reset-password`、`/confirm-email-change`）は、`/api/v1`の外、サーバーのルートにあります。ヘルスチェックのエンドポイントは、ルートと`/api/v1`の下の両方で応答します。Googleログインにはサーバー上のページがありません。Googleはブラウザーをゲーム自体（`127.0.0.1`）か、ログインを開始したウェブサイトのページ（`GOOGLE_WEB_REDIRECT_URI`）に戻します。
     - 末尾のスラッシュは無視され（`/api/v1/info/`は`/api/v1/info`と同じです）、パスパラメーターはURLデコードされます（有効なURLエンコーディングでないパラメーターには400 `invalid_request`が返ります）。
 
     ## リクエスト
@@ -123,7 +123,7 @@ info:
     | `gif_user_min`、`gif_user_hour` | `GIF_USER_RENDERS_PER_MIN`（4）/ 分と`GIF_USER_RENDERS_PER_HOUR`（30）/ 1時間、共有 | プレイヤー | 同じ2つ。GIFを作成する必要がある場合のみ（キャッシュから返さない場合） |
     | `gif_ip_min`、`gif_ip_hour` | `GIF_IP_RENDERS_PER_MIN`（12）/ 分と`GIF_IP_RENDERS_PER_HOUR`（120）/ 1時間、共有 | クライアント（そのすべてのアカウントの合計）。IPv6の/48ごとにその3倍 | 同上 |
     | `reports` | 30 / 1時間 | プレイヤー | `POST /reports` |
-    | `sso_start` | 30 / 10分、共有 | クライアント。IPv6の/48ごとに90 | `POST /auth/sso/google/start` |
+    | `sso_start` | 30 / 10分、共有 | クライアント。IPv6の/48ごとに90 | `POST /auth/sso/google/start`、`POST /auth/sso/google/web/start`（合算） |
     | `sso_finish` | 30 / 分 | クライアント | `POST /auth/sso/google/finish` |
     | `page` | 60 / 分 | クライアント | `GET /verify-email`、`/reset-password`、`/confirm-email-change` |
 
@@ -214,7 +214,7 @@ tags:
   - name: google-sign-in
     x-displayName: Googleログイン
     description: |-
-      `GET /info`が`sso.google: true`を示す場合に提供されます。そうでなければ、以下のすべてのエンドポイントは404 `sso_disabled`を返します。ゲームは、RFC 8252のインストール型アプリのフロー（「デスクトップアプリ」タイプのクライアント）により、システムのブラウザーを通じてログインします。Googleはブラウザーを、このサーバーではなく、`127.0.0.1`で待ち受けるゲームのリスナーに戻します。ゲームがGoogleの認証情報を目にすることはありません。
+      `GET /info`が`sso.google: true`を示す場合に提供されます。そうでなければ、以下のすべてのエンドポイントは404 `sso_disabled`を返します。`sso.googleWeb`がtrueの場合は、ウェブサイトも独自のクライアントを使って同じ方法でログインします（後述の**ウェブサイトでのログイン**を参照）。ゲームは、RFC 8252のインストール型アプリのフロー（「デスクトップアプリ」タイプのクライアント）により、システムのブラウザーを通じてログインします。Googleはブラウザーを、このサーバーではなく、`127.0.0.1`で待ち受けるゲームのリスナーに戻します。ゲームがGoogleの認証情報を目にすることはありません。
 
       1. クライアントは`127.0.0.1:0`で待ち受け（ポートはシステムが選びます）、PKCEのペアを作ります。43～128文字の`[A-Za-z0-9._~-]`からなる`codeVerifier`と、`codeChallenge = BASE64URL(SHA-256(codeVerifier))`です。後者は43文字で、パディングはありません。
       2. チャレンジとポートを指定した`POST /auth/sso/google/start`が、GoogleのURLとこの試行の`state`を返します。クライアントはURLを検査し（後述）、ブラウザーで開きます。
@@ -234,6 +234,15 @@ tags:
       したがって、Googleログインが使えるのは、サーバーを`SERVER_PUBLIC_HOST`と公開APIポートのとおりに追加したプレイヤーだけです。
 
       **ブラウザーを開く前にゲームが検査すること**。`authUrl`は正確に`https://accounts.google.com/o/oauth2/v2/auth?`で始まり、4096文字未満の印字可能なASCIIで構成され、そのクエリには、`response_type=code`がちょうど1つ、ゲームが自身のポートとオリジンタグから計算したURIに等しい`redirect_uri`がちょうど1つ、レスポンスの`state`に等しい`state`がちょうど1つ、そして`code_challenge_method=S256`と43文字の`code_challenge`が含まれていなければなりません。そうでなければ、ゲームはリスナーを停止し、何も開きません。ゲームは`finish`と`link`を、`start`に応答したサーバーにだけ送信します。
+
+      **ウェブサイトでのログイン**。ウェブサイト（公式サイト：<https://scacelith.com/>）は、同じGoogleプロジェクトの「ウェブアプリケーション」タイプのクライアント（`GOOGLE_WEB_CLIENT_ID`）でログインします。Googleはブラウザーを、運用者が設定したサイトの1ページ（`GOOGLE_WEB_REDIRECT_URI`。クライアントの「承認済みのリダイレクトURI」に登録されているもの）に戻し、そのページがコードを`finish`に送信します。ここでも、サーバーはクライアントからリダイレクトURIを受け取りません。
+
+      1. ページは上記と同様にPKCEのペアを作成し、ベリファイアをタブ内（`sessionStorage`）に保持して、チャレンジを付けて`POST /auth/sso/google/web/start`を送信します。
+      2. ページはゲームと同様に`authUrl`を検査します。ただし、そこに含まれる`redirect_uri`は、ページ自身のオリジンのページでなければなりません。検査が済んだら、そのURLに移動します。Googleのスクリプトは一切読み込みません。
+      3. Googleはブラウザーを`GOOGLE_WEB_REDIRECT_URI?code=...&state=...`に送ります。ページは開始時のレスポンスの`state`しか受け付けず、`error=`付きでリダイレクトされた場合は何も送信しません。
+      4. `finish`、`link`、`complete`はゲームの場合と同様に続きます。試行は、ウェブサイトによって開始されたことを記憶しています。コードはウェブサイトのクライアントとページを使って交換され、IDトークンにはそのクライアントが指定されていなければなりません（ゲームのクライアントのコードやIDトークンは502 `sso_failed`で失敗し、その逆も同様です）。
+
+      Googleアカウントは、ゲームからでもウェブサイトからでも同じScacelithアカウントにつながります。連携にはGoogleのサブジェクト（`sub`）が保存されており、これはクライアントにかかわらずGoogleアカウントを識別します。ウェブサイトのオリジンは`CORS_ORIGINS`に含まれていなければなりません（含まれていない場合は`check-config`が警告します）。
 
       **Googleログインでどのアカウントに入るか**：そのGoogleアカウントとすでに連携しているアカウント。なければ、Googleが確認したアドレスを持つ有効なアカウント（パスワードがある場合、`finish`は`needsPassword`を返し、パスワード、続いて二要素認証がオンならその第二要素が通った時点で初めて連携が保存されます。パスワードがない場合は409 `sso_account_exists`）。それもなければ新しいアカウント（`needsUsername`）。Googleアカウントが、アドレスだけを根拠に既存のアカウントと連携されることはありません。Googleログインによってアカウントが作成されたとき、および既存のアカウントにGoogleログインが追加されたときには、そのアカウントのアドレスにメールが送られます。
   - name: sessions
@@ -616,7 +625,7 @@ paths:
           description: '`sso_already_linked`：Googleアカウント連携のパスワード段階の後のみ。その間に、Googleアカウントが別のアカウントと連携された。'
         '410':
           $ref: '#/components/responses/Gone'
-          description: '`sso_expired`：Googleアカウント連携のパスワード段階の後のみ。その間にアカウントが変更された。ゲームから最初からやり直してください。'
+          description: '`sso_expired`：Googleアカウント連携のパスワード段階の後のみ。その間にアカウントが変更された。ログインを最初からやり直してください。'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '414':
@@ -630,7 +639,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`retryAfter: 1`付きの`server_busy`：データベースのロックが解除されなかった（Googleアカウント連携の段階の後であれば、何も連携されていません。ゲームから最初からやり直してください）。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
+          description: '`retryAfter: 1`付きの`server_busy`：データベースのロックが解除されなかった（Googleアカウント連携の段階の後であれば、何も連携されていません。ログインを最初からやり直してください）。`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/logout:
     post:
       operationId: logOut
@@ -939,6 +948,64 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
           description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
+  /auth/sso/google/web/start:
+    post:
+      operationId: startGoogleWebSignIn
+      tags:
+        - google-sign-in
+      summary: ウェブサイトでGoogleログインを開始する
+      description: |-
+        ウェブサイトのページのPKCEチャレンジに対して、そのウェブサイトのGoogleログインの試行を開始します。レスポンスはゲームの場合と同じで、移動先のGoogleのURLと、試行の`state`です。試行は10分間有効です。`GET /info`が`sso.googleWeb: true`を示す場合に提供されます。
+
+        `authUrl`には、ウェブサイトの`client_id`と`redirect_uri=GOOGLE_WEB_REDIRECT_URI`が含まれ、その他のパラメーターはゲームの場合と同じです。ページは、そのURLに移動する前にこれを検査します（タグの説明の**ウェブサイトでのログイン**を参照）。
+
+        **制限**：`sso_start`（ゲームの開始と共有）。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoWebStartRequest'
+            example:
+              codeChallenge: 6e7diXEYxG7OTYw7STfNOltEeLxAilPthC_txzaE0xA
+      responses:
+        '200':
+          description: 試行。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoStartAnswer'
+              example:
+                attemptId: sso_ogvVEL75n7q90NIFsh-4zXVt-izc3WRbghsd6HDOtNQ
+                authUrl: https://accounts.google.com/o/oauth2/v2/auth?client_id=1234567890-web.apps.googleusercontent.com&redirect_uri=https%3A%2F%2Fscacelith.com%2Faccount%2Fgoogle%2F&response_type=code&scope=openid%20email%20profile&state=yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ&nonce=gYIKKhwnz1AqWfFxOC3R-ZvCACw06q74fEMtGEOJQWU&code_challenge=ZfEI6iZjePTHbnbevupaD9O7GjBCzcL-GJu2XGOdFGc&code_challenge_method=S256&prompt=select_account
+                state: yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ
+                expiresIn: 600
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_request`：`codeChallenge`がない、または形式が不正、あるいはその他のフィールドがある（`redirectPort`を含む）。'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`sso_disabled`：このサーバーではGoogleログインが提供されていない、またはウェブサイトには提供されていない。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`sso_start`の制限（ゲームの開始と共有）。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（データベースのロックが解除されなかった）、`timeout`。また、`retryAfter`（2～5）付きの`server_busy`：サーバーの処理が大幅に遅れている（冒頭の説明を参照）ため、リクエストは実行されていません。'
   /auth/sso/google/finish:
     post:
       operationId: finishGoogleSignIn
@@ -946,7 +1013,7 @@ paths:
         - google-sign-in
       summary: Googleからの応答をサーバーに渡す
       description: |-
-        Googleがゲームのリスナーに送った`code`と`state`を、試行のIDとPKCEのベリファイアとともにサーバーに渡します。試行のIDはベリファイアがなければ役に立たず、コードはサーバー自身のPKCEのベリファイアとクライアントシークレットがなければ役に立ちません。
+        Googleがゲームのリスナーまたはウェブサイトのページに送った`code`と`state`を、試行のIDとPKCEのベリファイアとともにサーバーに渡します。試行のIDはベリファイアがなければ役に立たず、コードはサーバー自身のPKCEのベリファイアとクライアントシークレットがなければ役に立ちません。
 
         サーバーは試行（未知、使用済み、期限切れなら410）、次にベリファイア（誤っていても試行は引き続き使えます）を検査し、その後試行を1回分消費して、`state`と`iss`を検査し、Googleとコードを交換してIDトークンを検証します。レスポンス（200）は次のいずれかです：
 
@@ -1100,7 +1167,7 @@ paths:
           description: '`sso_already_linked`：その間に、Googleアカウントが別のアカウントと連携された。'
         '410':
           $ref: '#/components/responses/Gone'
-          description: '`sso_expired`：未知、使用済み、または期限切れのチケット、5回目の誤ったパスワード、`finish`の後に状態またはアドレスが変わったアカウント、あるいは連携の保存中に状態、アドレス、パスワード、二要素認証のいずれかが変わったアカウント。ゲームから最初からやり直してください。'
+          description: '`sso_expired`：未知、使用済み、または期限切れのチケット、5回目の誤ったパスワード、`finish`の後に状態またはアドレスが変わったアカウント、あるいは連携の保存中に状態、アドレス、パスワード、二要素認証のいずれかが変わったアカウント。ログインを最初からやり直してください。'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '414':
@@ -3349,7 +3416,7 @@ components:
             error: username_taken
             message: This username is already taken.
     Gone:
-      description: '`sso_expired`：Googleログインの試行またはチケットが未知、使用済み、または期限切れ。ゲームから最初からやり直してください。'
+      description: '`sso_expired`：Googleログインの試行またはチケットが未知、使用済み、または期限切れ。ログインを最初からやり直してください。'
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3464,7 +3531,7 @@ components:
             error: internal_error
             message: Internal server error.
     BadGateway:
-      description: '`sso_failed`：`state`または`iss`が誤っている、あるいはGoogleがコードを拒否したか、検証できないIDトークンを送ってきた。Googleからのテキストが含まれることはありません。'
+      description: '`sso_failed`：`state`または`iss`が誤っている、あるいはGoogleがコードを拒否したか、検証できないIDトークンを送ってきた（ゲームとウェブサイトのうち、もう一方のクライアントのコードやIDトークンの場合を含む）。Googleからのテキストが含まれることはありません。'
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3788,10 +3855,14 @@ components:
           type: object
           required:
             - google
+            - googleWeb
           properties:
             google:
               type: boolean
-              description: Googleログインを提供しているかどうか。
+              description: ゲームにGoogleログインを提供しているかどうか。
+            googleWeb:
+              type: boolean
+              description: ウェブサイトにもGoogleログインを提供しているかどうか（`POST /auth/sso/google/web/start`）。
         mfa:
           type: boolean
           const: true
@@ -3863,6 +3934,7 @@ components:
         emailVerification: true
         sso:
           google: false
+          googleWeb: false
         mfa: true
         pow:
           register: 18
@@ -4226,6 +4298,16 @@ components:
           minimum: 1024
           maximum: 65535
           description: '`127.0.0.1`で待ち受けるクライアントのリスナーのポート。'
+    SsoWebStartRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - codeChallenge
+      properties:
+        codeChallenge:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: ページの`codeVerifier`から求めたS256方式のPKCEチャレンジ（`BASE64URL(SHA-256(codeVerifier))`）。
     SsoFinishRequest:
       type: object
       additionalProperties: false

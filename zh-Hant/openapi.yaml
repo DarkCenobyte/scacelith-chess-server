@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: Scacelith 伺服器 HTTPS API
-  version: "1.0.0"
+  version: "1.1.0"
   summary: 每一台 Scacelith 伺服器（官方伺服器與社群伺服器）共用的 HTTPS API。
   description: |-
     每一台 Scacelith 伺服器，包括官方的 `caissa.scacelith.com` 與任何社群伺服器，都提供這個 HTTPS API。對局本身以外的一切功能，遊戲都透過它進行：註冊與登入（含雙重驗證與 Google 登入）、帳號頁面、對局紀錄、PGN 下載與對局的 GIF 動畫、已登入的裝置、資料下載、刪除帳號，以及檢舉。
@@ -16,7 +16,7 @@ info:
     - 社群伺服器：`https://<SERVER_PUBLIC_HOST>[:<port>]/api/v1`。`API_PORT` 預設為 443；位於 NAT 或代理伺服器之後時，棋手連線所用的連接埠是 `PUBLIC_API_PORT`。
     - 遊戲的 WebSocket 預設位於同一個連接埠（可用 `WS_PORT` 改到其他連接埠；`GET /info` 會告訴用戶端它在哪裡）。
     - 採用 TLS 之上的 HTTP/1.1。設為 `TLS_MODE=proxy` 時，由伺服器前方的反向代理伺服器終止 TLS。`TLS_MODE=off`（純 HTTP）僅供本機開發使用。
-    - 從電子郵件中的連結開啟的 HTML 頁面（`/verify-email`、`/reset-password`、`/confirm-email-change`）位於伺服器的根路徑，不在 `/api/v1` 之下。健康檢查端點在根路徑與 `/api/v1` 之下都會回應。Google 登入在伺服器上沒有任何頁面：Google 會將瀏覽器直接導回遊戲本身，位址為 `127.0.0.1`。
+    - 從電子郵件中的連結開啟的 HTML 頁面（`/verify-email`、`/reset-password`、`/confirm-email-change`）位於伺服器的根路徑，不在 `/api/v1` 之下。健康檢查端點在根路徑與 `/api/v1` 之下都會回應。Google 登入在伺服器上沒有任何頁面：Google 會將瀏覽器直接導回遊戲本身，位址為 `127.0.0.1`，或導回發起登入之網站上的某個頁面（`GOOGLE_WEB_REDIRECT_URI`）。
     - 結尾的斜線會被忽略（`/api/v1/info/` 等同於 `/api/v1/info`），路徑參數會經過 URL 解碼（不是有效 URL 編碼的參數會得到 400 `invalid_request`）。
 
     ## 要求
@@ -123,7 +123,7 @@ info:
     | `gif_user_min`、`gif_user_hour` | `GIF_USER_RENDERS_PER_MIN`（4）/ 分鐘與 `GIF_USER_RENDERS_PER_HOUR`（30）/ 小時，共用 | 棋手 | 同上兩個端點，僅在必須實際製作 GIF 時（而非取自快取） |
     | `gif_ip_min`、`gif_ip_hour` | `GIF_IP_RENDERS_PER_MIN`（12）/ 分鐘與 `GIF_IP_RENDERS_PER_HOUR`（120）/ 小時，共用 | 用戶端（其所有帳號合計）；每個 IPv6 /48 為其 3 倍 | 同上，條件亦同 |
     | `reports` | 30 / 小時 | 棋手 | `POST /reports` |
-    | `sso_start` | 30 / 10 分鐘，共用 | 用戶端；每個 IPv6 /48 為 90 | `POST /auth/sso/google/start` |
+    | `sso_start` | 30 / 10 分鐘，共用 | 用戶端；每個 IPv6 /48 為 90 | `POST /auth/sso/google/start`、`POST /auth/sso/google/web/start`（合併計算） |
     | `sso_finish` | 30 / 分鐘 | 用戶端 | `POST /auth/sso/google/finish` |
     | `page` | 60 / 分鐘 | 用戶端 | `GET /verify-email`、`/reset-password`、`/confirm-email-change` |
 
@@ -214,7 +214,7 @@ tags:
   - name: google-sign-in
     x-displayName: Google 登入
     description: |-
-      當 `GET /info` 顯示 `sso.google: true` 時提供；否則下列所有端點都會回應 404 `sso_disabled`。遊戲透過系統瀏覽器，以 RFC 8252 的已安裝應用程式流程登入（Google 用戶端類型為「Desktop app」，即電腦版應用程式）：Google 會將瀏覽器導回遊戲在 `127.0.0.1` 上的監聽器，絕不會導向本伺服器，遊戲也從不會接觸到任何 Google 憑證。
+      當 `GET /info` 顯示 `sso.google: true` 時提供；否則下列所有端點都會回應 404 `sso_disabled`。當 `sso.googleWeb` 為 true 時，網站也會使用自己的用戶端，以同樣的方式登入（請見下文的**在網站上登入**）。遊戲透過系統瀏覽器，以 RFC 8252 的已安裝應用程式流程登入（Google 用戶端類型為「Desktop app」，即電腦版應用程式）：Google 會將瀏覽器導回遊戲在 `127.0.0.1` 上的監聽器，絕不會導向本伺服器，遊戲也從不會接觸到任何 Google 憑證。
 
       1. 用戶端在 `127.0.0.1:0` 上監聽（由系統選擇連接埠），並產生一組 PKCE：由 43 至 128 個 `[A-Za-z0-9._~-]` 字元組成的 `codeVerifier`，以及 `codeChallenge = BASE64URL(SHA-256(codeVerifier))`，後者長度為 43 個字元，不含填補字元。
       2. 以挑戰值與連接埠呼叫 `POST /auth/sso/google/start`，會傳回 Google URL 與此次嘗試的 `state`。用戶端檢查該 URL（見下文）後，在瀏覽器中開啟。
@@ -234,6 +234,15 @@ tags:
       因此，只有以完全相同的 `SERVER_PUBLIC_HOST` 及其公開 API 連接埠新增伺服器的棋手，才能使用 Google 登入。
 
       **遊戲開啟瀏覽器前的檢查**：`authUrl` 必須正好以 `https://accounts.google.com/o/oauth2/v2/auth?` 開頭，由可列印的 ASCII 字元組成且少於 4096 個字元；其查詢字串必須恰好包含一個 `response_type=code`、恰好一個與遊戲依其連接埠與來源標記算出之 URI 相同的 `redirect_uri`、恰好一個與回應中 `state` 相同的 `state`、`code_challenge_method=S256`，以及一個長度為 43 個字元的 `code_challenge`。否則遊戲會停止監聽器，不開啟任何頁面。遊戲只會將 `finish` 與 `link` 傳送給回應 `start` 的那台伺服器。
+
+      **在網站上登入**。網站（官方網站：<https://scacelith.com/>）使用同一個 Google 專案中的用戶端登入（`GOOGLE_WEB_CLIENT_ID`，Google 用戶端類型為「Web application」，即網頁應用程式）。Google 會將瀏覽器導回網站上由營運者設定的某個頁面（`GOOGLE_WEB_REDIRECT_URI`，已列在該用戶端的「Authorized redirect URIs」，即已授權的重新導向 URI 之中），再由該頁面將授權碼傳送給 `finish`；在此，伺服器同樣不接受用戶端提供的重新導向 URI。
+
+      1. 頁面依上文所述產生一組 PKCE 值，將驗證值保存在分頁中（`sessionStorage`），並附上挑戰值呼叫 `POST /auth/sso/google/web/start`。
+      2. 頁面以與遊戲相同的方式檢查 `authUrl`，但其中的 `redirect_uri` 必須是與該頁面同源的頁面，接著導向該網址。不會載入任何 Google 指令碼。
+      3. Google 將瀏覽器導向 `GOOGLE_WEB_REDIRECT_URI?code=...&state=...`。頁面只接受開始登入時回應中的 `state`；若重新導向帶有 `error=`，則不會傳送任何內容。
+      4. 之後的 `finish`、`link` 與 `complete` 與遊戲的流程相同。嘗試會記住它是由網站發起的：授權碼會以網站的用戶端與頁面兌換，且 ID 權杖必須指名該用戶端（遊戲用戶端的授權碼或 ID 權杖會以 502 `sso_failed` 失敗，反之亦然）。
+
+      無論從遊戲還是從網站登入，同一個 Google 帳號都會對應到同一個 Scacelith 帳號：連結中保存的是 Google 的主體識別碼（`sub`），不論使用哪個用戶端，它識別的都是同一個 Google 帳號。網站的來源必須列在 `CORS_ORIGINS` 中（否則 `check-config` 會發出警告）。
 
       **Google 登入會進入哪個帳號**：已與該 Google 帳號連結的帳號；若沒有，則為使用 Google 所確認之地址的啟用中帳號（設有密碼時，`finish` 會回應 `needsPassword`，必須先通過密碼、若已啟用雙重驗證再通過第二驗證因素，才會儲存連結；未設密碼時，回應 409 `sso_account_exists`）；若仍沒有，則建立新帳號（`needsUsername`）。Google 帳號絕不會僅憑地址就連結到現有帳號。當 Google 登入建立了帳號，或被新增到現有帳號時，該帳號的地址都會收到一封郵件。
   - name: sessions
@@ -616,7 +625,7 @@ paths:
           description: '`sso_already_linked`：僅限 Google 連結的密碼步驟之後：該 Google 帳號在此期間已連結到另一個帳號。'
         '410':
           $ref: '#/components/responses/Gone'
-          description: '`sso_expired`：僅限 Google 連結的密碼步驟之後：帳號在此期間有所變更；請從遊戲中重新開始。'
+          description: '`sso_expired`：僅限 Google 連結的密碼步驟之後：帳號在此期間有所變更；請重新開始登入。'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '414':
@@ -630,7 +639,7 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
-          description: '`server_busy` 附 `retryAfter: 1`：資料庫持續鎖定（若發生在 Google 連結步驟之後，則未建立任何連結：請從遊戲中重新開始）。`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：伺服器處理嚴重落後（請見簡介），要求並未執行。'
+          description: '`server_busy` 附 `retryAfter: 1`：資料庫持續鎖定（若發生在 Google 連結步驟之後，則未建立任何連結：請重新開始登入）。`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：伺服器處理嚴重落後（請見簡介），要求並未執行。'
   /auth/logout:
     post:
       operationId: logOut
@@ -939,6 +948,64 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
           description: '`server_busy`（資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：伺服器處理嚴重落後（請見簡介），要求並未執行。'
+  /auth/sso/google/web/start:
+    post:
+      operationId: startGoogleWebSignIn
+      tags:
+        - google-sign-in
+      summary: 在網站上開始 Google 登入
+      description: |-
+        為網站頁面的 PKCE 挑戰值，開始該網站的一次 Google 登入嘗試。回應與遊戲的相同：要導向的 Google 網址，以及該嘗試的 `state`；嘗試在 10 分鐘內有效。當 `GET /info` 顯示 `sso.googleWeb: true` 時提供。
+
+        `authUrl` 包含網站的 `client_id` 與 `redirect_uri=GOOGLE_WEB_REDIRECT_URI`，其他參數與遊戲的相同。頁面在導向該網址之前會先檢查它（請見標籤說明中的**在網站上登入**）。
+
+        **限制**：`sso_start`，與遊戲端的開始登入共用。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SsoWebStartRequest'
+            example:
+              codeChallenge: 6e7diXEYxG7OTYw7STfNOltEeLxAilPthC_txzaE0xA
+      responses:
+        '200':
+          description: 該嘗試。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControl'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SsoStartAnswer'
+              example:
+                attemptId: sso_ogvVEL75n7q90NIFsh-4zXVt-izc3WRbghsd6HDOtNQ
+                authUrl: https://accounts.google.com/o/oauth2/v2/auth?client_id=1234567890-web.apps.googleusercontent.com&redirect_uri=https%3A%2F%2Fscacelith.com%2Faccount%2Fgoogle%2F&response_type=code&scope=openid%20email%20profile&state=yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ&nonce=gYIKKhwnz1AqWfFxOC3R-ZvCACw06q74fEMtGEOJQWU&code_challenge=ZfEI6iZjePTHbnbevupaD9O7GjBCzcL-GJu2XGOdFGc&code_challenge_method=S256&prompt=select_account
+                state: yBjjEhGgqHdeqhUAzyx9jE2IhQ56bec53iRA7RvKRzQ
+                expiresIn: 600
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: '`invalid_request`：缺少 `codeChallenge` 或其格式錯誤，或包含任何其他欄位（包括 `redirectPort`）。'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: '`sso_disabled`：本伺服器未提供 Google 登入，或未對網站提供。'
+        '408':
+          $ref: '#/components/responses/RequestTimeout'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '414':
+          $ref: '#/components/responses/UriTooLong'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+          description: '`rate_limited`：`sso_start` 限制（與遊戲端的開始登入共用）。'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+          description: '`server_busy`（資料庫持續鎖定）、`timeout`。此外，`server_busy` 附 `retryAfter`（2 至 5）：伺服器處理嚴重落後（請見簡介），要求並未執行。'
   /auth/sso/google/finish:
     post:
       operationId: finishGoogleSignIn
@@ -946,7 +1013,7 @@ paths:
         - google-sign-in
       summary: 將 Google 的回應交給伺服器
       description: |-
-        將 Google 傳送到遊戲監聽器的 `code` 與 `state`，連同嘗試 ID 與 PKCE 驗證值一起交給伺服器。沒有驗證值，嘗試 ID 毫無用處；而沒有伺服器自己的 PKCE 驗證值與用戶端密碼，授權碼同樣毫無用處。
+        將 Google 傳送到遊戲監聽器或網站頁面的 `code` 與 `state`，連同嘗試 ID 與 PKCE 驗證值一起交給伺服器。沒有驗證值，嘗試 ID 毫無用處；而沒有伺服器自己的 PKCE 驗證值與用戶端密碼，授權碼同樣毫無用處。
 
         伺服器先檢查嘗試（未知、已使用或已過期：410），再檢查驗證值（錯誤的驗證值不會使嘗試失效），接著將嘗試標記為已使用，檢查 `state` 與 `iss`，向 Google 兌換授權碼，並驗證 ID 權杖。回應（200）為下列其中之一：
 
@@ -1100,7 +1167,7 @@ paths:
           description: '`sso_already_linked`：該 Google 帳號在此期間已連結到另一個帳號。'
         '410':
           $ref: '#/components/responses/Gone'
-          description: '`sso_expired`：票證未知、已使用或已過期；第 5 次密碼錯誤；帳號的狀態或地址在 `finish` 之後有所變更；或在儲存連結期間，帳號的狀態、地址、密碼或雙重驗證有所變更。請從遊戲中重新開始。'
+          description: '`sso_expired`：票證未知、已使用或已過期；第 5 次密碼錯誤；帳號的狀態或地址在 `finish` 之後有所變更；或在儲存連結期間，帳號的狀態、地址、密碼或雙重驗證有所變更。請重新開始登入。'
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
         '414':
@@ -3349,7 +3416,7 @@ components:
             error: username_taken
             message: This username is already taken.
     Gone:
-      description: '`sso_expired`：Google 登入嘗試或票證未知、已使用或已過期；請從遊戲中重新開始。'
+      description: '`sso_expired`：Google 登入嘗試或票證未知、已使用或已過期；請重新開始登入。'
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3464,7 +3531,7 @@ components:
             error: internal_error
             message: Internal server error.
     BadGateway:
-      description: '`sso_failed`：`state` 或 `iss` 錯誤，或 Google 拒絕了授權碼，或傳來無法通過驗證的 ID 權杖。回應絕不會包含 Google 的原文訊息。'
+      description: '`sso_failed`：`state` 或 `iss` 錯誤，或 Google 拒絕了授權碼，或傳來無法通過驗證的 ID 權杖（包括遊戲與網站兩個用戶端中另一方的授權碼或 ID 權杖）。回應絕不會包含 Google 的原文訊息。'
       headers:
         Cache-Control:
           $ref: '#/components/headers/CacheControl'
@@ -3788,10 +3855,14 @@ components:
           type: object
           required:
             - google
+            - googleWeb
           properties:
             google:
               type: boolean
-              description: 是否提供 Google 登入。
+              description: 是否對遊戲提供 Google 登入。
+            googleWeb:
+              type: boolean
+              description: 是否也對網站提供 Google 登入（`POST /auth/sso/google/web/start`）。
         mfa:
           type: boolean
           const: true
@@ -3863,6 +3934,7 @@ components:
         emailVerification: true
         sso:
           google: false
+          googleWeb: false
         mfa: true
         pow:
           register: 18
@@ -4226,6 +4298,16 @@ components:
           minimum: 1024
           maximum: 65535
           description: 用戶端在 `127.0.0.1` 上之監聽器的連接埠。
+    SsoWebStartRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - codeChallenge
+      properties:
+        codeChallenge:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: 由頁面的 `codeVerifier` 算出的 S256 PKCE 挑戰值（`BASE64URL(SHA-256(codeVerifier))`）。
     SsoFinishRequest:
       type: object
       additionalProperties: false
