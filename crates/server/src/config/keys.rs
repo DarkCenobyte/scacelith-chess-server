@@ -513,6 +513,29 @@ pub static KEYS: &[KeySpec] = &[
     )
     .default(""),
     key("GOOGLE_CLIENT_SECRET", Sso, SecretText, "OAuth client secret. Never commit it.").default(""),
+    key(
+        "GOOGLE_WEB_CLIENT_ID",
+        Sso,
+        Text,
+        "Optional: OAuth client ID of a \"Web application\" client of the same Google project, for \"Sign in \
+         with Google\" on a website (POST /auth/sso/google/web/start). Google sends the browser back to \
+         GOOGLE_WEB_REDIRECT_URI, a page of that site, which hands the code to this server. Needs \
+         SSO_GOOGLE_ENABLED, GOOGLE_WEB_CLIENT_SECRET and GOOGLE_WEB_REDIRECT_URI. Empty: Google sign-in in \
+         the game only.",
+    )
+    .default(""),
+    key("GOOGLE_WEB_CLIENT_SECRET", Sso, SecretText, "OAuth client secret of the web client. Never commit it.")
+        .default(""),
+    key(
+        "GOOGLE_WEB_REDIRECT_URI",
+        Sso,
+        Text,
+        "The page of the website Google sends the browser back to, exactly as listed in the web client's \
+         \"Authorized redirect URIs\": https://host[:port]/path (http:// only for localhost, 127.0.0.1 and \
+         [::1]), no query or fragment. Its origin should be in CORS_ORIGINS. The official server uses \
+         https://scacelith.com/account/google/.",
+    )
+    .default(""),
     // ---- Protection per address (background layer) ------------------------------------------
     key(
         "HTTP_RATE_PER_IP",

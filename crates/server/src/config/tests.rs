@@ -271,6 +271,77 @@ fn google_sign_in_origin_tag_and_warnings() {
     );
 }
 
+#[test]
+fn google_sign_in_on_a_website_needs_a_web_client_its_secret_and_its_page() {
+    let web: [(&'static str, &'static str); 7] = [
+        ("SSO_GOOGLE_ENABLED", "1"),
+        ("GOOGLE_CLIENT_ID", "id.apps.googleusercontent.com"),
+        ("GOOGLE_CLIENT_SECRET", "GOCSPX-x"),
+        ("SERVER_PUBLIC_HOST", "caissa.scacelith.com"),
+        ("GOOGLE_WEB_CLIENT_ID", "web.apps.googleusercontent.com"),
+        ("GOOGLE_WEB_CLIENT_SECRET", "GOCSPX-web"),
+        ("GOOGLE_WEB_REDIRECT_URI", "https://scacelith.com/account/google/"),
+    ];
+    type Pairs = Vec<(&'static str, &'static str)>;
+    let with = |extra: &[(&'static str, &'static str)]| -> Pairs {
+        let mut all: Pairs =
+            web.iter().copied().filter(|(k, _)| !extra.iter().any(|(e, _)| e == k)).collect();
+        all.extend_from_slice(extra);
+        all
+    };
+    let cors = ("CORS_ORIGINS", "https://scacelith.com,https://www.scacelith.com");
+    let c = ok(&with(&[cors]));
+    assert!(c.google_web_sign_in());
+    assert_eq!(c.google_web_redirect_uri, "https://scacelith.com/account/google/");
+    assert!(c.warnings_for_cores(64).is_empty(), "{:?}", c.warnings_for_cores(64));
+    assert!(!ok(&[]).google_web_sign_in(), "off by default");
+
+    // The page must be able to call this server.
+    assert_eq!(
+        ok(&with(&[])).warnings_for_cores(64),
+        [
+            "GOOGLE_WEB_REDIRECT_URI is a page of https://scacelith.com, which is not in CORS_ORIGINS: that page \
+          cannot call this server, so Google sign-in on the website cannot finish. Add https://scacelith.com to \
+          CORS_ORIGINS."
+        ]
+    );
+    // Without SSO_GOOGLE_ENABLED, nothing is offered.
+    let off = ok(&with(&[("SSO_GOOGLE_ENABLED", "0"), cors]));
+    assert!(!off.google_web_sign_in());
+    assert_eq!(
+        off.warnings_for_cores(64),
+        [
+            "GOOGLE_WEB_CLIENT_ID without SSO_GOOGLE_ENABLED: Google sign-in is off, on the website as in the game."
+        ]
+    );
+
+    for (missing, value) in [("GOOGLE_WEB_CLIENT_SECRET", ""), ("GOOGLE_WEB_REDIRECT_URI", "")] {
+        assert!(
+            err(&with(&[(missing, value)]))
+                .contains("GOOGLE_WEB_CLIENT_ID needs GOOGLE_WEB_CLIENT_SECRET and GOOGLE_WEB_REDIRECT_URI."),
+            "{missing}"
+        );
+    }
+    assert!(err(&with(&[("GOOGLE_WEB_CLIENT_ID", "id.apps.googleusercontent.com")])).contains(
+        "GOOGLE_WEB_CLIENT_ID must be a \"Web application\" client, another one than GOOGLE_CLIENT_ID (a \
+         \"Desktop app\" client)."
+    ));
+    for (uri, reason) in [
+        ("https://scacelith.com", "must have a path, at least \"/\" (https://host/path)"),
+        ("http://scacelith.com/account/google/", "uses http://, which is accepted for localhost"),
+        ("https://scacelith.com/account/google/?lang=fr", "must have no query or fragment"),
+    ] {
+        let e = err(&with(&[("GOOGLE_WEB_REDIRECT_URI", uri)]));
+        assert!(e.contains(&format!("GOOGLE_WEB_REDIRECT_URI: \"{uri}\" {reason}")), "{e}");
+    }
+    // A local copy of the site.
+    let local = ok(&with(&[
+        ("GOOGLE_WEB_REDIRECT_URI", "http://localhost:8000/account/google/"),
+        ("CORS_ORIGINS", "http://localhost:8000"),
+    ]));
+    assert!(local.google_web_sign_in() && local.warnings_for_cores(64).is_empty());
+}
+
 // ---- config.quotas.test.js ----------------------------------------------------------------------
 
 #[test]
@@ -821,7 +892,7 @@ fn check_config_prints_every_key_in_table_order_then_the_derived_values() {
     let mut want: Vec<String> = KEYS.iter().map(|k| camel_case(k.name)).collect();
     want.extend(["ssoOrigin", "ssoRedirectTag", "categories"].map(String::from));
     assert_eq!(keys, want);
-    assert_eq!(keys.len(), 159);
+    assert_eq!(keys.len(), 162);
     assert_eq!(d["serverSecret"], "<set>");
     assert_eq!(d["mfaEncryptionKey"], "<unset>");
     assert_eq!(d["smtpPassword"], "<set>");

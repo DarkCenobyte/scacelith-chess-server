@@ -18,6 +18,13 @@
 //! 5. complete (new accounts): `{ssoTicket, username}` creates the account and links it (with the
 //!    use of the ticket, in one transaction), then logs in.
 //!
+//! A website signs in the same way with a "Web application" client of its own
+//! (`GOOGLE_WEB_CLIENT_ID`): its start (`POST /auth/sso/google/web/start {codeChallenge}`) takes
+//! no port, and Google sends the browser back to the one page of the site the operator configured
+//! (`GOOGLE_WEB_REDIRECT_URI`), which posts the code to finish. The attempt remembers its client,
+//! so the code is exchanged with that client's credentials and redirect URI, and its ID token must
+//! name that client. Steps 3 to 5 are the same.
+//!
 //! Invariant: a Google identity is attached to an existing account only after the person proved
 //! the Google address (ID token, `email_verified`) and the account (its current password, plus its
 //! second factor when on). It never depends on the account's own address confirmation.
@@ -96,6 +103,18 @@ fn first_truthy(claims: &Map<String, Value>, keys: &[&str]) -> String {
     String::new()
 }
 
+/// Who started a sign-in, and so where Google sends the browser back to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SsoClient {
+    /// The game, its listener on 127.0.0.1 at this port ("Desktop app" client).
+    Game { redirect_port: u16 },
+    /// A website, its page `GOOGLE_WEB_REDIRECT_URI` ("Web application" client).
+    Web,
+}
+
+/// The `client` of a website's attempt (none for the game's).
+const WEB_CLIENT: &str = "web";
+
 /// What a verified Google identity signs in to.
 enum Resolution {
     Login(UserId),
@@ -135,22 +154,49 @@ impl Inner {
         }
     }
 
-    /// `POST /auth/sso/google/start`: `{attemptId, authUrl, state, expiresIn}`.
+    /// The website's client, when Google sign-in is offered to a website.
+    fn require_sso_web(&self) -> AuthResult<&OidcClient> {
+        self.require_sso()?;
+        self.oidc_web.as_ref().ok_or_else(|| {
+            AuthError::new(404, "sso_disabled", "Google sign-in is not enabled for websites on this server.")
+        })
+    }
+
+    /// `POST /auth/sso/google/start` and `POST /auth/sso/google/web/start`: `{attemptId, authUrl,
+    /// state, expiresIn}`.
     pub(crate) async fn sso_start(
         &self,
         code_challenge: &str,
-        redirect_port: u16,
+        client: SsoClient,
         ip: Option<&str>,
     ) -> AuthResult<Value> {
-        let oidc = self.require_sso()?;
+        // Never a host, path or URI of the client: the game's port with this server's own tag,
+        // or the website's page of the configuration.
+        let (oidc, redirect_uri) = match client {
+            SsoClient::Game { redirect_port } => (
+                self.require_sso()?,
+                format!("http://127.0.0.1:{redirect_port}/oauth2/google/{}", self.config.sso_redirect_tag),
+            ),
+            SsoClient::Web => (self.require_sso_web()?, self.config.google_web_redirect_uri.clone()),
+        };
+        let web = client == SsoClient::Web;
         let attempt_id = random_token(SSO_PREFIX);
         let (state, nonce, verifier) = (random_token(""), random_token(""), random_token(""));
-        // From the port alone and this server's own tag: never a host, path or URI of the client.
-        let redirect_uri =
-            format!("http://127.0.0.1:{redirect_port}/oauth2/google/{}", self.config.sso_redirect_tag);
         let auth_url = oidc
             .authorization_url(&state, &nonce, &pkce_challenge(&verifier), &redirect_uri)
             .map_err(|e| AuthError::internal(e.to_string()))?;
+        let mut data = json!({
+            "challenge": code_challenge,
+            "stateHash": sha256_hex(&state),
+            "nonce": nonce,
+            "verifier": verifier,
+            "redirectUri": redirect_uri,
+        });
+        let mut event = json!({ "provider": PROVIDER });
+        if web {
+            data["client"] = WEB_CLIENT.into();
+            event["client"] = WEB_CLIENT.into();
+        }
         let now = self.now();
         self.store
             .tokens()
@@ -158,18 +204,12 @@ impl Inner {
                 kind: SSO_ATTEMPT.into(),
                 token_hash: sha256_hex(&attempt_id),
                 user_id: None,
-                data: Some(json!({
-                    "challenge": code_challenge,
-                    "stateHash": sha256_hex(&state),
-                    "nonce": nonce,
-                    "verifier": verifier,
-                    "redirectUri": redirect_uri,
-                })),
+                data: Some(data),
                 created_at: now,
                 expires_at: now + SSO_TTL_MS,
             })
             .await?;
-        self.events.record("sso_started", None, ip, Some(json!({ "provider": PROVIDER })));
+        self.events.record("sso_started", None, ip, Some(event));
         Ok(
             json!({ "attemptId": attempt_id, "authUrl": auth_url, "state": state, "expiresIn": SSO_TTL_MS / 1000 }),
         )
@@ -212,9 +252,10 @@ impl Inner {
         Ok(Resolution::New { sub, email, suggestion })
     }
 
-    /// `POST /auth/sso/google/finish`: the code Google sent to the game's listener.
+    /// `POST /auth/sso/google/finish`: the code Google sent to the game's listener or the
+    /// website's page.
     pub(crate) async fn sso_finish(&self, p: &SsoFinishParams) -> AuthResult<Value> {
-        let oidc = self.require_sso()?;
+        self.require_sso()?;
         let ip = p.ip.as_deref();
         if !is_prefixed_token(&p.attempt_id, SSO_PREFIX) {
             return Err(expired());
@@ -227,6 +268,12 @@ impl Inner {
             (str_field(&d, "stateHash"), str_field(&d, "redirectUri"), str_field(&d, "verifier"))
         else {
             return Err(expired());
+        };
+        // The client that started the attempt exchanges its code.
+        let oidc = if str_field(&d, "client") == Some(WEB_CLIENT) {
+            self.require_sso_web()?
+        } else {
+            self.require_sso()?
         };
         let challenge =
             claim_text(d.get("challenge").filter(|c| !matches!(c, Value::String(s) if s.is_empty())));

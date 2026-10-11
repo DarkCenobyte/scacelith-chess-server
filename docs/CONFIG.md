@@ -118,6 +118,9 @@ Sections:
 | `SSO_GOOGLE_ENABLED` | boolean (true/false, 1/0, yes/no, on/off) | `false` | Offers "Sign in with Google" (authorization code + PKCE; Google sends the browser back to the game on 127.0.0.1 and the game hands the code to this server). An existing account is linked only after its password, and its two-step code when on, is entered once in the game. |
 | `GOOGLE_CLIENT_ID` | text | (empty) | OAuth client ID of a "Desktop app" client (Google Auth Platform &gt; Clients). Not a "Web application" client: Google sends the browser back to the game on 127.0.0.1 and only a Desktop app client accepts that. |
 | `GOOGLE_CLIENT_SECRET`<br>`GOOGLE_CLIENT_SECRET_FILE` | secret text (used as written) | (empty) | OAuth client secret. Never commit it. |
+| `GOOGLE_WEB_CLIENT_ID` | text | (empty) | Optional: OAuth client ID of a "Web application" client of the same Google project, for "Sign in with Google" on a website (POST /auth/sso/google/web/start). Google sends the browser back to GOOGLE_WEB_REDIRECT_URI, a page of that site, which hands the code to this server. Needs SSO_GOOGLE_ENABLED, GOOGLE_WEB_CLIENT_SECRET and GOOGLE_WEB_REDIRECT_URI. Empty: Google sign-in in the game only. |
+| `GOOGLE_WEB_CLIENT_SECRET`<br>`GOOGLE_WEB_CLIENT_SECRET_FILE` | secret text (used as written) | (empty) | OAuth client secret of the web client. Never commit it. |
+| `GOOGLE_WEB_REDIRECT_URI` | text | (empty) | The page of the website Google sends the browser back to, exactly as listed in the web client's "Authorized redirect URIs": https://host[:port]/path (http:// only for localhost, 127.0.0.1 and [::1]), no query or fragment. Its origin should be in CORS_ORIGINS. The official server uses https://scacelith.com/account/google/. |
 
 ## Protection per address (background layer)
 

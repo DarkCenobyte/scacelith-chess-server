@@ -11,7 +11,7 @@ use indexmap::IndexMap;
 use super::keys::{KEYS, KeySpec, Kind, OBSOLETE};
 use super::{Category, Config, ConfigError, Derived, sso_origin_tag};
 use crate::util::ip::IpMatcher;
-use crate::util::origin::check_web_origin;
+use crate::util::origin::{check_web_origin, check_web_page_uri};
 use crate::util::{encoding, errno, js, path};
 
 /// Largest integer a setting may hold (JavaScript's `Number.MAX_SAFE_INTEGER`).
@@ -477,6 +477,26 @@ fn derive<'a>(
         && !(v.truthy("GOOGLE_CLIENT_ID") && v.truthy("GOOGLE_CLIENT_SECRET"))
     {
         errors.push("SSO_GOOGLE_ENABLED needs GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.".to_string());
+    }
+    if v.truthy("GOOGLE_WEB_CLIENT_ID") {
+        if !(v.truthy("GOOGLE_WEB_CLIENT_SECRET") && v.truthy("GOOGLE_WEB_REDIRECT_URI")) {
+            errors.push(
+                "GOOGLE_WEB_CLIENT_ID needs GOOGLE_WEB_CLIENT_SECRET and GOOGLE_WEB_REDIRECT_URI."
+                    .to_string(),
+            );
+        }
+        if v.text("GOOGLE_WEB_CLIENT_ID") == v.text("GOOGLE_CLIENT_ID") {
+            errors.push(
+                "GOOGLE_WEB_CLIENT_ID must be a \"Web application\" client, another one than GOOGLE_CLIENT_ID \
+                 (a \"Desktop app\" client)."
+                    .to_string(),
+            );
+        }
+    }
+    if let Some(uri) = v.text("GOOGLE_WEB_REDIRECT_URI").filter(|u| !u.is_empty())
+        && let Err(reason) = check_web_page_uri(uri)
+    {
+        errors.push(format!("GOOGLE_WEB_REDIRECT_URI: \"{uri}\" {reason}."));
     }
     // Keys that no longer exist: without a note they would be ignored silently.
     for (key, note) in OBSOLETE {

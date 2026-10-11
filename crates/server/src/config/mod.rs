@@ -44,6 +44,8 @@ use std::fmt;
 
 use serde_json::{Map, Value};
 
+use crate::util::origin::split_page_uri;
+
 use load::Val;
 
 /// A binary secret (`secret` keys: hexadecimal, or the former server's lenient base64). Never
@@ -489,6 +491,9 @@ config_struct! {
     "SSO_GOOGLE_ENABLED" => sso_google_enabled: bool,
     "GOOGLE_CLIENT_ID" => google_client_id: String,
     "GOOGLE_CLIENT_SECRET" => google_client_secret: Option<SecretText>,
+    "GOOGLE_WEB_CLIENT_ID" => google_web_client_id: String,
+    "GOOGLE_WEB_CLIENT_SECRET" => google_web_client_secret: Option<SecretText>,
+    "GOOGLE_WEB_REDIRECT_URI" => google_web_redirect_uri: String,
     "HTTP_RATE_PER_IP" => http_rate_per_ip: i64,
     "HTTP_RATE_PER_PREFIX" => http_rate_per_prefix: i64,
     "IP_CONN_RATE" => ip_conn_rate: i64,
@@ -672,7 +677,27 @@ impl Config {
                 self.public_api_port
             ));
         }
+        if !self.sso_google_enabled && !self.google_web_client_id.is_empty() {
+            out.push(
+                "GOOGLE_WEB_CLIENT_ID without SSO_GOOGLE_ENABLED: Google sign-in is off, on the website as in the game."
+                    .to_string(),
+            );
+        }
+        if self.google_web_sign_in()
+            && let Some((origin, _)) = split_page_uri(&self.google_web_redirect_uri)
+            && !self.cors_origins.iter().any(|o| o == origin)
+        {
+            out.push(format!(
+                "GOOGLE_WEB_REDIRECT_URI is a page of {origin}, which is not in CORS_ORIGINS: that page cannot call \
+                 this server, so Google sign-in on the website cannot finish. Add {origin} to CORS_ORIGINS."
+            ));
+        }
         out
+    }
+
+    /// True when Google sign-in is offered to a website too (`GOOGLE_WEB_CLIENT_ID`).
+    pub fn google_web_sign_in(&self) -> bool {
+        self.sso_google_enabled && !self.google_client_id.is_empty() && !self.google_web_client_id.is_empty()
     }
 
     /// The configuration of the unit tests (the former `testConfig()` with no override): every

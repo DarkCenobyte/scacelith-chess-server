@@ -1,16 +1,18 @@
 //! Google sign-in (DESIGN.md 5.9; the flow is described in the auth service). Off (404
-//! `sso_disabled`) unless `SSO_GOOGLE_ENABLED`. Google sends the browser back to the game's own
-//! listener on 127.0.0.1, never to this server.
+//! `sso_disabled`) unless `SSO_GOOGLE_ENABLED`, and for websites unless `GOOGLE_WEB_CLIENT_ID`.
+//! Google sends the browser back to the game's own listener on 127.0.0.1, or to the website's
+//! page `GOOGLE_WEB_REDIRECT_URI`, never to this server.
 //!
 //! | endpoint | answer |
 //! |---|---|
 //! | `POST /auth/sso/google/start {codeChallenge, redirectPort}` | `{attemptId, authUrl, state, expiresIn}` |
+//! | `POST /auth/sso/google/web/start {codeChallenge}` | `{attemptId, authUrl, state, expiresIn}` |
 //! | `POST /auth/sso/google/finish {attemptId, codeVerifier, state, code, iss?, clientLabel?}` | a login answer, `{needsUsername: true, ssoTicket, suggestedUsername}` or `{needsPassword: true, linkTicket, username, expiresIn}` |
 //! | `POST /auth/sso/google/link {linkTicket, password, clientLabel?, pow?}` | a login answer (the link is stored once a code passes) |
 //! | `POST /auth/sso/complete {ssoTicket, username, clientLabel?}` | `{token, expiresAt, user}` |
 //!
-//! Limits: start 30 per 10 minutes per address and 90 per IPv6 /48 (`sso_start`, shared: it
-//! writes a token row); finish 30 per minute per address (`sso_finish`); link and complete take
+//! Limits: the two starts together 30 per 10 minutes per address and 90 per IPv6 /48
+//! (`sso_start`, shared: it writes a token row); finish 30 per minute per address (`sso_finish`); link and complete take
 //! the `auth` limit of [`super::auth`].
 
 use std::sync::Arc;
@@ -49,12 +51,19 @@ pub fn register(router: &mut Router, deps: SsoRouteDeps) {
 
     router.post(
         "/auth/sso/google/start",
-        RouteOpts::new().rate(start_rate).body(
+        RouteOpts::new().rate(start_rate.clone()).body(
             Schema::new()
                 .field("codeChallenge", Spec::string().min_len(43).max_len(43).pattern(is_token43))
                 .field("redirectPort", Spec::integer().min(1024.0).max(65535.0)),
         ),
         bind(&d, start),
+    );
+    router.post(
+        "/auth/sso/google/web/start",
+        RouteOpts::new().rate(start_rate.clone()).body(
+            Schema::new().field("codeChallenge", Spec::string().min_len(43).max_len(43).pattern(is_token43)),
+        ),
+        bind(&d, web_start),
     );
     router.post(
         "/auth/sso/google/finish",
@@ -95,6 +104,11 @@ pub fn register(router: &mut Router, deps: SsoRouteDeps) {
 async fn start(d: Arc<SsoRouteDeps>, ctx: Ctx) -> Result<Answer, ApiError> {
     let port = ctx.body["redirectPort"].as_u64().and_then(|p| u16::try_from(p).ok()).unwrap_or_default();
     let body = d.auth.sso_start(&text(&ctx.body, "codeChallenge"), port, Some(&ip_of(&ctx))).await?;
+    Ok(Answer::json(body))
+}
+
+async fn web_start(d: Arc<SsoRouteDeps>, ctx: Ctx) -> Result<Answer, ApiError> {
+    let body = d.auth.sso_web_start(&text(&ctx.body, "codeChallenge"), Some(&ip_of(&ctx))).await?;
     Ok(Answer::json(body))
 }
 

@@ -6,7 +6,9 @@
 //!
 //! The redirect URI is given per call: `http://127.0.0.1:<the game's port>/oauth2/google/<origin
 //! tag>`, the game's own listener. Both calls refuse any other form (`bad_redirect_uri`), so the
-//! URI the exchange sends is always one the authorization request could carry.
+//! URI the exchange sends is always one the authorization request could carry. A "Web
+//! application" client (Google sign-in on a website, [`RedirectPolicy::Page`]) accepts only the
+//! one page of the site that the operator configured.
 //!
 //! Requests go over HTTPS only (plain HTTP only when allowed, for tests against a local fake
 //! provider), without following redirects, within 10 seconds, and answers are read up to 1 MiB.
@@ -116,6 +118,15 @@ pub fn check_redirect_uri(uri: &str) -> Result<(), OidcError> {
     if port_ok && tag_ok { Ok(()) } else { Err(refuse()) }
 }
 
+/// The redirect URIs a client accepts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RedirectPolicy {
+    /// A "Desktop app" client: the game's loopback listener ([`check_redirect_uri`]).
+    Loopback,
+    /// A "Web application" client: this page of a website, byte for byte.
+    Page(String),
+}
+
 /// WHATWG `application/x-www-form-urlencoded` serialisation (`URLSearchParams.toString()`).
 pub fn form_urlencode(pairs: &[(&str, &str)]) -> String {
     fn push(out: &mut String, s: &str) {
@@ -221,6 +232,7 @@ pub struct OidcClient {
     client_id: String,
     client_secret: String,
     endpoints: OidcEndpoints,
+    redirect: RedirectPolicy,
     clock: SharedClock,
     allow_http: bool,
     jwks: Mutex<Jwks>,
@@ -233,14 +245,15 @@ impl fmt::Debug for OidcClient {
         f.debug_struct("OidcClient")
             .field("client_id", &self.client_id)
             .field("endpoints", &self.endpoints)
+            .field("redirect", &self.redirect)
             .field("allow_http", &self.allow_http)
             .finish_non_exhaustive()
     }
 }
 
 impl OidcClient {
-    /// A client of `endpoints` with these credentials. `allow_http` permits plain HTTP endpoints
-    /// (tests against a local fake provider).
+    /// A "Desktop app" client of `endpoints` with these credentials. `allow_http` permits plain
+    /// HTTP endpoints (tests against a local fake provider).
     pub fn new(
         client_id: &str,
         client_secret: &str,
@@ -252,10 +265,28 @@ impl OidcClient {
             client_id: client_id.to_owned(),
             client_secret: client_secret.to_owned(),
             endpoints,
+            redirect: RedirectPolicy::Loopback,
             clock,
             allow_http,
             jwks: Mutex::new(Jwks::default()),
             fetching: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    /// The same client with other accepted redirect URIs.
+    pub fn with_redirect(mut self, redirect: RedirectPolicy) -> OidcClient {
+        self.redirect = redirect;
+        self
+    }
+
+    /// Checks a redirect URI against the client's policy.
+    fn check_redirect(&self, uri: &str) -> Result<(), OidcError> {
+        match &self.redirect {
+            RedirectPolicy::Loopback => check_redirect_uri(uri),
+            RedirectPolicy::Page(page) if uri == page => Ok(()),
+            RedirectPolicy::Page(_) => {
+                Err(OidcError::new("bad_redirect_uri", "redirect URI is not the page of the web client"))
+            }
         }
     }
 
@@ -272,7 +303,7 @@ impl OidcClient {
         code_challenge: &str,
         redirect_uri: &str,
     ) -> Result<String, OidcError> {
-        check_redirect_uri(redirect_uri)?;
+        self.check_redirect(redirect_uri)?;
         let query = form_urlencode(&[
             ("client_id", &self.client_id),
             ("redirect_uri", redirect_uri),
@@ -296,7 +327,7 @@ impl OidcClient {
         verifier: &str,
         redirect_uri: &str,
     ) -> Result<String, OidcError> {
-        check_redirect_uri(redirect_uri)?;
+        self.check_redirect(redirect_uri)?;
         let body = form_urlencode(&[
             ("grant_type", "authorization_code"),
             ("code", code),

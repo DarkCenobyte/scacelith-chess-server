@@ -38,7 +38,8 @@ async fn the_info_document() {
     let expected = json!({
         "name": "Club", "serverId": "test-server-id", "motd": "Welcome",
         "protocol": { "min": 1, "max": PROTOCOL_VERSION, "schema": FINGERPRINT, "subprotocol": "scacelith.rt1" },
-        "wsPort": 9444, "wsPath": "/ws", "registration": "open", "emailVerification": true, "sso": { "google": false },
+        "wsPort": 9444, "wsPath": "/ws", "registration": "open", "emailVerification": true,
+        "sso": { "google": false, "googleWeb": false },
         "mfa": true, "pow": { "register": 16 },
         "categories": [{ "id": "3+2", "baseSec": 180, "incSec": 2 }, { "id": "10+0", "baseSec": 600, "incSec": 0 }],
         "limits": {
@@ -105,7 +106,22 @@ fn categories_in_seconds_sso_and_registration() {
     );
     assert_eq!(
         (doc["registration"].clone(), doc["sso"].clone()),
-        (json!("closed"), json!({ "google": true }))
+        (json!("closed"), json!({ "google": true, "googleWeb": false }))
+    );
+    let web = [
+        ("SSO_GOOGLE_ENABLED", "1"),
+        ("GOOGLE_CLIENT_ID", "id.apps.googleusercontent.com"),
+        ("GOOGLE_CLIENT_SECRET", "secret"),
+        ("GOOGLE_WEB_CLIENT_ID", "web.apps.googleusercontent.com"),
+        ("GOOGLE_WEB_CLIENT_SECRET", "web-secret"),
+        ("GOOGLE_WEB_REDIRECT_URI", "https://chess.example.org/account/google/"),
+    ];
+    assert_eq!(info_document(&config(&web))["sso"], json!({ "google": true, "googleWeb": true }));
+    let off = config(&[web[3], web[4], web[5]]);
+    assert_eq!(
+        info_document(&off)["sso"],
+        json!({ "google": false, "googleWeb": false }),
+        "SSO_GOOGLE_ENABLED off"
     );
     assert_eq!(seconds(90_500), json!(90.5));
     assert_eq!(seconds(180_000), json!(180));

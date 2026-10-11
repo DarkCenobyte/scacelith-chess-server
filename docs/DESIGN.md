@@ -768,7 +768,8 @@ query and body validation, the handler under its timeout, and the answer with it
   `players`, `games`, `leaderboard`, `reports`, `account_games`, `account_export`, `gif`, then the
   HTML pages `/verify-email`, `/reset-password` and `/confirm-email-change` (a GET shows a
   confirmation button; only the POST changes state, so link scanners consume no token). Google
-  sign-in has no page: Google sends the browser back to the game's 127.0.0.1 listener.
+  sign-in has no page: Google sends the browser back to the game's 127.0.0.1 listener, or, with
+  a website client (`GOOGLE_WEB_CLIENT_ID`), to a page of that website.
 
 **GIF service** (`gifsvc`, renderer in `crates/gif`). `GET /games/:id/gif` and `POST /gif` render
 on `GIF_THREADS` dedicated threads at nice 19, started on the first render and stopped after a

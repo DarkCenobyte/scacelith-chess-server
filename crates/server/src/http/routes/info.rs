@@ -55,7 +55,10 @@ pub fn info_document(config: &Config) -> Value {
         "wsPath": "/ws",
         "registration": config.registration.as_str(),
         "emailVerification": config.require_email_verification,
-        "sso": { "google": config.sso_google_enabled && !config.google_client_id.is_empty() },
+        "sso": {
+            "google": config.sso_google_enabled && !config.google_client_id.is_empty(),
+            "googleWeb": config.google_web_sign_in(),
+        },
         "mfa": true,
         "pow": { "register": config.pow_register_bits },
         "categories": categories,

@@ -240,11 +240,29 @@ the limit, the better layout for a server that expects to be full.
   5. Clients > Create client > application type **Desktop app**. It has no redirect URI to enter:
      the game's address on 127.0.0.1 is accepted for this type;
   6. set `SSO_GOOGLE_ENABLED=true`, `GOOGLE_CLIENT_ID` (the client ID) and the client secret in
-     `GOOGLE_CLIENT_SECRET_FILE` (a file of mode 0600; `GOOGLE_CLIENT_SECRET` also works).
+     `GOOGLE_CLIENT_SECRET_FILE` (a file owned by root, group scacelith, mode 0640, like the
+     other secrets of [DEPLOY.md](DEPLOY.md); `GOOGLE_CLIENT_SECRET` also works).
 
   `SERVER_PUBLIC_HOST` must be the name players type when they add the server (with
   `PUBLIC_API_PORT`, or `API_PORT`): Google sign-in works only for players who added it under
   exactly that name and port, and the game refuses it under another name or address.
+- Google sign-in on a website (optional, on top of the game's): the site's account page sends
+  the browser to Google, Google sends it back to one page of the site, and that page hands the
+  code to this server (no Google script on the site; [API.md](API.md), "On a website"). The same
+  Google account reaches the same account in the game and on the site. In the same Google Cloud
+  project:
+  1. Clients > Create client > application type **Web application**;
+  2. Authorized redirect URIs: the page Google returns to, written exactly as in
+     `GOOGLE_WEB_REDIRECT_URI` (`https://scacelith.com/account/google/` for the official site).
+     No JavaScript origin is needed: the site loads no Google script. The site's domain must be
+     one of Branding's authorized domains;
+  3. set `GOOGLE_WEB_CLIENT_ID`, the client secret in `GOOGLE_WEB_CLIENT_SECRET_FILE` (or
+     `GOOGLE_WEB_CLIENT_SECRET`) and `GOOGLE_WEB_REDIRECT_URI`, keep the site's origin in
+     `CORS_ORIGINS`, and restart. `GET /info` then says `"sso": { "google": true, "googleWeb":
+     true }`, and the site shows its Google button.
+
+  The Branding, Audience and Data access settings above are shared by both clients. The website
+  client needs `SSO_GOOGLE_ENABLED` and the game's client: without them, nothing is offered.
 - Every server is a separate trust boundary: the game keeps one login per server address and
   never sends a server the credentials or tokens of another one.
 - Players manage their account from the game through the HTTPS API (every endpoint:
