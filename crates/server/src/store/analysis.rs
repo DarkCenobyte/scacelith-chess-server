@@ -1,5 +1,8 @@
 //! The engine analysis queue (DESIGN 6.5): jobs claimed by priority then age, every fourth claim
-//! reserved for the oldest ordinary job, stale claims re-queued, at most three attempts.
+//! reserved for the oldest ordinary job, stale claims re-queued, at most three attempts. Each claim
+//! has an identity of its own ([`ClaimedJob::claim`]): only the claim a running job is held by
+//! renews, completes or fails it, so an attempt whose job was re-queued and claimed again changes
+//! nothing any more.
 
 use rusqlite::{Row, params};
 use serde_json::Value;
@@ -81,7 +84,13 @@ pub struct ClaimedJob {
     pub attempts: i64,
     pub queued_at: i64,
     pub started_at: Option<i64>,
+    /// The worker that claimed it, as given to [`Analysis::next`].
     pub worker: Option<String>,
+    /// The identity of this claim (the worker and a random tag), stored in the job's `worker`
+    /// column while it runs: [`Analysis::touch`], [`Analysis::complete`] and [`Analysis::fail`]
+    /// act only for it. Two claims of a job never share it, whatever resets the attempts between
+    /// them, nor do two loops of one process (they share the worker id).
+    pub claim: String,
 }
 
 /// The job of a game.
@@ -168,12 +177,16 @@ const JOBS_FOR_USER_SQL: &str =
     SELECT id FROM games WHERE white_id = ?1 UNION SELECT id FROM games WHERE black_id = ?1)
     ORDER BY g.id DESC LIMIT ?2";
 
-const CLAIM_ANY_SQL: &str = "UPDATE analysis_jobs SET status = 'running', worker = ?1, started_at = ?2,
+// The claim's identity ([`ClaimedJob::claim`]): the worker, `#`, 64 random bits (`randomblob` is
+// drawn for each row).
+const CLAIM_ANY_SQL: &str = "UPDATE analysis_jobs SET status = 'running',
+    worker = coalesce(?1, '') || '#' || lower(hex(randomblob(8))), started_at = ?2,
     attempts = attempts + 1 WHERE game_id IN (SELECT game_id FROM analysis_jobs WHERE status = 'queued'
     ORDER BY priority DESC, queued_at, game_id LIMIT ?3)
     RETURNING game_id, priority, attempts, queued_at, started_at, worker";
 
-const CLAIM_ORDINARY_SQL: &str = "UPDATE analysis_jobs SET status = 'running', worker = ?1, started_at = ?2,
+const CLAIM_ORDINARY_SQL: &str = "UPDATE analysis_jobs SET status = 'running',
+    worker = coalesce(?1, '') || '#' || lower(hex(randomblob(8))), started_at = ?2,
     attempts = attempts + 1 WHERE game_id IN (SELECT game_id FROM analysis_jobs WHERE status = 'queued' AND priority = 0
     ORDER BY queued_at, game_id LIMIT ?3)
     RETURNING game_id, priority, attempts, queued_at, started_at, worker";
@@ -185,7 +198,8 @@ fn to_claimed(r: &Row<'_>) -> rusqlite::Result<ClaimedJob> {
         attempts: r.get(2)?,
         queued_at: r.get(3)?,
         started_at: r.get(4)?,
-        worker: r.get(5)?,
+        worker: None,
+        claim: r.get(5)?,
     })
 }
 
@@ -222,10 +236,11 @@ pub struct Analysis<'a> {
 }
 
 impl Analysis<'_> {
-    /// Claims up to `limit` queued jobs for `worker`: the highest priority, then the oldest
-    /// first, except that every [`ORDINARY_SHARE`]-th claim of the store takes the oldest ordinary
-    /// job first when one waits. Running jobs claimed more than [`STALE_MS`] ago are re-queued (or
-    /// failed at [`MAX_ATTEMPTS`]) first. Sorted by priority (highest first), age, game id.
+    /// Claims up to `limit` queued jobs for `worker`, each with a claim of its own: the highest
+    /// priority, then the oldest first, except that every [`ORDINARY_SHARE`]-th claim of the store
+    /// takes the oldest ordinary job first when one waits. Running jobs claimed (or renewed) more
+    /// than [`STALE_MS`] ago are re-queued (or failed at [`MAX_ATTEMPTS`]) first: their claim no
+    /// longer holds them. Sorted by priority (highest first), age, game id.
     pub fn next(&self, limit: i64, worker: Option<&str>, now: i64) -> Result<Vec<ClaimedJob>> {
         let n = limit.max(0);
         let claims = &self.db.ctx().claims;
@@ -252,49 +267,67 @@ impl Analysis<'_> {
             Ok::<_, StoreError>(out)
         })?;
         claims.fetch_add(rows.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        for row in &mut rows {
+            row.worker = worker.map(str::to_string);
+        }
         rows.sort_by(|a, b| {
             b.priority.cmp(&a.priority).then(a.queued_at.cmp(&b.queued_at)).then(a.game_id.cmp(&b.game_id))
         });
         Ok(rows)
     }
 
-    /// Stores the features of an analysed game (any state); `true` when the job exists.
-    pub fn complete(&self, game_id: GameId, features: Option<&Value>, now: i64) -> Result<bool> {
+    /// Stores the features of the game analysed under `claim` ([`ClaimedJob::claim`]): `true` when
+    /// the job still runs for that claim, and is now done. `false` changes nothing: the job was
+    /// re-queued since (stale, or asked again by a moderator), claimed again, completed or failed.
+    pub fn complete(&self, game_id: GameId, claim: &str, features: Option<&Value>, now: i64) -> Result<bool> {
         let n = self.db.exec(
             "UPDATE analysis_jobs SET status = 'done', features = ?1, finished_at = ?2, error = NULL, worker = NULL
-             WHERE game_id = ?3",
-            params![json_text(features), now, sql_id(game_id)],
+             WHERE game_id = ?3 AND status = 'running' AND worker = ?4",
+            params![json_text(features), now, sql_id(game_id), claim],
         )?;
         Ok(n == 1)
     }
 
-    /// Heartbeat of a job being analysed: its claim time moves to `now`, so that only the jobs of a
-    /// worker that stopped renewing them are re-queued. `true` while it runs for that worker.
-    pub fn touch(&self, game_id: GameId, worker: Option<&str>, now: i64) -> Result<bool> {
+    /// Heartbeat of a job being analysed under `claim`: its claim time moves to `now`, so that only
+    /// the jobs whose claims stopped being renewed are re-queued. `true` while it runs for that
+    /// claim; `false` once it does not (the analysis is then of no use).
+    pub fn touch(&self, game_id: GameId, claim: &str, now: i64) -> Result<bool> {
         let n = self.db.exec(
-            "UPDATE analysis_jobs SET started_at = ?1 WHERE game_id = ?2 AND status = 'running' AND worker IS ?3",
-            params![now, sql_id(game_id), worker],
+            "UPDATE analysis_jobs SET started_at = ?1 WHERE game_id = ?2 AND status = 'running' AND worker = ?3",
+            params![now, sql_id(game_id), claim],
         )?;
         Ok(n == 1)
     }
 
-    /// Re-queues the job, or fails it once tried [`MAX_ATTEMPTS`] times; returns the new status,
-    /// `None` without a job. The error text is kept to 2000 UTF-16 units.
-    pub fn fail(&self, game_id: GameId, error: Option<&str>, now: i64) -> Result<Option<JobStatus>> {
+    /// Re-queues the job analysed under `claim`, or fails it once tried [`MAX_ATTEMPTS`] times;
+    /// returns the new status, `None` (nothing changed) when the job does not run for that claim
+    /// (or there is none). The error text is kept to 2000 UTF-16 units.
+    pub fn fail(
+        &self,
+        game_id: GameId,
+        claim: &str,
+        error: Option<&str>,
+        now: i64,
+    ) -> Result<Option<JobStatus>> {
         self.db.transaction(|db| {
-            let Some(attempts) =
-                db.one("SELECT attempts FROM analysis_jobs WHERE game_id = ?1", [sql_id(game_id)], |r| r.get::<_, i64>(0))?
+            let Some(attempts) = db.one(
+                "SELECT attempts FROM analysis_jobs WHERE game_id = ?1 AND status = 'running' AND worker = ?2",
+                params![sql_id(game_id), claim],
+                |r| r.get::<_, i64>(0),
+            )?
             else {
                 return Ok(None);
             };
             let status = if attempts >= MAX_ATTEMPTS { JobStatus::Failed } else { JobStatus::Queued };
             db.exec(
-                "UPDATE analysis_jobs SET status = ?1, error = ?2, worker = NULL, finished_at = ?3 WHERE game_id = ?4",
+                "UPDATE analysis_jobs SET status = ?1, error = ?2, worker = NULL, finished_at = ?3
+                 WHERE game_id = ?4 AND status = 'running' AND worker = ?5",
                 params![
                     status,
                     error.map(|e| truncate_utf16(e, ERROR_MAX_UNITS)),
                     (status == JobStatus::Failed).then_some(now),
                     sql_id(game_id),
+                    claim,
                 ],
             )?;
             Ok(Some(status))
@@ -320,7 +353,8 @@ impl Analysis<'_> {
     }
 
     /// Moderator request: (re-)analyses any stored game before every other job (priority
-    /// `manual`), whatever its job's state. Error `foreign_key` for an unknown game.
+    /// `manual`), whatever its job's state (a running job's claim no longer holds it). Error
+    /// `foreign_key` for an unknown game.
     pub fn enqueue(&self, game_id: GameId, now: i64) -> Result<()> {
         self.db.exec(
             "INSERT INTO analysis_jobs (game_id, queued_at, priority, white_id, black_id)

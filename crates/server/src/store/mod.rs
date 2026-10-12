@@ -819,14 +819,14 @@ async_api! {
         write fn next(limit: i64, worker: Option<String>, now: i64) -> Vec<ClaimedJob> =>
             |db| db.analysis().next(limit, worker.as_deref(), now);
         /// See [`Analysis::complete`].
-        write fn complete(game_id: GameId, features: Option<serde_json::Value>, now: i64) -> bool =>
-            |db| db.analysis().complete(game_id, features.as_ref(), now);
+        write fn complete(game_id: GameId, claim: String, features: Option<serde_json::Value>, now: i64) -> bool =>
+            |db| db.analysis().complete(game_id, &claim, features.as_ref(), now);
         /// See [`Analysis::touch`].
-        write fn touch(game_id: GameId, worker: Option<String>, now: i64) -> bool =>
-            |db| db.analysis().touch(game_id, worker.as_deref(), now);
+        write fn touch(game_id: GameId, claim: String, now: i64) -> bool =>
+            |db| db.analysis().touch(game_id, &claim, now);
         /// See [`Analysis::fail`].
-        write fn fail(game_id: GameId, error: Option<String>, now: i64) -> Option<JobStatus> =>
-            |db| db.analysis().fail(game_id, error.as_deref(), now);
+        write fn fail(game_id: GameId, claim: String, error: Option<String>, now: i64) -> Option<JobStatus> =>
+            |db| db.analysis().fail(game_id, &claim, error.as_deref(), now);
         /// See [`Analysis::job`].
         read fn job(game_id: GameId) -> Option<Job> => |db| db.analysis().job(game_id);
         /// See [`Analysis::enqueue`].

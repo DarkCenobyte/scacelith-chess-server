@@ -198,7 +198,9 @@ async fn priority_moderator_request_then_reports_then_suspicion_signals_then_ord
     f.commit(std::slice::from_ref(&analysed)).await;
     let q = f.store.analysis();
     let job = q.next(1, Some("w".into()), now()).await.unwrap().remove(0);
-    q.complete(job.game_id, Some(serde_json::json!({"gameId": analysed.id})), now()).await.unwrap();
+    q.complete(job.game_id, job.claim, Some(serde_json::json!({"gameId": analysed.id})), now())
+        .await
+        .unwrap();
     assert_eq!(f.commit(&[o1.clone(), o2.clone(), skipped.clone()]).await[2], BACKLOG);
     // A suspected player: their new games are queued whatever the backlog, ahead of the ordinary ones.
     f.flag(c, IntegrityLevel::Suspected).await;
@@ -373,15 +375,21 @@ async fn request_eligible_games_only_raises_a_waiting_job_requeues_a_failed_one_
     for id in [running, done, failed] {
         q.enqueue(id, t).await.unwrap();
     }
-    let claimed: Vec<GameId> =
-        q.next(3, Some("w".into()), t).await.unwrap().iter().map(|j| j.game_id).collect();
-    assert!(claimed.contains(&running) && claimed.contains(&done) && claimed.contains(&failed));
-    q.complete(done, Some(serde_json::json!({"gameId": done})), t).await.unwrap();
+    let claimed = q.next(3, Some("w".into()), t).await.unwrap();
+    let claim = |id: GameId| claimed.iter().find(|j| j.game_id == id).map(|j| j.claim.clone()).unwrap();
+    q.complete(done, claim(done), Some(serde_json::json!({"gameId": done})), t).await.unwrap();
+    let mut failing = claim(failed);
+    assert!(claimed.iter().any(|j| j.game_id == running));
     for i in 0..3 {
         let expected = if i < 2 { JobStatus::Queued } else { JobStatus::Failed };
-        assert_eq!(q.fail(failed, Some("engine crashed".into()), t).await.unwrap(), Some(expected));
+        assert_eq!(
+            q.fail(failed, failing.clone(), Some("engine crashed".into()), t).await.unwrap(),
+            Some(expected)
+        );
         if i < 2 {
-            assert_eq!(q.next(1, Some("w".into()), t).await.unwrap()[0].game_id, failed);
+            let job = q.next(1, Some("w".into()), t).await.unwrap().remove(0);
+            assert_eq!(job.game_id, failed);
+            failing = job.claim;
         }
     }
     assert!(!q.request(running, Priority::Report, t).await.unwrap());

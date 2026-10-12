@@ -13,6 +13,13 @@
 //!
 //! The engines run as child processes; the loops are tokio tasks that only wait on them and on
 //! the store (the scoring runs in store read jobs, on the reader threads).
+//!
+//! A job is analysed under its claim ([`ClaimedJob::claim`]), renewed every [`HEARTBEAT`]. A job
+//! not renewed for 10 minutes goes back to the queue (its worker vanished, or the wall clock the
+//! claims are dated with jumped forward) and another loop may claim it: the first claim then no
+//! longer holds it. Its analysis stops at its next renewal, and whatever it finishes with is
+//! dropped: the store completes or fails a job only for the claim that holds it, and only a
+//! completion the store took scores the players and feeds the population, so a game counts once.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -32,7 +39,7 @@ use super::players::{add_game_to_population, apply_player_score, score_player_ga
 use super::scoring::Population;
 use crate::clock::SharedClock;
 use crate::config::Config;
-use crate::ids::{GameId, UserId};
+use crate::ids::UserId;
 use crate::log::Logger;
 use crate::metrics::{self, Counter, Gauge, Histogram};
 use crate::store::{ClaimedJob, Priority, Store, StoreError};
@@ -153,6 +160,7 @@ pub fn engine_options(config: &Config, logger: &Logger) -> EngineOptions {
 struct Metrics {
     ok: Counter,
     failed: Counter,
+    lost: Counter,
     seconds: Histogram,
     engines: Gauge,
     shared: Gauge,
@@ -161,12 +169,13 @@ struct Metrics {
 static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let games = metrics::counter_vec(
         "scacelith_anticheat_analysis_games_total",
-        "Games analysed by the engine",
+        "Games analysed by the engine (result ok, failed, or lost: dropped, its job claimed again)",
         &["result"],
     );
     Metrics {
         ok: games.with(&["ok"]),
         failed: games.with(&["failed"]),
+        lost: games.with(&["lost"]),
         seconds: metrics::histogram(
             "scacelith_anticheat_analysis_seconds",
             "Engine analysis time per game",
@@ -244,6 +253,9 @@ struct Shared {
 enum JobError {
     /// The pool is stopping: the job stays claimed and is analysed again later.
     Interrupted,
+    /// The claim no longer holds the job (re-queued, then claimed again or asked again by a
+    /// moderator): the analysis is dropped, the job left to its new claim.
+    Lost,
     Engine(EngineError),
     Store(StoreError),
     Missing,
@@ -253,6 +265,7 @@ impl JobError {
     fn message(&self) -> String {
         match self {
             JobError::Interrupted => "interrupted".into(),
+            JobError::Lost => "claim lost".into(),
             JobError::Engine(e) => format!("engine {}: {}", e.code(), e.message()),
             JobError::Store(e) => e.to_string(),
             JobError::Missing => "game not found".into(),
@@ -331,12 +344,13 @@ impl Shared {
     }
 
     /// Analyses one claimed job end to end; returns the stored features, `None` when the job
-    /// failed or was interrupted.
+    /// failed, was interrupted or is no longer held by its claim.
     async fn process_job<E: PoolEngine>(&self, engine: &mut E, job: &ClaimedJob) -> Option<Value> {
         let game_id = job.game_id;
         let started = self.clock.wall_ms();
-        let heartbeat = self.heartbeat(game_id);
-        let result = self.analyse_job(engine, job).await;
+        let (lost_tx, lost) = watch::channel(false);
+        let heartbeat = self.heartbeat(job, lost_tx);
+        let result = self.analyse_job(engine, job, lost).await;
         heartbeat.abort();
         let now = self.clock.wall_ms();
         match result {
@@ -352,30 +366,51 @@ impl Shared {
                 log_info!(self.logger, "analysis interrupted by shutdown", { "gameId": game_id });
                 None
             }
+            Err(JobError::Lost) => {
+                METRICS.lost.inc();
+                log_warn!(self.logger, "analysis dropped: the job was claimed again", { "gameId": game_id,
+                    "attempt": job.attempts, "ms": now - started });
+                None
+            }
             Err(e) => {
                 self.counters.failed.fetch_add(1, Ordering::Relaxed);
                 METRICS.failed.inc();
                 let msg = e.message();
                 log_warn!(self.logger, "analysis failed", { "gameId": game_id, "err": msg });
                 let error = js::truncate_utf16(&msg, ERROR_MAX).to_string();
-                if let Err(e2) = self.store.analysis().fail(game_id, Some(error), now).await {
-                    log_error!(self.logger, "cannot mark the job failed", { "err": crate::log::error(&e2), "gameId": game_id });
+                match self.store.analysis().fail(game_id, job.claim.clone(), Some(error), now).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        log_info!(self.logger, "the failure changes nothing: the job is no longer held by this claim",
+                            { "gameId": game_id, "attempt": job.attempts });
+                    }
+                    Err(e2) => {
+                        log_error!(self.logger, "cannot mark the job failed", { "err": crate::log::error(&e2), "gameId": game_id });
+                    }
                 }
                 None
             }
         }
     }
 
-    /// Renews the job's claim every heartbeat while it is analysed.
-    fn heartbeat(&self, game_id: GameId) -> tokio::task::AbortHandle {
+    /// Renews the job's claim every heartbeat while it is analysed. Once the claim no longer holds
+    /// the job, says so on `lost` and stops.
+    fn heartbeat(&self, job: &ClaimedJob, lost: watch::Sender<bool>) -> tokio::task::AbortHandle {
         let (store, clock, logger) = (self.store.clone(), self.clock.clone(), self.logger.clone());
-        let (every, worker) = (self.settings.heartbeat, self.settings.worker_id.clone());
+        let (every, game_id, claim) = (self.settings.heartbeat, job.game_id, job.claim.clone());
         tokio::spawn(async move {
             let mut interval = tokio::time::interval_at(Instant::now() + every, every);
             loop {
                 interval.tick().await;
-                if let Err(e) = store.analysis().touch(game_id, Some(worker.clone()), clock.wall_ms()).await {
-                    log_warn!(logger, "analysis heartbeat not stored", { "err": crate::log::error(&e), "gameId": game_id });
+                match store.analysis().touch(game_id, claim.clone(), clock.wall_ms()).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let _ = lost.send(true);
+                        return;
+                    }
+                    Err(e) => {
+                        log_warn!(logger, "analysis heartbeat not stored", { "err": crate::log::error(&e), "gameId": game_id });
+                    }
                 }
             }
         })
@@ -386,6 +421,7 @@ impl Shared {
         &self,
         engine: &mut E,
         job: &ClaimedJob,
+        mut lost: watch::Receiver<bool>,
     ) -> Result<(Value, usize, u32, u32), JobError> {
         let game_id = job.game_id;
         let game = self.store.games().by_id(game_id).await?.ok_or(JobError::Missing)?;
@@ -412,11 +448,15 @@ impl Shared {
         let analysed = tokio::select! {
             r = analyse_game(engine, &record, self.settings.depths, context, &*self.clock) => r,
             _ = stop.wait_for(|s| *s) => return Err(JobError::Interrupted),
+            Ok(_) = lost.wait_for(|l| *l) => return Err(JobError::Lost),
         };
         let features = analysed.map_err(JobError::Engine)?;
         let json = features.to_json();
         let now = self.clock.wall_ms();
-        self.store.analysis().complete(game_id, Some(json.clone()), now).await?;
+        // Only the claim that holds the job completes it; what follows happens once per game.
+        if !self.store.analysis().complete(game_id, job.claim.clone(), Some(json.clone()), now).await? {
+            return Err(JobError::Lost);
+        }
 
         // Score the players first (their new game is judged against the population as it was),
         // then let the game join the population, but only a game claimed at ordinary priority:

@@ -521,21 +521,26 @@ async fn analysis_queue_claim_complete_fail_with_attempt_cap_stale_requeue_for_u
     let j2 = q.next(5, w("w2"), t).await.unwrap();
     assert_eq!(j2.iter().map(|j| j.game_id).collect::<Vec<_>>(), vec![gs[2].id]);
     assert!(q.next(5, w("w2"), t).await.unwrap().is_empty());
-    assert!(q.complete(gs[0].id, Some(json!({"acpl": 23.5, "moves": 20})), t).await.unwrap());
-    assert_eq!(q.fail(gs[1].id, Some("engine crashed".into()), t).await.unwrap(), Some(JobStatus::Queued));
+    assert!(
+        q.complete(gs[0].id, j1[0].claim.clone(), Some(json!({"acpl": 23.5, "moves": 20})), t).await.unwrap()
+    );
+    let fail = |claim: &str, error: &str| q.fail(gs[1].id, claim.into(), Some(error.into()), t);
+    assert_eq!(fail(&j1[1].claim, "engine crashed").await.unwrap(), Some(JobStatus::Queued));
     assert_eq!(q.stats().await.unwrap(), stats(1, 1, 1, 0));
     // Retried until the cap.
-    assert_eq!(q.next(1, w("w1"), t).await.unwrap()[0].attempts, 2);
-    assert_eq!(q.fail(gs[1].id, Some("again".into()), t).await.unwrap(), Some(JobStatus::Queued));
-    assert_eq!(q.next(1, w("w1"), t).await.unwrap()[0].attempts, 3);
-    assert_eq!(q.fail(gs[1].id, Some("third".into()), t).await.unwrap(), Some(JobStatus::Failed));
+    let retry = q.next(1, w("w1"), t).await.unwrap().remove(0);
+    assert_eq!(retry.attempts, 2);
+    assert_eq!(fail(&retry.claim, "again").await.unwrap(), Some(JobStatus::Queued));
+    let retry = q.next(1, w("w1"), t).await.unwrap().remove(0);
+    assert_eq!(retry.attempts, 3);
+    assert_eq!(fail(&retry.claim, "third").await.unwrap(), Some(JobStatus::Failed));
     let job = q.job(gs[1].id).await.unwrap().unwrap();
     assert_eq!(
         (job.status, job.error.as_deref(), job.finished_at),
         (JobStatus::Failed, Some("third"), Some(t))
     );
     assert!(q.next(5, w("w1"), t).await.unwrap().is_empty());
-    assert_eq!(q.fail(424_242, Some("x".into()), t).await.unwrap(), None);
+    assert_eq!(q.fail(424_242, retry.claim.clone(), Some("x".into()), t).await.unwrap(), None);
     // gs[2] is running for w2 since t: 10 minutes later it goes back to the queue.
     assert!(q.next(5, w("w3"), t + 5 * 60_000).await.unwrap().is_empty());
     let again = q.next(5, w("w3"), t + 11 * 60_000).await.unwrap();
@@ -555,8 +560,8 @@ async fn analysis_queue_claim_complete_fail_with_attempt_cap_stale_requeue_for_u
     assert_eq!(q.enqueue(55_555, t).await.unwrap_err().kind(), ErrorKind::ForeignKey);
     // The error text is bounded.
     q.enqueue(gs[0].id, t).await.unwrap();
-    q.next(5, w("w9"), t + 11 * 60_000).await.unwrap();
-    q.fail(gs[0].id, Some("e".repeat(5000)), t).await.unwrap();
+    let job = q.next(5, w("w9"), t + 11 * 60_000).await.unwrap().remove(0);
+    q.fail(gs[0].id, job.claim, Some("e".repeat(5000)), t).await.unwrap();
     assert_eq!(q.job(gs[0].id).await.unwrap().unwrap().error.unwrap().len(), 2000);
     store.close().await;
 }
@@ -571,15 +576,97 @@ async fn analysis_touch_a_job_its_worker_keeps_renewing_is_not_taken_for_stale()
     let t = 1_900_000_000_000;
     let claimed = q.next(2, w("w1"), t).await.unwrap();
     assert_eq!(claimed.iter().map(|j| j.game_id).collect::<Vec<_>>(), vec![gs[0].id, gs[1].id]);
-    // gs[0] is renewed 9 minutes after the claim, gs[1] is not (and only its worker renews a job).
-    assert!(q.touch(gs[0].id, w("w1"), t + 9 * 60_000).await.unwrap());
-    assert!(!q.touch(gs[1].id, w("w2"), t + 9 * 60_000).await.unwrap());
+    // gs[0] is renewed 9 minutes after the claim, gs[1] is not (and only its claim renews a job).
+    assert!(q.touch(gs[0].id, claimed[0].claim.clone(), t + 9 * 60_000).await.unwrap());
+    assert!(!q.touch(gs[1].id, claimed[0].claim.clone(), t + 9 * 60_000).await.unwrap());
+    assert!(!q.touch(gs[1].id, "w1".into(), t + 9 * 60_000).await.unwrap(), "the worker id alone");
     let again = q.next(5, w("w2"), t + 11 * 60_000).await.unwrap();
     let got: Vec<_> = again.iter().map(|j| (j.game_id, j.attempts, j.worker.clone())).collect();
     assert_eq!(got, vec![(gs[1].id, 2, w("w2"))]);
-    assert!(!q.touch(gs[1].id, w("w1"), t + 11 * 60_000).await.unwrap(), "claimed by another worker since");
-    assert!(q.complete(gs[0].id, Some(json!({"n": 1})), t + 12 * 60_000).await.unwrap());
-    assert!(!q.touch(gs[0].id, w("w1"), t + 12 * 60_000).await.unwrap(), "done");
+    assert!(
+        !q.touch(gs[1].id, claimed[1].claim.clone(), t + 11 * 60_000).await.unwrap(),
+        "claimed again since"
+    );
+    assert!(q.touch(gs[1].id, again[0].claim.clone(), t + 11 * 60_000).await.unwrap());
+    assert!(
+        q.complete(gs[0].id, claimed[0].claim.clone(), Some(json!({"n": 1})), t + 12 * 60_000).await.unwrap()
+    );
+    assert!(!q.touch(gs[0].id, claimed[0].claim.clone(), t + 12 * 60_000).await.unwrap(), "done");
+    store.close().await;
+}
+
+/// The features stored for `game` (one of `user`'s games).
+async fn features_of(
+    q: &crate::store::AnalysisApi,
+    user: UserId,
+    game: crate::ids::GameId,
+) -> Option<serde_json::Value> {
+    let jobs = q.for_user(user, 50, false).await.unwrap();
+    jobs.into_iter().find(|j| j.game_id == game).and_then(|j| j.features)
+}
+
+#[tokio::test]
+async fn analysis_a_claim_whose_job_was_claimed_again_no_longer_renews_completes_or_fails_it() {
+    // Audit N14: the job of a worker that stalled (or whose wall clock jumped) is re-queued and
+    // claimed again, here by the same worker id; the first claim then holds nothing.
+    let (store, [a, b, ..]) = setup().await;
+    let mut mk = Gen::new();
+    let gs = vec![mk.game(a, b), mk.game(a, b)];
+    store.finish_batch(gs.clone()).await.unwrap();
+    let q = store.analysis();
+    let t = 1_900_000_000_000;
+    let first = q.next(2, w("w1"), t).await.unwrap();
+    assert_ne!(first[0].claim, first[1].claim, "a claim of its own for each job of one worker");
+    assert!(first.iter().all(|j| j.claim.starts_with("w1#") && j.claim.len() == "w1#".len() + 16));
+    let old = first[0].claim.clone();
+    assert!(q.touch(gs[1].id, first[1].claim.clone(), t + 9 * 60_000).await.unwrap());
+    let again = q.next(5, w("w1"), t + 11 * 60_000).await.unwrap();
+    assert_eq!(again.iter().map(|j| (j.game_id, j.attempts)).collect::<Vec<_>>(), vec![(gs[0].id, 2)]);
+    let new = again[0].claim.clone();
+    assert_ne!(new, old);
+    // While the new claim runs, the old one's heartbeat, failure and completion change nothing.
+    let late = t + 12 * 60_000;
+    assert!(!q.touch(gs[0].id, old.clone(), late).await.unwrap());
+    assert_eq!(q.fail(gs[0].id, old.clone(), Some("late failure".into()), late).await.unwrap(), None);
+    assert!(!q.complete(gs[0].id, old.clone(), Some(json!({"by": "old"})), late).await.unwrap());
+    let job = q.job(gs[0].id).await.unwrap().unwrap();
+    assert_eq!((job.status, job.attempts, job.finished_at), (JobStatus::Running, 2, None));
+    assert_eq!(features_of(&q, a, gs[0].id).await, None);
+    // The new claim completes it; the old one's answers still change nothing.
+    assert!(q.complete(gs[0].id, new.clone(), Some(json!({"by": "new"})), late).await.unwrap());
+    assert!(!q.complete(gs[0].id, old.clone(), Some(json!({"by": "old"})), late + 1).await.unwrap());
+    assert!(
+        !q.complete(gs[0].id, new, Some(json!({"by": "new, twice"})), late + 1).await.unwrap(),
+        "done once"
+    );
+    assert_eq!(q.fail(gs[0].id, old, Some("late failure".into()), late + 1).await.unwrap(), None);
+    let job = q.job(gs[0].id).await.unwrap().unwrap();
+    assert_eq!(
+        (job.status, job.attempts, job.finished_at, job.error),
+        (JobStatus::Done, 2, Some(late), None)
+    );
+    assert_eq!(features_of(&q, a, gs[0].id).await, Some(json!({"by": "new"})));
+    store.close().await;
+}
+
+#[tokio::test]
+async fn analysis_a_moderator_request_on_a_running_job_ends_its_claim_though_the_attempts_start_over() {
+    let (store, [a, b, ..]) = setup().await;
+    let mut mk = Gen::new();
+    let g = mk.game(a, b);
+    store.finish_batch(vec![g.clone()]).await.unwrap();
+    let q = store.analysis();
+    let t = 1_900_000_000_000;
+    let first = q.next(1, w("w1"), t).await.unwrap().remove(0);
+    assert_eq!(first.attempts, 1);
+    q.enqueue(g.id, t + 1000).await.unwrap();
+    assert!(!q.touch(g.id, first.claim.clone(), t + 2000).await.unwrap(), "queued again");
+    let second = q.next(1, w("w1"), t + 3000).await.unwrap().remove(0);
+    assert_eq!((second.game_id, second.attempts), (g.id, 1), "the same attempt count as the first claim");
+    assert!(!q.complete(g.id, first.claim.clone(), Some(json!({"by": "first"})), t + 4000).await.unwrap());
+    assert_eq!(q.fail(g.id, first.claim, Some("x".into()), t + 4000).await.unwrap(), None);
+    assert!(q.complete(g.id, second.claim, Some(json!({"by": "second"})), t + 5000).await.unwrap());
+    assert_eq!(features_of(&q, a, g.id).await, Some(json!({"by": "second"})));
     store.close().await;
 }
 
@@ -597,15 +684,16 @@ async fn analysis_for_user_done_only_lists_the_latest_analysed_games_and_reads_t
         let job = q.next(1, w("w"), t).await.unwrap().remove(0);
         assert_eq!(job.game_id, g.id);
         if i == 25 {
+            let mut claim = job.claim;
             for k in 0..3 {
-                q.fail(g.id, Some("engine crashed".into()), t).await.unwrap();
+                q.fail(g.id, claim.clone(), Some("engine crashed".into()), t).await.unwrap();
                 if k < 2 {
-                    q.next(1, w("w"), t).await.unwrap();
+                    claim = q.next(1, w("w"), t).await.unwrap().remove(0).claim;
                 }
             }
         } else {
             let features = json!({"gameId": g.id, "white": {"userId": g.white_id, "n": 20}});
-            q.complete(g.id, Some(features), t).await.unwrap();
+            q.complete(g.id, job.claim, Some(features), t).await.unwrap();
         }
     }
     assert_eq!(q.stats().await.unwrap(), stats(14, 0, 25, 1));
@@ -658,7 +746,11 @@ async fn analysis_next_two_workers_with_their_own_connections_never_claim_the_sa
                 }
                 for j in jobs {
                     got.push(j.game_id);
-                    worker.analysis().complete(j.game_id, Some(json!({"by": name})), 2).await.unwrap();
+                    worker
+                        .analysis()
+                        .complete(j.game_id, j.claim, Some(json!({"by": name})), 2)
+                        .await
+                        .unwrap();
                 }
             }
             worker.close().await;
