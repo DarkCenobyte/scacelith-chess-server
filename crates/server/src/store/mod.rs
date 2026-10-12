@@ -372,27 +372,25 @@ impl Store {
         self.meta().get("server_id".into()).await
     }
 
-    /// Closes the store: later calls fail with `closed`; the reads in progress and the write jobs
-    /// already queued finish (at most 7 s, longer than `busy_timeout`; a job not answered by then
-    /// fails with "outcome unknown"), then `PRAGMA optimize` and every connection is closed.
-    /// Idempotent.
+    /// Closes the store: later calls fail with `closed`; the reads in progress finish and the
+    /// readers close, then the write jobs already queued finish (each wait at most 7 s, longer than
+    /// `busy_timeout`; a job not answered by then fails with "outcome unknown"), then `PRAGMA
+    /// optimize` and the writer closes, last. Idempotent.
     pub async fn close(&self) {
         let _guard = self.inner.close_lock.lock().await;
         if self.inner.closed.swap(true, Ordering::SeqCst) {
             return;
         }
         let logger = self.inner.ctx.logger.clone();
-        let readers = async {
-            if let Some(r) = &self.inner.readers {
-                r.close(CLOSE_TIMEOUT).await;
-            }
-        };
-        let writer = async {
-            if let Some(w) = &self.inner.writer {
-                w.close(CLOSE_TIMEOUT, &logger).await;
-            }
-        };
-        tokio::join!(readers, writer);
+        // One after the other, the writer last: SQLite checkpoints the WAL and removes its file
+        // only when the connection that closes can lock the database alone, which two connections
+        // closing at the same time can both miss (the file then stays until the next open).
+        if let Some(r) = &self.inner.readers {
+            r.close(CLOSE_TIMEOUT).await;
+        }
+        if let Some(w) = &self.inner.writer {
+            w.close(CLOSE_TIMEOUT, &logger).await;
+        }
     }
 
     /// Commits finished games in one transaction (DESIGN 5.5): game rows, both ratings of each
