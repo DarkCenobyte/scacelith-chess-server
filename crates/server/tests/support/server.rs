@@ -337,13 +337,15 @@ impl TestServer {
     async fn launch(opts: ServerOptions) -> TestServer {
         let dir = opts.dir.clone().unwrap_or_else(|| Arc::new(TempDir::new("srv")));
         // The metrics port is taken free a moment before the server binds it: another process
-        // may take it meanwhile, in which case the start is tried again on another one.
+        // may take it meanwhile, in which case the start is tried again on another one. The
+        // failure is recognized by the errno name the server logs ("listen EADDRINUSE: ...",
+        // errorCode "EADDRINUSE"), not by the system's text, which differs by C library and case.
         let mut attempt = 0;
         loop {
             attempt += 1;
             match Self::try_launch(&opts, dir.clone()).await {
                 Ok(server) => return server,
-                Err(failure) if attempt < 3 && failure.contains("address already in use") => continue,
+                Err(failure) if attempt < 3 && failure.contains("EADDRINUSE") => continue,
                 Err(failure) => panic!("the test server did not start: {failure}"),
             }
         }
