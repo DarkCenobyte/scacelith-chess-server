@@ -216,6 +216,17 @@ answer within 2 s is killed and started again for the next job. A loop never cla
 without a working engine: an engine that cannot start, or dies, is started again after 1 s,
 doubling up to 60 s, and back to 1 s once it ran for 60 s.
 
+**Claims.** A loop analyses a job under a claim of its own: the worker id (host name and
+process id, shared by the loops of one process) and 64 random bits, stored with the running job.
+The claim is renewed every minute while the engine works. A job whose claim was not renewed for 10 minutes
+(its server stopped, or the wall clock the claims are dated with jumped forward) goes back to the
+queue, or fails at its third attempt, and a moderator request queues a running job again; in
+both cases the first claim no longer holds the job. Only the claim that holds a job renews,
+completes or fails it, so an analysis that ends after its job was claimed again changes nothing:
+its result and its failure are dropped, and the players are scored and the population fed once
+per game, by the claim that completed it. The analysis stops at its next renewal once the claim
+is lost (`scacelith_anticheat_analysis_games_total{result="lost"}`, a warning in the log).
+
 ### Engine
 
 **Use Stockfish 19**, the official release: it is the engine the anti-cheat is calibrated for.

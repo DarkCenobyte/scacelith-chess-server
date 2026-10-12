@@ -18,6 +18,7 @@ use crate::anticheat::analysis::moves::move_to_uci;
 use crate::anticheat::scoring::model::suspected;
 use crate::anticheat::testing::*;
 use crate::clock::ManualClock;
+use crate::ids::GameId;
 use crate::store::status::WHITE_WINS;
 use crate::store::tests::support::{LogCapture, TempDir};
 use crate::store::{IntegrityLevel as StoredLevel, IntegrityUpdate, JobStatus};
@@ -525,6 +526,78 @@ async fn a_job_is_renewed_while_the_engine_works_on_it_and_no_longer_after() {
 }
 
 #[tokio::test]
+async fn an_analysis_whose_job_was_claimed_again_is_dropped_and_its_game_counted_once() {
+    // Audit N14: the wall clock jumps past the stale delay while a job is analysed; the job is
+    // claimed again (same worker id) and analysed, then the first analysis ends, done or failed.
+    let w = world().await;
+    let g = w.add_game(40, Priority::Ordinary, None).await;
+    let (worker, _stop) = w.worker("w1");
+    let logs = LogCapture::start();
+    let first = w.claim("w1").await;
+    w.clock.set_wall(NOW + 11 * 60_000);
+    let second = w.store.analysis().next(1, Some("w1".into()), NOW + 11 * 60_000).await.unwrap().remove(0);
+    assert_eq!((second.game_id, second.attempts), (g.id, 2));
+    let mut engine = Fake::new(&g.moves);
+    let f = worker.process_job(&mut engine, &second).await.expect("analysed");
+    let profile = f["profile"].as_str().unwrap().to_string();
+    let done = w.job(g.id).await;
+    assert_eq!(done.status, JobStatus::Done);
+    let scored = (w.statistics(g.white).await, w.statistics(g.black).await);
+    assert_eq!(scored.1["games"], 1);
+    assert_eq!(w.accuracy_n(&profile).await, 2);
+    // The first analysis ends later: its result, then its failure, change nothing.
+    w.clock.advance(1000.0);
+    assert_eq!(worker.process_job(&mut engine, &first).await, None);
+    let mut crashing = Fake {
+        analyse_error: Some(EngineError::new(EngineErrorKind::Crashed, "engine exited")),
+        ..Fake::new(&g.moves)
+    };
+    assert_eq!(worker.process_job(&mut crashing, &first).await, None);
+    assert_eq!(
+        w.job(g.id).await,
+        done,
+        "the job stays done, attempts and time as the second claim left them"
+    );
+    let stored = w.store.analysis().for_user(g.white, 10, true).await.unwrap();
+    assert_eq!(stored[0].features.as_ref(), Some(&f));
+    assert_eq!((w.statistics(g.white).await, w.statistics(g.black).await), scored, "scored once");
+    assert_eq!(w.accuracy_n(&profile).await, 2, "one game in the population");
+    assert_eq!(analysed(&worker), (1, 1), "the crash counts, the dropped analysis does not");
+    let dropped = logs
+        .records("analysis")
+        .into_iter()
+        .filter(|r| r["msg"] == "analysis dropped: the job was claimed again" && r["gameId"] == json!(g.id))
+        .count();
+    assert_eq!(dropped, 1);
+}
+
+#[tokio::test]
+async fn an_analysis_stops_at_its_first_renewal_once_its_job_was_claimed_again() {
+    let w = world().await;
+    let g = w.add_game(40, Priority::Ordinary, None).await;
+    let (tx, rx) = watch::channel(false);
+    let settings = PoolSettings { heartbeat: Duration::from_millis(10), ..w.settings(1, "w7") };
+    let worker = Shared::new(settings, w.store.clone(), w.clock.clone(), rx);
+    let first = w.claim("w7").await;
+    // A moderator asks for the game again while its first position is searched (a search that
+    // never ends: only the lost claim stops it), and the job is claimed again.
+    let mut stuck = Fake { gate: Some(Arc::new(Notify::new())), ..Fake::new(&g.moves) };
+    let again = async {
+        w.store.analysis().enqueue(g.id, NOW).await.unwrap();
+        w.claim("w7").await
+    };
+    let analysis = tokio::time::timeout(Duration::from_secs(10), worker.process_job(&mut stuck, &first));
+    let (stopped, second) = tokio::join!(analysis, again);
+    assert_eq!(stopped.expect("stopped by its heartbeat"), None);
+    assert_eq!((w.job(g.id).await.status, second.attempts), (JobStatus::Running, 1));
+    let mut engine = Fake::new(&g.moves);
+    assert!(worker.process_job(&mut engine, &second).await.is_some(), "the new claim analyses it");
+    assert_eq!(w.job(g.id).await.status, JobStatus::Done);
+    assert_eq!(analysed(&worker), (1, 0));
+    drop(tx);
+}
+
+#[tokio::test]
 async fn a_job_whose_game_is_missing_or_whose_engine_crashes_is_marked_failed() {
     let w = world().await;
     let (worker, _stop) = w.worker("t");
@@ -537,6 +610,7 @@ async fn a_job_whose_game_is_missing_or_whose_engine_crashes_is_marked_failed() 
         queued_at: NOW,
         started_at: Some(NOW),
         worker: Some("t".into()),
+        claim: "t#0000000000000000".into(),
     };
     let mut engine = Fake::new(&[]);
     assert_eq!(worker.process_job(&mut engine, &missing).await, None);

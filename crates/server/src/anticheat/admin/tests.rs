@@ -264,7 +264,17 @@ async fn analysed(w: &World, white: UserId, black: UserId, features: impl FnOnce
     let id = g.id;
     w.finish(vec![g]).await;
     w.store.analysis().enqueue(id, NOW).await.unwrap();
-    assert!(w.store.analysis().complete(id, Some(features(id)), NOW).await.unwrap());
+    // Claimed under a known claim (`next` could take another queued game first), then completed.
+    let claim = format!("test#{id}");
+    let sql = "UPDATE analysis_jobs SET status = 'running', started_at = ?1, worker = ?2 WHERE game_id = ?3";
+    let (at, by) = (NOW, claim.clone());
+    w.store
+        .write(move |db| {
+            db.connection().execute(sql, rusqlite::params![at, by, id as i64]).map_err(StoreError::from)
+        })
+        .await
+        .unwrap();
+    assert!(w.store.analysis().complete(id, claim, Some(features(id)), NOW).await.unwrap());
     id
 }
 
@@ -869,12 +879,18 @@ async fn analysis_queue_puts_the_game_first_and_leaves_a_game_being_or_already_a
     let analysis = w.store.analysis();
     let claimed = analysis.next(3, Some("w".into()), NOW).await.unwrap();
     assert_eq!(claimed.iter().map(|j| j.game_id).collect::<Vec<_>>(), ids(&[&running, &done, &failed]));
-    analysis.complete(done.id, Some(json!({ "gameId": done.id })), NOW).await.unwrap();
+    analysis
+        .complete(done.id, claimed[1].claim.clone(), Some(json!({ "gameId": done.id })), NOW)
+        .await
+        .unwrap();
+    let mut failing = claimed[2].claim.clone();
     for _ in 0..3 {
-        if analysis.fail(failed.id, Some("engine crashed".into()), NOW).await.unwrap()
+        if analysis.fail(failed.id, failing.clone(), Some("engine crashed".into()), NOW).await.unwrap()
             == Some(JobStatus::Queued)
         {
-            assert_eq!(analysis.next(1, Some("w".into()), NOW).await.unwrap()[0].game_id, failed.id);
+            let job = analysis.next(1, Some("w".into()), NOW).await.unwrap().remove(0);
+            assert_eq!(job.game_id, failed.id);
+            failing = job.claim;
         }
     }
     assert!(analysis.request(reported.id, Priority::Report, NOW).await.unwrap());
