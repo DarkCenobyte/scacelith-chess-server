@@ -492,7 +492,9 @@ embedded in the binary and recorded in `schema_migrations`.
 * **Closing.** The store closes last at shutdown. The writer waits up to 7 s for the jobs already
   submitted, longer than `busy_timeout`, so that one wait for another process's lock (the admin
   command) loses nothing; jobs still unanswered then fail with "outcome unknown" (finished games
-  stay in the journal).
+  stay in the journal). The readers close first and the writer last: SQLite checkpoints the WAL
+  and removes its file only when the closing connection is the last one, which two connections
+  closing at the same time can both miss.
 
 ### 5.6 Journal (`journal`)
 
