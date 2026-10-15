@@ -282,6 +282,61 @@
    "properties": "propriedades"
   }
  },
+ "bg": {
+  "name": "Български",
+  "dir": "ltr",
+  "language": "Език",
+  "labels": {
+   "enum": "Възможни стойности",
+   "enumSingleValue": "Стойност",
+   "enumArray": "Елементи",
+   "default": "По подразбиране",
+   "deprecated": "Остаряло",
+   "example": "Пример",
+   "examples": "Примери",
+   "recursive": "Рекурсивно",
+   "arrayOf": "Масив от ",
+   "webhook": "Събитие",
+   "const": "Стойност",
+   "noResultsFound": "Няма намерени резултати",
+   "download": "Изтегляне",
+   "downloadSpecification": "Изтегляне на спецификацията OpenAPI",
+   "responses": "Отговори",
+   "callbackResponses": "Отговори на обратното извикване",
+   "requestSamples": "Примерни заявки",
+   "responseSamples": "Примерни отговори"
+  },
+  "text": {
+   "Authorizations:": "Оторизация:",
+   "Request Body schema: ": "Схема на тялото на заявката: ",
+   "Response Schema: ": "Схема на отговора: ",
+   "required": "задължително",
+   "Search...": "Търсене…",
+   "Copy": "Копирай",
+   "Copied": "Копирано",
+   "Content type": "Тип на съдържанието",
+   "HTTP Authorization Scheme: ": "Схема за HTTP оторизация: ",
+   "Bearer format: ": "Формат на Bearer: ",
+   "Security Scheme Type: ": "Тип на схемата за сигурност: ",
+   "No sample": "Няма пример",
+   "query Parameters": "Параметри на заявката",
+   "path Parameters": "Параметри на пътя",
+   "header Parameters": "Параметри в заглавките",
+   "cookie Parameters": "Параметри в бисквитките",
+   "Payload": "Тяло",
+   "Example": "Пример",
+   "Default": "По подразбиране",
+   "Expand all": "Разгъни всички",
+   "Collapse all": "Свий всички",
+   "non-empty": "непразно",
+   "License:": "Лиценз:"
+  },
+  "words": {
+   "characters": "знака",
+   "items": "елемента",
+   "properties": "свойства"
+  }
+ },
  "ru": {
   "name": "Русский",
   "dir": "ltr",
