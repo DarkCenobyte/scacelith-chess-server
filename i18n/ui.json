@@ -172,6 +172,61 @@
    "properties": "propriétés"
   }
  },
+ "pt-BR": {
+  "name": "Português (Brasil)",
+  "dir": "ltr",
+  "language": "Idioma",
+  "labels": {
+   "enum": "Valores possíveis",
+   "enumSingleValue": "Valor",
+   "enumArray": "Itens",
+   "default": "Padrão",
+   "deprecated": "Obsoleto",
+   "example": "Exemplo",
+   "examples": "Exemplos",
+   "recursive": "Recursivo",
+   "arrayOf": "Array de ",
+   "webhook": "Evento",
+   "const": "Valor",
+   "noResultsFound": "Nenhum resultado encontrado",
+   "download": "Baixar",
+   "downloadSpecification": "Baixar a especificação OpenAPI",
+   "responses": "Respostas",
+   "callbackResponses": "Respostas do callback",
+   "requestSamples": "Exemplos de requisição",
+   "responseSamples": "Exemplos de resposta"
+  },
+  "text": {
+   "Authorizations:": "Autorizações:",
+   "Request Body schema: ": "Esquema do corpo da requisição: ",
+   "Response Schema: ": "Esquema da resposta: ",
+   "required": "obrigatório",
+   "Search...": "Pesquisar…",
+   "Copy": "Copiar",
+   "Copied": "Copiado",
+   "Content type": "Tipo de conteúdo",
+   "HTTP Authorization Scheme: ": "Esquema de autorização HTTP: ",
+   "Bearer format: ": "Formato Bearer: ",
+   "Security Scheme Type: ": "Tipo de esquema de segurança: ",
+   "No sample": "Sem exemplo",
+   "query Parameters": "Parâmetros de query",
+   "path Parameters": "Parâmetros de caminho",
+   "header Parameters": "Parâmetros de cabeçalho",
+   "cookie Parameters": "Parâmetros de cookie",
+   "Payload": "Corpo",
+   "Example": "Exemplo",
+   "Default": "Padrão",
+   "Expand all": "Expandir tudo",
+   "Collapse all": "Recolher tudo",
+   "non-empty": "não vazio",
+   "License:": "Licença:"
+  },
+  "words": {
+   "characters": "caracteres",
+   "items": "itens",
+   "properties": "propriedades"
+  }
+ },
  "pt": {
   "name": "Português (Portugal)",
   "dir": "ltr",
