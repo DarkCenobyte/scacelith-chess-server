@@ -447,6 +447,61 @@
    "properties": "خاصية"
   }
  },
+ "ko": {
+  "name": "한국어",
+  "dir": "ltr",
+  "language": "언어",
+  "labels": {
+   "enum": "가능한 값",
+   "enumSingleValue": "값",
+   "enumArray": "항목",
+   "default": "기본값",
+   "deprecated": "사용 중단됨",
+   "example": "예시",
+   "examples": "예시",
+   "recursive": "재귀",
+   "arrayOf": "배열: ",
+   "webhook": "이벤트",
+   "const": "값",
+   "noResultsFound": "결과 없음",
+   "download": "다운로드",
+   "downloadSpecification": "OpenAPI 명세 다운로드",
+   "responses": "응답",
+   "callbackResponses": "콜백 응답",
+   "requestSamples": "요청 예시",
+   "responseSamples": "응답 예시"
+  },
+  "text": {
+   "Authorizations:": "인증:",
+   "Request Body schema: ": "요청 본문 스키마: ",
+   "Response Schema: ": "응답 스키마: ",
+   "required": "필수",
+   "Search...": "검색…",
+   "Copy": "복사",
+   "Copied": "복사됨",
+   "Content type": "콘텐츠 유형",
+   "HTTP Authorization Scheme: ": "HTTP 인증 스킴: ",
+   "Bearer format: ": "Bearer 형식: ",
+   "Security Scheme Type: ": "보안 스킴 유형: ",
+   "No sample": "예시 없음",
+   "query Parameters": "쿼리 매개변수",
+   "path Parameters": "경로 매개변수",
+   "header Parameters": "헤더 매개변수",
+   "cookie Parameters": "쿠키 매개변수",
+   "Payload": "페이로드",
+   "Example": "예시",
+   "Default": "기본값",
+   "Expand all": "모두 펼치기",
+   "Collapse all": "모두 접기",
+   "non-empty": "비어 있지 않음",
+   "License:": "라이선스:"
+  },
+  "words": {
+   "characters": "문자",
+   "items": "항목",
+   "properties": "속성"
+  }
+ },
  "ja": {
   "name": "日本語",
   "dir": "ltr",
