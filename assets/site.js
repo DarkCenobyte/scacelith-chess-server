@@ -12,6 +12,8 @@
     "zh-Hans": '"PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", ',
     "zh-Hant": '"PingFang TC", "Microsoft JhengHei", "Noto Sans CJK TC", "Noto Sans TC", ',
     ar: '"Segoe UI", "Noto Sans Arabic", "Geeza Pro", Tahoma, ',
+    ko: '"Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans CJK KR", "Noto Sans KR", ',
+    hi: '"Nirmala UI", "Kohinoor Devanagari", "Noto Sans Devanagari", "Mangal", ',
   }[lang] || "";
   sans += 'system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif';
   var mono = 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';

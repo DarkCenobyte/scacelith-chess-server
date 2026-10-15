@@ -1,6 +1,6 @@
 # Scacelith server API reference (gh-pages)
 
-This branch is the website of the HTTPS API reference of the Scacelith server, in the ten languages
+This branch is the website of the HTTPS API reference of the Scacelith server, in the 34 languages
 of the game, published by GitHub Pages at <https://docs.scacelith.com/> (the game's website links
 there). The server itself, its documentation (`docs/API.md` is the reference this site describes)
 and the realtime protocol are on the
@@ -10,7 +10,7 @@ and the realtime protocol are on the
 | --- | --- |
 | `index.html` | The language picker (the visitor's language first) |
 | `en/openapi.yaml` | The OpenAPI 3.1 description, in English: the source of every language |
-| `<lang>/openapi.yaml` | The same description translated (`fr`, `de`, `es`, `uk`, `ru`, `ar`, `ja`, `zh-Hans`, `zh-Hant`), generated |
+| `<lang>/openapi.yaml` | The same description translated (every language of `i18n/ui.json`: `fr`, `de`, `es`, `it`, `pt`, `pt-BR`, `ja`, `ko`...), generated |
 | `<lang>/index.html` | The reference page of a language (Redoc), generated |
 | `i18n/<lang>.json` | The translations: for each title, summary, description and tag name of the English description (by JSON pointer), the English text it translates and its translation |
 | `i18n/ui.json` | Per language: its name, direction, and the strings of the page itself (Redoc's labels and the few strings `assets/site.js` replaces) |

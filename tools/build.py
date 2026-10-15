@@ -170,7 +170,7 @@ PICKER = """<!doctype html>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <title>Scacelith server API reference</title>
-<meta name="description" content="The HTTPS API of the Scacelith chess server, in ten languages.">
+<meta name="description" content="The HTTPS API of the Scacelith chess server, in the 34 languages of the game.">
 <link rel="stylesheet" href="assets/site.css">
 </head>
 <body class="picker">
