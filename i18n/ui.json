@@ -117,6 +117,61 @@
    "properties": "Eigenschaften"
   }
  },
+ "et": {
+  "name": "Eesti",
+  "dir": "ltr",
+  "language": "Keel",
+  "labels": {
+   "enum": "Võimalikud väärtused",
+   "enumSingleValue": "Väärtus",
+   "enumArray": "Elemendid",
+   "default": "Vaikimisi",
+   "deprecated": "Aegunud",
+   "example": "Näide",
+   "examples": "Näited",
+   "recursive": "Rekursiivne",
+   "arrayOf": "Massiiv: ",
+   "webhook": "Sündmus",
+   "const": "Väärtus",
+   "noResultsFound": "Tulemusi ei leitud",
+   "download": "Laadi alla",
+   "downloadSpecification": "Laadi alla OpenAPI spetsifikatsioon",
+   "responses": "Vastused",
+   "callbackResponses": "Tagasikutse vastused",
+   "requestSamples": "Päringute näited",
+   "responseSamples": "Vastuste näited"
+  },
+  "text": {
+   "Authorizations:": "Autoriseerimine:",
+   "Request Body schema: ": "Päringu keha skeem: ",
+   "Response Schema: ": "Vastuse skeem: ",
+   "required": "kohustuslik",
+   "Search...": "Otsi…",
+   "Copy": "Kopeeri",
+   "Copied": "Kopeeritud",
+   "Content type": "Sisutüüp",
+   "HTTP Authorization Scheme: ": "HTTP autoriseerimisskeem: ",
+   "Bearer format: ": "Bearer-vorming: ",
+   "Security Scheme Type: ": "Turvaskeemi tüüp: ",
+   "No sample": "Näide puudub",
+   "query Parameters": "Päringuparameetrid",
+   "path Parameters": "Teeparameetrid",
+   "header Parameters": "Päiseparameetrid",
+   "cookie Parameters": "Küpsiseparameetrid",
+   "Payload": "Keha",
+   "Example": "Näide",
+   "Default": "Vaikimisi",
+   "Expand all": "Laienda kõik",
+   "Collapse all": "Ahenda kõik",
+   "non-empty": "mittetühi",
+   "License:": "Litsents:"
+  },
+  "words": {
+   "characters": "märki",
+   "items": "elementi",
+   "properties": "omadust"
+  }
+ },
  "es": {
   "name": "Español",
   "dir": "ltr",
