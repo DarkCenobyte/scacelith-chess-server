@@ -997,6 +997,61 @@
    "properties": "ominaisuutta"
   }
  },
+ "sv": {
+  "name": "Svenska",
+  "dir": "ltr",
+  "language": "Språk",
+  "labels": {
+   "enum": "Möjliga värden",
+   "enumSingleValue": "Värde",
+   "enumArray": "Element",
+   "default": "Standard",
+   "deprecated": "Föråldrad",
+   "example": "Exempel",
+   "examples": "Exempel",
+   "recursive": "Rekursiv",
+   "arrayOf": "Array av ",
+   "webhook": "Händelse",
+   "const": "Värde",
+   "noResultsFound": "Inga resultat hittades",
+   "download": "Ladda ned",
+   "downloadSpecification": "Ladda ned OpenAPI-specifikationen",
+   "responses": "Svar",
+   "callbackResponses": "Callback-svar",
+   "requestSamples": "Exempel på anrop",
+   "responseSamples": "Exempel på svar"
+  },
+  "text": {
+   "Authorizations:": "Auktorisering:",
+   "Request Body schema: ": "Schema för anropets body: ",
+   "Response Schema: ": "Schema för svaret: ",
+   "required": "obligatorisk",
+   "Search...": "Sök…",
+   "Copy": "Kopiera",
+   "Copied": "Kopierat",
+   "Content type": "Innehållstyp",
+   "HTTP Authorization Scheme: ": "HTTP-auktoriseringsschema: ",
+   "Bearer format: ": "Bearer-format: ",
+   "Security Scheme Type: ": "Typ av säkerhetsschema: ",
+   "No sample": "Inget exempel",
+   "query Parameters": "Query-parametrar",
+   "path Parameters": "Sökvägsparametrar",
+   "header Parameters": "Header-parametrar",
+   "cookie Parameters": "Cookie-parametrar",
+   "Payload": "Body",
+   "Example": "Exempel",
+   "Default": "Standard",
+   "Expand all": "Fäll ut alla",
+   "Collapse all": "Fäll ihop alla",
+   "non-empty": "inte tom",
+   "License:": "Licens:"
+  },
+  "words": {
+   "characters": "tecken",
+   "items": "element",
+   "properties": "egenskaper"
+  }
+ },
  "vi": {
   "name": "Tiếng Việt",
   "dir": "ltr",
