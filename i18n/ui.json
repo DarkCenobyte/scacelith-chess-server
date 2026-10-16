@@ -447,6 +447,61 @@
    "properties": "proprietà"
   }
  },
+ "hu": {
+  "name": "Magyar",
+  "dir": "ltr",
+  "language": "Nyelv",
+  "labels": {
+   "enum": "Lehetséges értékek",
+   "enumSingleValue": "Érték",
+   "enumArray": "Elemek",
+   "default": "Alapértelmezett",
+   "deprecated": "Elavult",
+   "example": "Példa",
+   "examples": "Példák",
+   "recursive": "Rekurzív",
+   "arrayOf": "Tömb: ",
+   "webhook": "Esemény",
+   "const": "Érték",
+   "noResultsFound": "Nincs találat",
+   "download": "Letöltés",
+   "downloadSpecification": "OpenAPI-specifikáció letöltése",
+   "responses": "Válaszok",
+   "callbackResponses": "Visszahívási válaszok",
+   "requestSamples": "Kérésminták",
+   "responseSamples": "Válaszminták"
+  },
+  "text": {
+   "Authorizations:": "Engedélyezés:",
+   "Request Body schema: ": "Kéréstörzs sémája: ",
+   "Response Schema: ": "Válasz sémája: ",
+   "required": "kötelező",
+   "Search...": "Keresés…",
+   "Copy": "Másolás",
+   "Copied": "Másolva",
+   "Content type": "Tartalomtípus",
+   "HTTP Authorization Scheme: ": "HTTP-engedélyezési séma: ",
+   "Bearer format: ": "Bearer formátum: ",
+   "Security Scheme Type: ": "Biztonsági séma típusa: ",
+   "No sample": "Nincs minta",
+   "query Parameters": "Lekérdezési paraméterek",
+   "path Parameters": "Útvonal-paraméterek",
+   "header Parameters": "Fejlécparaméterek",
+   "cookie Parameters": "Sütiparaméterek",
+   "Payload": "Törzs",
+   "Example": "Példa",
+   "Default": "Alapértelmezett",
+   "Expand all": "Összes kibontása",
+   "Collapse all": "Összes összecsukása",
+   "non-empty": "nem üres",
+   "License:": "Licenc:"
+  },
+  "words": {
+   "characters": "karakter",
+   "items": "elem",
+   "properties": "tulajdonság"
+  }
+ },
  "nl": {
   "name": "Nederlands",
   "dir": "ltr",
