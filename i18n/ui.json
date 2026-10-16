@@ -667,6 +667,61 @@
    "properties": "propriedades"
   }
  },
+ "ro": {
+  "name": "Română",
+  "dir": "ltr",
+  "language": "Limbă",
+  "labels": {
+   "enum": "Valori posibile",
+   "enumSingleValue": "Valoare",
+   "enumArray": "Elemente",
+   "default": "Implicit",
+   "deprecated": "Învechit",
+   "example": "Exemplu",
+   "examples": "Exemple",
+   "recursive": "Recursiv",
+   "arrayOf": "Array de ",
+   "webhook": "Eveniment",
+   "const": "Valoare",
+   "noResultsFound": "Nu s-au găsit rezultate",
+   "download": "Descărcare",
+   "downloadSpecification": "Descărcare specificație OpenAPI",
+   "responses": "Răspunsuri",
+   "callbackResponses": "Răspunsuri callback",
+   "requestSamples": "Exemple de cereri",
+   "responseSamples": "Exemple de răspunsuri"
+  },
+  "text": {
+   "Authorizations:": "Autorizări:",
+   "Request Body schema: ": "Schema corpului cererii: ",
+   "Response Schema: ": "Schema răspunsului: ",
+   "required": "obligatoriu",
+   "Search...": "Căutare…",
+   "Copy": "Copiere",
+   "Copied": "Copiat",
+   "Content type": "Tip de conținut",
+   "HTTP Authorization Scheme: ": "Schemă de autorizare HTTP: ",
+   "Bearer format: ": "Format Bearer: ",
+   "Security Scheme Type: ": "Tipul schemei de securitate: ",
+   "No sample": "Niciun exemplu",
+   "query Parameters": "Parametri de interogare",
+   "path Parameters": "Parametri de cale",
+   "header Parameters": "Parametri de antet",
+   "cookie Parameters": "Parametri cookie",
+   "Payload": "Corp",
+   "Example": "Exemplu",
+   "Default": "Implicit",
+   "Expand all": "Extindere totală",
+   "Collapse all": "Restrângere totală",
+   "non-empty": "nevid",
+   "License:": "Licență:"
+  },
+  "words": {
+   "characters": "caractere",
+   "items": "elemente",
+   "properties": "proprietăți"
+  }
+ },
  "fi": {
   "name": "Suomi",
   "dir": "ltr",
