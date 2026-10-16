@@ -447,6 +447,61 @@
    "properties": "propriedades"
   }
  },
+ "fi": {
+  "name": "Suomi",
+  "dir": "ltr",
+  "language": "Kieli",
+  "labels": {
+   "enum": "Mahdolliset arvot",
+   "enumSingleValue": "Arvo",
+   "enumArray": "Alkiot",
+   "default": "Oletus",
+   "deprecated": "Vanhentunut",
+   "example": "Esimerkki",
+   "examples": "Esimerkit",
+   "recursive": "Rekursiivinen",
+   "arrayOf": "Taulukko: ",
+   "webhook": "Tapahtuma",
+   "const": "Arvo",
+   "noResultsFound": "Tuloksia ei löytynyt",
+   "download": "Lataa",
+   "downloadSpecification": "Lataa OpenAPI-määritys",
+   "responses": "Vastaukset",
+   "callbackResponses": "Takaisinkutsun vastaukset",
+   "requestSamples": "Esimerkkipyynnöt",
+   "responseSamples": "Esimerkkivastaukset"
+  },
+  "text": {
+   "Authorizations:": "Valtuutukset:",
+   "Request Body schema: ": "Pyynnön rungon skeema: ",
+   "Response Schema: ": "Vastauksen skeema: ",
+   "required": "pakollinen",
+   "Search...": "Hae…",
+   "Copy": "Kopioi",
+   "Copied": "Kopioitu",
+   "Content type": "Sisältötyyppi",
+   "HTTP Authorization Scheme: ": "HTTP-valtuutusmenetelmä: ",
+   "Bearer format: ": "Bearer-muoto: ",
+   "Security Scheme Type: ": "Suojausmenetelmän tyyppi: ",
+   "No sample": "Ei esimerkkiä",
+   "query Parameters": "Kyselyparametrit",
+   "path Parameters": "Polkuparametrit",
+   "header Parameters": "Otsakeparametrit",
+   "cookie Parameters": "Evästeparametrit",
+   "Payload": "Runko",
+   "Example": "Esimerkki",
+   "Default": "Oletus",
+   "Expand all": "Laajenna kaikki",
+   "Collapse all": "Kutista kaikki",
+   "non-empty": "ei tyhjä",
+   "License:": "Lisenssi:"
+  },
+  "words": {
+   "characters": "merkkiä",
+   "items": "alkiota",
+   "properties": "ominaisuutta"
+  }
+ },
  "bg": {
   "name": "Български",
   "dir": "ltr",
