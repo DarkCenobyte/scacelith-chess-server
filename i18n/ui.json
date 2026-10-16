@@ -447,6 +447,61 @@
    "properties": "proprietà"
   }
  },
+ "lv": {
+  "name": "Latviešu",
+  "dir": "ltr",
+  "language": "Valoda",
+  "labels": {
+   "enum": "Iespējamās vērtības",
+   "enumSingleValue": "Vērtība",
+   "enumArray": "Elementi",
+   "default": "Noklusējums",
+   "deprecated": "Novecojis",
+   "example": "Piemērs",
+   "examples": "Piemēri",
+   "recursive": "Rekursīvs",
+   "arrayOf": "Masīvs: ",
+   "webhook": "Notikums",
+   "const": "Vērtība",
+   "noResultsFound": "Nekas nav atrasts",
+   "download": "Lejupielādēt",
+   "downloadSpecification": "Lejupielādēt OpenAPI specifikāciju",
+   "responses": "Atbildes",
+   "callbackResponses": "Atzvanīšanas atbildes",
+   "requestSamples": "Pieprasījumu piemēri",
+   "responseSamples": "Atbilžu piemēri"
+  },
+  "text": {
+   "Authorizations:": "Autorizācija:",
+   "Request Body schema: ": "Pieprasījuma pamatteksta shēma: ",
+   "Response Schema: ": "Atbildes shēma: ",
+   "required": "obligāts",
+   "Search...": "Meklēt…",
+   "Copy": "Kopēt",
+   "Copied": "Nokopēts",
+   "Content type": "Satura tips",
+   "HTTP Authorization Scheme: ": "HTTP autorizācijas shēma: ",
+   "Bearer format: ": "Bearer formāts: ",
+   "Security Scheme Type: ": "Drošības shēmas tips: ",
+   "No sample": "Nav piemēra",
+   "query Parameters": "Vaicājuma parametri",
+   "path Parameters": "Ceļa parametri",
+   "header Parameters": "Galvenes parametri",
+   "cookie Parameters": "Sīkfailu parametri",
+   "Payload": "Pamatteksts",
+   "Example": "Piemērs",
+   "Default": "Noklusējums",
+   "Expand all": "Izvērst visu",
+   "Collapse all": "Sakļaut visu",
+   "non-empty": "netukšs",
+   "License:": "Licence:"
+  },
+  "words": {
+   "characters": "rakstzīmes",
+   "items": "elementi",
+   "properties": "rekvizīti"
+  }
+ },
  "hu": {
   "name": "Magyar",
   "dir": "ltr",
