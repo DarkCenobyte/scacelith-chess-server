@@ -997,6 +997,61 @@
    "properties": "ominaisuutta"
   }
  },
+ "vi": {
+  "name": "Tiếng Việt",
+  "dir": "ltr",
+  "language": "Ngôn ngữ",
+  "labels": {
+   "enum": "Giá trị có thể có",
+   "enumSingleValue": "Giá trị",
+   "enumArray": "Phần tử",
+   "default": "Mặc định",
+   "deprecated": "Đã lỗi thời",
+   "example": "Ví dụ",
+   "examples": "Ví dụ",
+   "recursive": "Đệ quy",
+   "arrayOf": "Mảng gồm ",
+   "webhook": "Sự kiện",
+   "const": "Giá trị",
+   "noResultsFound": "Không tìm thấy kết quả",
+   "download": "Tải xuống",
+   "downloadSpecification": "Tải xuống đặc tả OpenAPI",
+   "responses": "Phản hồi",
+   "callbackResponses": "Phản hồi callback",
+   "requestSamples": "Mẫu yêu cầu",
+   "responseSamples": "Mẫu phản hồi"
+  },
+  "text": {
+   "Authorizations:": "Ủy quyền:",
+   "Request Body schema: ": "Schema phần thân yêu cầu: ",
+   "Response Schema: ": "Schema phản hồi: ",
+   "required": "bắt buộc",
+   "Search...": "Tìm kiếm…",
+   "Copy": "Sao chép",
+   "Copied": "Đã sao chép",
+   "Content type": "Loại nội dung",
+   "HTTP Authorization Scheme: ": "Scheme ủy quyền HTTP: ",
+   "Bearer format: ": "Định dạng Bearer: ",
+   "Security Scheme Type: ": "Loại scheme bảo mật: ",
+   "No sample": "Không có mẫu",
+   "query Parameters": "Tham số truy vấn",
+   "path Parameters": "Tham số đường dẫn",
+   "header Parameters": "Tham số header",
+   "cookie Parameters": "Tham số cookie",
+   "Payload": "Phần thân",
+   "Example": "Ví dụ",
+   "Default": "Mặc định",
+   "Expand all": "Mở rộng tất cả",
+   "Collapse all": "Thu gọn tất cả",
+   "non-empty": "không rỗng",
+   "License:": "Giấy phép:"
+  },
+  "words": {
+   "characters": "ký tự",
+   "items": "phần tử",
+   "properties": "thuộc tính"
+  }
+ },
  "bg": {
   "name": "Български",
   "dir": "ltr",
