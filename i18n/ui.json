@@ -1272,6 +1272,61 @@
    "properties": "özellik"
   }
  },
+ "el": {
+  "name": "Ελληνικά",
+  "dir": "ltr",
+  "language": "Γλώσσα",
+  "labels": {
+   "enum": "Πιθανές τιμές",
+   "enumSingleValue": "Τιμή",
+   "enumArray": "Στοιχεία",
+   "default": "Προεπιλογή",
+   "deprecated": "Παρωχημένο",
+   "example": "Παράδειγμα",
+   "examples": "Παραδείγματα",
+   "recursive": "Αναδρομικό",
+   "arrayOf": "Πίνακας από ",
+   "webhook": "Συμβάν",
+   "const": "Τιμή",
+   "noResultsFound": "Δεν βρέθηκαν αποτελέσματα",
+   "download": "Λήψη",
+   "downloadSpecification": "Λήψη της προδιαγραφής OpenAPI",
+   "responses": "Απαντήσεις",
+   "callbackResponses": "Απαντήσεις επανάκλησης",
+   "requestSamples": "Παραδείγματα αιτημάτων",
+   "responseSamples": "Παραδείγματα απαντήσεων"
+  },
+  "text": {
+   "Authorizations:": "Εξουσιοδοτήσεις:",
+   "Request Body schema: ": "Σχήμα σώματος αιτήματος: ",
+   "Response Schema: ": "Σχήμα απάντησης: ",
+   "required": "υποχρεωτικό",
+   "Search...": "Αναζήτηση…",
+   "Copy": "Αντιγραφή",
+   "Copied": "Αντιγράφηκε",
+   "Content type": "Τύπος περιεχομένου",
+   "HTTP Authorization Scheme: ": "Σχήμα εξουσιοδότησης HTTP: ",
+   "Bearer format: ": "Μορφή Bearer: ",
+   "Security Scheme Type: ": "Τύπος σχήματος ασφαλείας: ",
+   "No sample": "Χωρίς παράδειγμα",
+   "query Parameters": "Παράμετροι ερωτήματος",
+   "path Parameters": "Παράμετροι διαδρομής",
+   "header Parameters": "Παράμετροι κεφαλίδας",
+   "cookie Parameters": "Παράμετροι cookie",
+   "Payload": "Σώμα",
+   "Example": "Παράδειγμα",
+   "Default": "Προεπιλογή",
+   "Expand all": "Ανάπτυξη όλων",
+   "Collapse all": "Σύμπτυξη όλων",
+   "non-empty": "μη κενό",
+   "License:": "Άδεια χρήσης:"
+  },
+  "words": {
+   "characters": "χαρακτήρες",
+   "items": "στοιχεία",
+   "properties": "ιδιότητες"
+  }
+ },
  "bg": {
   "name": "Български",
   "dir": "ltr",
