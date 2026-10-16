@@ -557,6 +557,61 @@
    "properties": "rekvizīti"
   }
  },
+ "lt": {
+  "name": "Lietuvių",
+  "dir": "ltr",
+  "language": "Kalba",
+  "labels": {
+   "enum": "Galimos reikšmės",
+   "enumSingleValue": "Reikšmė",
+   "enumArray": "Elementai",
+   "default": "Numatytoji reikšmė",
+   "deprecated": "Nebenaudojama",
+   "example": "Pavyzdys",
+   "examples": "Pavyzdžiai",
+   "recursive": "Rekursinis",
+   "arrayOf": "Masyvas: ",
+   "webhook": "Įvykis",
+   "const": "Reikšmė",
+   "noResultsFound": "Rezultatų nerasta",
+   "download": "Atsisiųsti",
+   "downloadSpecification": "Atsisiųsti OpenAPI specifikaciją",
+   "responses": "Atsakymai",
+   "callbackResponses": "Atgalinio iškvietimo atsakymai",
+   "requestSamples": "Užklausų pavyzdžiai",
+   "responseSamples": "Atsakymų pavyzdžiai"
+  },
+  "text": {
+   "Authorizations:": "Autorizavimas:",
+   "Request Body schema: ": "Užklausos turinio schema: ",
+   "Response Schema: ": "Atsakymo schema: ",
+   "required": "privalomas",
+   "Search...": "Ieškoti…",
+   "Copy": "Kopijuoti",
+   "Copied": "Nukopijuota",
+   "Content type": "Turinio tipas",
+   "HTTP Authorization Scheme: ": "HTTP autorizavimo schema: ",
+   "Bearer format: ": "Bearer formatas: ",
+   "Security Scheme Type: ": "Saugos schemos tipas: ",
+   "No sample": "Pavyzdžio nėra",
+   "query Parameters": "Užklausos eilutės parametrai",
+   "path Parameters": "Kelio parametrai",
+   "header Parameters": "Antraštės parametrai",
+   "cookie Parameters": "Slapuko parametrai",
+   "Payload": "Turinys",
+   "Example": "Pavyzdys",
+   "Default": "Numatytoji reikšmė",
+   "Expand all": "Išskleisti viską",
+   "Collapse all": "Suskleisti viską",
+   "non-empty": "netuščias",
+   "License:": "Licencija:"
+  },
+  "words": {
+   "characters": "simbolių",
+   "items": "elementų",
+   "properties": "savybių"
+  }
+ },
  "hu": {
   "name": "Magyar",
   "dir": "ltr",
