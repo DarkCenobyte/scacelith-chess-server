@@ -722,6 +722,61 @@
    "properties": "eigenschappen"
   }
  },
+ "pl": {
+  "name": "Polski",
+  "dir": "ltr",
+  "language": "Język",
+  "labels": {
+   "enum": "Możliwe wartości",
+   "enumSingleValue": "Wartość",
+   "enumArray": "Elementy",
+   "default": "Domyślnie",
+   "deprecated": "Przestarzałe",
+   "example": "Przykład",
+   "examples": "Przykłady",
+   "recursive": "Rekurencyjnie",
+   "arrayOf": "Tablica typu ",
+   "webhook": "Zdarzenie",
+   "const": "Wartość",
+   "noResultsFound": "Nie znaleziono wyników",
+   "download": "Pobierz",
+   "downloadSpecification": "Pobierz specyfikację OpenAPI",
+   "responses": "Odpowiedzi",
+   "callbackResponses": "Odpowiedzi wywołania zwrotnego",
+   "requestSamples": "Przykłady żądań",
+   "responseSamples": "Przykłady odpowiedzi"
+  },
+  "text": {
+   "Authorizations:": "Autoryzacja:",
+   "Request Body schema: ": "Schemat treści żądania: ",
+   "Response Schema: ": "Schemat odpowiedzi: ",
+   "required": "wymagane",
+   "Search...": "Szukaj…",
+   "Copy": "Kopiuj",
+   "Copied": "Skopiowano",
+   "Content type": "Typ zawartości",
+   "HTTP Authorization Scheme: ": "Schemat autoryzacji HTTP: ",
+   "Bearer format: ": "Format Bearer: ",
+   "Security Scheme Type: ": "Typ schematu zabezpieczeń: ",
+   "No sample": "Brak przykładu",
+   "query Parameters": "Parametry zapytania",
+   "path Parameters": "Parametry ścieżki",
+   "header Parameters": "Parametry nagłówka",
+   "cookie Parameters": "Parametry cookie",
+   "Payload": "Treść",
+   "Example": "Przykład",
+   "Default": "Domyślnie",
+   "Expand all": "Rozwiń wszystko",
+   "Collapse all": "Zwiń wszystko",
+   "non-empty": "niepuste",
+   "License:": "Licencja:"
+  },
+  "words": {
+   "characters": "znaków",
+   "items": "elementów",
+   "properties": "właściwości"
+  }
+ },
  "pt-BR": {
   "name": "Português (Brasil)",
   "dir": "ltr",
