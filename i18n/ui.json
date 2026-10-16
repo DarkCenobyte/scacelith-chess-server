@@ -997,6 +997,61 @@
    "properties": "vlastností"
   }
  },
+ "sl": {
+  "name": "Slovenščina",
+  "dir": "ltr",
+  "language": "Jezik",
+  "labels": {
+   "enum": "Možne vrednosti",
+   "enumSingleValue": "Vrednost",
+   "enumArray": "Elementi",
+   "default": "Privzeto",
+   "deprecated": "Zastarelo",
+   "example": "Primer",
+   "examples": "Primeri",
+   "recursive": "Rekurzivno",
+   "arrayOf": "Tabela ",
+   "webhook": "Dogodek",
+   "const": "Vrednost",
+   "noResultsFound": "Ni zadetkov",
+   "download": "Prenesi",
+   "downloadSpecification": "Prenesi specifikacijo OpenAPI",
+   "responses": "Odgovori",
+   "callbackResponses": "Odgovori povratnega klica",
+   "requestSamples": "Primeri zahtev",
+   "responseSamples": "Primeri odgovorov"
+  },
+  "text": {
+   "Authorizations:": "Avtorizacija:",
+   "Request Body schema: ": "Shema telesa zahteve: ",
+   "Response Schema: ": "Shema odgovora: ",
+   "required": "obvezno",
+   "Search...": "Iskanje …",
+   "Copy": "Kopiraj",
+   "Copied": "Kopirano",
+   "Content type": "Vrsta vsebine",
+   "HTTP Authorization Scheme: ": "Shema avtorizacije HTTP: ",
+   "Bearer format: ": "Oblika Bearer: ",
+   "Security Scheme Type: ": "Vrsta varnostne sheme: ",
+   "No sample": "Ni primera",
+   "query Parameters": "Parametri poizvedbe",
+   "path Parameters": "Parametri poti",
+   "header Parameters": "Parametri glave",
+   "cookie Parameters": "Parametri piškotkov",
+   "Payload": "Telo",
+   "Example": "Primer",
+   "Default": "Privzeto",
+   "Expand all": "Razširi vse",
+   "Collapse all": "Strni vse",
+   "non-empty": "neprazno",
+   "License:": "Licenca:"
+  },
+  "words": {
+   "characters": "znakov",
+   "items": "elementov",
+   "properties": "lastnosti"
+  }
+ },
  "fi": {
   "name": "Suomi",
   "dir": "ltr",
