@@ -777,6 +777,61 @@
    "properties": "خاصية"
   }
  },
+ "hi": {
+  "name": "हिन्दी",
+  "dir": "ltr",
+  "language": "भाषा",
+  "labels": {
+   "enum": "संभावित मान",
+   "enumSingleValue": "मान",
+   "enumArray": "आइटम",
+   "default": "डिफ़ॉल्ट",
+   "deprecated": "अप्रचलित",
+   "example": "उदाहरण",
+   "examples": "उदाहरण",
+   "recursive": "पुनरावर्ती",
+   "arrayOf": "ऐरे: ",
+   "webhook": "इवेंट",
+   "const": "मान",
+   "noResultsFound": "कोई परिणाम नहीं मिला",
+   "download": "डाउनलोड करें",
+   "downloadSpecification": "OpenAPI स्पेसिफ़िकेशन डाउनलोड करें",
+   "responses": "जवाब",
+   "callbackResponses": "कॉलबैक के जवाब",
+   "requestSamples": "अनुरोध के उदाहरण",
+   "responseSamples": "जवाब के उदाहरण"
+  },
+  "text": {
+   "Authorizations:": "ऑथराइज़ेशन:",
+   "Request Body schema: ": "अनुरोध बॉडी का स्कीमा: ",
+   "Response Schema: ": "जवाब का स्कीमा: ",
+   "required": "ज़रूरी",
+   "Search...": "खोजें…",
+   "Copy": "कॉपी करें",
+   "Copied": "कॉपी हो गया",
+   "Content type": "कंटेंट टाइप",
+   "HTTP Authorization Scheme: ": "HTTP ऑथराइज़ेशन स्कीम: ",
+   "Bearer format: ": "Bearer फ़ॉर्मैट: ",
+   "Security Scheme Type: ": "सुरक्षा स्कीम का प्रकार: ",
+   "No sample": "कोई उदाहरण नहीं",
+   "query Parameters": "क्वेरी पैरामीटर",
+   "path Parameters": "पाथ पैरामीटर",
+   "header Parameters": "हेडर पैरामीटर",
+   "cookie Parameters": "कुकी पैरामीटर",
+   "Payload": "पेलोड",
+   "Example": "उदाहरण",
+   "Default": "डिफ़ॉल्ट",
+   "Expand all": "सभी खोलें",
+   "Collapse all": "सभी बंद करें",
+   "non-empty": "ख़ाली नहीं",
+   "License:": "लाइसेंस:"
+  },
+  "words": {
+   "characters": "वर्ण",
+   "items": "आइटम",
+   "properties": "प्रॉपर्टी"
+  }
+ },
  "ko": {
   "name": "한국어",
   "dir": "ltr",
