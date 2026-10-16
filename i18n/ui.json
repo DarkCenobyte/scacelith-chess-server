@@ -1217,6 +1217,61 @@
    "properties": "thuộc tính"
   }
  },
+ "tr": {
+  "name": "Türkçe",
+  "dir": "ltr",
+  "language": "Dil",
+  "labels": {
+   "enum": "Olası değerler",
+   "enumSingleValue": "Değer",
+   "enumArray": "Öğeler",
+   "default": "Varsayılan",
+   "deprecated": "Kullanımdan kaldırıldı",
+   "example": "Örnek",
+   "examples": "Örnekler",
+   "recursive": "Özyinelemeli",
+   "arrayOf": "Dizi: ",
+   "webhook": "Olay",
+   "const": "Değer",
+   "noResultsFound": "Sonuç bulunamadı",
+   "download": "İndir",
+   "downloadSpecification": "OpenAPI belirtimini indir",
+   "responses": "Yanıtlar",
+   "callbackResponses": "Geri çağırma yanıtları",
+   "requestSamples": "İstek örnekleri",
+   "responseSamples": "Yanıt örnekleri"
+  },
+  "text": {
+   "Authorizations:": "Yetkilendirmeler:",
+   "Request Body schema: ": "İstek gövdesi şeması: ",
+   "Response Schema: ": "Yanıt şeması: ",
+   "required": "zorunlu",
+   "Search...": "Ara…",
+   "Copy": "Kopyala",
+   "Copied": "Kopyalandı",
+   "Content type": "İçerik türü",
+   "HTTP Authorization Scheme: ": "HTTP yetkilendirme şeması: ",
+   "Bearer format: ": "Bearer biçimi: ",
+   "Security Scheme Type: ": "Güvenlik şeması türü: ",
+   "No sample": "Örnek yok",
+   "query Parameters": "Sorgu parametreleri",
+   "path Parameters": "Yol parametreleri",
+   "header Parameters": "Başlık parametreleri",
+   "cookie Parameters": "Çerez parametreleri",
+   "Payload": "Gövde",
+   "Example": "Örnek",
+   "Default": "Varsayılan",
+   "Expand all": "Tümünü genişlet",
+   "Collapse all": "Tümünü daralt",
+   "non-empty": "boş olmayan",
+   "License:": "Lisans:"
+  },
+  "words": {
+   "characters": "karakter",
+   "items": "öğe",
+   "properties": "özellik"
+  }
+ },
  "bg": {
   "name": "Български",
   "dir": "ltr",
