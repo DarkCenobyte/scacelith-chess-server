@@ -62,6 +62,61 @@
    "properties": "properti"
   }
  },
+ "cs": {
+  "name": "Čeština",
+  "dir": "ltr",
+  "language": "Jazyk",
+  "labels": {
+   "enum": "Možné hodnoty",
+   "enumSingleValue": "Hodnota",
+   "enumArray": "Položky",
+   "default": "Výchozí",
+   "deprecated": "Zastaralé",
+   "example": "Příklad",
+   "examples": "Příklady",
+   "recursive": "Rekurzivní",
+   "arrayOf": "Pole typu ",
+   "webhook": "Událost",
+   "const": "Hodnota",
+   "noResultsFound": "Nic nenalezeno",
+   "download": "Stáhnout",
+   "downloadSpecification": "Stáhnout specifikaci OpenAPI",
+   "responses": "Odpovědi",
+   "callbackResponses": "Odpovědi zpětného volání",
+   "requestSamples": "Ukázky požadavků",
+   "responseSamples": "Ukázky odpovědí"
+  },
+  "text": {
+   "Authorizations:": "Autorizace:",
+   "Request Body schema: ": "Schéma těla požadavku: ",
+   "Response Schema: ": "Schéma odpovědi: ",
+   "required": "povinné",
+   "Search...": "Hledat…",
+   "Copy": "Kopírovat",
+   "Copied": "Zkopírováno",
+   "Content type": "Typ obsahu",
+   "HTTP Authorization Scheme: ": "Schéma autorizace HTTP: ",
+   "Bearer format: ": "Formát Bearer: ",
+   "Security Scheme Type: ": "Typ schématu zabezpečení: ",
+   "No sample": "Bez ukázky",
+   "query Parameters": "Parametry dotazu",
+   "path Parameters": "Parametry cesty",
+   "header Parameters": "Parametry hlavičky",
+   "cookie Parameters": "Parametry cookie",
+   "Payload": "Tělo",
+   "Example": "Příklad",
+   "Default": "Výchozí",
+   "Expand all": "Rozbalit vše",
+   "Collapse all": "Sbalit vše",
+   "non-empty": "neprázdné",
+   "License:": "Licence:"
+  },
+  "words": {
+   "characters": "znaků",
+   "items": "položek",
+   "properties": "vlastností"
+  }
+ },
  "da": {
   "name": "Dansk",
   "dir": "ltr",
