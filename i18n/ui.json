@@ -337,6 +337,61 @@
    "properties": "propriétés"
   }
  },
+ "hr": {
+  "name": "Hrvatski",
+  "dir": "ltr",
+  "language": "Jezik",
+  "labels": {
+   "enum": "Moguće vrijednosti",
+   "enumSingleValue": "Vrijednost",
+   "enumArray": "Elementi",
+   "default": "Zadano",
+   "deprecated": "Zastarjelo",
+   "example": "Primjer",
+   "examples": "Primjeri",
+   "recursive": "Rekurzivno",
+   "arrayOf": "Niz od ",
+   "webhook": "Događaj",
+   "const": "Vrijednost",
+   "noResultsFound": "Nema rezultata",
+   "download": "Preuzmi",
+   "downloadSpecification": "Preuzmi specifikaciju OpenAPI",
+   "responses": "Odgovori",
+   "callbackResponses": "Odgovori povratnog poziva",
+   "requestSamples": "Primjeri zahtjeva",
+   "responseSamples": "Primjeri odgovora"
+  },
+  "text": {
+   "Authorizations:": "Autorizacije:",
+   "Request Body schema: ": "Shema tijela zahtjeva: ",
+   "Response Schema: ": "Shema odgovora: ",
+   "required": "obavezno",
+   "Search...": "Pretraži…",
+   "Copy": "Kopiraj",
+   "Copied": "Kopirano",
+   "Content type": "Vrsta sadržaja",
+   "HTTP Authorization Scheme: ": "Shema HTTP autorizacije: ",
+   "Bearer format: ": "Format Bearer: ",
+   "Security Scheme Type: ": "Vrsta sigurnosne sheme: ",
+   "No sample": "Nema primjera",
+   "query Parameters": "Parametri upita",
+   "path Parameters": "Parametri putanje",
+   "header Parameters": "Parametri zaglavlja",
+   "cookie Parameters": "Parametri kolačića",
+   "Payload": "Tijelo",
+   "Example": "Primjer",
+   "Default": "Zadano",
+   "Expand all": "Proširi sve",
+   "Collapse all": "Sažmi sve",
+   "non-empty": "neprazno",
+   "License:": "Licenca:"
+  },
+  "words": {
+   "characters": "znakova",
+   "items": "elemenata",
+   "properties": "svojstava"
+  }
+ },
  "it": {
   "name": "Italiano",
   "dir": "ltr",
