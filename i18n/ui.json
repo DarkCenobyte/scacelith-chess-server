@@ -447,6 +447,61 @@
    "properties": "proprietà"
   }
  },
+ "nl": {
+  "name": "Nederlands",
+  "dir": "ltr",
+  "language": "Taal",
+  "labels": {
+   "enum": "Mogelijke waarden",
+   "enumSingleValue": "Waarde",
+   "enumArray": "Elementen",
+   "default": "Standaard",
+   "deprecated": "Verouderd",
+   "example": "Voorbeeld",
+   "examples": "Voorbeelden",
+   "recursive": "Recursief",
+   "arrayOf": "Array van ",
+   "webhook": "Gebeurtenis",
+   "const": "Waarde",
+   "noResultsFound": "Geen resultaten gevonden",
+   "download": "Downloaden",
+   "downloadSpecification": "OpenAPI-specificatie downloaden",
+   "responses": "Antwoorden",
+   "callbackResponses": "Callback-antwoorden",
+   "requestSamples": "Voorbeeldverzoeken",
+   "responseSamples": "Voorbeeldantwoorden"
+  },
+  "text": {
+   "Authorizations:": "Autorisaties:",
+   "Request Body schema: ": "Schema van de verzoekbody: ",
+   "Response Schema: ": "Schema van het antwoord: ",
+   "required": "verplicht",
+   "Search...": "Zoeken…",
+   "Copy": "Kopiëren",
+   "Copied": "Gekopieerd",
+   "Content type": "Inhoudstype",
+   "HTTP Authorization Scheme: ": "HTTP-autorisatieschema: ",
+   "Bearer format: ": "Bearer-formaat: ",
+   "Security Scheme Type: ": "Type beveiligingsschema: ",
+   "No sample": "Geen voorbeeld",
+   "query Parameters": "Queryparameters",
+   "path Parameters": "Padparameters",
+   "header Parameters": "Headerparameters",
+   "cookie Parameters": "Cookieparameters",
+   "Payload": "Payload",
+   "Example": "Voorbeeld",
+   "Default": "Standaard",
+   "Expand all": "Alles uitklappen",
+   "Collapse all": "Alles inklappen",
+   "non-empty": "niet leeg",
+   "License:": "Licentie:"
+  },
+  "words": {
+   "characters": "tekens",
+   "items": "elementen",
+   "properties": "eigenschappen"
+  }
+ },
  "pt-BR": {
   "name": "Português (Brasil)",
   "dir": "ltr",
