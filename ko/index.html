@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ko" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>Scacelith 서버 HTTPS API</title>
+<meta name="description" content="공식 서버와 커뮤니티 서버를 비롯한 모든 Scacelith 서버의 HTTPS API입니다.">
+<link rel="alternate" type="application/yaml" href="openapi.yaml">
+<link rel="alternate" hreflang="en" href="../en/">
+<link rel="alternate" hreflang="id" href="../id/">
+<link rel="alternate" hreflang="cs" href="../cs/">
+<link rel="alternate" hreflang="da" href="../da/">
+<link rel="alternate" hreflang="de" href="../de/">
+<link rel="alternate" hreflang="et" href="../et/">
+<link rel="alternate" hreflang="es" href="../es/">
+<link rel="alternate" hreflang="fr" href="../fr/">
+<link rel="alternate" hreflang="hr" href="../hr/">
+<link rel="alternate" hreflang="it" href="../it/">
+<link rel="alternate" hreflang="lv" href="../lv/">
+<link rel="alternate" hreflang="lt" href="../lt/">
+<link rel="alternate" hreflang="hu" href="../hu/">
+<link rel="alternate" hreflang="nl" href="../nl/">
+<link rel="alternate" hreflang="pl" href="../pl/">
+<link rel="alternate" hreflang="pt-BR" href="../pt-BR/">
+<link rel="alternate" hreflang="pt" href="../pt/">
+<link rel="alternate" hreflang="ro" href="../ro/">
+<link rel="alternate" hreflang="sk" href="../sk/">
+<link rel="alternate" hreflang="sl" href="../sl/">
+<link rel="alternate" hreflang="fi" href="../fi/">
+<link rel="alternate" hreflang="sv" href="../sv/">
+<link rel="alternate" hreflang="vi" href="../vi/">
+<link rel="alternate" hreflang="tr" href="../tr/">
+<link rel="alternate" hreflang="el" href="../el/">
+<link rel="alternate" hreflang="bg" href="../bg/">
+<link rel="alternate" hreflang="ru" href="../ru/">
+<link rel="alternate" hreflang="uk" href="../uk/">
+<link rel="alternate" hreflang="ar" href="../ar/">
+<link rel="alternate" hreflang="hi" href="../hi/">
+<link rel="alternate" hreflang="ko" href="../ko/">
+<link rel="alternate" hreflang="ja" href="../ja/">
+<link rel="alternate" hreflang="zh-Hans" href="../zh-Hans/">
+<link rel="alternate" hreflang="zh-Hant" href="../zh-Hant/">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+<header class="site-bar">
+  <a class="site-home" href="../">Scacelith</a>
+  <span class="site-title">Scacelith 서버 HTTPS API</span>
+  <label class="site-lang"><span>언어</span>
+    <select id="site-lang">
+      <option value="en" lang="en">English</option>
+      <option value="id" lang="id">Bahasa Indonesia</option>
+      <option value="cs" lang="cs">Čeština</option>
+      <option value="da" lang="da">Dansk</option>
+      <option value="de" lang="de">Deutsch</option>
+      <option value="et" lang="et">Eesti</option>
+      <option value="es" lang="es">Español</option>
+      <option value="fr" lang="fr">Français</option>
+      <option value="hr" lang="hr">Hrvatski</option>
+      <option value="it" lang="it">Italiano</option>
+      <option value="lv" lang="lv">Latviešu</option>
+      <option value="lt" lang="lt">Lietuvių</option>
+      <option value="hu" lang="hu">Magyar</option>
+      <option value="nl" lang="nl">Nederlands</option>
+      <option value="pl" lang="pl">Polski</option>
+      <option value="pt-BR" lang="pt-BR">Português (Brasil)</option>
+      <option value="pt" lang="pt">Português (Portugal)</option>
+      <option value="ro" lang="ro">Română</option>
+      <option value="sk" lang="sk">Slovenčina</option>
+      <option value="sl" lang="sl">Slovenščina</option>
+      <option value="fi" lang="fi">Suomi</option>
+      <option value="sv" lang="sv">Svenska</option>
+      <option value="vi" lang="vi">Tiếng Việt</option>
+      <option value="tr" lang="tr">Türkçe</option>
+      <option value="el" lang="el">Ελληνικά</option>
+      <option value="bg" lang="bg">Български</option>
+      <option value="ru" lang="ru">Русский</option>
+      <option value="uk" lang="uk">Українська</option>
+      <option value="ar" lang="ar">العربية</option>
+      <option value="hi" lang="hi">हिन्दी</option>
+      <option value="ko" selected lang="ko">한국어</option>
+      <option value="ja" lang="ja">日本語</option>
+      <option value="zh-Hans" lang="zh-Hans">简体中文</option>
+      <option value="zh-Hant" lang="zh-Hant">繁體中文</option>
+    </select>
+  </label>
+</header>
+<main id="redoc"></main>
+<script type="application/json" id="site-config">{"lang": "ko", "redoc": {"labels": {"enum": "가능한 값", "enumSingleValue": "값", "enumArray": "항목", "default": "기본값", "deprecated": "사용 중단됨", "example": "예시", "examples": "예시", "recursive": "재귀", "arrayOf": "배열: ", "webhook": "이벤트", "const": "값", "noResultsFound": "결과 없음", "download": "다운로드", "downloadSpecification": "OpenAPI 명세 다운로드", "responses": "응답", "callbackResponses": "콜백 응답", "requestSamples": "요청 예시", "responseSamples": "응답 예시"}, "scrollYOffset": ".site-bar", "expandResponses": "200,201,202,204", "requiredPropsFirst": true, "pathInMiddlePanel": true, "jsonSamplesExpandLevel": 3, "hideHostname": false, "showExtensions": false, "downloadFileName": "scacelith-server-api-ko.yaml", "theme": null}, "text": {"Authorizations:": "인증:", "Request Body schema: ": "요청 본문 스키마: ", "Response Schema: ": "응답 스키마: ", "required": "필수", "Search...": "검색…", "Copy": "복사", "Copied": "복사됨", "Content type": "콘텐츠 유형", "HTTP Authorization Scheme: ": "HTTP 인증 스킴: ", "Bearer format: ": "Bearer 형식: ", "Security Scheme Type: ": "보안 스킴 유형: ", "No sample": "예시 없음", "query Parameters": "쿼리 매개변수", "path Parameters": "경로 매개변수", "header Parameters": "헤더 매개변수", "cookie Parameters": "쿠키 매개변수", "Payload": "페이로드", "Example": "예시", "Default": "기본값", "Expand all": "모두 펼치기", "Collapse all": "모두 접기", "non-empty": "비어 있지 않음", "License:": "라이선스:"}, "words": {"characters": "문자", "items": "항목", "properties": "속성"}}</script>
+<script src="../assets/redoc/redoc.standalone.js"></script>
+<script src="../assets/site.js"></script>
+</body>
+</html>

@@ -4,7 +4,8 @@
   "use strict";
   var items = Array.prototype.slice.call(document.querySelectorAll(".languages li"));
   var wanted = (navigator.languages || [navigator.language || "en"]).map(function (l) {
-    return l.toLowerCase();
+    // "in" is the former code of Indonesian, still sent by some browsers.
+    return l.toLowerCase().replace(/^in(-|$)/, "id$1");
   });
   function score(code) {
     code = code.toLowerCase();
