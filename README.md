@@ -65,7 +65,7 @@ The release workflow builds them from the tag, and their build provenance and th
 are attested; to check a download with the GitHub CLI:
 
 ```sh
-gh attestation verify scacelith-server-1.1.1-x86_64-linux-musl.tar.gz --repo DarkCenobyte/scacelith-chess-server
+gh attestation verify scacelith-server-1.1.2-x86_64-linux-musl.tar.gz --repo DarkCenobyte/scacelith-chess-server
 ```
 
 The binary runs on any x86-64 Linux, whatever its C library, and is all the server needs: the
@@ -97,7 +97,7 @@ backups, moderation, monitoring and scaling.
 
 ## Building
 
-You need Rust 1.99.0 (`rust-toolchain.toml` selects it with rustup) and a C compiler (for the
+You need Rust 1.99.1 (`rust-toolchain.toml` selects it with rustup) and a C compiler (for the
 bundled SQLite and *ring*); the static release binary also needs the `x86_64-unknown-linux-musl`
 target and a musl C compiler (Debian and Ubuntu: `musl-tools`).
 

@@ -15,7 +15,7 @@ and the security model. It is the reference for behaviour; module documentation 
 | [ANTICHEAT.md](ANTICHEAT.md) | anomalies, the statistical model, moderation |
 | [SIZING.md](SIZING.md) | capacity and hosting |
 
-The server is written in Rust (toolchain 1.99.0, pinned by `rust-toolchain.toml`). It replaced a
+The server is written in Rust (toolchain 1.99.1, pinned by `rust-toolchain.toml`). It replaced a
 Node.js server, which stays in the Git history (last in commit 9b65410); "the former server" in
 the code and the documents refers to that history only.
 

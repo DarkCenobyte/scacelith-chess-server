@@ -80,7 +80,7 @@ no shard bus: what the Node primary owned is in-process state.
 ```
 scacelith-chess-server/
   Cargo.toml              workspace (shared dependency versions, lints, profiles)
-  rust-toolchain.toml     Rust 1.99.0 (+ x86_64-unknown-linux-musl for the static release build)
+  rust-toolchain.toml     Rust 1.99.1 (+ x86_64-unknown-linux-musl for the static release build)
   protocol/scacelith-v1.json   realtime protocol schema (source of all generated codecs)
   protocol/frozen/        manifests of the released protocol minors (v1.0.json to v1.2.json)
   crates/protocol         scacelith-protocol: generated codec, constants, the `protogen` generator
