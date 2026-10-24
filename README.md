@@ -97,7 +97,7 @@ backups, moderation, monitoring and scaling.
 
 ## Building
 
-You need Rust 1.99.0 (`rust-toolchain.toml` selects it with rustup) and a C compiler (for the
+You need Rust 1.99.1 (`rust-toolchain.toml` selects it with rustup) and a C compiler (for the
 bundled SQLite and *ring*); the static release binary also needs the `x86_64-unknown-linux-musl`
 target and a musl C compiler (Debian and Ubuntu: `musl-tools`).
 

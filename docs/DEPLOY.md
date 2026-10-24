@@ -36,8 +36,8 @@ sha256sum -c SHA256SUMS --ignore-missing
 ```
 
 To build it yourself: the release binary is static (`x86_64-unknown-linux-musl`) and runs on any x86-64 Linux,
-whatever its C library. It needs Rust 1.99.0 with the musl target (`rust-toolchain.toml`; with
-rustup: `rustup toolchain install 1.99.0 --target x86_64-unknown-linux-musl`) and a musl C
+whatever its C library. It needs Rust 1.99.1 with the musl target (`rust-toolchain.toml`; with
+rustup: `rustup toolchain install 1.99.1 --target x86_64-unknown-linux-musl`) and a musl C
 compiler for *ring* and the bundled SQLite (Debian and Ubuntu: `apt install musl-tools`):
 
 ```sh
